@@ -3,7 +3,7 @@ use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 use crate::{
     evaluation::{
         compiler::{CompilerResponse, error::CompilerError},
-        request::EvaluateData,
+        request::{EvalWorkerContext, EvaluateData},
         response::{
             EvalRunnerError, EvaluationResult, EvaluatorError,
             EvaluatorResponse as EvalRes,
@@ -57,8 +57,7 @@ pub struct EvalWorker {
     pub governance_id: DigestIdentifier,
     pub gov_version: u64,
     pub sn: u64,
-    pub issuers: BTreeSet<PublicKey>,
-    pub issuer_any: bool,
+    pub context: EvalWorkerContext,
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
@@ -165,8 +164,8 @@ impl EvalWorker {
         ctx: &mut ActorContext<Self>,
         evaluation_req: &EvaluationReq,
     ) -> Result<RunnerResult, EvaluatorError> {
-        let runner_data =
-            evaluation_req.build_evaluate_info(&self.init_state)?;
+        let runner_data = evaluation_req
+            .build_evaluate_info(&self.init_state, &self.context)?;
 
         // Mirar la parte final de execute contract.
         let response = self
@@ -472,7 +471,15 @@ impl EvalWorker {
                 .content()
                 .is_fact_event()
             {
-                if !self.issuer_any && !self.issuers.contains(&signer) {
+                let Some((issuers, issuer_any)) = self.context.issuers()
+                else {
+                    return Err(EvaluatorError::InvalidEventRequest(
+                        "Fact event evaluation context does not include issuers"
+                            .to_owned(),
+                    ));
+                };
+
+                if !issuer_any && !issuers.contains(&signer) {
                     return Err(EvaluatorError::InvalidEventRequest(
                         "In fact events, the signer has to be an issuer"
                             .to_owned(),
@@ -540,8 +547,10 @@ impl Handler<Self> for EvalWorker {
                 issuer_any,
             } => {
                 self.gov_version = gov_version;
-                self.issuers = issuers;
-                self.issuer_any = issuer_any;
+                self.context = EvalWorkerContext::Governance {
+                    issuers,
+                    issuer_any,
+                };
             }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {
                 let evaluation =

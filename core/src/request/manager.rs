@@ -14,7 +14,7 @@ use ave_common::{Namespace, SchemaType, ValueWrapper};
 use borsh::{BorshDeserialize, BorshSerialize};
 use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{Span, debug, error, info, info_span, warn};
@@ -23,7 +23,7 @@ use crate::approval::request::ApprovalReq;
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
 };
-use crate::evaluation::request::EvaluateData;
+use crate::evaluation::request::{EvalWorkerContext, EvaluateData};
 use crate::evaluation::response::EvaluatorResponse;
 use crate::governance::data::GovernanceData;
 use crate::governance::model::{
@@ -216,6 +216,58 @@ impl RequestManager {
     //////// EVAL
     ////////////////////////////////////////////////
     //Revisado
+    fn tracker_evaluation_context(
+        governance_data: &GovernanceData,
+        schema_id: &SchemaType,
+        namespace: Namespace,
+        request_type: &EventRequestType,
+    ) -> Result<EvalWorkerContext, RequestManagerError> {
+        match request_type {
+            EventRequestType::Fact => {
+                let (issuers, issuer_any) = governance_data.get_signers(
+                    RoleTypes::Issuer,
+                    schema_id,
+                    namespace,
+                );
+                let schema_viewpoints = governance_data
+                    .schemas
+                    .get(schema_id)
+                    .ok_or_else(|| {
+                        crate::governance::error::GovernanceError::SchemaDoesNotExist {
+                            schema_id: schema_id.to_string(),
+                        }
+                    })?
+                    .viewpoints
+                    .clone();
+
+                Ok(EvalWorkerContext::TrackerFact {
+                    issuers: issuers.into_iter().collect(),
+                    issuer_any,
+                    schema_viewpoints,
+                })
+            }
+            EventRequestType::Transfer => {
+                let members = governance_data
+                    .members
+                    .values()
+                    .cloned()
+                    .collect::<BTreeSet<PublicKey>>();
+                let (creator_signers, _) = governance_data.get_signers(
+                    RoleTypes::Creator,
+                    schema_id,
+                    namespace.clone(),
+                );
+                let creators = creator_signers
+                    .into_iter()
+                    .map(|creator| (creator, BTreeSet::from([namespace.clone()])))
+                    .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
+
+                Ok(EvalWorkerContext::TrackerTransfer { members, creators })
+            }
+            _ => Ok(EvalWorkerContext::Empty),
+        }
+    }
+
     async fn build_evaluation(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -234,7 +286,13 @@ impl RequestManager {
 
         let metadata = self.check_data_eval(ctx, &request).await?;
 
-        let (signed_evaluation_req, quorum, signers, init_state) =
+        let (
+            signed_evaluation_req,
+            quorum,
+            signers,
+            init_state,
+            tracker_context,
+        ) =
             self.build_request_eval(ctx, &metadata, &request).await?;
 
         if signers.is_empty() {
@@ -258,6 +316,7 @@ impl RequestManager {
             signed_evaluation_req.clone(),
             quorum,
             init_state,
+            tracker_context,
             signers,
         )
         .await
@@ -408,13 +467,14 @@ impl RequestManager {
             Quorum,
             HashSet<PublicKey>,
             Option<ValueWrapper>,
+            EvalWorkerContext,
         ),
         RequestManagerError,
     > {
         let is_gov = metadata.schema_id.is_gov();
 
         let request_type = EventRequestType::from(request.content());
-        let (evaluate_data, governance_data, init_state) = match (
+        let (evaluate_data, governance_data, init_state, tracker_context) = match (
             is_gov,
             request_type.clone(),
         ) {
@@ -428,6 +488,7 @@ impl RequestManager {
                     },
                     state,
                     None,
+                    EvalWorkerContext::default(),
                 )
             }
             (true, EventRequestType::Transfer) => {
@@ -440,6 +501,7 @@ impl RequestManager {
                     },
                     state,
                     None,
+                    EvalWorkerContext::default(),
                 )
             }
             (true, EventRequestType::Confirm) => {
@@ -452,6 +514,7 @@ impl RequestManager {
                     },
                     state,
                     None,
+                    EvalWorkerContext::default(),
                 )
             }
             (false, EventRequestType::Fact) => {
@@ -460,43 +523,38 @@ impl RequestManager {
 
                 let init_state =
                     governance_data.get_init_state(&metadata.schema_id)?;
-                let schema_viewpoints = governance_data
-                    .schemas
-                    .get(&metadata.schema_id)
-                    .ok_or_else(|| {
-                        crate::governance::error::GovernanceError::SchemaDoesNotExist {
-                            schema_id: metadata.schema_id.to_string(),
-                        }
-                    })?
-                    .viewpoints
-                    .clone();
+                let tracker_context = Self::tracker_evaluation_context(
+                    &governance_data,
+                    &metadata.schema_id,
+                    metadata.namespace.clone(),
+                    &request_type,
+                )?;
 
                 (
                     EvaluateData::TrackerSchemasFact {
-                        contract: format!(
-                            "{}_{}",
-                            metadata.governance_id, metadata.schema_id
-                        ),
                         state: metadata.properties.clone(),
-                        governance_data: governance_data.clone(),
-                        schema_viewpoints,
                     },
                     governance_data,
                     Some(init_state),
+                    tracker_context,
                 )
             }
             (false, EventRequestType::Transfer) => {
                 let governance_data =
                     get_gov(ctx, &metadata.governance_id).await?;
+                let tracker_context = Self::tracker_evaluation_context(
+                    &governance_data,
+                    &metadata.schema_id,
+                    metadata.namespace.clone(),
+                    &request_type,
+                )?;
                 (
                     EvaluateData::TrackerSchemasTransfer {
-                        governance_data: governance_data.clone(),
-                        namespace: metadata.namespace.clone(),
-                        schema_id: metadata.schema_id.clone(),
                         state: metadata.properties.clone(),
                     },
                     governance_data,
                     None,
+                    tracker_context,
                 )
             }
             _ => {
@@ -538,7 +596,13 @@ impl RequestManager {
 
         let signed_evaluation_req: Signed<EvaluationReq> =
             Signed::from_parts(eval_req, signature);
-        Ok((signed_evaluation_req, quorum, signers, init_state))
+        Ok((
+            signed_evaluation_req,
+            quorum,
+            signers,
+            init_state,
+            tracker_context,
+        ))
     }
 
     async fn run_evaluation(
@@ -547,6 +611,7 @@ impl RequestManager {
         request: Signed<EvaluationReq>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
+        context: EvalWorkerContext,
         signers: HashSet<PublicKey>,
     ) -> Result<(), RequestManagerError> {
         let Some((hash, network)) = self.helpers.clone() else {
@@ -563,6 +628,7 @@ impl RequestManager {
                     request,
                     quorum,
                     init_state,
+                    context,
                     hash,
                     network,
                 ),

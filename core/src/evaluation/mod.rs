@@ -32,7 +32,7 @@ use ave_common::{
     },
 };
 
-use request::EvaluationReq;
+use request::{EvalWorkerContext, EvaluationReq};
 use response::{EvaluationRes, EvaluatorResponse as EvalRes};
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -45,7 +45,7 @@ pub mod runner;
 pub mod schema;
 pub mod worker;
 
-use std::{collections::{BTreeSet, HashSet}, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 pub struct Evaluation {
     our_key: Arc<PublicKey>,
     // Quorum
@@ -78,6 +78,8 @@ pub struct Evaluation {
     pending_evaluators: HashSet<PublicKey>,
 
     init_state: Option<ValueWrapper>,
+
+    context: EvalWorkerContext,
 }
 
 impl Evaluation {
@@ -92,6 +94,7 @@ impl Evaluation {
         request: Signed<EvaluationReq>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
+        context: EvalWorkerContext,
         hash: HashAlgorithm,
         network: Arc<NetworkSender>,
     ) -> Self {
@@ -102,6 +105,7 @@ impl Evaluation {
             request,
             quorum,
             init_state,
+            context,
             current_evaluators: HashSet::new(),
             errors: vec![],
             evaluation_request_hash: DigestIdentifier::default(),
@@ -119,24 +123,20 @@ impl Evaluation {
         self.current_evaluators.remove(&evaluator)
     }
 
-    fn current_issuers(&self) -> (BTreeSet<PublicKey>, bool) {
+    fn worker_context(&self) -> EvalWorkerContext {
         match &self.request.content().data {
             request::EvaluateData::GovFact { state }
             | request::EvaluateData::GovTransfer { state }
             | request::EvaluateData::GovConfirm { state } => {
-                state.governance_issuers()
+                let (issuers, issuer_any) = state.governance_issuers();
+                EvalWorkerContext::Governance {
+                    issuers,
+                    issuer_any,
+                }
             }
-            request::EvaluateData::TrackerSchemasFact { governance_data, .. }
-            | request::EvaluateData::TrackerSchemasTransfer {
-                governance_data,
-                ..
-            } => {
-                let (issuers, issuer_any) = governance_data.get_signers(
-                    crate::governance::model::RoleTypes::Issuer,
-                    &self.request.content().schema_id,
-                    self.request.content().namespace.clone(),
-                );
-                (issuers.into_iter().collect(), issuer_any)
+            request::EvaluateData::TrackerSchemasFact { .. }
+            | request::EvaluateData::TrackerSchemasTransfer { .. } => {
+                self.context.clone()
             }
         }
     }
@@ -167,7 +167,6 @@ impl Evaluation {
                 })
                 .await?
         } else {
-            let (issuers, issuer_any) = self.current_issuers();
             let child = ctx
                 .create_child(
                     &format!("{}", signer),
@@ -182,8 +181,7 @@ impl Evaluation {
                             .clone(),
                         gov_version: self.request.content().gov_version,
                         sn: self.request.content().sn,
-                        issuers,
-                        issuer_any,
+                        context: self.worker_context(),
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,

@@ -951,16 +951,22 @@ impl GovernanceData {
 
         for (schema_id, _) in schema_namespaces {
             if schema_id == SchemaType::TrackerSchemas {
-                for (current_schema_id, _) in self.roles_schema.iter() {
+                for (current_schema_id, roles) in self.roles_schema.iter() {
                     let (schema_entry, issuer_any) =
                         map.entry(current_schema_id.clone())
                             .or_insert_with(|| (BTreeMap::new(), false));
-                    *issuer_any |= self.roles_tracker_schemas.issuer.any;
+                    *issuer_any |= self.roles_tracker_schemas.issuer.any
+                        || roles.issuer.any;
 
                     insert_issuers(
                         &self.members,
                         schema_entry,
                         &self.roles_tracker_schemas.issuer.signers,
+                    );
+                    insert_issuers(
+                        &self.members,
+                        schema_entry,
+                        &roles.issuer.signers,
                     );
                 }
             } else if let Some(roles) = self.roles_schema.get(&schema_id) {

@@ -11,7 +11,43 @@ use ave_common::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, Default)]
+pub enum EvalWorkerContext {
+    #[default]
+    Empty,
+    Governance {
+        issuers: BTreeSet<PublicKey>,
+        issuer_any: bool,
+    },
+    TrackerFact {
+        issuers: BTreeSet<PublicKey>,
+        issuer_any: bool,
+        schema_viewpoints: BTreeSet<String>,
+    },
+    TrackerTransfer {
+        members: BTreeSet<PublicKey>,
+        creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+    },
+}
+
+impl EvalWorkerContext {
+    pub const fn issuers(&self) -> Option<(&BTreeSet<PublicKey>, bool)> {
+        match self {
+            Self::Governance {
+                issuers,
+                issuer_any,
+            }
+            | Self::TrackerFact {
+                issuers,
+                issuer_any,
+                ..
+            } => Some((issuers, *issuer_any)),
+            Self::Empty | Self::TrackerTransfer { .. } => None,
+        }
+    }
+}
 
 /// A struct representing an evaluation request.
 #[derive(
@@ -51,6 +87,7 @@ impl EvaluationReq {
     pub fn build_evaluate_info(
         &self,
         init_state: &Option<ValueWrapper>,
+        worker_context: &EvalWorkerContext,
     ) -> Result<EvaluateInfo, EvaluatorError> {
         match (self.event_request.content(), &self.data) {
             (
@@ -71,10 +108,7 @@ impl EvaluationReq {
             (
                 EventRequest::Fact(fact_request),
                 EvaluateData::TrackerSchemasFact {
-                    contract,
                     state,
-                    governance_data: _,
-                    schema_viewpoints,
                 },
             ) => init_state.as_ref().map_or_else(
                 || {
@@ -83,6 +117,17 @@ impl EvaluationReq {
                     ))
                 },
                 |init_state| {
+                    let EvalWorkerContext::TrackerFact {
+                        schema_viewpoints,
+                        ..
+                    } = worker_context
+                    else {
+                        return Err(EvaluatorError::InternalError(
+                            "Tracker fact evaluation context is missing"
+                                .to_owned(),
+                        ));
+                    };
+
                     Self::validate_fact_viewpoints(
                         &fact_request.viewpoints,
                         &self.schema_id,
@@ -90,7 +135,10 @@ impl EvaluationReq {
                     )?;
 
                     Ok(EvaluateInfo::TrackerSchemasFact {
-                        contract: contract.clone(),
+                        contract: format!(
+                            "{}_{}",
+                            self.governance_id, self.schema_id
+                        ),
                         init_state: init_state.clone(),
                         state: state.clone(),
                         payload: fact_request.payload.clone(),
@@ -106,19 +154,28 @@ impl EvaluationReq {
             }),
             (
                 EventRequest::Transfer(transfer_request),
-                EvaluateData::TrackerSchemasTransfer {
-                    governance_data,
-                    namespace,
-                    schema_id,
-                    ..
-                },
-            ) => Ok(EvaluateInfo::TrackerSchemasTransfer {
-                governance_data: governance_data.clone(),
-                new_owner: transfer_request.new_owner.clone(),
-                old_owner: self.event_request.signature().signer.clone(),
-                namespace: namespace.clone(),
-                schema_id: schema_id.clone(),
-            }),
+                EvaluateData::TrackerSchemasTransfer { .. },
+            ) => {
+                let EvalWorkerContext::TrackerTransfer {
+                    members,
+                    creators,
+                } = worker_context
+                else {
+                    return Err(EvaluatorError::InternalError(
+                        "Tracker transfer evaluation context is missing"
+                            .to_owned(),
+                    ));
+                };
+
+                Ok(EvaluateInfo::TrackerSchemasTransfer {
+                    new_owner: transfer_request.new_owner.clone(),
+                    old_owner: self.event_request.signature().signer.clone(),
+                    namespace: self.namespace.clone(),
+                    schema_id: self.schema_id.clone(),
+                    members: members.clone(),
+                    creators: creators.clone(),
+                })
+            }
             (
                 EventRequest::Confirm(confirm_request),
                 EvaluateData::GovConfirm { state },
@@ -149,16 +206,10 @@ pub enum EvaluateData {
         state: GovernanceData,
     },
     TrackerSchemasFact {
-        contract: String,
         state: ValueWrapper,
-        governance_data: GovernanceData,
-        schema_viewpoints: BTreeSet<String>,
     },
     TrackerSchemasTransfer {
         state: ValueWrapper,
-        governance_data: GovernanceData,
-        namespace: Namespace,
-        schema_id: SchemaType,
     },
 }
 
@@ -228,7 +279,9 @@ mod tests {
             signer_is_owner: true,
         };
 
-        let error = req.build_evaluate_info(&None).unwrap_err();
+        let error = req
+            .build_evaluate_info(&None, &EvalWorkerContext::default())
+            .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
@@ -248,13 +301,7 @@ mod tests {
             event_request,
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::TrackerSchemasFact {
-                contract: "contract".to_owned(),
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
-                governance_data: GovernanceData::new(public_key.clone()),
-                schema_viewpoints: BTreeSet::from([
-                    "agua".to_owned(),
-                    "basura".to_owned(),
-                ]),
             },
             sn: 1,
             gov_version: 0,
@@ -265,7 +312,17 @@ mod tests {
         };
 
         let error = req
-            .build_evaluate_info(&Some(ValueWrapper(json!({}))))
+            .build_evaluate_info(
+                &Some(ValueWrapper(json!({}))),
+                &EvalWorkerContext::TrackerFact {
+                    issuers: BTreeSet::new(),
+                    issuer_any: false,
+                    schema_viewpoints: BTreeSet::from([
+                        "agua".to_owned(),
+                        "basura".to_owned(),
+                    ]),
+                },
+            )
             .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
@@ -286,13 +343,7 @@ mod tests {
             event_request,
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::TrackerSchemasFact {
-                contract: "contract".to_owned(),
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
-                governance_data: GovernanceData::new(public_key.clone()),
-                schema_viewpoints: BTreeSet::from([
-                    "agua".to_owned(),
-                    "basura".to_owned(),
-                ]),
             },
             sn: 1,
             gov_version: 0,
@@ -303,7 +354,17 @@ mod tests {
         };
 
         let error = req
-            .build_evaluate_info(&Some(ValueWrapper(json!({}))))
+            .build_evaluate_info(
+                &Some(ValueWrapper(json!({}))),
+                &EvalWorkerContext::TrackerFact {
+                    issuers: BTreeSet::new(),
+                    issuer_any: false,
+                    schema_viewpoints: BTreeSet::from([
+                        "agua".to_owned(),
+                        "basura".to_owned(),
+                    ]),
+                },
+            )
             .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
@@ -324,13 +385,7 @@ mod tests {
             event_request,
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::TrackerSchemasFact {
-                contract: "contract".to_owned(),
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
-                governance_data: GovernanceData::new(public_key.clone()),
-                schema_viewpoints: BTreeSet::from([
-                    "agua".to_owned(),
-                    "basura".to_owned(),
-                ]),
             },
             sn: 1,
             gov_version: 0,
@@ -341,7 +396,17 @@ mod tests {
         };
 
         let error = req
-            .build_evaluate_info(&Some(ValueWrapper(json!({}))))
+            .build_evaluate_info(
+                &Some(ValueWrapper(json!({}))),
+                &EvalWorkerContext::TrackerFact {
+                    issuers: BTreeSet::new(),
+                    issuer_any: false,
+                    schema_viewpoints: BTreeSet::from([
+                        "agua".to_owned(),
+                        "basura".to_owned(),
+                    ]),
+                },
+            )
             .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }

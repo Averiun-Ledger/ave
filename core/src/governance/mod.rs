@@ -11,6 +11,7 @@ use crate::{
         compiler::{
             CompilerResponse, ContractCompiler, ContractCompilerMessage,
         },
+        request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
@@ -684,6 +685,7 @@ impl Governance {
 
             actor
                 .tell(EvaluationSchemaMessage::Update {
+                    members: self.properties.members.values().cloned().collect(),
                     creators: schema_creators_eval
                         .get(schema_id)
                         .cloned()
@@ -696,6 +698,12 @@ impl Governance {
                         .get(schema_id)
                         .map(|(_, issuer_any)| *issuer_any)
                         .unwrap_or(false),
+                    schema_viewpoints: self
+                        .properties
+                        .schemas
+                        .get(schema_id)
+                        .map(|schema| schema.viewpoints.clone())
+                        .unwrap_or_default(),
                     sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
                     init_state: init_state.clone(),
@@ -773,6 +781,7 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
+                members: self.properties.members.values().cloned().collect(),
                 creators: schema_roles
                     .creators_eval
                     .get(schema_id)
@@ -788,6 +797,12 @@ impl Governance {
                     .get(schema_id)
                     .map(|(_, issuer_any)| *issuer_any)
                     .unwrap_or(false),
+                schema_viewpoints: self
+                    .properties
+                    .schemas
+                    .get(schema_id)
+                    .map(|schema| schema.viewpoints.clone())
+                    .unwrap_or_default(),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
                 hash: *hash_network.0,
@@ -1389,8 +1404,10 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
-                issuers,
-                issuer_any,
+                context: EvalWorkerContext::Governance {
+                    issuers,
+                    issuer_any,
+                },
                 init_state: None,
                 hash: *hash,
                 network: network.clone(),
@@ -1519,8 +1536,10 @@ impl Governance {
                     governance_id: self.subject_metadata.subject_id.clone(),
                     gov_version: self.properties.version,
                     sn: self.subject_metadata.sn,
-                    issuers,
-                    issuer_any,
+                    context: EvalWorkerContext::Governance {
+                        issuers,
+                        issuer_any,
+                    },
                     init_state: None,
                     hash: *hash,
                     network: network.clone(),

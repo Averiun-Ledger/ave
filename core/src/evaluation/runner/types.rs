@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -43,10 +45,11 @@ pub enum EvaluateInfo {
         payload: ValueWrapper,
     },
     TrackerSchemasTransfer {
-        governance_data: GovernanceData,
         new_owner: PublicKey,
         old_owner: PublicKey,
         namespace: Namespace,
         schema_id: SchemaType,
+        members: BTreeSet<PublicKey>,
+        creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
     },
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -37,7 +37,7 @@ use crate::{
             tracker_schemas_role_event_check_data,
             tracker_schemas_role_event_is_empty,
         },
-        model::{CreatorWitness, HashThisRole, RoleCreator, RoleTypes, Schema},
+        model::{CreatorWitness, RoleCreator, Schema},
     },
     metrics::try_core_metrics,
     model::common::contract::{
@@ -133,13 +133,15 @@ impl Runner {
                 .await
             }
             EvaluateInfo::TrackerSchemasTransfer {
-                governance_data,
                 new_owner,
                 old_owner,
                 namespace,
                 schema_id,
+                members,
+                creators,
             } => Self::execute_transfer_not_gov(
-                governance_data,
+                members,
+                creators,
                 new_owner,
                 old_owner,
                 namespace.clone(),
@@ -149,7 +151,8 @@ impl Runner {
     }
 
     fn execute_transfer_not_gov(
-        governance: &GovernanceData,
+        members: &BTreeSet<PublicKey>,
+        creators: &BTreeMap<PublicKey, BTreeSet<Namespace>>,
         new_owner: &PublicKey,
         old_owner: &PublicKey,
         namespace: Namespace,
@@ -173,7 +176,7 @@ impl Runner {
             });
         }
 
-        if !governance.is_member(new_owner) {
+        if !members.contains(new_owner) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
                 kind: error::InvalidEventKind::NotMember {
@@ -182,11 +185,10 @@ impl Runner {
             });
         }
 
-        if !governance.has_this_role(HashThisRole::Schema {
-            who: new_owner.clone(),
-            role: RoleTypes::Creator,
-            schema_id: schema_id.to_owned(),
-            namespace: namespace.clone(),
+        if !creators.get(new_owner).is_some_and(|namespaces| {
+            namespaces.iter().any(|creator_namespace| {
+                creator_namespace.is_ancestor_or_equal_of(&namespace)
+            })
         }) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
