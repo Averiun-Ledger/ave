@@ -103,6 +103,17 @@ pub mod tracker_sync;
 pub mod version_sync;
 pub mod witnesses_register;
 
+type SchemaCreatorsByNamespace =
+    BTreeMap<SchemaType, BTreeMap<PublicKey, BTreeSet<Namespace>>>;
+type SchemaIssuersByNamespace =
+    BTreeMap<SchemaType, (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool)>;
+
+struct SchemaRuntimeRoles<'a> {
+    creators_eval: &'a SchemaCreatorsByNamespace,
+    issuers_eval: &'a SchemaIssuersByNamespace,
+    creators_vali: &'a SchemaCreatorsByNamespace,
+}
+
 pub struct RolesUpdate {
     pub appr_quorum: Option<Quorum>,
     pub new_approvers: Vec<PublicKey>,
@@ -652,6 +663,10 @@ impl Governance {
             SchemaType,
             BTreeMap<PublicKey, BTreeSet<Namespace>>,
         >,
+        schema_issuers_eval: &BTreeMap<
+            SchemaType,
+            (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool),
+        >,
         schema_creators_vali: &BTreeMap<
             SchemaType,
             BTreeMap<PublicKey, BTreeSet<Namespace>>,
@@ -673,6 +688,14 @@ impl Governance {
                         .get(schema_id)
                         .cloned()
                         .unwrap_or_default(),
+                    issuers: schema_issuers_eval
+                        .get(schema_id)
+                        .map(|(issuers, _)| issuers.clone())
+                        .unwrap_or_default(),
+                    issuer_any: schema_issuers_eval
+                        .get(schema_id)
+                        .map(|(_, issuer_any)| *issuer_any)
+                        .unwrap_or(false),
                     sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
                     init_state: init_state.clone(),
@@ -739,14 +762,7 @@ impl Governance {
     async fn up_schemas(
         &self,
         ctx: &mut ActorContext<Self>,
-        schema_creators_eval: &BTreeMap<
-            SchemaType,
-            BTreeMap<PublicKey, BTreeSet<Namespace>>,
-        >,
-        schema_creators_vali: &BTreeMap<
-            SchemaType,
-            BTreeMap<PublicKey, BTreeSet<Namespace>>,
-        >,
+        schema_roles: SchemaRuntimeRoles<'_>,
         up_eval: &BTreeMap<SchemaType, ValueWrapper>,
         up_vali: &BTreeMap<SchemaType, ValueWrapper>,
         hash_network: (&HashAlgorithm, &Arc<NetworkSender>),
@@ -757,10 +773,21 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
-                creators: schema_creators_eval
+                creators: schema_roles
+                    .creators_eval
                     .get(schema_id)
                     .cloned()
                     .unwrap_or_default(),
+                issuers: schema_roles
+                    .issuers_eval
+                    .get(schema_id)
+                    .map(|(issuers, _)| issuers.clone())
+                    .unwrap_or_default(),
+                issuer_any: schema_roles
+                    .issuers_eval
+                    .get(schema_id)
+                    .map(|(_, issuer_any)| *issuer_any)
+                    .unwrap_or(false),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
                 hash: *hash_network.0,
@@ -780,7 +807,8 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
-                creators: schema_creators_vali
+                creators: schema_roles
+                    .creators_vali
                     .get(schema_id)
                     .cloned()
                     .unwrap_or_default(),
@@ -913,7 +941,10 @@ impl Governance {
 
         let schema_creators_eval = self
             .properties
-            .schema_creators_namespace(schemas_namespace_eval);
+            .schema_creators_namespace(schemas_namespace_eval.clone());
+        let schema_issuers_eval = self
+            .properties
+            .schema_issuers_namespace(schemas_namespace_eval);
 
         let up_eval = new_schemas_eval
             .clone()
@@ -939,8 +970,11 @@ impl Governance {
         // Up
         self.up_schemas(
             ctx,
-            &schema_creators_eval,
-            &schema_creators_vali,
+            SchemaRuntimeRoles {
+                creators_eval: &schema_creators_eval,
+                issuers_eval: &schema_issuers_eval,
+                creators_vali: &schema_creators_vali,
+            },
             &up_eval,
             &up_vali,
             (&hash, &network),
@@ -965,6 +999,7 @@ impl Governance {
         self.update_schemas(
             ctx,
             &schema_creators_eval,
+            &schema_issuers_eval,
             &schema_creators_vali,
             &update_eval,
             &update_vali,
@@ -977,9 +1012,12 @@ impl Governance {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
             evaluator
-                .tell(EvalWorkerMessage::UpdateGovVersion {
+                .tell(EvalWorkerMessage::Update {
                     gov_version: self.properties.version,
+                    issuers,
+                    issuer_any,
                 })
                 .await?;
         }
@@ -1262,7 +1300,10 @@ impl Governance {
 
         let schema_creators_eval = self
             .properties
-            .schema_creators_namespace(schemas_namespace_eval);
+            .schema_creators_namespace(schemas_namespace_eval.clone());
+        let schema_issuers_eval = self
+            .properties
+            .schema_issuers_namespace(schemas_namespace_eval);
 
         let schemas_namespace_vali = self
             .properties
@@ -1278,8 +1319,11 @@ impl Governance {
 
         self.up_schemas(
             ctx,
-            &schema_creators_eval,
-            &schema_creators_vali,
+            SchemaRuntimeRoles {
+                creators_eval: &schema_creators_eval,
+                issuers_eval: &schema_issuers_eval,
+                creators_vali: &schema_creators_vali,
+            },
             &new_schemas_eval,
             &new_schemas_vali,
             (hash, network),
@@ -1337,6 +1381,7 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Evaluator,
         }) {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
             // If we are a evaluator
             let evaluator = EvalWorker {
                 node_key: node_key.clone(),
@@ -1344,6 +1389,8 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
+                issuers,
+                issuer_any,
                 init_state: None,
                 hash: *hash,
                 network: network.clone(),
@@ -1465,12 +1512,15 @@ impl Governance {
                 actor.ask_stop().await?;
             }
             (false, true) => {
+                let (issuers, issuer_any) = self.properties.governance_issuers();
                 let evaluator = EvalWorker {
                     node_key: node_key.clone(),
                     our_key: self.our_key.clone(),
                     governance_id: self.subject_metadata.subject_id.clone(),
                     gov_version: self.properties.version,
                     sn: self.subject_metadata.sn,
+                    issuers,
+                    issuer_any,
                     init_state: None,
                     hash: *hash,
                     network: network.clone(),

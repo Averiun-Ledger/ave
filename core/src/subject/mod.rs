@@ -1302,6 +1302,46 @@ where
                 });
             }
 
+            let signer = event_request.signature().signer.clone();
+            if !event_request.content().check_request_signature(
+                &signer,
+                &subject_metadata.owner,
+                &subject_metadata.new_owner,
+            ) {
+                let (event, expected) = match event_request.content() {
+                    EventRequest::Create(..) => {
+                        ("create", subject_metadata.owner.to_string())
+                    }
+                    EventRequest::Transfer(..) => {
+                        ("transfer", subject_metadata.owner.to_string())
+                    }
+                    EventRequest::EOL(..) => {
+                        ("eol", subject_metadata.owner.to_string())
+                    }
+                    EventRequest::Confirm(..) => (
+                        "confirm",
+                        subject_metadata.new_owner.as_ref().map_or_else(
+                            || "new_owner".to_owned(),
+                            ToString::to_string,
+                        ),
+                    ),
+                    EventRequest::Reject(..) => (
+                        "reject",
+                        subject_metadata.new_owner.as_ref().map_or_else(
+                            || "new_owner".to_owned(),
+                            ToString::to_string,
+                        ),
+                    ),
+                    EventRequest::Fact(..) => ("fact", signer.to_string()),
+                };
+
+                return Err(SubjectError::InvalidEventRequestSigner {
+                    event: event.to_owned(),
+                    expected,
+                    actual: signer.to_string(),
+                });
+            }
+
             let event_subject_id = event_request.content().get_subject_id();
             if event_subject_id != subject_metadata.subject_id {
                 return Err(SubjectError::SubjectIdMismatch {
@@ -1596,6 +1636,16 @@ where
                     return Err(SubjectError::SignatureVerificationFailed {
                         context: "event request signature verification failed"
                             .to_string(),
+                    });
+                }
+
+                let event_request_signer =
+                    event_request.signature().signer.clone();
+                if event_request_signer != subject_metadata.owner {
+                    return Err(SubjectError::InvalidEventRequestSigner {
+                        event: "Create".to_owned(),
+                        expected: subject_metadata.owner.to_string(),
+                        actual: event_request_signer.to_string(),
                     });
                 }
 

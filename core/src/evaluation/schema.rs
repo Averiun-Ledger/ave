@@ -32,6 +32,8 @@ pub struct EvaluationSchema {
     pub schema_id: SchemaType,
     pub sn: u64,
     pub creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+    pub issuers: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+    pub issuer_any: bool,
     pub init_state: ValueWrapper,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
@@ -46,6 +48,8 @@ pub enum EvaluationSchemaMessage {
     },
     Update {
         creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        issuers: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        issuer_any: bool,
         sn: u64,
         gov_version: u64,
         init_state: ValueWrapper,
@@ -168,6 +172,19 @@ impl Handler<Self> for EvaluationSchema {
                             governance_id: self.governance_id.clone(),
                             gov_version: self.gov_version,
                             sn: self.sn,
+                            issuers: self
+                                .issuers
+                                .iter()
+                                .filter(|(_, namespaces)| {
+                                    namespaces.iter().any(|issuer_namespace| {
+                                        issuer_namespace.is_ancestor_or_equal_of(
+                                            &evaluation_req.content().namespace,
+                                        )
+                                    })
+                                })
+                                .map(|(issuer, _)| issuer.clone())
+                                .collect(),
+                            issuer_any: self.issuer_any,
                             hash: self.hash,
                             network: self.network.clone(),
                             stop: true,
@@ -221,6 +238,8 @@ impl Handler<Self> for EvaluationSchema {
             }
             EvaluationSchemaMessage::Update {
                 creators,
+                issuers,
+                issuer_any,
                 sn,
                 gov_version,
                 init_state,
@@ -229,6 +248,8 @@ impl Handler<Self> for EvaluationSchema {
                     metrics.observe_schema_event("evaluation_schema", "update");
                 }
                 self.creators = creators;
+                self.issuers = issuers;
+                self.issuer_any = issuer_any;
                 self.gov_version = gov_version;
                 self.sn = sn;
                 self.init_state = init_state;

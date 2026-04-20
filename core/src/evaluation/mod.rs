@@ -45,7 +45,7 @@ pub mod runner;
 pub mod schema;
 pub mod worker;
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::{BTreeSet, HashSet}, sync::Arc};
 pub struct Evaluation {
     our_key: Arc<PublicKey>,
     // Quorum
@@ -119,6 +119,28 @@ impl Evaluation {
         self.current_evaluators.remove(&evaluator)
     }
 
+    fn current_issuers(&self) -> (BTreeSet<PublicKey>, bool) {
+        match &self.request.content().data {
+            request::EvaluateData::GovFact { state }
+            | request::EvaluateData::GovTransfer { state }
+            | request::EvaluateData::GovConfirm { state } => {
+                state.governance_issuers()
+            }
+            request::EvaluateData::TrackerSchemasFact { governance_data, .. }
+            | request::EvaluateData::TrackerSchemasTransfer {
+                governance_data,
+                ..
+            } => {
+                let (issuers, issuer_any) = governance_data.get_signers(
+                    crate::governance::model::RoleTypes::Issuer,
+                    &self.request.content().schema_id,
+                    self.request.content().namespace.clone(),
+                );
+                (issuers.into_iter().collect(), issuer_any)
+            }
+        }
+    }
+
     async fn create_evaluators(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -145,6 +167,7 @@ impl Evaluation {
                 })
                 .await?
         } else {
+            let (issuers, issuer_any) = self.current_issuers();
             let child = ctx
                 .create_child(
                     &format!("{}", signer),
@@ -159,6 +182,8 @@ impl Evaluation {
                             .clone(),
                         gov_version: self.request.content().gov_version,
                         sn: self.request.content().sn,
+                        issuers,
+                        issuer_any,
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,

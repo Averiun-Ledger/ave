@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
 use crate::{
     evaluation::{
@@ -57,6 +57,8 @@ pub struct EvalWorker {
     pub governance_id: DigestIdentifier,
     pub gov_version: u64,
     pub sn: u64,
+    pub issuers: BTreeSet<PublicKey>,
+    pub issuer_any: bool,
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
@@ -456,14 +458,44 @@ impl EvalWorker {
             return Err(EvaluatorError::InvalidEventSignature);
         }
 
+        if self.gov_version == evaluation_req.content().gov_version {
+            let signer = evaluation_req
+                .content()
+                .event_request
+                .signature()
+                .signer
+                .clone();
+
+            if evaluation_req
+                .content()
+                .event_request
+                .content()
+                .is_fact_event()
+            {
+                if !self.issuer_any && !self.issuers.contains(&signer) {
+                    return Err(EvaluatorError::InvalidEventRequest(
+                        "In fact events, the signer has to be an issuer"
+                            .to_owned(),
+                    ));
+                }
+            } else if signer != self.node_key {
+                return Err(EvaluatorError::InvalidEventRequest(
+                    "In non-fact events, the signer has to be the sender"
+                        .to_owned(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum EvalWorkerMessage {
-    UpdateGovVersion {
+    Update {
         gov_version: u64,
+        issuers: BTreeSet<PublicKey>,
+        issuer_any: bool,
     },
     LocalEvaluation {
         evaluation_req: Signed<EvaluationReq>,
@@ -502,8 +534,14 @@ impl Handler<Self> for EvalWorker {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            EvalWorkerMessage::UpdateGovVersion { gov_version } => {
+            EvalWorkerMessage::Update {
+                gov_version,
+                issuers,
+                issuer_any,
+            } => {
                 self.gov_version = gov_version;
+                self.issuers = issuers;
+                self.issuer_any = issuer_any;
             }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {
                 let evaluation =

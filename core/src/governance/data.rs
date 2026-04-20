@@ -6,7 +6,7 @@ use crate::governance::{
     error::GovernanceError,
     model::{
         HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum,
-        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesGov, RolesSchema,
+        Role, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesGov, RolesSchema,
         RolesTrackerSchemas, Schema, WitnessesData,
     },
 };
@@ -904,6 +904,81 @@ impl GovernanceData {
                         }
                     }
                 }
+            }
+        }
+
+        map
+    }
+
+    pub fn governance_issuers(&self) -> (BTreeSet<PublicKey>, bool) {
+        let mut issuers = BTreeSet::new();
+
+        for name in self.roles_gov.issuer.signers.iter() {
+            if let Some(key) = self.members.get(name) {
+                issuers.insert(key.clone());
+            }
+        }
+
+        (issuers, self.roles_gov.issuer.any)
+    }
+
+    pub fn schema_issuers_namespace(
+        &self,
+        schema_namespaces: BTreeMap<SchemaType, Vec<Namespace>>,
+    ) -> BTreeMap<
+        SchemaType,
+        (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool),
+    > {
+        let mut map: BTreeMap<
+            SchemaType,
+            (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool),
+        > = BTreeMap::new();
+
+        fn insert_issuers(
+            members: &BTreeMap<MemberName, PublicKey>,
+            schema_entry: &mut BTreeMap<PublicKey, BTreeSet<Namespace>>,
+            issuers: &BTreeSet<Role>,
+        ) {
+            for issuer in issuers {
+                if let Some(pub_key) = members.get(&issuer.name) {
+                    schema_entry
+                        .entry(pub_key.clone())
+                        .or_default()
+                        .insert(issuer.namespace.clone());
+                }
+            }
+        }
+
+        for (schema_id, _) in schema_namespaces {
+            if schema_id == SchemaType::TrackerSchemas {
+                for (current_schema_id, _) in self.roles_schema.iter() {
+                    let (schema_entry, issuer_any) =
+                        map.entry(current_schema_id.clone())
+                            .or_insert_with(|| (BTreeMap::new(), false));
+                    *issuer_any |= self.roles_tracker_schemas.issuer.any;
+
+                    insert_issuers(
+                        &self.members,
+                        schema_entry,
+                        &self.roles_tracker_schemas.issuer.signers,
+                    );
+                }
+            } else if let Some(roles) = self.roles_schema.get(&schema_id) {
+                let (schema_entry, issuer_any) =
+                    map.entry(schema_id).or_insert_with(|| (BTreeMap::new(), false));
+                *issuer_any |=
+                    self.roles_tracker_schemas.issuer.any || roles.issuer.any;
+
+                insert_issuers(
+                    &self.members,
+                    schema_entry,
+                    &self.roles_tracker_schemas.issuer.signers,
+                );
+                insert_issuers(
+                    &self.members,
+                    schema_entry,
+                    &roles.issuer.signers,
+                );
             }
         }
 

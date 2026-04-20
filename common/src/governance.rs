@@ -390,6 +390,7 @@ pub struct Role {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct CreatorWitness {
     pub name: String,
+    #[cfg_attr(feature = "typescript", ts(type = "string[] | undefined"))]
     pub viewpoints: BTreeSet<String>,
 }
 
@@ -509,6 +510,10 @@ impl<'de> Deserialize<'de> for CreatorWitnesses {
 pub struct RoleCreator {
     pub name: String,
     pub namespace: Namespace,
+    #[cfg_attr(
+        feature = "typescript",
+        ts(type = "(string | CreatorWitness)[] | undefined")
+    )]
     pub witnesses: BTreeSet<CreatorWitness>,
     pub quantity: CreatorQuantity,
 }

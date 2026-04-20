@@ -997,7 +997,6 @@ async fn test_namespace_in_role_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-
                         "add": {
                             "evaluator": [
                                 {

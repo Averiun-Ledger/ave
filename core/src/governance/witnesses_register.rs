@@ -1385,25 +1385,23 @@ impl WitnessesRegister {
             )) {
                 if let Some((interval, actual_lo)) =
                     witnesses_creator.get(&WitnessesType::User(node.clone()))
-                {
-                    if let Some(gov_version) =
+                    && let Some(gov_version) =
                         Self::max_covered_old_owner_gov_version(
                             *actual_lo, interval, old_data,
                         )
+                {
+                    match self
+                        .get_sn(ctx, subject_id.clone(), gov_version)
+                        .await?
                     {
-                        match self
-                            .get_sn(ctx, subject_id.clone(), gov_version)
-                            .await?
-                        {
-                            SnLimit::Sn(sn) => {
-                                better_sn =
-                                    better_sn.max(Some(sn.min(old_data.sn)));
-                            }
-                            SnLimit::LastSn => {
-                                better_sn = better_sn.max(Some(old_data.sn));
-                            }
-                            SnLimit::NotSn => {}
+                        SnLimit::Sn(sn) => {
+                            better_sn =
+                                better_sn.max(Some(sn.min(old_data.sn)));
                         }
+                        SnLimit::LastSn => {
+                            better_sn = better_sn.max(Some(old_data.sn));
+                        }
+                        SnLimit::NotSn => {}
                     }
                 }
 

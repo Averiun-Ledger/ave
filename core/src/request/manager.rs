@@ -478,6 +478,7 @@ impl RequestManager {
                             metadata.governance_id, metadata.schema_id
                         ),
                         state: metadata.properties.clone(),
+                        governance_data: governance_data.clone(),
                         schema_viewpoints,
                     },
                     governance_data,

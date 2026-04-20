@@ -73,6 +73,7 @@ impl EvaluationReq {
                 EvaluateData::TrackerSchemasFact {
                     contract,
                     state,
+                    governance_data: _,
                     schema_viewpoints,
                 },
             ) => init_state.as_ref().map_or_else(
@@ -150,6 +151,7 @@ pub enum EvaluateData {
     TrackerSchemasFact {
         contract: String,
         state: ValueWrapper,
+        governance_data: GovernanceData,
         schema_viewpoints: BTreeSet<String>,
     },
     TrackerSchemasTransfer {
@@ -248,6 +250,7 @@ mod tests {
             data: EvaluateData::TrackerSchemasFact {
                 contract: "contract".to_owned(),
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
+                governance_data: GovernanceData::new(public_key.clone()),
                 schema_viewpoints: BTreeSet::from([
                     "agua".to_owned(),
                     "basura".to_owned(),
@@ -285,6 +288,7 @@ mod tests {
             data: EvaluateData::TrackerSchemasFact {
                 contract: "contract".to_owned(),
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
+                governance_data: GovernanceData::new(public_key.clone()),
                 schema_viewpoints: BTreeSet::from([
                     "agua".to_owned(),
                     "basura".to_owned(),
@@ -322,6 +326,7 @@ mod tests {
             data: EvaluateData::TrackerSchemasFact {
                 contract: "contract".to_owned(),
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
+                governance_data: GovernanceData::new(public_key.clone()),
                 schema_viewpoints: BTreeSet::from([
                     "agua".to_owned(),
                     "basura".to_owned(),

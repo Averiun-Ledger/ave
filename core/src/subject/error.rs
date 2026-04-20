@@ -16,6 +16,15 @@ pub enum SubjectError {
     #[error("incorrect signer: expected {expected}, got {actual}")]
     IncorrectSigner { expected: String, actual: String },
 
+    #[error(
+        "event request signer is invalid for {event}: expected {expected}, got {actual}"
+    )]
+    InvalidEventRequestSigner {
+        event: String,
+        expected: String,
+        actual: String,
+    },
+
     #[error("validation request signature is invalid")]
     InvalidValidationRequestSignature,
 
