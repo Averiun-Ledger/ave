@@ -21,21 +21,7 @@ use crate::common::{
     create_node, node_running,
 };
 
-// TODO(witness coverage):
-// - Cubrir el caso histórico de old_owner + Witnesses:
-//   si un creator tuvo Witnesses y luego lo quitó antes de pasar a old_owner,
-//   un schema witness no debe heredar acceso fuera del intervalo real.
-// - Cubrir un batch de catch-up que empiece en Create y dentro del mismo lote
-//   haga Transfer + Confirm/Reject, para verificar acceso witness con subject
-//   inicialmente desconocido.
-// - Cubrir cambios de grants/viewpoints del creator witness:
-//   Full -> Clear(viewpoints) -> Hash, comprobando clear vs opaque.
-// - Cubrir ownership encadenado con varios old_owners y cambios de Witnesses
-//   entre medias, verificando que el sn límite del witness se corte justo
-//   donde corresponde.
-// - Cubrir update entre testigos tras gap:
-//   recibir el último evento de un witness, pedirle el catch-up al mismo sender
-//   y comprobar que el witness receptor no acepta de más ni de menos.
+const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
 #[test(tokio::test)]
 // Recibe la copia de un sujeto sin tener la gobernanza
@@ -6992,4 +6978,1455 @@ async fn test_more_cases_3() {
     let _state = get_subject(&owner, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
+}
+
+#[test(tokio::test)]
+// Ownership encadenado con varios old_owners y cambios de Witnesses entre medias.
+//
+// Secuencia:
+//   - Alice crea el subject y emite un fact.
+//   - Alice transfiere a Bob y Bob confirma.
+//   - Bob emite un fact.
+//   - Se quita `Witnesses` de Bob y se añade tarde a Alice, cuando Alice ya
+//     es old_owner.
+//   - Bob transfiere a Charlie y Charlie confirma.
+//   - Charlie emite un fact.
+//
+// Verificación:
+//   - Dali, como schema witness, solo debe recuperar el tramo real en el que
+//     Bob estuvo autorizado con `Witnesses`.
+//   - El grant tardío sobre Alice no debe reabrir su histórico de old_owner.
+//   - El corte exacto debe quedar en sn=4.
+async fn test_chained_old_owners_witness_range_cut() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+    let witness_dali = nodes[4].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![
+            &witness_alice,
+            &witness_bob,
+            &witness_charlie,
+            &witness_dali,
+        ],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice",
+                        "Bob",
+                        "Charlie",
+                        "Dali"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Dali",
+                                "namespace": []
+                            },
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Charlie",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Alice",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Charlie",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 100
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_bob,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 200
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_bob,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state =
+        get_subject(&witness_charlie, subject_id.clone(), Some(5), true)
+            .await
+            .unwrap();
+
+    emit_confirm(&witness_charlie, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_charlie,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 300
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_charlie, subject_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_dali, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    nodes[4].token.cancel();
+    join_all(nodes[4].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        keys: Some(nodes[4].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_dali = node_new_dali.api;
+    node_running(&new_dali).await.unwrap();
+
+    new_dali
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    new_dali
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(&new_dali, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    assert_eq!(state.sn, 4);
+    assert_eq!(state.owner, witness_bob.public_key());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, witness_alice.public_key());
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 200,
+            "two": 0,
+            "three": 0
+        })
+    );
+}
+
+#[test(tokio::test)]
+// Witnesses on -> off -> on sobre el mismo creator, y luego pasa a old_owner.
+//
+// Objetivo:
+//   - Verificar que los intervalos discontinuos no se fusionan.
+//   - Si Dali tuvo acceso a Alice en dos ventanas separadas por cambios de
+//     gobernanza, al reconstruir histórico debe recuperar solo el tramo real
+//     de Alice como old_owner y no extenderse al tramo de Bob.
+//
+// Pasos:
+//   - Alice crea el subject y tiene `Witnesses` activo.
+//   - Emitir un fact en la primera ventana visible.
+//   - Quitar `Witnesses` de Alice.
+//   - Volver a añadir `Witnesses` de Alice y emitir un segundo fact.
+//   - Transferir el subject para que Alice pase a old_owner.
+//   - Reiniciar Dali sin DB y pedir copia desde cero.
+//   - Comprobar que solo recupera el tramo histórico real de Alice y no el de
+//     Bob tras la confirmación y el fact posterior.
+async fn test_old_owner_disjoint_witness_windows_cut() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_dali = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_dali],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice",
+                        "Bob",
+                        "Dali"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Dali",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Alice",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 100
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 200
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_bob,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 300
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_dali, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_dali = node_new_dali.api;
+    node_running(&new_dali).await.unwrap();
+
+    assert!(
+        new_dali
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+
+    new_dali
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    assert!(
+        new_dali
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    new_dali
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(&new_dali, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 4);
+    assert_eq!(state.owner, witness_bob.public_key());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, witness_alice.public_key());
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 200,
+            "two": 0,
+            "three": 0
+        })
+    );
+}
+
+#[test(tokio::test)]
+// Solape entre testigo explícito y schema witness sobre el mismo creator.
+//
+// Objetivo:
+//   - Verificar que el rango final visible es la unión correcta de ambos accesos.
+//   - No debe abrir más SNs de la cuenta ni perder tramo por priorizar una rama.
+//
+// Pasos:
+//   - Dar a Dali acceso explícito al creator en una ventana corta.
+//   - Dar a Dali acceso por schema witness en otra ventana distinta.
+//   - Emitir eventos repartidos entre ambas ventanas y fuera de ellas.
+//   - Hacer que el creator pase a old_owner.
+//   - Reiniciar Dali sin DB y pedir copia desde cero.
+//   - Comprobar que ve exactamente la unión de ambos tramos y no los huecos.
+async fn test_old_owner_explicit_and_schema_union_cut() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_dali = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_dali],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice",
+                        "Bob",
+                        "Dali"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Dali",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Alice",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 100
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Dali",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 200
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    witness_bob.update_subject(subject_id.clone()).await.unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_bob,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 300
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_dali, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_dali = node_new_dali.api;
+    node_running(&new_dali).await.unwrap();
+
+    assert!(
+        new_dali
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+    new_dali
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    assert!(
+        new_dali
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+    new_dali
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(&new_dali, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 4);
+    assert_eq!(state.owner, witness_bob.public_key());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, witness_alice.public_key());
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 200,
+            "two": 0,
+            "three": 0
+        })
+    );
+}
+
+#[test(tokio::test)]
+// Cadena de ownership con reject en vez de confirm.
+//
+// Objetivo:
+//   - Verificar que un pending owner rechazado no desplaza mal el rango witness.
+//   - El corte debe seguir el ownership real consolidado, no el pending temporal.
+//
+// Pasos:
+//   - Alice crea el subject y emite un fact.
+//   - Transferir a Bob para abrir pending ownership.
+//   - Emitir los eventos necesarios alrededor del pending.
+//   - Hacer reject en vez de confirm.
+//   - Cambiar `Witnesses` antes y después del reject para forzar el borde.
+//   - Reiniciar el witness receptor sin DB y pedir copia desde cero.
+//   - Comprobar que no se abre tramo por el pending owner rechazado.
+async fn test_reject_does_not_extend_old_owner_witness_range() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_dali = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_dali],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice",
+                        "Bob",
+                        "Dali"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Dali",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Alice",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 100
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    emit_reject(&witness_bob, subject_id.clone(), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 200
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    witness_dali
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    witness_dali.update_subject(subject_id.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        witness_dali
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_dali = node_new_dali.api;
+    node_running(&new_dali).await.unwrap();
+
+    assert!(
+        new_dali
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+    new_dali
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    assert!(
+        new_dali
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+    new_dali
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali.update_subject(subject_id.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        new_dali
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
 }

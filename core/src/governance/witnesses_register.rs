@@ -459,19 +459,46 @@ impl WitnessesRegister {
             || intervals.max_covered_in(owner_lo, owner_hi).is_some()
     }
 
-    fn interval_overlaps_old_owner(
+    fn covered_old_owner_intervals(
         current_from: Option<u64>,
         intervals: &IntervalSet,
         old_owner: &OldOwnerData,
-    ) -> bool {
-        old_owner.interval_gov_version.iter().any(|range| {
-            Self::interval_overlaps_owner(
-                current_from,
-                intervals,
-                range.lo,
-                range.hi,
-            )
-        })
+    ) -> IntervalSet {
+        let mut covered = IntervalSet::new();
+
+        for owner_range in old_owner.interval_gov_version.iter() {
+            if let Some(from) = current_from {
+                let lo = from.max(owner_range.lo);
+                if lo <= owner_range.hi {
+                    covered.insert(Interval {
+                        lo,
+                        hi: owner_range.hi,
+                    });
+                }
+            }
+
+            for witness_range in intervals.iter() {
+                let lo = witness_range.lo.max(owner_range.lo);
+                let hi = witness_range.hi.min(owner_range.hi);
+
+                if lo <= hi {
+                    covered.insert(Interval { lo, hi });
+                }
+            }
+        }
+
+        covered
+    }
+
+    fn max_covered_old_owner_gov_version(
+        current_from: Option<u64>,
+        intervals: &IntervalSet,
+        old_owner: &OldOwnerData,
+    ) -> Option<u64> {
+        Self::covered_old_owner_intervals(current_from, intervals, old_owner)
+            .iter()
+            .last()
+            .map(|range| range.hi)
     }
 
     fn grant_for_owner_interval(
@@ -1089,34 +1116,20 @@ impl WitnessesRegister {
         parse_namespace: &Namespace,
         data: &OldOwnerData,
         mut better_gov_version: Option<u64>,
-        mut better_sn: Option<u64>,
-    ) -> (Option<u64>, Option<u64>) {
-        'witness: {
-            for (namespace, (interval, actual_lo)) in witness_data.iter() {
-                if namespace.is_ancestor_or_equal_of(parse_namespace) {
-                    for range in data.interval_gov_version.iter().rev() {
-                        if let Some(actual_lo) = actual_lo
-                            && *actual_lo <= range.hi
-                        {
-                            better_sn = better_sn.max(Some(data.sn));
+    ) -> Option<u64> {
+        for (namespace, (interval, actual_lo)) in witness_data.iter() {
+            if !namespace.is_ancestor_or_equal_of(parse_namespace) {
+                continue;
+            }
 
-                            break 'witness;
-                        }
-
-                        if let Some(gov_version) =
-                            interval.max_covered_in(range.lo, range.hi)
-                        {
-                            better_gov_version =
-                                better_gov_version.max(Some(gov_version));
-
-                            break;
-                        }
-                    }
-                }
+            if let Some(gov_version) = Self::max_covered_old_owner_gov_version(
+                *actual_lo, interval, data,
+            ) {
+                better_gov_version = better_gov_version.max(Some(gov_version));
             }
         }
 
-        (better_gov_version, better_sn)
+        better_gov_version
     }
 
     async fn search_in_schema_actual(
@@ -1207,19 +1220,17 @@ impl WitnessesRegister {
         parse_namespace: &Namespace,
         data: &OldOwnerData,
         better_gov_version: Option<u64>,
-        better_sn: Option<u64>,
-    ) -> (Option<u64>, Option<u64>) {
+    ) -> Option<u64> {
         // el esquema específico
-        let (better_gov_version, better_sn) = self
+        let better_gov_version = self
             .witnesses
             .get(&(node.clone(), schema_id.clone()))
-            .map_or((better_gov_version, better_sn), |witness_data| {
+            .map_or(better_gov_version, |witness_data| {
                 Self::search_in_schema(
                     witness_data,
                     parse_namespace,
                     data,
                     better_gov_version,
-                    better_sn,
                 )
             });
 
@@ -1233,11 +1244,10 @@ impl WitnessesRegister {
                 parse_namespace,
                 data,
                 better_gov_version,
-                better_sn,
             );
         }
 
-        (better_gov_version, better_sn)
+        better_gov_version
     }
 
     /// Busca testigos para un owner actual (actual_owner o new_owner en transferencia)
@@ -1376,48 +1386,64 @@ impl WitnessesRegister {
                 if let Some((interval, actual_lo)) =
                     witnesses_creator.get(&WitnessesType::User(node.clone()))
                 {
-                    // Si es testigo explicito
-                    for range in old_data.interval_gov_version.iter().rev() {
-                        // Sigue siendo testigo.
-                        if let Some(actual_lo) = actual_lo
-                            && *actual_lo <= range.hi
+                    if let Some(gov_version) =
+                        Self::max_covered_old_owner_gov_version(
+                            *actual_lo, interval, old_data,
+                        )
+                    {
+                        match self
+                            .get_sn(ctx, subject_id.clone(), gov_version)
+                            .await?
                         {
-                            better_sn = better_sn.max(Some(old_data.sn));
-
-                            break;
-                        }
-
-                        if let Some(gov_version) =
-                            interval.max_covered_in(range.lo, range.hi)
-                        {
-                            better_gov_version =
-                                better_gov_version.max(Some(gov_version));
-
-                            break;
+                            SnLimit::Sn(sn) => {
+                                better_sn =
+                                    better_sn.max(Some(sn.min(old_data.sn)));
+                            }
+                            SnLimit::LastSn => {
+                                better_sn = better_sn.max(Some(old_data.sn));
+                            }
+                            SnLimit::NotSn => {}
                         }
                     }
                 }
 
                 // Witness de schema.
-                if witnesses_creator
-                    .get(&WitnessesType::Witnesses)
-                    .is_some_and(|(interval, actual_lo)| {
-                        Self::interval_overlaps_old_owner(
-                            *actual_lo, interval, old_data,
-                        )
-                    })
+                if let Some((interval, actual_lo)) =
+                    witnesses_creator.get(&WitnessesType::Witnesses)
                 {
-                    // ha tenido el rol de testigo.
-                    let (bgv, bs) = self.search_schemas_old(
-                        node,
-                        &schema_id,
-                        &parse_namespace,
-                        old_data,
-                        better_gov_version,
-                        better_sn,
+                    let covered_old_owner = Self::covered_old_owner_intervals(
+                        *actual_lo, interval, old_data,
                     );
-                    better_gov_version = bgv;
-                    better_sn = bs;
+
+                    if covered_old_owner.iter().next().is_some() {
+                        let capped_old_owner = OldOwnerData {
+                            sn: old_data.sn,
+                            interval_gov_version: covered_old_owner,
+                        };
+
+                        if let Some(gov_version) = self.search_schemas_old(
+                            node,
+                            &schema_id,
+                            &parse_namespace,
+                            &capped_old_owner,
+                            better_gov_version,
+                        ) {
+                            match self
+                                .get_sn(ctx, subject_id.clone(), gov_version)
+                                .await?
+                            {
+                                SnLimit::Sn(sn) => {
+                                    better_sn =
+                                        better_sn.max(Some(sn.min(old_data.sn)));
+                                }
+                                SnLimit::LastSn => {
+                                    better_sn =
+                                        better_sn.max(Some(old_data.sn));
+                                }
+                                SnLimit::NotSn => {}
+                            }
+                        }
+                    }
                 }
             }
         }
