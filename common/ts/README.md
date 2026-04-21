@@ -2,13 +2,15 @@
 
 TypeScript type definitions for the [Averiun Ledger](https://averiun.com) API.
 
-Auto-generated from Rust source code using [ts-rs](https://github.com/Aleph-Alpha/ts-rs), ensuring perfect synchronization between backend types and frontend interfaces.
+Auto-generated from Rust source code using [ts-rs](https://github.com/Aleph-Alpha/ts-rs), keeping backend types and frontend interfaces aligned from the same source model.
 
 ## Installation
 
 ```bash
 npm install ave-types
 ```
+
+Current package version: `0.9.0`.
 
 ## Usage
 

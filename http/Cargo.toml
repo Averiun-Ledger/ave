@@ -27,11 +27,11 @@ file-rotate = {  workspace = true }
 futures = { workspace = true }
 
 reqwest = {  workspace = true }
-rustls = { version = "0.23.37", features = ["ring"] }
+rustls = { version = "0.23.38", features = ["ring"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { workspace = true }
 ip_network = { workspace = true }
-serde_qs = { version = "1.0", features = ["axum"] }
+serde_qs = { version = "1.1", features = ["axum"] }
 tower = "0.5.3"
 tower-http = {version = "0.6.8", features = ["trace", "metrics", "cors", "set-header"]}
 utoipa = { workspace = true, features = ["axum_extras"] }

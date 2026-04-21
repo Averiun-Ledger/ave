@@ -1875,51 +1875,46 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 connection_id,
-                num_established,
+                num_established: 0,
                 ..
             } => {
-                if num_established == 0 {
-                    if let Some(Action::Identified(id)) =
-                        self.peer_action.get(&peer_id)
-                        && connection_id == *id
+                if let Some(Action::Identified(id)) =
+                    self.peer_action.get(&peer_id)
+                    && connection_id == *id
+                {
+                    self.peer_action.remove(&peer_id);
+
+                    self.peer_identify.remove(&peer_id);
+                    self.drop_pending_inbound_messages(&peer_id);
+                    self.response_channels.remove(&peer_id);
+
+                    self.retry_by_peer.remove(&peer_id);
+
+                    if self
+                        .pending_outbound_messages
+                        .get(&peer_id)
+                        .is_some_and(|q| !q.is_empty())
                     {
-                        self.peer_action.remove(&peer_id);
+                        self.schedule_retry(
+                            peer_id,
+                            ScheduleType::Dial(vec![]),
+                        );
+                    }
+                } else if let Some(Action::Dial | Action::Discover) =
+                    self.peer_action.get(&peer_id)
+                {
+                    self.peer_action.remove(&peer_id);
+                    self.retry_by_peer.remove(&peer_id);
+                    self.drop_pending_inbound_messages(&peer_id);
+                    self.response_channels.remove(&peer_id);
+                    self.peer_identify.remove(&peer_id);
 
-                        self.peer_identify.remove(&peer_id);
-                        self.drop_pending_inbound_messages(&peer_id);
-                        self.response_channels.remove(&peer_id);
-
-                        self.retry_by_peer.remove(&peer_id);
-
-                        if self
-                            .pending_outbound_messages
-                            .get(&peer_id)
-                            .is_some_and(|q| !q.is_empty())
-                        {
-                            self.schedule_retry(
-                                peer_id,
-                                ScheduleType::Dial(vec![]),
-                            );
-                        }
-                    } else if let Some(Action::Dial | Action::Discover) =
-                        self.peer_action.get(&peer_id)
+                    if self
+                        .pending_outbound_messages
+                        .get(&peer_id)
+                        .is_some_and(|q| !q.is_empty())
                     {
-                        self.peer_action.remove(&peer_id);
-                        self.retry_by_peer.remove(&peer_id);
-                        self.drop_pending_inbound_messages(&peer_id);
-                        self.response_channels.remove(&peer_id);
-                        self.peer_identify.remove(&peer_id);
-
-                        if self
-                            .pending_outbound_messages
-                            .get(&peer_id)
-                            .is_some_and(|q| !q.is_empty())
-                        {
-                            self.schedule_retry(
-                                peer_id,
-                                ScheduleType::Discover,
-                            );
-                        }
+                        self.schedule_retry(peer_id, ScheduleType::Discover);
                     }
                 }
             }
@@ -1940,13 +1935,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 connection_id,
                 num_established,
                 ..
-            } => {
-                if num_established.get() > 1 {
-                    debug!(target: TARGET, peer_id = %peer_id, "duplicate connection detected; closing excess");
-                    self.swarm
-                        .behaviour_mut()
-                        .close_connections(&peer_id, Some(connection_id));
-                }
+            } if num_established.get() > 1 => {
+                debug!(target: TARGET, peer_id = %peer_id, "duplicate connection detected; closing excess");
+                self.swarm
+                    .behaviour_mut()
+                    .close_connections(&peer_id, Some(connection_id));
             }
             SwarmEvent::IncomingConnection { .. }
             | SwarmEvent::ListenerClosed { .. }

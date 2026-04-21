@@ -184,7 +184,7 @@ pub async fn query_audit_logs(
         ("days" = Option<u32>, Query, description = "Number of days to include (default 7)")
     ),
     responses(
-        (status = 200, description = "Audit statistics", body = serde_json::Value),
+        (status = 200, description = "Audit statistics", body = AuditStats),
         (status = 403, description = "Permission denied", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -193,7 +193,7 @@ pub async fn get_audit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
     Query(params): Query<AuditStatsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<AuditStats>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
 
@@ -457,7 +457,7 @@ pub async fn get_my_permissions_detailed(
         ("hours" = Option<u32>, Query, description = "Time window in hours (default 24)")
     ),
     responses(
-        (status = 200, description = "Rate limit statistics", body = serde_json::Value),
+        (status = 200, description = "Rate limit statistics", body = RateLimitStats),
         (status = 403, description = "Permission denied", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -466,7 +466,7 @@ pub async fn get_rate_limit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
     Query(query): Query<RateLimitStatsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RateLimitStats>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_system", "get")?;
 
     let hours = query.hours.unwrap_or(24);

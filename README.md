@@ -35,7 +35,22 @@ The workspace is split into focused crates:
 | [`ave-bridge`](./bridge) | Application-facing integration layer over the runtime |
 | [`ave-http`](./http) | Axum-based HTTP API, auth system, admin surface, and startup wiring |
 
-The runtime also depends on the sibling [`ave-actors`](../ave-actors) workspace for the actor model and persistence backends.
+The runtime also depends on `ave-actors` for the actor model and persistence backends.
+
+## Current package versions
+
+Versions currently declared by this workspace:
+
+| Package | Version |
+|---|---:|
+| `ave` | `0.9.0` |
+| `ave-identity` | `0.3.0` |
+| `ave-common` | `0.9.0` |
+| `ave-network` | `0.9.1` |
+| `ave-core` | `0.10.0` |
+| `ave-bridge` | `0.10.0` |
+| `ave-http` | `0.10.0` |
+| `ave-types` | `0.9.0` |
 
 ## How the pieces fit together
 
@@ -85,7 +100,7 @@ If you are browsing the code for the first time, a good reading order is:
 
 ### Requirements
 
-- Rust toolchain compatible with the workspace `rust-version`
+- Rust toolchain compatible with the workspace `rust-version` (`1.95.0`)
 - Cargo
 - Docker, if you want to build the container images from `http/docker`
 
@@ -143,6 +158,10 @@ That script supports:
 - development builds for selected architectures
 - SQLite and RocksDB variants
 - separate Cargo profiles for production and experimental builds
+
+Runtime images run as the non-root `ave` user (`uid=10001`, `gid=10001`).
+Mounted volumes that need writes, especially `/app/db`, `/app/logs`, and
+`/contracts`, must be writable by that user.
 
 ## Configuration
 

@@ -48,14 +48,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-bridge = "0.9.0"
+ave-bridge = "0.10.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-bridge = { version = "0.9.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-bridge = { version = "0.10.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Bootstrap example
@@ -137,6 +137,10 @@ The `Bridge` facade exposes higher-level methods for common operations, includin
 - deleting subjects while the node is running in safe mode
 
 This lets application code stay mostly unaware of the actor-system internals in `ave-core`.
+
+Manual subject update accepts an optional strict mode. When enabled, update
+discovery is limited to auth-configured nodes instead of also deriving
+witnesses from governance state.
 
 ## Safe mode
 

@@ -1,19 +1,25 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    error::Error,
     str::FromStr,
     sync::atomic::Ordering,
+    time::Duration,
 };
 
 mod common;
 
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
-    bridge::request::ApprovalStateRes,
+    bridge::{
+        request::{ApprovalStateRes, SinkEventsQuery},
+        response::{EvalResDB, RequestEventDB},
+    },
     identity::{
-        PublicKey,
+        DigestIdentifier, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
     response::RequestState,
+    sink::{DataToSink, DataToSinkEvent},
 };
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
@@ -22,14 +28,14 @@ use ave_core::governance::model::{
     RoleGovIssuer, RolesGov, RolesSchema, RolesTrackerSchemas, Schema,
 };
 
+use ave_network::{NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig,
     create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_approve, emit_confirm, emit_fact, emit_transfer,
-    get_subject,
+    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
+    emit_reject, emit_transfer, get_events, get_subject,
 };
 use futures::future::join_all;
-use ave_network::{NodeType, RoutingNode};
 use serde_json::{Value, from_value, json};
 use test_log::test;
 
@@ -51,6 +57,43 @@ fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
 #[track_caller]
 fn governance_properties(actual: Value) -> GovernanceData {
     from_value(actual).unwrap()
+}
+
+async fn wait_sink_events(
+    node: &ave_core::Api,
+    subject_id: DigestIdentifier,
+    expected_len: usize,
+) -> Result<Vec<DataToSink>, Box<dyn Error>> {
+    let mut attempts = 0;
+    loop {
+        let page = node
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await?;
+
+        if page.events.len() == expected_len {
+            return Ok(page.events);
+        }
+
+        if attempts > 100 {
+            return Err(format!(
+                "timeout waiting for sink events for subject {} at len {}, actual len {}",
+                subject_id,
+                expected_len,
+                page.events.len()
+            )
+            .into());
+        }
+
+        attempts += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[test(tokio::test)]
@@ -3780,4 +3823,436 @@ async fn test_governance_invalid_viewpoints_validation() {
             viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
         }])
     );
+}
+
+#[test(tokio::test)]
+async fn test_sink_replay_and_external_db_battery() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes[0].api.clone();
+    let bob = nodes[1].api.clone();
+    let bob_pk = PublicKey::from_str(&bob.public_key()).unwrap();
+    let charlie_pk =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let invalid_member_pk =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&bob]).await;
+    let governance_id_string = governance_id.to_string();
+
+    let governance_setup_payload = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Bob",
+                    "key": bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": charlie_pk.to_string()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Bob"]
+                }
+            }
+        }
+    });
+
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        governance_setup_payload.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(&bob, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        governance_setup_payload.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(
+        &owner,
+        governance_id.clone(),
+        invalid_member_pk.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(&owner, governance_id.clone(), bob_pk.clone(), true)
+        .await
+        .unwrap();
+
+    get_subject(&bob, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    emit_confirm(
+        &bob,
+        governance_id.clone(),
+        Some("Charlie".to_owned()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_reject(&bob, governance_id.clone(), true)
+        .await
+        .unwrap();
+
+    owner
+        .auth_subject(governance_id.clone(), AuthWitness::One(bob_pk.clone()))
+        .await
+        .unwrap();
+    owner.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&owner, governance_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    emit_eol(&owner, governance_id.clone(), true).await.unwrap();
+
+    let subject_state =
+        get_subject(&owner, governance_id.clone(), Some(7), true)
+            .await
+            .unwrap();
+    assert!(!subject_state.active);
+
+    let api_events = get_events(&owner, governance_id.clone(), 8, true)
+        .await
+        .unwrap();
+    let sink_events = wait_sink_events(&owner, governance_id.clone(), 8)
+        .await
+        .unwrap();
+
+    assert_eq!(api_events.len(), 8);
+    assert_eq!(sink_events.len(), 8);
+
+    match &api_events[0].event {
+        RequestEventDB::Create {
+            name,
+            description,
+            schema_id,
+            namespace,
+        } => {
+            assert_eq!(name.as_deref(), Some("Governance Tests"));
+            assert_eq!(
+                description.as_deref(),
+                Some("A description for Governance Tests")
+            );
+            assert_eq!(schema_id, "governance");
+            assert_eq!(namespace, "");
+        }
+        other => panic!("unexpected create event: {other:?}"),
+    }
+
+    match &api_events[1].event {
+        RequestEventDB::GovernanceFact {
+            payload,
+            evaluation_response,
+            approval_success,
+        } => {
+            assert_eq!(payload, &governance_setup_payload);
+            match evaluation_response {
+                EvalResDB::Patch(_) => {}
+                other => {
+                    panic!("unexpected governance fact result: {other:?}")
+                }
+            }
+            assert_eq!(*approval_success, Some(true));
+        }
+        other => panic!("unexpected governance fact event: {other:?}"),
+    }
+
+    match &api_events[2].event {
+        RequestEventDB::GovernanceFact {
+            payload,
+            evaluation_response,
+            approval_success,
+        } => {
+            assert_eq!(payload, &governance_setup_payload);
+            match evaluation_response {
+                EvalResDB::Error(error) => {
+                    assert!(!error.is_empty());
+                }
+                other => {
+                    panic!(
+                        "unexpected failed governance fact result: {other:?}"
+                    )
+                }
+            }
+            assert!(approval_success.is_none());
+        }
+        other => panic!("unexpected failed governance fact event: {other:?}"),
+    }
+
+    match &api_events[3].event {
+        RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner,
+        } => {
+            assert_eq!(new_owner, &invalid_member_pk.to_string());
+            assert!(evaluation_error.is_some());
+        }
+        other => panic!("unexpected failed transfer event: {other:?}"),
+    }
+
+    match &api_events[4].event {
+        RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner,
+        } => {
+            assert_eq!(new_owner, &bob.public_key());
+            assert!(evaluation_error.is_none());
+        }
+        other => panic!("unexpected successful transfer event: {other:?}"),
+    }
+
+    match &api_events[5].event {
+        RequestEventDB::GovernanceConfirm {
+            name_old_owner,
+            evaluation_response,
+        } => {
+            assert_eq!(name_old_owner.as_deref(), Some("Charlie"));
+            match evaluation_response {
+                EvalResDB::Error(error) => {
+                    assert!(!error.is_empty());
+                }
+                other => panic!("unexpected failed confirm result: {other:?}"),
+            }
+        }
+        other => panic!("unexpected failed confirm event: {other:?}"),
+    }
+
+    assert!(matches!(api_events[6].event, RequestEventDB::Reject));
+    assert!(matches!(api_events[7].event, RequestEventDB::EOL));
+
+    for event in &sink_events {
+        assert!(event.event_request_timestamp > 0);
+        assert!(event.event_ledger_timestamp > 0);
+        assert!(event.sink_timestamp > 0);
+    }
+
+    match &sink_events[0].payload {
+        DataToSinkEvent::Create {
+            governance_id: event_governance_id,
+            subject_id,
+            owner: event_owner,
+            schema_id,
+            namespace,
+            sn,
+            gov_version,
+            state,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(namespace, "");
+            assert_eq!(*sn, 0);
+            assert_eq!(*gov_version, 0);
+            assert!(state.is_object());
+        }
+        other => panic!("unexpected sink create event: {other:?}"),
+    }
+    assert_eq!(sink_events[0].public_key, owner.public_key());
+
+    match &sink_events[1].payload {
+        DataToSinkEvent::FactFull {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            viewpoints,
+            issuer,
+            owner: event_owner,
+            payload,
+            patch,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert!(viewpoints.is_empty());
+            assert_eq!(issuer, &owner.public_key());
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(payload.as_ref(), Some(&governance_setup_payload));
+            assert!(patch.is_some());
+            assert!(*success);
+            assert!(error.is_none());
+            assert_eq!(*sn, 1);
+            assert_eq!(*gov_version, 0);
+        }
+        other => panic!("unexpected sink successful fact event: {other:?}"),
+    }
+    assert_eq!(sink_events[1].public_key, owner.public_key());
+
+    match &sink_events[2].payload {
+        DataToSinkEvent::FactFull {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            viewpoints,
+            issuer,
+            owner: event_owner,
+            payload,
+            patch,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert!(viewpoints.is_empty());
+            assert_eq!(issuer, &owner.public_key());
+            assert_eq!(event_owner, &owner.public_key());
+            assert!(payload.is_none());
+            assert!(patch.is_none());
+            assert!(!success);
+            assert!(error.is_some());
+            assert_eq!(*sn, 2);
+            assert_eq!(*gov_version, 1);
+        }
+        other => panic!("unexpected sink failed fact event: {other:?}"),
+    }
+    assert_eq!(sink_events[2].public_key, owner.public_key());
+
+    match &sink_events[3].payload {
+        DataToSinkEvent::Transfer {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            owner: event_owner,
+            new_owner,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(new_owner, &invalid_member_pk.to_string());
+            assert!(!success);
+            assert!(error.is_some());
+            assert_eq!(*sn, 3);
+            assert_eq!(*gov_version, 1);
+        }
+        other => panic!("unexpected sink failed transfer event: {other:?}"),
+    }
+    assert_eq!(sink_events[3].public_key, owner.public_key());
+
+    match &sink_events[4].payload {
+        DataToSinkEvent::Transfer {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            owner: event_owner,
+            new_owner,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(new_owner, &bob.public_key());
+            assert!(*success);
+            assert!(error.is_none());
+            assert_eq!(*sn, 4);
+            assert_eq!(*gov_version, 1);
+        }
+        other => panic!("unexpected sink successful transfer event: {other:?}"),
+    }
+    assert_eq!(sink_events[4].public_key, owner.public_key());
+
+    match &sink_events[5].payload {
+        DataToSinkEvent::Confirm {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            sn,
+            patch,
+            success,
+            error,
+            gov_version,
+            name_old_owner,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(*sn, 5);
+            assert!(patch.is_none());
+            assert!(!success);
+            assert!(error.is_some());
+            assert_eq!(*gov_version, 2);
+            assert_eq!(name_old_owner.as_deref(), Some("Charlie"));
+        }
+        other => panic!("unexpected sink failed confirm event: {other:?}"),
+    }
+    assert_eq!(sink_events[5].public_key, owner.public_key());
+
+    match &sink_events[6].payload {
+        DataToSinkEvent::Reject {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(*sn, 6);
+            assert_eq!(*gov_version, 2);
+        }
+        other => panic!("unexpected sink reject event: {other:?}"),
+    }
+    assert_eq!(sink_events[6].public_key, owner.public_key());
+
+    match &sink_events[7].payload {
+        DataToSinkEvent::Eol {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(*sn, 7);
+            assert_eq!(*gov_version, 3);
+        }
+        other => panic!("unexpected sink eol event: {other:?}"),
+    }
+    assert_eq!(sink_events[7].public_key, owner.public_key());
 }

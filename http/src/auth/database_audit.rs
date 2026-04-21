@@ -31,67 +31,75 @@ fn append_audit_log_filters(
     params_vec: &mut Vec<Box<dyn rusqlite::ToSql>>,
 ) {
     if let Some(uid) = query.user_id {
-        sql.push_str(" AND user_id = ?");
+        sql.push_str(" AND audit_logs.user_id = ?");
         params_vec.push(Box::new(uid));
     }
 
     if let Some(ref api_key_id) = query.api_key_id {
-        sql.push_str(" AND api_key_id = ?");
+        sql.push_str(" AND audit_logs.api_key_id = ?");
         params_vec.push(Box::new(api_key_id.clone()));
     }
 
     if let Some(ref endpoint) = query.endpoint {
-        sql.push_str(" AND endpoint = ?");
+        sql.push_str(" AND audit_logs.endpoint = ?");
         params_vec.push(Box::new(endpoint.clone()));
     }
 
     if let Some(ref method) = query.http_method {
-        sql.push_str(" AND http_method = ?");
+        sql.push_str(" AND audit_logs.http_method = ?");
         params_vec.push(Box::new(method.clone()));
     }
 
     if let Some(ref ip) = query.ip_address {
-        sql.push_str(" AND ip_address = ?");
+        sql.push_str(" AND audit_logs.ip_address = ?");
         params_vec.push(Box::new(ip.clone()));
     }
 
     if let Some(ref ua) = query.user_agent {
-        sql.push_str(" AND user_agent = ?");
+        sql.push_str(" AND audit_logs.user_agent = ?");
         params_vec.push(Box::new(ua.clone()));
     }
 
     if let Some(success) = query.success {
-        sql.push_str(" AND success = ?");
+        sql.push_str(" AND audit_logs.success = ?");
         params_vec.push(Box::new(success));
     }
 
     if let Some(start) = query.start_timestamp {
-        sql.push_str(" AND timestamp >= ?");
+        sql.push_str(" AND audit_logs.timestamp >= ?");
         params_vec.push(Box::new(start));
     }
 
     if let Some(end) = query.end_timestamp {
-        sql.push_str(" AND timestamp <= ?");
+        sql.push_str(" AND audit_logs.timestamp <= ?");
         params_vec.push(Box::new(end));
     }
 
     if let Some(exclude_uid) = query.exclude_user_id {
-        sql.push_str(" AND (user_id IS NULL OR user_id != ?)");
+        sql.push_str(
+            " AND (audit_logs.user_id IS NULL OR audit_logs.user_id != ?)",
+        );
         params_vec.push(Box::new(exclude_uid));
     }
 
     if let Some(ref exclude_api_key) = query.exclude_api_key_id {
-        sql.push_str(" AND (api_key_id IS NULL OR api_key_id != ?)");
+        sql.push_str(
+            " AND (audit_logs.api_key_id IS NULL OR audit_logs.api_key_id != ?)",
+        );
         params_vec.push(Box::new(exclude_api_key.clone()));
     }
 
     if let Some(ref exclude_ip) = query.exclude_ip_address {
-        sql.push_str(" AND (ip_address IS NULL OR ip_address != ?)");
+        sql.push_str(
+            " AND (audit_logs.ip_address IS NULL OR audit_logs.ip_address != ?)",
+        );
         params_vec.push(Box::new(exclude_ip.clone()));
     }
 
     if let Some(ref exclude_endpoint) = query.exclude_endpoint {
-        sql.push_str(" AND (endpoint IS NULL OR endpoint != ?)");
+        sql.push_str(
+            " AND (audit_logs.endpoint IS NULL OR audit_logs.endpoint != ?)",
+        );
         params_vec.push(Box::new(exclude_endpoint.clone()));
     }
 }
@@ -233,17 +241,23 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let mut sql = String::from(
-            "SELECT id, timestamp, user_id, api_key_id, action_type,
-                    endpoint, http_method, ip_address, user_agent,
-                    request_id, details, success, error_message
+            "SELECT audit_logs.id, audit_logs.timestamp, audit_logs.user_id,
+                    users.username, audit_logs.api_key_id, api_keys.name,
+                    audit_logs.action_type, audit_logs.endpoint,
+                    audit_logs.http_method, audit_logs.ip_address,
+                    audit_logs.user_agent, audit_logs.request_id,
+                    audit_logs.details, audit_logs.success,
+                    audit_logs.error_message
              FROM audit_logs
+             LEFT JOIN users ON audit_logs.user_id = users.id
+             LEFT JOIN api_keys ON audit_logs.api_key_id = api_keys.id
              WHERE 1=1",
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         append_audit_log_filters(query, &mut sql, &mut params_vec);
 
-        sql.push_str(" ORDER BY timestamp DESC");
+        sql.push_str(" ORDER BY audit_logs.timestamp DESC");
 
         let max_limit = self.audit_logs_max_limit();
         let default_limit = self.audit_logs_default_limit();
@@ -307,16 +321,18 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
                     user_id: row.get(2)?,
-                    api_key_id: row.get(3)?,
-                    action_type: row.get(4)?,
-                    endpoint: row.get(5)?,
-                    http_method: row.get(6)?,
-                    ip_address: row.get(7)?,
-                    user_agent: row.get(8)?,
-                    request_id: row.get(9)?,
-                    details: row.get(10)?,
-                    success: row.get(11)?,
-                    error_message: row.get(12)?,
+                    username: row.get(3)?,
+                    api_key_id: row.get(4)?,
+                    api_key_name: row.get(5)?,
+                    action_type: row.get(6)?,
+                    endpoint: row.get(7)?,
+                    http_method: row.get(8)?,
+                    ip_address: row.get(9)?,
+                    user_agent: row.get(10)?,
+                    request_id: row.get(11)?,
+                    details: row.get(12)?,
+                    success: row.get(13)?,
+                    error_message: row.get(14)?,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -431,7 +447,7 @@ impl AuthDatabase {
     pub fn get_audit_stats(
         &self,
         days: u32,
-    ) -> Result<serde_json::Value, DatabaseError> {
+    ) -> Result<AuditStats, DatabaseError> {
         let conn = self.lock_conn()?;
 
         let cutoff = Self::now() - (days as i64 * 86400);
@@ -463,12 +479,15 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Common helper to fetch top-N aggregated counts
-        let top_n = |sql: &str| -> Result<Vec<(String, i64)>, DatabaseError> {
+        let top_n = |sql: &str| -> Result<Vec<AuditValueCount>, DatabaseError> {
             let mut stmt = conn
                 .prepare(sql)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             stmt.query_map(params![cutoff], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+                Ok(AuditValueCount {
+                    value: row.get(0)?,
+                    count: row.get(1)?,
+                })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -484,23 +503,58 @@ impl AuthDatabase {
              LIMIT 10",
         )?;
 
-        let top_users = top_n(
-            "SELECT CAST(user_id AS TEXT) as user_id, COUNT(*) as count
-             FROM audit_logs
-             WHERE timestamp >= ?1 AND user_id IS NOT NULL
-             GROUP BY user_id
-             ORDER BY count DESC
-             LIMIT 10",
-        )?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT audit_logs.user_id, users.username, COUNT(*) as count
+                 FROM audit_logs
+                 LEFT JOIN users ON audit_logs.user_id = users.id
+                 WHERE audit_logs.timestamp >= ?1
+                   AND audit_logs.user_id IS NOT NULL
+                 GROUP BY audit_logs.user_id, users.username
+                 ORDER BY count DESC
+                 LIMIT 10",
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let top_users = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(AuditUserCount {
+                    user_id: row.get(0)?,
+                    username: row.get(1)?,
+                    count: row.get(2)?,
+                })
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let top_api_keys = top_n(
-            "SELECT CAST(api_key_id AS TEXT) as api_key_id, COUNT(*) as count
-             FROM audit_logs
-             WHERE timestamp >= ?1 AND api_key_id IS NOT NULL
-             GROUP BY api_key_id
-             ORDER BY count DESC
-             LIMIT 10",
-        )?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT audit_logs.api_key_id, api_keys.name,
+                        api_keys.user_id, users.username, COUNT(*) as count
+                 FROM audit_logs
+                 LEFT JOIN api_keys ON audit_logs.api_key_id = api_keys.id
+                 LEFT JOIN users ON api_keys.user_id = users.id
+                 WHERE audit_logs.timestamp >= ?1
+                   AND audit_logs.api_key_id IS NOT NULL
+                 GROUP BY audit_logs.api_key_id, api_keys.name,
+                          api_keys.user_id, users.username
+                 ORDER BY count DESC
+                 LIMIT 10",
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let top_api_keys = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(AuditApiKeyCount {
+                    api_key_id: row.get(0)?,
+                    api_key_name: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    count: row.get(4)?,
+                })
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let top_endpoints = top_n(
             "SELECT endpoint, COUNT(*) as count
@@ -529,18 +583,22 @@ impl AuthDatabase {
              LIMIT 10",
         )?;
 
-        Ok(serde_json::json!({
-            "total_logs": total,
-            "success_count": success_count,
-            "failure_count": failure_count,
-            "success_rate": if total > 0 { (success_count as f64 / total as f64) * 100.0 } else { 0.0 },
-            "top_action_types": top_actions,
-            "top_users": top_users,
-            "top_api_keys": top_api_keys,
-            "top_endpoints": top_endpoints,
-            "top_http_methods": top_methods,
-            "top_ip_addresses": top_ips,
-        }))
+        Ok(AuditStats {
+            total_logs: total,
+            success_count,
+            failure_count,
+            success_rate: if total > 0 {
+                (success_count as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            },
+            top_action_types: top_actions,
+            top_users,
+            top_api_keys,
+            top_endpoints,
+            top_http_methods: top_methods,
+            top_ip_addresses: top_ips,
+        })
     }
 }
 
@@ -739,7 +797,7 @@ impl AuthDatabase {
     pub fn get_rate_limit_details(
         &self,
         hours: u32,
-    ) -> Result<serde_json::Value, DatabaseError> {
+    ) -> Result<RateLimitStats, DatabaseError> {
         let conn = self.lock_conn()?;
 
         let cutoff = Self::now() - (hours as i64 * 3600);
@@ -758,22 +816,24 @@ impl AuthDatabase {
                  LEFT JOIN api_keys ak ON rl.api_key_id = ak.id
                  LEFT JOIN users u ON ak.user_id = u.id
                  WHERE rl.window_start >= ?1 AND rl.api_key_id IS NOT NULL
-                 GROUP BY rl.api_key_id
+                 GROUP BY rl.api_key_id, ak.name, ak.user_id, u.username
                  ORDER BY total_requests DESC
                  LIMIT 50",
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let by_api_key: Vec<serde_json::Value> = stmt
+        let by_api_key: Vec<RateLimitApiKeyStats> = stmt
             .query_map(params![cutoff], |row| {
-                Ok(serde_json::json!({
-                    "api_key_id": row.get::<_, Option<String>>(0)?,
-                    "key_name": row.get::<_, Option<String>>(1)?,
-                    "user_id": row.get::<_, Option<i64>>(2)?,
-                    "username": row.get::<_, Option<String>>(3)?,
-                    "total_requests": row.get::<_, i64>(4)?,
-                    "last_request_at": row.get::<_, Option<i64>>(5)?.map(format_ts),
-                }))
+                Ok(RateLimitApiKeyStats {
+                    api_key_id: row.get(0)?,
+                    key_name: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    total_requests: row.get(4)?,
+                    last_request_at: row
+                        .get::<_, Option<i64>>(5)?
+                        .map(format_ts),
+                })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -795,14 +855,16 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let by_ip: Vec<serde_json::Value> = stmt
+        let by_ip: Vec<RateLimitIpStats> = stmt
             .query_map(params![cutoff], |row| {
-                Ok(serde_json::json!({
-                    "ip_address": row.get::<_, Option<String>>(0)?,
-                    "total_requests": row.get::<_, i64>(1)?,
-                    "last_request_at": row.get::<_, Option<i64>>(2)?.map(format_ts),
-                    "unique_api_keys": row.get::<_, i64>(3)?,
-                }))
+                Ok(RateLimitIpStats {
+                    ip_address: row.get(0)?,
+                    total_requests: row.get(1)?,
+                    last_request_at: row
+                        .get::<_, Option<i64>>(2)?
+                        .map(format_ts),
+                    unique_api_keys: row.get(3)?,
+                })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -823,13 +885,15 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let by_endpoint: Vec<serde_json::Value> = stmt
+        let by_endpoint: Vec<RateLimitEndpointStats> = stmt
             .query_map(params![cutoff], |row| {
-                Ok(serde_json::json!({
-                    "endpoint": row.get::<_, Option<String>>(0)?,
-                    "total_requests": row.get::<_, i64>(1)?,
-                    "last_request_at": row.get::<_, Option<i64>>(2)?.map(format_ts),
-                }))
+                Ok(RateLimitEndpointStats {
+                    endpoint: row.get(0)?,
+                    total_requests: row.get(1)?,
+                    last_request_at: row
+                        .get::<_, Option<i64>>(2)?
+                        .map(format_ts),
+                })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -854,15 +918,17 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let by_ip_endpoint: Vec<serde_json::Value> = stmt
+        let by_ip_endpoint: Vec<RateLimitIpEndpointStats> = stmt
             .query_map(params![cutoff], |row| {
-                Ok(serde_json::json!({
-                    "ip_address": row.get::<_, Option<String>>(0)?,
-                    "endpoint": row.get::<_, Option<String>>(1)?,
-                    "total_requests": row.get::<_, i64>(2)?,
-                    "last_request_at": row.get::<_, Option<i64>>(3)?.map(format_ts),
-                    "unique_api_keys": row.get::<_, i64>(4)?,
-                }))
+                Ok(RateLimitIpEndpointStats {
+                    ip_address: row.get(0)?,
+                    endpoint: row.get(1)?,
+                    total_requests: row.get(2)?,
+                    last_request_at: row
+                        .get::<_, Option<i64>>(3)?
+                        .map(format_ts),
+                    unique_api_keys: row.get(4)?,
+                })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -871,7 +937,9 @@ impl AuthDatabase {
         // Get total requests in period
         let total_requests: i64 = conn
             .query_row(
-                "SELECT SUM(request_count) FROM rate_limits WHERE window_start >= ?1",
+                "SELECT COALESCE(SUM(request_count), 0)
+                 FROM rate_limits
+                 WHERE window_start >= ?1",
                 params![cutoff],
                 |row| row.get(0),
             )
@@ -879,15 +947,15 @@ impl AuthDatabase {
 
         let (max_requests, window_seconds) = self.rate_limit_defaults();
 
-        Ok(serde_json::json!({
-            "total_requests": total_requests,
-            "window_seconds": window_seconds,
-            "max_requests_per_window": max_requests,
-            "by_api_key": by_api_key,
-            "by_ip": by_ip,
-            "by_endpoint": by_endpoint,
-            "by_ip_endpoint": by_ip_endpoint,
-        }))
+        Ok(RateLimitStats {
+            total_requests,
+            window_seconds,
+            max_requests_per_window: max_requests,
+            by_api_key,
+            by_ip,
+            by_endpoint,
+            by_ip_endpoint,
+        })
     }
 }
 
@@ -910,9 +978,12 @@ impl AuthDatabase {
     ) -> Result<SystemConfig, DatabaseError> {
         let row = conn
             .query_row(
-                "SELECT key, value, description, updated_at, updated_by
+                "SELECT system_config.key, system_config.value,
+                        system_config.description, system_config.updated_at,
+                        system_config.updated_by, users.username
                  FROM system_config
-                 WHERE key = ?1",
+                 LEFT JOIN users ON system_config.updated_by = users.id
+                 WHERE system_config.key = ?1",
                 params![key],
                 |row| {
                     Ok((
@@ -921,12 +992,13 @@ impl AuthDatabase {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        system_config_from_row(&row.0, &row.1, row.2, row.3, row.4)
+        system_config_from_row(&row.0, &row.1, row.2, row.3, row.4, row.5)
     }
 
     /// List all system config
@@ -937,9 +1009,12 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(
-                "SELECT key, value, description, updated_at, updated_by
-             FROM system_config
-             ORDER BY key",
+                "SELECT system_config.key, system_config.value,
+                        system_config.description, system_config.updated_at,
+                        system_config.updated_by, users.username
+                 FROM system_config
+                 LEFT JOIN users ON system_config.updated_by = users.id
+                 ORDER BY system_config.key",
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
@@ -951,6 +1026,7 @@ impl AuthDatabase {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -958,15 +1034,25 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let configs = rows
             .into_iter()
-            .map(|(key, value, description, updated_at, updated_by)| {
-                system_config_from_row(
-                    &key,
-                    &value,
+            .map(
+                |(
+                    key,
+                    value,
                     description,
                     updated_at,
                     updated_by,
-                )
-            })
+                    updated_by_username,
+                )| {
+                    system_config_from_row(
+                        &key,
+                        &value,
+                        description,
+                        updated_at,
+                        updated_by,
+                        updated_by_username,
+                    )
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
         drop(conn);

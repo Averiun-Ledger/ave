@@ -679,11 +679,7 @@ impl SqliteMetrics {
     }
 
     fn avg_ns_to_ms(total: u64, count: u64) -> f64 {
-        if count == 0 {
-            0.0
-        } else {
-            Self::ns_to_ms(total / count)
-        }
+        total.checked_div(count).map_or(0.0, Self::ns_to_ms)
     }
 
     fn update_max_u64(target: &AtomicU64, value: u64) {

@@ -22,7 +22,7 @@ tokio-util = { workspace = true }
 ave-common = { workspace = true }
 pkcs8 = { workspace = true, features = ["encryption"] }
 config = { workspace = true }
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 tracing = { workspace = true }
 getrandom = { workspace = true }
 axum = { workspace = true , optional = true }
