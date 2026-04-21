@@ -950,12 +950,21 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
+        self.update_subject_with_options(subject_id, false).await
+    }
+
+    pub async fn update_subject_with_options(
+        &self,
+        subject_id: DigestIdentifier,
+        strict: bool,
+    ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         let response = self
             .auth
             .ask(AuthMessage::Update {
                 subject_id: subject_id.clone(),
                 objective: None,
+                strict,
             })
             .await
             .map_err(|e| {

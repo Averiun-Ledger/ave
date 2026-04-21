@@ -103,6 +103,32 @@ impl BorshDeserialize for Auth {
 }
 
 impl Auth {
+    async fn build_update_state(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(Option<u64>, Option<UpdateSubjectKind>), ActorError> {
+        let data = get_subject_data(ctx, subject_id).await?;
+
+        match data {
+            Some(SubjectData::Tracker { governance_id, .. }) => {
+                let actual_sn = get_tracker_sn_owner(
+                    ctx,
+                    &governance_id,
+                    subject_id,
+                )
+                .await?
+                .map(|(_, actual_sn)| actual_sn);
+
+                Ok((actual_sn, Some(UpdateSubjectKind::Tracker)))
+            }
+            Some(SubjectData::Governance { .. }) => {
+                let sn = get_gov_sn(ctx, subject_id).await?;
+                Ok((Some(sn), Some(UpdateSubjectKind::Governance)))
+            }
+            None => Ok((None, None)),
+        }
+    }
+
     async fn build_update_data(
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
@@ -203,6 +229,7 @@ pub enum AuthMessage {
     Update {
         subject_id: DigestIdentifier,
         objective: Option<PublicKey>,
+        strict: bool,
     },
 }
 
@@ -346,6 +373,7 @@ impl Handler<Self> for Auth {
             AuthMessage::Update {
                 subject_id,
                 objective,
+                strict,
             } => {
                 let Some(network) = self.network.clone() else {
                     error!(
@@ -359,20 +387,35 @@ impl Handler<Self> for Auth {
                 };
 
                 let (witnesses, actual_sn, subject_kind_hint) = {
-                    let (mut witnesses, actual_sn, subject_kind_hint) =
-                        Self::build_update_data(ctx, &subject_id).await?;
-
-                    if let Some(witness) = objective {
-                        witnesses.insert(witness);
-                    }
-
                     let auth_witnesses =
                         self.auth.get(&subject_id).cloned().unwrap_or_default();
+                    let (mut witnesses, actual_sn, subject_kind_hint) =
+                        if strict {
+                            let (actual_sn, subject_kind_hint) =
+                                Self::build_update_state(ctx, &subject_id)
+                                    .await?;
+                            (auth_witnesses, actual_sn, subject_kind_hint)
+                        } else {
+                            let (
+                                mut governance_witnesses,
+                                actual_sn,
+                                subject_kind_hint,
+                            ) = Self::build_update_data(ctx, &subject_id)
+                                .await?;
 
-                    let mut witnesses = witnesses
-                        .union(&auth_witnesses)
-                        .cloned()
-                        .collect::<HashSet<PublicKey>>();
+                            if let Some(witness) = objective {
+                                governance_witnesses.insert(witness);
+                            }
+
+                            (
+                                governance_witnesses
+                                    .union(&auth_witnesses)
+                                    .cloned()
+                                    .collect::<HashSet<PublicKey>>(),
+                                actual_sn,
+                                subject_kind_hint,
+                            )
+                        };
                     witnesses.remove(&self.our_key);
 
                     (witnesses, actual_sn, subject_kind_hint)

@@ -44,7 +44,7 @@ use ave_bridge::ave_common::{
             BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
             BridgeSignedEventRequest, BridgeTransferRequest, EventRequestType,
             EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery,
-            SubjectQuery,
+            SubjectQuery, UpdateSubjectQuery,
         },
         signature::BridgeSignature,
     },
@@ -263,6 +263,7 @@ impl Modify for SecurityAddon {
 
             // ── Query parameters ────────────────────────────────
             SubjectQuery,
+            UpdateSubjectQuery,
             GovQuery,
             ApprovalQuery,
             EventsQuery,

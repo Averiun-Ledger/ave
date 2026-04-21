@@ -15,6 +15,7 @@ use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
         FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
+        UpdateSubjectQuery,
     },
     response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
@@ -549,13 +550,17 @@ pub async fn delete_auth_subject(
 /// Trigger subject update
 ///
 /// Triggers a manual synchronization update for the specified subject.
+/// By default the updater can use both explicitly authorized auth nodes and
+/// witnesses discovered from governance. When `strict=true`, it only contacts
+/// nodes explicitly configured in the subject auth.
 #[utoipa::path(
     post,
     path = "/update/{subject_id}",
     operation_id = "postUpdateSubject",
     tag = "Authorization",
     params(
-        ("subject_id" = String, Path, description = "Subject identifier")
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        UpdateSubjectQuery
     ),
     responses(
         (status = 200, description = "Subject update triggered", body = String),
@@ -569,8 +574,9 @@ pub async fn post_update_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
+    Query(query): Query<UpdateSubjectQuery>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.post_update_subject(subject_id).await?))
+    Ok(Json(bridge.post_update_subject(subject_id, query).await?))
 }
 
 /// Delete a subject in maintenance mode

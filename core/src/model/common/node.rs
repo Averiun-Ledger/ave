@@ -149,6 +149,7 @@ where
         .tell(AuthMessage::Update {
             subject_id,
             objective,
+            strict: false,
         })
         .await
 }
