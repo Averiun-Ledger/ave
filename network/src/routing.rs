@@ -50,10 +50,13 @@ pub struct Behaviour {
     /// Number of active connections over which we interrupt the discovery process.
     discovery_only_if_under_num: u64,
 
+    #[cfg_attr(any(test, feature = "test"), allow(dead_code))]
     allow_private_address_in_dht: bool,
 
+    #[cfg_attr(any(test, feature = "test"), allow(dead_code))]
     allow_dns_address_in_dht: bool,
 
+    #[cfg_attr(any(test, feature = "test"), allow(dead_code))]
     allow_loop_back_address_in_dht: bool,
 
     /// Peers to close connection
@@ -196,8 +199,13 @@ impl Behaviour {
         true
     }
 
+    #[cfg(any(test, feature = "test"))]
+    pub fn is_invalid_address(&self, _addr: &Multiaddr) -> bool {
+        return false;
+    }
+
+    #[cfg(not(any(test, feature = "test")))]
     pub fn is_invalid_address(&self, addr: &Multiaddr) -> bool {
-        #[cfg(not(any(test, feature = "test")))]
         {
             // Our transport is TPC only
             if !is_tcp(addr) {
@@ -218,9 +226,6 @@ impl Behaviour {
 
             !is_global(addr)
         }
-
-        #[cfg(any(test, feature = "test"))]
-        return false;
     }
 
     /// Discover closet peers to the given `PeerId`.
