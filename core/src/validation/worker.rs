@@ -40,8 +40,8 @@ use ave_common::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use json_patch::{Patch, patch};
 use ave_network::ComunicateInfo;
+use json_patch::{Patch, patch};
 use std::collections::BTreeSet;
 
 use ave_actors::{

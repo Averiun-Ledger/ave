@@ -77,8 +77,9 @@ impl EvaluationSchema {
                     .iter()
                     .filter(|(_, namespaces)| {
                         namespaces.iter().any(|issuer_namespace| {
-                            issuer_namespace
-                                .is_ancestor_or_equal_of(&evaluation_req.namespace)
+                            issuer_namespace.is_ancestor_or_equal_of(
+                                &evaluation_req.namespace,
+                            )
                         })
                     })
                     .map(|(issuer, _)| issuer.clone())

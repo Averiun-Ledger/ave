@@ -7144,19 +7144,22 @@ async fn test_chained_old_owners_witness_range_cut() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
-    let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state =
+        get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     let _state =
         get_subject(&witness_charlie, governance_id.clone(), Some(1), true)
             .await
             .unwrap();
-    let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
 
     let (subject_id, ..) = create_subject(
         &witness_alice,
@@ -7275,9 +7278,10 @@ async fn test_chained_old_owners_witness_range_cut() {
     .await
     .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id.clone(), Some(7), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id.clone(), Some(7), true)
+            .await
+            .unwrap();
 
     let _state = get_subject(&witness_dali, subject_id.clone(), Some(4), true)
         .await
@@ -7483,15 +7487,18 @@ async fn test_old_owner_cut_ranges_battery() {
             .await
             .unwrap();
 
-        let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
 
         let (subject_id, ..) = create_subject(
             &witness_alice,
@@ -7589,9 +7596,10 @@ async fn test_old_owner_cut_ranges_battery() {
         .await
         .unwrap();
 
-        let _state = get_subject(&witness_bob, subject_id.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         emit_confirm(&witness_bob, subject_id.clone(), None, true)
             .await
@@ -7610,12 +7618,14 @@ async fn test_old_owner_cut_ranges_battery() {
         .await
         .unwrap();
 
-        let _state = get_subject(&witness_bob, subject_id.clone(), Some(5), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_dali, subject_id.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(5), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         nodes[3].token.cancel();
         join_all(nodes[3].handler.iter_mut()).await;
@@ -7649,7 +7659,9 @@ async fn test_old_owner_cut_ranges_battery() {
         new_dali
             .auth_subject(
                 governance_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -7657,9 +7669,10 @@ async fn test_old_owner_cut_ranges_battery() {
             .update_subject(governance_id.clone())
             .await
             .unwrap();
-        let _state = get_subject(&new_dali, governance_id.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&new_dali, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         assert!(
             new_dali
@@ -7671,7 +7684,9 @@ async fn test_old_owner_cut_ranges_battery() {
         new_dali
             .auth_subject(
                 subject_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -7822,15 +7837,18 @@ async fn test_old_owner_cut_ranges_battery() {
             .await
             .unwrap();
 
-        let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
 
         let (subject_id, ..) = create_subject(
             &witness_alice,
@@ -7931,15 +7949,21 @@ async fn test_old_owner_cut_ranges_battery() {
         witness_bob
             .auth_subject(
                 subject_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
-        witness_bob.update_subject(subject_id.clone()).await.unwrap();
-
-        let _state = get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+        witness_bob
+            .update_subject(subject_id.clone())
             .await
             .unwrap();
+
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         emit_confirm(&witness_bob, subject_id.clone(), None, true)
             .await
@@ -7958,12 +7982,14 @@ async fn test_old_owner_cut_ranges_battery() {
         .await
         .unwrap();
 
-        let _state = get_subject(&witness_bob, subject_id.clone(), Some(5), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_dali, subject_id.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(5), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         nodes[3].token.cancel();
         join_all(nodes[3].handler.iter_mut()).await;
@@ -7996,7 +8022,9 @@ async fn test_old_owner_cut_ranges_battery() {
         new_dali
             .auth_subject(
                 governance_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -8004,9 +8032,10 @@ async fn test_old_owner_cut_ranges_battery() {
             .update_subject(governance_id.clone())
             .await
             .unwrap();
-        let _state = get_subject(&new_dali, governance_id.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&new_dali, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         assert!(
             new_dali
@@ -8017,7 +8046,9 @@ async fn test_old_owner_cut_ranges_battery() {
         new_dali
             .auth_subject(
                 subject_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -8163,15 +8194,18 @@ async fn test_old_owner_cut_ranges_battery() {
             .await
             .unwrap();
 
-        let _state = get_subject(&witness_alice, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_bob, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
-        let _state = get_subject(&witness_dali, governance_id.clone(), Some(1), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
 
         let (subject_id, ..) = create_subject(
             &witness_alice,
@@ -8256,17 +8290,19 @@ async fn test_old_owner_cut_ranges_battery() {
         .await
         .unwrap();
 
-        let _state = get_subject(&witness_bob, subject_id.clone(), Some(2), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(2), true)
+                .await
+                .unwrap();
 
         emit_reject(&witness_bob, subject_id.clone(), true)
             .await
             .unwrap();
 
-        let _state = get_subject(&witness_alice, subject_id.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_alice, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
 
         let json = json!({
             "roles": {
@@ -8309,9 +8345,10 @@ async fn test_old_owner_cut_ranges_battery() {
         .await
         .unwrap();
 
-        let _state = get_subject(&witness_alice, subject_id.clone(), Some(4), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&witness_alice, subject_id.clone(), Some(4), true)
+                .await
+                .unwrap();
         let _state = get_subject(&owner, subject_id.clone(), Some(4), true)
             .await
             .unwrap();
@@ -8319,11 +8356,16 @@ async fn test_old_owner_cut_ranges_battery() {
         witness_dali
             .auth_subject(
                 subject_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
-        witness_dali.update_subject(subject_id.clone()).await.unwrap();
+        witness_dali
+            .update_subject(subject_id.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(
             witness_dali
@@ -8363,7 +8405,9 @@ async fn test_old_owner_cut_ranges_battery() {
         new_dali
             .auth_subject(
                 governance_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -8371,9 +8415,10 @@ async fn test_old_owner_cut_ranges_battery() {
             .update_subject(governance_id.clone())
             .await
             .unwrap();
-        let _state = get_subject(&new_dali, governance_id.clone(), Some(4), true)
-            .await
-            .unwrap();
+        let _state =
+            get_subject(&new_dali, governance_id.clone(), Some(4), true)
+                .await
+                .unwrap();
 
         assert!(
             new_dali
@@ -8384,7 +8429,9 @@ async fn test_old_owner_cut_ranges_battery() {
         new_dali
             .auth_subject(
                 subject_id.clone(),
-                AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();

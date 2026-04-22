@@ -5,8 +5,8 @@ use crate::governance::{
     RolesUpdateConfirm, RolesUpdateRemove,
     error::GovernanceError,
     model::{
-        HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum,
-        Role, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesGov, RolesSchema,
+        HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum, Role,
+        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesGov, RolesSchema,
         RolesTrackerSchemas, Schema, WitnessesData,
     },
 };
@@ -925,10 +925,8 @@ impl GovernanceData {
     pub fn schema_issuers_namespace(
         &self,
         schema_namespaces: BTreeMap<SchemaType, Vec<Namespace>>,
-    ) -> BTreeMap<
-        SchemaType,
-        (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool),
-    > {
+    ) -> BTreeMap<SchemaType, (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool)>
+    {
         let mut map: BTreeMap<
             SchemaType,
             (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool),
@@ -952,9 +950,9 @@ impl GovernanceData {
         for (schema_id, _) in schema_namespaces {
             if schema_id == SchemaType::TrackerSchemas {
                 for (current_schema_id, roles) in self.roles_schema.iter() {
-                    let (schema_entry, issuer_any) =
-                        map.entry(current_schema_id.clone())
-                            .or_insert_with(|| (BTreeMap::new(), false));
+                    let (schema_entry, issuer_any) = map
+                        .entry(current_schema_id.clone())
+                        .or_insert_with(|| (BTreeMap::new(), false));
                     *issuer_any |= self.roles_tracker_schemas.issuer.any
                         || roles.issuer.any;
 
@@ -970,8 +968,9 @@ impl GovernanceData {
                     );
                 }
             } else if let Some(roles) = self.roles_schema.get(&schema_id) {
-                let (schema_entry, issuer_any) =
-                    map.entry(schema_id).or_insert_with(|| (BTreeMap::new(), false));
+                let (schema_entry, issuer_any) = map
+                    .entry(schema_id)
+                    .or_insert_with(|| (BTreeMap::new(), false));
                 *issuer_any |=
                     self.roles_tracker_schemas.issuer.any || roles.issuer.any;
 

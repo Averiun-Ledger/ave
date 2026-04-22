@@ -39,15 +39,15 @@ use ave_common::response::{
     RequestInfo, RequestInfoExtend, RequestsInManager,
     RequestsInManagerSubject, SinkEventsPage, SubjectDB, SubjsData,
 };
+use ave_network::{
+    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
+    NetworkWorkerRuntime,
+};
 use config::Config as AveBaseConfig;
 use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use ave_network::{
-    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
-    NetworkWorkerRuntime,
-};
 
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;

@@ -539,14 +539,12 @@ impl DistriWorker {
                         actual_sn.is_none_or(|actual_sn| *clear_sn > actual_sn)
                     })
                     .unwrap_or(window_sn);
-                let preferred_hi_sn = if from_sn == 0
-                    && preferred_hi_sn == 0
-                    && window_sn > 0
-                {
-                    window_sn
-                } else {
-                    preferred_hi_sn
-                };
+                let preferred_hi_sn =
+                    if from_sn == 0 && preferred_hi_sn == 0 && window_sn > 0 {
+                        window_sn
+                    } else {
+                        preferred_hi_sn
+                    };
                 let hi_sn = target_sn
                     .unwrap_or(preferred_hi_sn)
                     .min(preferred_hi_sn)
@@ -917,36 +915,35 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger.get_subject_id();
                 let sn = ledger.sn;
 
-                let (is_gov, ..) =
-                    match self
-                        .check_auth(ctx, sender.clone(), &info, &ledger)
-                        .await
-                    {
-                        Ok(is_gov) => is_gov,
-                        Err(e) => {
-                            if let ActorError::Functional { .. } = e {
-                                warn!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    sender = %sender,
-                                    error = %e,
-                                    "Authorization check failed"
-                                );
-                                return Err(e);
-                            } else {
-                                error!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    sender = %sender,
-                                    error = %e,
-                                    "Authorization check failed"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
+                let (is_gov, ..) = match self
+                    .check_auth(ctx, sender.clone(), &info, &ledger)
+                    .await
+                {
+                    Ok(is_gov) => is_gov,
+                    Err(e) => {
+                        if let ActorError::Functional { .. } = e {
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                sender = %sender,
+                                error = %e,
+                                "Authorization check failed"
+                            );
+                            return Err(e);
+                        } else {
+                            error!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                sender = %sender,
+                                error = %e,
+                                "Authorization check failed"
+                            );
+                            return Err(emit_fail(ctx, e).await);
                         }
-                    };
+                    }
+                };
 
                 let lease = if ledger.is_create_event() {
                     if let Err(e) = create_subject(ctx, *ledger.clone()).await {

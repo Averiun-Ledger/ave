@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::{
     evaluation::{
@@ -30,8 +33,8 @@ use ave_common::{
     },
 };
 
-use json_patch::diff;
 use ave_network::ComunicateInfo;
+use json_patch::diff;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
@@ -471,8 +474,7 @@ impl EvalWorker {
                 .content()
                 .is_fact_event()
             {
-                let Some((issuers, issuer_any)) = self.context.issuers()
-                else {
+                let Some((issuers, issuer_any)) = self.context.issuers() else {
                     return Err(EvaluatorError::InvalidEventRequest(
                         "Fact event evaluation context does not include issuers"
                             .to_owned(),

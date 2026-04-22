@@ -23,9 +23,7 @@ use crate::{
     model::common::{
         emit_fail,
         node::i_can_send_last_ledger,
-        subject::{
-            acquire_subject, get_gov, get_last_ledger_event,
-        },
+        subject::{acquire_subject, get_gov, get_last_ledger_event},
     },
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
@@ -70,14 +68,12 @@ impl ManualDistribution {
             return DistributionPlanMode::Opaque;
         };
 
-        let Some(role_creator) =
-            roles_schema
-                .creator
-                .get(&ave_common::governance::RoleCreator::create(
-                    &creator_name,
-                    namespace.clone(),
-                ))
-        else {
+        let Some(role_creator) = roles_schema.creator.get(
+            &ave_common::governance::RoleCreator::create(
+                &creator_name,
+                namespace.clone(),
+            ),
+        ) else {
             return DistributionPlanMode::Opaque;
         };
 
@@ -262,16 +258,17 @@ impl Handler<Self> for ManualDistribution {
 
                 let schema_id = data.get_schema_id();
                 let recipients = if is_gov {
-                    let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
-                        error!(
-                            msg_type = "Update",
-                            subject_id = %subject_id,
-                            governance_id = %governance_id,
-                            error = %e,
-                            "Failed to get governance"
-                        );
-                        e
-                    })?;
+                    let gov =
+                        get_gov(ctx, &governance_id).await.map_err(|e| {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get governance"
+                            );
+                            e
+                        })?;
 
                     let mut witnesses =
                         gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
@@ -295,20 +292,23 @@ impl Handler<Self> for ManualDistribution {
                         })
                         .collect::<Vec<_>>()
                 } else {
-                    let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
-                        error!(
-                            msg_type = "Update",
-                            subject_id = %subject_id,
-                            governance_id = %governance_id,
-                            error = %e,
-                            "Failed to get governance"
-                        );
-                        e
-                    })?;
+                    let gov =
+                        get_gov(ctx, &governance_id).await.map_err(|e| {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get governance"
+                            );
+                            e
+                        })?;
 
                     let Some(event_request) = ledger.get_event_request() else {
                         return Err(ActorError::Functional {
-                            description: "Missing event request in tracker ledger".to_owned(),
+                            description:
+                                "Missing event request in tracker ledger"
+                                    .to_owned(),
                         });
                     };
 

@@ -12,13 +12,13 @@ use ave_common::{
     response::RequestState,
 };
 use ave_core::auth::AuthWitness;
+use ave_network::{NodeType, RoutingNode};
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
     create_subject, emit_confirm, emit_fact, emit_reject, emit_transfer,
     get_subject,
 };
 use futures::future::join_all;
-use ave_network::{NodeType, RoutingNode};
 use serde_json::json;
 use test_log::test;
 

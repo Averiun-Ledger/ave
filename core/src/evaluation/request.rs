@@ -107,9 +107,7 @@ impl EvaluationReq {
             }
             (
                 EventRequest::Fact(fact_request),
-                EvaluateData::TrackerSchemasFact {
-                    state,
-                },
+                EvaluateData::TrackerSchemasFact { state },
             ) => init_state.as_ref().map_or_else(
                 || {
                     Err(EvaluatorError::InternalError(
@@ -156,10 +154,8 @@ impl EvaluationReq {
                 EventRequest::Transfer(transfer_request),
                 EvaluateData::TrackerSchemasTransfer { .. },
             ) => {
-                let EvalWorkerContext::TrackerTransfer {
-                    members,
-                    creators,
-                } = worker_context
+                let EvalWorkerContext::TrackerTransfer { members, creators } =
+                    worker_context
                 else {
                     return Err(EvaluatorError::InternalError(
                         "Tracker transfer evaluation context is missing"
@@ -196,21 +192,11 @@ impl EvaluationReq {
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub enum EvaluateData {
-    GovFact {
-        state: GovernanceData,
-    },
-    GovTransfer {
-        state: GovernanceData,
-    },
-    GovConfirm {
-        state: GovernanceData,
-    },
-    TrackerSchemasFact {
-        state: ValueWrapper,
-    },
-    TrackerSchemasTransfer {
-        state: ValueWrapper,
-    },
+    GovFact { state: GovernanceData },
+    GovTransfer { state: GovernanceData },
+    GovConfirm { state: GovernanceData },
+    TrackerSchemasFact { state: ValueWrapper },
+    TrackerSchemasTransfer { state: ValueWrapper },
 }
 
 impl EvaluateData {

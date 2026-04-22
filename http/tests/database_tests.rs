@@ -554,7 +554,8 @@ async fn test_api_key_ttl_uses_system_default_when_absent_or_zero() {
 }
 
 #[test(tokio::test)]
-async fn test_api_key_ttl_honors_explicit_value_and_uses_system_default_when_absent() {
+async fn test_api_key_ttl_honors_explicit_value_and_uses_system_default_when_absent()
+ {
     let tmp_dir = tempfile::tempdir().unwrap();
     let mut config = AuthConfig::default();
     config.enable = true;
@@ -641,9 +642,10 @@ async fn test_update_system_config_does_not_backfill_existing_api_keys() {
     std::thread::sleep(std::time::Duration::from_secs(2));
     let deleted = db.cleanup_expired_api_keys().unwrap();
     assert_eq!(deleted, 0);
-    assert!(db
-        .authenticate_api_key_request(&api_key, None, "/peer-id")
-        .is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 }
 
 #[test(tokio::test)]
@@ -670,9 +672,10 @@ async fn test_cleanup_does_not_expire_explicit_permanent_api_key() {
 
     let info = db.get_api_key_info(&key_info.id).unwrap();
     assert!(info.expires_at.is_none());
-    assert!(db
-        .authenticate_api_key_request(&api_key, None, "/peer-id")
-        .is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 }
 
 #[test(tokio::test)]

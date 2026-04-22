@@ -27,8 +27,8 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
 };
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_network::ComunicateInfo;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 

@@ -111,13 +111,10 @@ impl Auth {
 
         match data {
             Some(SubjectData::Tracker { governance_id, .. }) => {
-                let actual_sn = get_tracker_sn_owner(
-                    ctx,
-                    &governance_id,
-                    subject_id,
-                )
-                .await?
-                .map(|(_, actual_sn)| actual_sn);
+                let actual_sn =
+                    get_tracker_sn_owner(ctx, &governance_id, subject_id)
+                        .await?
+                        .map(|(_, actual_sn)| actual_sn);
 
                 Ok((actual_sn, Some(UpdateSubjectKind::Tracker)))
             }

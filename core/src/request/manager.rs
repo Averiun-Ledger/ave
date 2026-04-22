@@ -11,8 +11,8 @@ use ave_common::identity::{
 use ave_common::request::EventRequest;
 use ave_common::response::RequestState;
 use ave_common::{Namespace, SchemaType, ValueWrapper};
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_network::ComunicateInfo;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -259,7 +259,9 @@ impl RequestManager {
                 );
                 let creators = creator_signers
                     .into_iter()
-                    .map(|creator| (creator, BTreeSet::from([namespace.clone()])))
+                    .map(|creator| {
+                        (creator, BTreeSet::from([namespace.clone()]))
+                    })
                     .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
 
                 Ok(EvalWorkerContext::TrackerTransfer { members, creators })
@@ -292,8 +294,7 @@ impl RequestManager {
             signers,
             init_state,
             tracker_context,
-        ) =
-            self.build_request_eval(ctx, &metadata, &request).await?;
+        ) = self.build_request_eval(ctx, &metadata, &request).await?;
 
         if signers.is_empty() {
             warn!(
@@ -474,101 +475,99 @@ impl RequestManager {
         let is_gov = metadata.schema_id.is_gov();
 
         let request_type = EventRequestType::from(request.content());
-        let (evaluate_data, governance_data, init_state, tracker_context) = match (
-            is_gov,
-            request_type.clone(),
-        ) {
-            (true, EventRequestType::Fact) => {
-                let state =
-                    GovernanceData::try_from(metadata.properties.clone())?;
+        let (evaluate_data, governance_data, init_state, tracker_context) =
+            match (is_gov, request_type.clone()) {
+                (true, EventRequestType::Fact) => {
+                    let state =
+                        GovernanceData::try_from(metadata.properties.clone())?;
 
-                (
-                    EvaluateData::GovFact {
-                        state: state.clone(),
-                    },
-                    state,
-                    None,
-                    EvalWorkerContext::default(),
-                )
-            }
-            (true, EventRequestType::Transfer) => {
-                let state =
-                    GovernanceData::try_from(metadata.properties.clone())?;
+                    (
+                        EvaluateData::GovFact {
+                            state: state.clone(),
+                        },
+                        state,
+                        None,
+                        EvalWorkerContext::default(),
+                    )
+                }
+                (true, EventRequestType::Transfer) => {
+                    let state =
+                        GovernanceData::try_from(metadata.properties.clone())?;
 
-                (
-                    EvaluateData::GovTransfer {
-                        state: state.clone(),
-                    },
-                    state,
-                    None,
-                    EvalWorkerContext::default(),
-                )
-            }
-            (true, EventRequestType::Confirm) => {
-                let state =
-                    GovernanceData::try_from(metadata.properties.clone())?;
+                    (
+                        EvaluateData::GovTransfer {
+                            state: state.clone(),
+                        },
+                        state,
+                        None,
+                        EvalWorkerContext::default(),
+                    )
+                }
+                (true, EventRequestType::Confirm) => {
+                    let state =
+                        GovernanceData::try_from(metadata.properties.clone())?;
 
-                (
-                    EvaluateData::GovConfirm {
-                        state: state.clone(),
-                    },
-                    state,
-                    None,
-                    EvalWorkerContext::default(),
-                )
-            }
-            (false, EventRequestType::Fact) => {
-                let governance_data =
-                    get_gov(ctx, &metadata.governance_id).await?;
+                    (
+                        EvaluateData::GovConfirm {
+                            state: state.clone(),
+                        },
+                        state,
+                        None,
+                        EvalWorkerContext::default(),
+                    )
+                }
+                (false, EventRequestType::Fact) => {
+                    let governance_data =
+                        get_gov(ctx, &metadata.governance_id).await?;
 
-                let init_state =
-                    governance_data.get_init_state(&metadata.schema_id)?;
-                let tracker_context = Self::tracker_evaluation_context(
-                    &governance_data,
-                    &metadata.schema_id,
-                    metadata.namespace.clone(),
-                    &request_type,
-                )?;
+                    let init_state =
+                        governance_data.get_init_state(&metadata.schema_id)?;
+                    let tracker_context = Self::tracker_evaluation_context(
+                        &governance_data,
+                        &metadata.schema_id,
+                        metadata.namespace.clone(),
+                        &request_type,
+                    )?;
 
-                (
-                    EvaluateData::TrackerSchemasFact {
-                        state: metadata.properties.clone(),
-                    },
-                    governance_data,
-                    Some(init_state),
-                    tracker_context,
-                )
-            }
-            (false, EventRequestType::Transfer) => {
-                let governance_data =
-                    get_gov(ctx, &metadata.governance_id).await?;
-                let tracker_context = Self::tracker_evaluation_context(
-                    &governance_data,
-                    &metadata.schema_id,
-                    metadata.namespace.clone(),
-                    &request_type,
-                )?;
-                (
-                    EvaluateData::TrackerSchemasTransfer {
-                        state: metadata.properties.clone(),
-                    },
-                    governance_data,
-                    None,
-                    tracker_context,
-                )
-            }
-            _ => {
-                error!(
-                    request_id = %self.id,
-                    is_gov = is_gov,
-                    request_type = ?request_type,
-                    "Invalid event request type for evaluation state"
-                );
-                return Err(
-                    RequestManagerError::InvalidEventRequestForEvaluation,
-                );
-            }
-        };
+                    (
+                        EvaluateData::TrackerSchemasFact {
+                            state: metadata.properties.clone(),
+                        },
+                        governance_data,
+                        Some(init_state),
+                        tracker_context,
+                    )
+                }
+                (false, EventRequestType::Transfer) => {
+                    let governance_data =
+                        get_gov(ctx, &metadata.governance_id).await?;
+                    let tracker_context = Self::tracker_evaluation_context(
+                        &governance_data,
+                        &metadata.schema_id,
+                        metadata.namespace.clone(),
+                        &request_type,
+                    )?;
+                    (
+                        EvaluateData::TrackerSchemasTransfer {
+                            state: metadata.properties.clone(),
+                        },
+                        governance_data,
+                        None,
+                        tracker_context,
+                    )
+                }
+                _ => {
+                    error!(
+                        request_id = %self.id,
+                        is_gov = is_gov,
+                        request_type = ?request_type,
+                        "Invalid event request type for evaluation state"
+                    );
+                    return Err(
+                        RequestManagerError::InvalidEventRequestForEvaluation,
+                    );
+                }
+            };
 
         let (signers, quorum) = governance_data.get_quorum_and_signers(
             ProtocolTypes::Evaluation,
@@ -1821,24 +1820,25 @@ impl RequestManager {
             _ => get_subject_data(ctx, &self.subject_id).await?,
         };
 
-        let creator_scope = match request.content() {
-            EventRequest::Create(create) if !create.schema_id.is_gov() => {
-                Some((create.schema_id.clone(), create.namespace.clone()))
-            }
-            _ => subject_data.as_ref().and_then(|subject_data| {
-                match subject_data {
-                    SubjectData::Tracker {
-                        schema_id,
-                        namespace,
-                        ..
-                    } => Some((
-                        schema_id.clone(),
-                        Namespace::from(namespace.clone()),
-                    )),
-                    _ => None,
+        let creator_scope =
+            match request.content() {
+                EventRequest::Create(create) if !create.schema_id.is_gov() => {
+                    Some((create.schema_id.clone(), create.namespace.clone()))
                 }
-            }),
-        };
+                _ => subject_data.as_ref().and_then(|subject_data| {
+                    match subject_data {
+                        SubjectData::Tracker {
+                            schema_id,
+                            namespace,
+                            ..
+                        } => Some((
+                            schema_id.clone(),
+                            Namespace::from(namespace.clone()),
+                        )),
+                        _ => None,
+                    }
+                }),
+            };
 
         if let Some((schema_id, namespace)) = creator_scope
             && !gov.has_this_role(HashThisRole::Schema {

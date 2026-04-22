@@ -259,7 +259,9 @@ impl GovernanceVersionSync {
 
             if let Err(error) = self
                 .network
-                .send_command(ave_network::CommandHelper::SendMessage { message })
+                .send_command(ave_network::CommandHelper::SendMessage {
+                    message,
+                })
                 .await
             {
                 warn!(

@@ -685,7 +685,12 @@ impl Governance {
 
             actor
                 .tell(EvaluationSchemaMessage::Update {
-                    members: self.properties.members.values().cloned().collect(),
+                    members: self
+                        .properties
+                        .members
+                        .values()
+                        .cloned()
+                        .collect(),
                     creators: schema_creators_eval
                         .get(schema_id)
                         .cloned()
@@ -1529,7 +1534,8 @@ impl Governance {
                 actor.ask_stop().await?;
             }
             (false, true) => {
-                let (issuers, issuer_any) = self.properties.governance_issuers();
+                let (issuers, issuer_any) =
+                    self.properties.governance_issuers();
                 let evaluator = EvalWorker {
                     node_key: node_key.clone(),
                     our_key: self.our_key.clone(),

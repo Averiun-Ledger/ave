@@ -1431,8 +1431,8 @@ impl WitnessesRegister {
                                 .await?
                             {
                                 SnLimit::Sn(sn) => {
-                                    better_sn =
-                                        better_sn.max(Some(sn.min(old_data.sn)));
+                                    better_sn = better_sn
+                                        .max(Some(sn.min(old_data.sn)));
                                 }
                                 SnLimit::LastSn => {
                                     better_sn =

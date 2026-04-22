@@ -11,8 +11,8 @@ use common::{
     get_subject,
 };
 
-use futures::future::join_all;
 use ave_network::{NodeType, RoutingNode};
+use futures::future::join_all;
 use serde_json::json;
 use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;

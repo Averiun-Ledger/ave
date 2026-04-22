@@ -54,13 +54,8 @@ impl AuthDatabase {
 
         let plan_info = Self::get_plan_for_key_internal(conn, key_id)?;
 
-        let (
-            plan_id,
-            plan_name,
-            plan_limit,
-            extensions_total,
-            effective_limit,
-        ) = if let Some((plan_id, plan_name, plan_limit)) = plan_info {
+        let (plan_id, plan_name, plan_limit, extensions_total, effective_limit) =
+            if let Some((plan_id, plan_name, plan_limit)) = plan_info {
                 let extensions_total = Self::get_extensions_total_internal(
                     conn,
                     key_id,
