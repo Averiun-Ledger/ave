@@ -22,6 +22,11 @@ pub enum RequestHandlerError {
     #[error("invalid tracker fact viewpoints: {0}")]
     InvalidTrackerFactViewpoints(String),
 
+    #[error(
+        "tracker subject '{0}' cannot emit events because the local ledger is not full"
+    )]
+    TrackerLedgerNotFull(String),
+
     /// Attempted to mark an approval as obsolete.
     #[error("a user cannot mark a request approval as obsolete")]
     ObsoleteApproval,

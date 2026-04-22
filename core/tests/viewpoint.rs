@@ -10105,3 +10105,187 @@ async fn test_viewpoints_transfer_restart_override_battery() {
         &["basura"],
     );
 }
+
+#[test(tokio::test)]
+async fn test_viewpoints_opaque_tracker_cannot_confirm_transfer() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = &nodes[0].api;
+    let witness = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![witness]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Witness",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Witness"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witness",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Witness",
+                                "namespace": [],
+                                "quantity": "infinity",
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(witness, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact_viewpoints(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 1
+            }
+        }),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let witness_state = get_subject(witness, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        witness_state.properties,
+        json!({
+            "one": 0,
+            "two": 0,
+            "three": 0
+        })
+    );
+    assert_tracker_visibility(
+        &witness_state,
+        TrackerVisibilityModeDB::Opaque,
+        vec![
+            TrackerStoredVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(0),
+                visibility: TrackerStoredVisibilityDB::Full,
+            },
+            TrackerStoredVisibilityRangeDB {
+                from_sn: 1,
+                to_sn: None,
+                visibility: TrackerStoredVisibilityDB::None,
+            },
+        ],
+        vec![
+            TrackerEventVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(0),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 1,
+                to_sn: None,
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec!["agua".to_owned()],
+                },
+            },
+        ],
+    )
+    .unwrap();
+
+    emit_transfer(
+        owner,
+        subject_id.clone(),
+        PublicKey::from_str(&witness.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(witness, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    assert!(
+        emit_confirm(witness, subject_id.clone(), None, true)
+            .await
+            .is_err()
+    );
+}

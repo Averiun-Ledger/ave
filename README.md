@@ -50,7 +50,7 @@ Versions currently declared by this workspace:
 | `ave-core` | `0.10.0` |
 | `ave-bridge` | `0.10.0` |
 | `ave-http` | `0.10.0` |
-| `ave-types` | `0.9.0` |
+| `ave-common` (npm TypeScript package) | `0.9.0` |
 
 ## How the pieces fit together
 

@@ -36,7 +36,9 @@ use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
-use crate::model::common::subject::{get_gov, get_version};
+use crate::model::common::subject::{
+    get_gov, get_tracker_visibility_state, get_version,
+};
 use crate::model::common::{
     check_subject_creation, emit_fail, send_to_tracking,
     viewpoints::validate_fact_viewpoints,
@@ -541,6 +543,33 @@ impl RequestHandler {
         }
     }
 
+    async fn check_tracker_ledger_full(
+        ctx: &mut ActorContext<Self>,
+        request: &EventRequest,
+        subject_data: &SubjectData,
+    ) -> Result<(), RequestHandlerError> {
+        let SubjectData::Tracker { governance_id, .. } = subject_data else {
+            return Ok(());
+        };
+
+        if matches!(request, EventRequest::Create(..)) {
+            return Ok(());
+        }
+
+        let subject_id = request.get_subject_id();
+        let visibility_state =
+            get_tracker_visibility_state(ctx, governance_id, &subject_id)
+                .await?;
+
+        if !visibility_state.is_full() {
+            return Err(RequestHandlerError::TrackerLedgerNotFull(
+                subject_id.to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn build_subject_data(
         ctx: &mut ActorContext<Self>,
         request: &EventRequest,
@@ -781,6 +810,9 @@ impl RequestHandler {
                 request.content().get_subject_id().to_string(),
             ));
         }
+
+        Self::check_tracker_ledger_full(ctx, request.content(), &subject_data)
+            .await?;
 
         Self::check_signer_authorization(
             ctx,
@@ -1283,6 +1315,21 @@ impl Handler<Self> for RequestHandler {
                             subject_id.to_string(),
                         ),
                     ));
+                }
+
+                if let Err(e) = Self::check_tracker_ledger_full(
+                    ctx,
+                    request.content(),
+                    &subject_data,
+                )
+                .await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Tracker full ledger check failed"
+                    );
+                    return Err(ActorError::from(e));
                 }
 
                 if let Err(e) =

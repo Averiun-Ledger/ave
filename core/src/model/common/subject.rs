@@ -19,7 +19,10 @@ use crate::{
         },
     },
     model::{
-        common::{check_subject_creation, node::get_subject_data},
+        common::{
+            TrackerVisibilityState, check_subject_creation,
+            node::get_subject_data,
+        },
         event::Ledger,
     },
     node::{
@@ -459,6 +462,40 @@ where
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerSn".to_string(),
+        }),
+    }
+}
+
+pub async fn get_tracker_visibility_state<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<TrackerVisibilityState, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
+            subject_id: subject_id.clone(),
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::TrackerVisibilityState { state } => {
+            Ok(state)
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::TrackerVisibilityState"
+                .to_string(),
         }),
     }
 }
