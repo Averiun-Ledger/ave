@@ -1,4 +1,4 @@
-# ave-types
+# ave-common
 
 TypeScript type definitions for the [Averiun Ledger](https://averiun.com) API.
 
@@ -7,7 +7,7 @@ Auto-generated from Rust source code using [ts-rs](https://github.com/Aleph-Alph
 ## Installation
 
 ```bash
-npm install ave-types
+npm install ave-common
 ```
 
 Current package version: `0.9.0`.
@@ -22,7 +22,7 @@ import type {
   SubjectDB,
   RequestState,
   LedgerDB
-} from "ave-types";
+} from "ave-common";
 
 // Example: Create event request
 const createRequest: BridgeEventRequest = {
@@ -174,7 +174,7 @@ bash check-published.sh --full
 
 That command:
 1. Generates bindings in a temporary directory
-2. Downloads `ave-types@<package.json version>` from npm
+2. Downloads `ave-common@<package.json version>` from npm
 3. Groups drift into `API changes` vs `docs/comment changes only`
 4. Fails if the published package differs from the current Rust type surface
 
