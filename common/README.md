@@ -34,7 +34,7 @@ ave-common = "0.9.0"
 Default features enable `common`.
 
 The `openapi` and `typescript` features are intended to keep HTTP schemas and
-the generated `ave-types` package aligned with the Rust source types.
+the generated `ave-common` npm package aligned with the Rust source types.
 
 ## Basic example
 
