@@ -69,6 +69,7 @@ pub struct SubjectManager {
     our_key: Arc<PublicKey>,
     hash: HashAlgorithm,
     is_service: bool,
+    only_clear_events: bool,
     subjects: HashMap<DigestIdentifier, SubjectEntry>,
 }
 
@@ -77,11 +78,13 @@ impl SubjectManager {
         our_key: Arc<PublicKey>,
         hash: HashAlgorithm,
         is_service: bool,
+        only_clear_events: bool,
     ) -> Self {
         Self {
             our_key,
             hash,
             is_service,
+            only_clear_events,
             subjects: HashMap::new(),
         }
     }
@@ -206,6 +209,7 @@ impl SubjectManager {
                     data: None,
                     hash: self.hash,
                     is_service: self.is_service,
+                    only_clear_events: self.only_clear_events,
                     public_key: self.our_key.clone(),
                 }),
             )
@@ -397,6 +401,7 @@ impl SubjectManager {
                     data: None,
                     hash: self.hash,
                     is_service: self.is_service,
+                    only_clear_events: self.only_clear_events,
                     public_key: self.our_key.clone(),
                 }),
             )
@@ -419,6 +424,7 @@ impl SubjectManager {
                     data: Some(TrackerInit::from(&metadata)),
                     hash: self.hash,
                     is_service: self.is_service,
+                    only_clear_events: self.only_clear_events,
                     public_key: self.our_key.clone(),
                 }),
             )

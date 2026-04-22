@@ -365,6 +365,7 @@ impl Api {
                     key_pair: keys.clone(),
                     hash: config.hash_algorithm,
                     is_service: config.is_service,
+                    only_clear_events: config.only_clear_events,
                     ledger_batch_size: config.sync.ledger_batch_size as u64,
                     public_key: public_key.clone(),
                 }),

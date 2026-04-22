@@ -79,7 +79,7 @@ pub struct VerifyNewLedgerEvent<'a> {
     pub last_data: LastData,
     pub hash: &'a HashAlgorithm,
     pub full_view: bool,
-    pub is_service: bool,
+    pub only_clear_events: bool,
 }
 
 /// Subject metadata.
@@ -878,7 +878,7 @@ where
         last_data: LastData,
         hash: &'a HashAlgorithm,
         full_view: bool,
-        is_service: bool,
+        only_clear_events: bool,
     ) -> VerifyNewLedgerEvent<'a> {
         VerifyNewLedgerEvent {
             new_ledger_event,
@@ -887,7 +887,7 @@ where
             last_data,
             hash,
             full_view,
-            is_service,
+            only_clear_events,
         }
     }
 
@@ -938,7 +938,7 @@ where
             last_data,
             hash,
             full_view,
-            is_service,
+            only_clear_events,
         } = args;
 
         if !subject_metadata.active {
@@ -1057,8 +1057,10 @@ where
                 },
                 false,
             ) => {
-                if is_service {
-                    return Err(SubjectError::ServiceCannotAcceptTrackerOpaque);
+                if only_clear_events {
+                    return Err(
+                        SubjectError::OnlyClearEventsCannotAcceptTrackerOpaque,
+                    );
                 }
 
                 if data.subject_id != subject_metadata.subject_id {

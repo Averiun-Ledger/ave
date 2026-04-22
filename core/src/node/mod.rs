@@ -136,6 +136,8 @@ pub struct Node {
     #[serde(skip)]
     is_service: bool,
     #[serde(skip)]
+    only_clear_events: bool,
+    #[serde(skip)]
     ledger_batch_size: u64,
     /// The node's owned subjects.
     owned_subjects: HashMap<DigestIdentifier, SubjectData>,
@@ -198,6 +200,7 @@ impl BorshDeserialize for Node {
             transfer_subjects,
             reject_subjects,
             is_service: false,
+            only_clear_events: false,
         })
     }
 }
@@ -870,6 +873,7 @@ impl Actor for Node {
                     self.our_key.clone(),
                     hash,
                     self.is_service,
+                    self.only_clear_events,
                 ),
             )
             .await
@@ -1347,6 +1351,7 @@ pub struct InitParamsNode {
     pub public_key: Arc<PublicKey>,
     pub hash: HashAlgorithm,
     pub is_service: bool,
+    pub only_clear_events: bool,
     pub ledger_batch_size: u64,
 }
 
@@ -1368,6 +1373,7 @@ impl PersistentActor for Node {
             owner: params.key_pair,
             our_key: params.public_key,
             is_service: params.is_service,
+            only_clear_events: params.only_clear_events,
             ledger_batch_size: params.ledger_batch_size,
             owned_subjects: HashMap::new(),
             known_subjects: HashMap::new(),

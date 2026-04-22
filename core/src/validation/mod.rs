@@ -713,6 +713,7 @@ pub mod tests {
                     public_key: public_key.clone(),
                     hash: HashAlgorithm::Blake3,
                     is_service: true,
+                    only_clear_events: false,
                     ledger_batch_size: 100,
                 }),
             )

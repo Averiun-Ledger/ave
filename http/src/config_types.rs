@@ -309,6 +309,8 @@ pub struct AveConfigHttp {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
+    /// Whether the node rejects tracker opaque events
+    pub only_clear_events: bool,
     /// Sync protocol configuration
     pub sync: SyncConfigHttp,
 
@@ -369,6 +371,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
+            only_clear_events: value.only_clear_events,
             sync: SyncConfigHttp {
                 ledger_batch_size: value.sync.ledger_batch_size,
                 governance: GovernanceSyncConfigHttp {

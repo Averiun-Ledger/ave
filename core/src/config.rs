@@ -37,6 +37,8 @@ pub struct Config {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
+    /// Reject tracker opaque events and only commit clear tracker events.
+    pub only_clear_events: bool,
     /// Sync protocol configuration.
     pub sync: SyncConfig,
     /// Wasmtime execution environment sizing.
@@ -57,6 +59,7 @@ impl Default for Config {
             safe_mode: false,
             tracking_size: 100,
             is_service: false,
+            only_clear_events: false,
             sync: Default::default(),
             spec: None,
         }

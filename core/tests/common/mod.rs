@@ -62,6 +62,7 @@ pub struct CreateNodesAndConnectionsConfig {
     pub ephemeral: Vec<Vec<usize>>,
     pub always_accept: bool,
     pub is_service: bool,
+    pub only_clear_events: bool,
     pub ledger_batch_size: Option<usize>,
 }
 
@@ -72,6 +73,7 @@ pub struct CreateNodeConfig {
     pub peers: Vec<RoutingNode>,
     pub always_accept: bool,
     pub is_service: bool,
+    pub only_clear_events: bool,
     pub keys: Option<KeyPair>,
     pub local_db: Option<PathBuf>,
     pub ext_db: Option<PathBuf>,
@@ -85,6 +87,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         peers,
         always_accept,
         is_service,
+        only_clear_events,
         keys,
         local_db,
         ext_db,
@@ -134,6 +137,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
 
     let config = Config {
         is_service,
+        only_clear_events,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
         internal_db: AveInternalDBConfig {
@@ -207,6 +211,7 @@ pub async fn create_nodes_and_connections(
         ephemeral,
         always_accept,
         is_service,
+        only_clear_events,
         ledger_batch_size,
     } = config;
 
@@ -236,6 +241,7 @@ pub async fn create_nodes_and_connections(
             peers,
             always_accept,
             is_service,
+            only_clear_events,
             ledger_batch_size,
             ..Default::default()
         })
@@ -264,6 +270,7 @@ pub async fn create_nodes_and_connections(
             peers,
             always_accept,
             is_service,
+            only_clear_events,
             ledger_batch_size,
             ..Default::default()
         })
@@ -292,6 +299,7 @@ pub async fn create_nodes_and_connections(
             peers,
             always_accept,
             is_service,
+            only_clear_events,
             ledger_batch_size,
             ..Default::default()
         })

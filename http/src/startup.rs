@@ -471,6 +471,11 @@ fn log_effective_configuration(
     info!(target: TARGET, "  service   : {}", config.node.is_service);
     info!(
         target: TARGET,
+        "  only clear: {}",
+        config.node.only_clear_events
+    );
+    info!(
+        target: TARGET,
         "  ledger batch size           : {}",
         config.node.sync.ledger_batch_size
     );

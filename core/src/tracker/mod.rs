@@ -54,6 +54,8 @@ pub struct Tracker {
     #[serde(skip)]
     pub service: bool,
     #[serde(skip)]
+    pub only_clear_events: bool,
+    #[serde(skip)]
     pub hash: Option<HashAlgorithm>,
 
     pub subject_metadata: SubjectMetadata,
@@ -125,6 +127,7 @@ impl BorshDeserialize for Tracker {
 
         Ok(Self {
             service: false,
+            only_clear_events: false,
             hash,
             our_key,
             subject_metadata,
@@ -747,7 +750,7 @@ impl Tracker {
                     last_data,
                     hash,
                     self.is_full(),
-                    self.service,
+                    self.only_clear_events,
                 ),
             )
             .await
@@ -1094,6 +1097,7 @@ pub struct InitParamsTracker {
     pub public_key: Arc<PublicKey>,
     pub hash: HashAlgorithm,
     pub is_service: bool,
+    pub only_clear_events: bool,
 }
 
 #[async_trait]
@@ -1115,6 +1119,7 @@ impl PersistentActor for Tracker {
 
         Self {
             service: params.is_service,
+            only_clear_events: params.only_clear_events,
             hash: Some(params.hash),
             our_key: params.public_key,
             subject_metadata: init.subject_metadata,

@@ -137,8 +137,8 @@ pub enum SubjectError {
     #[error("protocols data is for Tracker but this is a Governance")]
     TrackerProtocolsInGovernance,
 
-    #[error("service subject cannot accept tracker opaque events")]
-    ServiceCannotAcceptTrackerOpaque,
+    #[error("node configured for clear events cannot accept tracker opaque events")]
+    OnlyClearEventsCannotAcceptTrackerOpaque,
 
     #[error("governance fact event cannot contain viewpoints")]
     GovernanceFactViewpointsNotAllowed,
