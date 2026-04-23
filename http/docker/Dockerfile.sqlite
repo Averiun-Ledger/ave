@@ -193,13 +193,14 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 RUN rustup target add wasm32-unknown-unknown
 RUN groupadd --system --gid 10001 ave \
     && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /app --shell /usr/sbin/nologin ave \
-    && mkdir -p /app/db /app/logs /contracts \
-    && chown -R ave:ave /app /contracts
-COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
-COPY --from=builder-amd64 /contracts /contracts
+    && mkdir -p /app /app/contracts \
+    && chown -R ave:ave /app \
+    && chmod -R u+rwX /app
+COPY --from=builder-amd64 --chown=ave:ave ./ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /app/ave-http
+COPY --from=builder-amd64 --chown=ave:ave /contracts/ /app/contracts/
 WORKDIR /app
 USER ave
-CMD ["ave-http"]
+CMD ["./ave-http"]
 
 FROM --platform=linux/arm64 ${RUST_IMAGE} AS arm64
 ARG CARGO_PROFILE=release
@@ -211,10 +212,11 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 RUN rustup target add wasm32-unknown-unknown
 RUN groupadd --system --gid 10001 ave \
     && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /app --shell /usr/sbin/nologin ave \
-    && mkdir -p /app/db /app/logs /contracts \
-    && chown -R ave:ave /app /contracts
-COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
-COPY --from=builder-arm64 /contracts /contracts
+    && mkdir -p /app /app/contracts \
+    && chown -R ave:ave /app \
+    && chmod -R u+rwX /app
+COPY --from=builder-arm64 --chown=ave:ave ./ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /app/ave-http
+COPY --from=builder-arm64 --chown=ave:ave /contracts/ /app/contracts/
 WORKDIR /app
 USER ave
-CMD ["ave-http"]
+CMD ["./ave-http"]

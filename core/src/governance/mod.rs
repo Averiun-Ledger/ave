@@ -1129,7 +1129,7 @@ impl Governance {
             }
         }
 
-        let contracts_dir = config.contracts_path.join("contracts");
+        let contracts_dir = config.contracts_path;
         if !contracts_dir.exists() {
             return Ok(());
         }
@@ -1226,7 +1226,7 @@ impl Governance {
             }
         }
 
-        let contracts_dir = config.contracts_path.join("contracts");
+        let contracts_dir = config.contracts_path;
         if !contracts_dir.exists() {
             return Ok(());
         }
@@ -1796,7 +1796,7 @@ impl Governance {
             }
 
             let contract_path =
-                config.contracts_path.join("contracts").join(&contract_name);
+                config.contracts_path.join(&contract_name);
             let _ = fs::remove_dir_all(contract_path).await;
         }
 

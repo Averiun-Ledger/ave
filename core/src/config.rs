@@ -54,7 +54,7 @@ impl Default for Config {
             internal_db: Default::default(),
             external_db: Default::default(),
             network: Default::default(),
-            contracts_path: PathBuf::new(),
+            contracts_path: PathBuf::from("contracts"),
             always_accept: Default::default(),
             safe_mode: false,
             tracking_size: 100,

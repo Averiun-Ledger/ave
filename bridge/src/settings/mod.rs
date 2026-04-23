@@ -283,7 +283,7 @@ keys_path = "/custom/keys"
 [node]
 keypair_algorithm = "Ed25519"
 hash_algorithm = "Blake3"
-contracts_path = "/contracts"
+contracts_path = "/contracts_proof"
 always_accept = true
 tracking_size = 200
 is_service = true
@@ -465,7 +465,7 @@ node:
     custom:
       ram_mb: 2048
       cpu_cores: 4
-  contracts_path: /contracts
+  contracts_path: /contracts_proof
   always_accept: true
   tracking_size: 200
   is_service: true
@@ -633,7 +633,7 @@ http:
         "cpu_cores": 4
       }
     },
-    "contracts_path": "/contracts",
+    "contracts_path": "/contracts_proof",
     "always_accept": true,
     "tracking_size": 200,
     "is_service": true,
@@ -902,7 +902,7 @@ http:
         assert_eq!(node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(node.hash_algorithm, HashAlgorithm::Blake3);
         assert!(node.always_accept);
-        assert_eq!(node.contracts_path, PathBuf::from("/contracts"));
+        assert_eq!(node.contracts_path, PathBuf::from("/contracts_proof"));
         assert_eq!(node.tracking_size, 200);
         assert!(node.is_service);
         assert!(node.only_clear_events);
@@ -1137,7 +1137,7 @@ http:
 
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
-        assert_eq!(config.node.contracts_path, PathBuf::new());
+        assert_eq!(config.node.contracts_path, PathBuf::from("contracts"));
         assert_eq!(
             config.node.internal_db.db,
             AveInternalDBFeatureConfig::default()

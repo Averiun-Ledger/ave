@@ -1,6 +1,6 @@
 [package]
 name = "ave"
-version = "0.10.0"
+version = "0.11.0"
 edition.workspace = true
 authors.workspace = true
 description = "Aggregated Ave crate re-exporting the main public workspace crates"
@@ -33,7 +33,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
 description = "Averiun Ledger library"
@@ -45,8 +45,8 @@ keywords = ["traceability", "distributed-ledger", "Averiun", "sustainability"]
 rust-version = "1.95.0"
 
 [workspace.dependencies]
-ave-core = { path = "core", version = "0.10.0", default-features = false }
-ave-bridge = { path = "bridge", version = "0.10.0", default-features = false }
+ave-core = { path = "core", version = "0.11.0", default-features = false }
+ave-bridge = { path = "bridge", version = "0.11.0", default-features = false }
 ave-network = { path = "network", version = "0.9.1" }
 ave-identity = { path = "identity", version = "0.3.0" }
 ave-common = { path = "common", version = "0.9.0" }
@@ -96,9 +96,9 @@ lru = "0.17.0"
 ave-identity = { path = "identity", version = "0.3.0" }
 ave-common = { path = "common", version = "0.9.0" }
 ave-network = { path = "network", version = "0.9.1" }
-ave-core = { path = "core", version = "0.10.0", default-features = false }
-ave-bridge = { path = "bridge", version = "0.10.0", default-features = false }
-ave-http = { path = "http", version = "0.10.0", default-features = false, optional = true }
+ave-core = { path = "core", version = "0.11.0", default-features = false }
+ave-bridge = { path = "bridge", version = "0.11.0", default-features = false }
+ave-http = { path = "http", version = "0.11.0", default-features = false, optional = true }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]

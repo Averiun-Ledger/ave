@@ -13,7 +13,7 @@ DOCKER_USERNAME="${DOCKER_USERNAME:-averiun}"
 DOCKER_REPO="${DOCKER_REPO:-ave-http}"
 NO_CACHE="${NO_CACHE:-false}"
 
-PROD_TAG_ARRAY=("0.10.0-sqlite" "0.10.0-rocksdb")
+PROD_TAG_ARRAY=("0.11.0-sqlite" "0.11.0-rocksdb")
 PROD_DOCKERFILE_ARRAY=(
     "$SCRIPT_DIR/Dockerfile.sqlite"
     "$SCRIPT_DIR/Dockerfile.rocksdb"
