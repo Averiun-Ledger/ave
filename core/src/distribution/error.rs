@@ -22,6 +22,9 @@ pub enum DistributorError {
     #[error("sender does not have access to the subject")]
     SenderNoAccess,
 
+    #[error("receiver does not have access to the subject")]
+    ReceiverNoAccess,
+
     #[error("missing governance_id for tracker subject {subject_id}")]
     MissingGovernanceId { subject_id: DigestIdentifier },
 
@@ -73,6 +76,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::SubjectNotFound
             | DistributorError::SenderNotMember { .. }
             | DistributorError::SenderNoAccess
+            | DistributorError::ReceiverNoAccess
             | DistributorError::UpdatingSubject
             | DistributorError::ActualSnBiggerThanWitness { .. }
             | DistributorError::UnexpectedSender

@@ -252,6 +252,13 @@ pub enum WitnessesRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
+    CreateAccess {
+        owner: PublicKey,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        gov_version: u64,
+    },
     GetTrackerVisibilityState {
         subject_id: DigestIdentifier,
     },
@@ -351,6 +358,9 @@ impl Event for WitnessesRegisterEvent {}
 pub enum WitnessesRegisterResponse {
     Access {
         sn: Option<u64>,
+    },
+    CreateAccess {
+        allowed: bool,
     },
     GovSn {
         sn: u64,
@@ -1516,6 +1526,88 @@ impl WitnessesRegister {
         )
     }
 
+    fn interval_active_at_version(
+        current_from: Option<u64>,
+        intervals: &IntervalSet,
+        gov_version: u64,
+    ) -> bool {
+        current_from.is_some_and(|from| from <= gov_version)
+            || intervals.contains(gov_version)
+    }
+
+    fn has_schema_witness_at_version(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &Namespace,
+        gov_version: u64,
+    ) -> bool {
+        let has_match = |witness_data: &HashMap<Namespace, IntervalData>| {
+            witness_data.iter().any(
+                |(current_namespace, (intervals, current_from))| {
+                    current_namespace.is_ancestor_or_equal_of(namespace)
+                        && Self::interval_active_at_version(
+                            *current_from,
+                            intervals,
+                            gov_version,
+                        )
+                },
+            )
+        };
+
+        self.witnesses
+            .get(&(node.clone(), schema_id.clone()))
+            .is_some_and(has_match)
+            || self
+                .witnesses
+                .get(&(node.clone(), SchemaType::TrackerSchemas))
+                .is_some_and(has_match)
+    }
+
+    fn has_create_access_for_node_at_version(
+        &self,
+        node: &PublicKey,
+        owner: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &str,
+        gov_version: u64,
+    ) -> bool {
+        if node == owner {
+            return true;
+        }
+
+        let namespace = Namespace::from(namespace.to_owned());
+
+        self.witnesses_creator
+            .get(&(owner.clone(), namespace.to_string(), schema_id.clone()))
+            .is_some_and(|creator_witnesses| {
+                creator_witnesses
+                    .get(&WitnessesType::User(node.clone()))
+                    .is_some_and(|(intervals, current_from)| {
+                        Self::interval_active_at_version(
+                            *current_from,
+                            intervals,
+                            gov_version,
+                        )
+                    })
+                    || creator_witnesses
+                        .get(&WitnessesType::Witnesses)
+                        .is_some_and(|(intervals, current_from)| {
+                            Self::interval_active_at_version(
+                                *current_from,
+                                intervals,
+                                gov_version,
+                            )
+                        })
+                        && self.has_schema_witness_at_version(
+                            node,
+                            schema_id,
+                            &namespace,
+                            gov_version,
+                        )
+            })
+    }
+
     async fn get_subjects_for_owner_schema(
         &self,
         ctx: &ActorContext<Self>,
@@ -1963,6 +2055,36 @@ impl Handler<Self> for WitnessesRegister {
                 );
 
                 return Ok(WitnessesRegisterResponse::Access { sn });
+            }
+            WitnessesRegisterMessage::CreateAccess {
+                owner,
+                node,
+                namespace,
+                schema_id,
+                gov_version,
+            } => {
+                let allowed = self.has_create_access_for_node_at_version(
+                    &node,
+                    &owner,
+                    &schema_id,
+                    &namespace,
+                    gov_version,
+                );
+
+                debug!(
+                    msg_type = "CreateAccess",
+                    owner = %owner,
+                    node = %node,
+                    namespace = %namespace,
+                    schema_id = %schema_id,
+                    gov_version = gov_version,
+                    allowed = allowed,
+                    "Checked create access status"
+                );
+
+                return Ok(WitnessesRegisterResponse::CreateAccess {
+                    allowed,
+                });
             }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
                 subject_id,

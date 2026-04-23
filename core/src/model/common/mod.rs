@@ -211,6 +211,46 @@ where
     }
 }
 
+pub async fn check_create_witness_access<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    owner: PublicKey,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+    gov_version: u64,
+) -> Result<bool, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::CreateAccess {
+            owner,
+            node,
+            namespace,
+            schema_id,
+            gov_version,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::CreateAccess { allowed } => Ok(allowed),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::CreateAccess { allowed }"
+                .to_string(),
+        }),
+    }
+}
+
 #[derive(
     Clone,
     Copy,
