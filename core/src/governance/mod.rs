@@ -1795,8 +1795,7 @@ impl Governance {
                 contracts.remove(&contract_name);
             }
 
-            let contract_path =
-                config.contracts_path.join(&contract_name);
+            let contract_path = config.contracts_path.join(&contract_name);
             let _ = fs::remove_dir_all(contract_path).await;
         }
 
