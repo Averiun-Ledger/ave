@@ -130,14 +130,7 @@ impl AuthDatabase {
         let now = Self::now();
         let config_ttl = self.api_key_default_ttl_seconds();
         let effective_ttl = match expires_in_seconds {
-            Some(ttl) if ttl > 0 => {
-                // Explicit positive TTL requested
-                if config_ttl > 0 {
-                    Some(std::cmp::min(ttl, config_ttl))
-                } else {
-                    Some(ttl)
-                }
-            }
+            Some(ttl) if ttl > 0 => Some(ttl),
             Some(0) => {
                 // Explicit TTL=0 means never expire (useful for service keys)
                 None
@@ -269,11 +262,13 @@ impl AuthDatabase {
     ) -> Result<ApiKeyInfo, DatabaseError> {
         conn.query_row(
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip, kp.plan_id
+                    k.is_management, k.created_at, k.expires_at, k.revoked,
+                    k.revoked_at, k.revoked_reason, k.last_used_at,
+                    k.last_used_ip, kp.plan_id, p.name
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
+             LEFT JOIN usage_plans p ON p.id = kp.plan_id
              WHERE k.id = ?1",
             params![key_id],
             |row| {
@@ -293,6 +288,7 @@ impl AuthDatabase {
                     last_used_at: row.get(12)?,
                     last_used_ip: row.get(13)?,
                     plan_id: row.get(14)?,
+                    plan_name: row.get(15)?,
                 })
             },
         )
@@ -547,20 +543,24 @@ impl AuthDatabase {
 
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip, kp.plan_id
+                    k.is_management, k.created_at, k.expires_at, k.revoked,
+                    k.revoked_at, k.revoked_reason, k.last_used_at,
+                    k.last_used_ip, kp.plan_id, p.name
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
+             LEFT JOIN usage_plans p ON p.id = kp.plan_id
              WHERE k.user_id = ?1
              ORDER BY k.created_at DESC"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip, kp.plan_id
+                    k.is_management, k.created_at, k.expires_at, k.revoked,
+                    k.revoked_at, k.revoked_reason, k.last_used_at,
+                    k.last_used_ip, kp.plan_id, p.name
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
+             LEFT JOIN usage_plans p ON p.id = kp.plan_id
              WHERE k.user_id = ?1 AND k.revoked = 0
              ORDER BY k.created_at DESC"
         };
@@ -587,6 +587,7 @@ impl AuthDatabase {
                     last_used_at: row.get(12)?,
                     last_used_ip: row.get(13)?,
                     plan_id: row.get(14)?,
+                    plan_name: row.get(15)?,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -634,19 +635,23 @@ impl AuthDatabase {
 
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip, kp.plan_id
+                    k.is_management, k.created_at, k.expires_at, k.revoked,
+                    k.revoked_at, k.revoked_reason, k.last_used_at,
+                    k.last_used_ip, kp.plan_id, p.name
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
+             LEFT JOIN usage_plans p ON p.id = kp.plan_id
              ORDER BY k.created_at DESC"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip, kp.plan_id
+                    k.is_management, k.created_at, k.expires_at, k.revoked,
+                    k.revoked_at, k.revoked_reason, k.last_used_at,
+                    k.last_used_ip, kp.plan_id, p.name
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
+             LEFT JOIN usage_plans p ON p.id = kp.plan_id
              WHERE k.revoked = 0
              ORDER BY k.created_at DESC"
         };
@@ -673,6 +678,7 @@ impl AuthDatabase {
                     last_used_at: row.get(12)?,
                     last_used_ip: row.get(13)?,
                     plan_id: row.get(14)?,
+                    plan_name: row.get(15)?,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -903,18 +909,6 @@ impl AuthDatabase {
         let conn = self.lock_maintenance_conn()?;
 
         let now = Self::now();
-
-        // If a default TTL is configured, backfill expires_at for legacy keys
-        let default_ttl_seconds = self.api_key_default_ttl_seconds();
-        if default_ttl_seconds > 0 {
-            conn.execute(
-                "UPDATE api_keys
-                 SET expires_at = created_at + ?1
-                 WHERE expires_at IS NULL AND revoked = 0",
-                params![default_ttl_seconds],
-            )
-            .map_err(|e| DatabaseError::Update(e.to_string()))?;
-        }
 
         let mut total_deleted = 0usize;
         let batch_size = self.expired_api_key_cleanup_batch_size();

@@ -8,9 +8,9 @@ use crate::{
 use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
-use ave_common::identity::{PublicKey, Signed};
+use ave_common::identity::{HashAlgorithm, PublicKey, Signed, hash_borsh};
 
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction,
@@ -32,6 +32,7 @@ pub struct EvalCoordinator {
     request_id: String,
     version: u64,
     network: Arc<NetworkSender>,
+    hash: HashAlgorithm,
 }
 
 impl EvalCoordinator {
@@ -40,13 +41,75 @@ impl EvalCoordinator {
         request_id: String,
         version: u64,
         network: Arc<NetworkSender>,
+        hash: HashAlgorithm,
     ) -> Self {
         Self {
             node_key,
             request_id,
             version,
             network,
+            hash,
         }
+    }
+
+    fn verify_result_response(
+        &self,
+        result: &super::response::EvaluationResult,
+        result_hash: &ave_common::identity::DigestIdentifier,
+        result_hash_signature: &ave_common::identity::Signature,
+    ) -> Result<(), ActorError> {
+        let hash = hash_borsh(&*self.hash.hasher(), result).map_err(|e| {
+            error!(
+                msg_type = "NetworkResponse",
+                error = %e,
+                "Failed to create evaluation result hash"
+            );
+
+            ActorError::Functional {
+                description: format!("Can not verify signature: {}", e),
+            }
+        })?;
+
+        if &hash != result_hash {
+            error!(
+                msg_type = "NetworkResponse",
+                result_hash = %result_hash,
+                generated_hash = %hash,
+                "Result hash is invalid"
+            );
+
+            return Err(ActorError::Functional {
+                description: "Result hash is invalid".to_string(),
+            });
+        }
+
+        result_hash_signature.verify(result_hash).map_err(|e| {
+            error!(
+                msg_type = "NetworkResponse",
+                error = %e,
+                "Failed to verify evaluation result hash signature"
+            );
+
+            ActorError::Functional {
+                description: format!("Can not verify signature: {}", e),
+            }
+        })?;
+
+        if result_hash_signature.signer != self.node_key {
+            error!(
+                msg_type = "NetworkResponse",
+                expected_signer = %self.node_key,
+                actual_signer = %result_hash_signature.signer,
+                "Evaluation result hash signature signer mismatch"
+            );
+
+            return Err(ActorError::Functional {
+                description: "Evaluation result hash signature signer mismatch"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -58,7 +121,7 @@ pub enum EvalCoordinatorMessage {
         node_key: PublicKey,
     },
     NetworkResponse {
-        evaluation_res: Box<Signed<EvaluationRes>>,
+        evaluation_res: Box<EvaluationRes>,
         request_id: String,
         version: u64,
         sender: PublicKey,
@@ -93,8 +156,10 @@ impl Handler<Self> for EvalCoordinator {
     ) -> Result<(), ActorError> {
         match msg {
             EvalCoordinatorMessage::EndRetry => {
-                debug!(
+                warn!(
                     node_key = %self.node_key,
+                    request_id = %self.request_id,
+                    version = self.version,
                     "Retry exhausted, notifying parent and stopping"
                 );
 
@@ -103,7 +168,6 @@ impl Handler<Self> for EvalCoordinator {
                         if let Err(e) = evaluation_actor
                             .tell(EvaluationMessage::Response {
                                 evaluation_res: EvaluationRes::TimeOut,
-                                signature: None,
                                 sender: self.node_key.clone(),
                             })
                             .await
@@ -224,33 +288,31 @@ impl Handler<Self> for EvalCoordinator {
                 sender,
             } => {
                 if request_id == self.request_id && version == self.version {
-                    if self.node_key != sender
-                        || sender != evaluation_res.signature().signer
-                    {
+                    if self.node_key != sender {
                         error!(
                             msg_type = "NetworkResponse",
                             expected_node = %self.node_key,
-                            sender = %sender,
-                            signer = %evaluation_res.signature().signer,
+                            network_sender = %sender,
                             "Evaluation response sender mismatch"
                         );
                         return Err(ActorError::Functional {
-                            description: "We received an evaluation where the request indicates one subject but the info indicates another".to_string()
+                            description:
+                                "We received an evaluation response from an unexpected sender"
+                                    .to_string(),
                         });
                     }
 
-                    if let Err(e) = evaluation_res.verify() {
-                        error!(
-                            msg_type = "NetworkResponse",
-                            error = %e,
-                            "Failed to verify evaluation response signature"
-                        );
-                        return Err(ActorError::Functional {
-                            description: format!(
-                                "Can not verify signature: {}",
-                                e
-                            ),
-                        });
+                    if let EvaluationRes::Response {
+                        result,
+                        result_hash,
+                        result_hash_signature,
+                    } = &*evaluation_res
+                    {
+                        self.verify_result_response(
+                            result,
+                            result_hash,
+                            result_hash_signature,
+                        )?;
                     }
 
                     // Evaluation actor.
@@ -258,13 +320,8 @@ impl Handler<Self> for EvalCoordinator {
                         Ok(evaluation_actor) => {
                             if let Err(e) = evaluation_actor
                                 .tell(EvaluationMessage::Response {
-                                    evaluation_res: evaluation_res
-                                        .content()
-                                        .clone(),
+                                    evaluation_res: *evaluation_res,
                                     sender: self.node_key.clone(),
-                                    signature: Some(
-                                        evaluation_res.signature().clone(),
-                                    ),
                                 })
                                 .await
                             {
@@ -279,6 +336,7 @@ impl Handler<Self> for EvalCoordinator {
                         Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
+                                error = %e,
                                 path = %ctx.path().parent(),
                                 "Evaluation actor not found"
                             );
@@ -292,12 +350,17 @@ impl Handler<Self> for EvalCoordinator {
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
+                            debug!(
+                                msg_type = "NetworkResponse",
+                                sender = %sender,
+                                "Retry actor not found while closing evaluation coordinator"
+                            );
                             // Aquí me da igual, porque al parar este actor para el hijo
                             break 'retry;
                         };
 
                         if let Err(e) = retry.tell(RetryMessage::End).await {
-                            error!(
+                            warn!(
                                 msg_type = "NetworkResponse",
                                 error = %e,
                                 "Failed to end retry actor"

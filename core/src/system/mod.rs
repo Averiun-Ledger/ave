@@ -2,7 +2,10 @@ pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
-    config::{Config, GovernanceSyncConfig, SinkAuth, TrackerSyncConfig},
+    config::{
+        Config, GovernanceSyncConfig, RebootSyncConfig, SinkAuth,
+        TrackerSyncConfig, UpdateSyncConfig,
+    },
     db::Database,
     external_db::DBManager,
     helpers::{db::ExternalDB, sink::AveSink},
@@ -26,8 +29,12 @@ pub struct ConfigHelper {
     pub always_accept: bool,
     pub safe_mode: bool,
     pub tracking_size: usize,
+    pub only_clear_events: bool,
+    pub ledger_batch_size: usize,
     pub sync_governance: GovernanceSyncConfig,
     pub sync_tracker: TrackerSyncConfig,
+    pub sync_update: UpdateSyncConfig,
+    pub sync_reboot: RebootSyncConfig,
 }
 
 impl From<Config> for ConfigHelper {
@@ -37,8 +44,12 @@ impl From<Config> for ConfigHelper {
             always_accept: value.always_accept,
             safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
+            only_clear_events: value.only_clear_events,
+            ledger_batch_size: value.sync.ledger_batch_size,
             sync_governance: value.sync.governance,
             sync_tracker: value.sync.tracker,
+            sync_update: value.sync.update,
+            sync_reboot: value.sync.reboot,
         }
     }
 }
@@ -141,8 +152,13 @@ pub async fn system(
 #[cfg(test)]
 pub mod tests {
 
+    use std::{
+        env, process,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use network::Config as NetworkConfig;
+    use ave_network::Config as NetworkConfig;
     use tempfile::TempDir;
     use test_log::test;
 
@@ -152,6 +168,19 @@ pub mod tests {
     };
 
     use super::*;
+
+    static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn create_contracts_temp_dir() -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!(
+                "ave-test-contracts-{}-{}-",
+                process::id(),
+                CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ))
+            .tempdir_in(env::temp_dir())
+            .expect("Can not create temporal directory")
+    }
 
     #[derive(Debug, Clone)]
     pub struct Dummy;
@@ -180,13 +209,12 @@ pub mod tests {
         let ext_path = dir_ext_db.path().to_path_buf();
         vec_dirs.push(dir_ext_db);
 
-        let dir_contracts =
-            tempfile::tempdir().expect("Can not create temporal directory");
+        let dir_contracts = create_contracts_temp_dir();
         let contracts_path = dir_contracts.path().to_path_buf();
         vec_dirs.push(dir_contracts);
 
         let newtork_config = NetworkConfig::new(
-            network::NodeType::Bootstrap,
+            ave_network::NodeType::Bootstrap,
             vec![],
             vec![],
             vec![],
@@ -208,6 +236,7 @@ pub mod tests {
             tracking_size: 100,
             safe_mode: false,
             is_service: true,
+            only_clear_events: false,
             sync: SyncConfig {
                 governance: GovernanceSyncConfig {
                     interval_secs: 60,
@@ -221,6 +250,9 @@ pub mod tests {
                     update_batch_size: 2,
                     update_timeout_secs: 10,
                 },
+                update: UpdateSyncConfig::default(),
+                reboot: RebootSyncConfig::default(),
+                ledger_batch_size: 100,
             },
             spec: None,
         };

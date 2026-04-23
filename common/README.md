@@ -13,7 +13,7 @@ license.
 
 ```toml
 [dependencies]
-ave-common = "0.8.0"
+ave-common = "0.9.0"
 ```
 
 ## What it includes
@@ -32,6 +32,9 @@ ave-common = "0.8.0"
 - `typescript`: derives TypeScript definitions
 
 Default features enable `common`.
+
+The `openapi` and `typescript` features are intended to keep HTTP schemas and
+the generated `ave-common` npm package aligned with the Rust source types.
 
 ## Basic example
 

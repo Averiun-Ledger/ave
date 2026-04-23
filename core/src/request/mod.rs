@@ -36,9 +36,12 @@ use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
-use crate::model::common::subject::{get_gov, get_version};
+use crate::model::common::subject::{
+    get_gov, get_tracker_visibility_state, get_version,
+};
 use crate::model::common::{
     check_subject_creation, emit_fail, send_to_tracking,
+    viewpoints::validate_fact_viewpoints,
 };
 use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
 use crate::request::manager::InitRequestManager;
@@ -108,7 +111,7 @@ impl BorshDeserialize for RequestHandler {
 }
 
 impl RequestHandler {
-    async fn check_signature(
+    async fn check_signer_authorization(
         ctx: &mut ActorContext<Self>,
         our_key: PublicKey,
         signer: PublicKey,
@@ -116,6 +119,42 @@ impl RequestHandler {
         event_request: &EventRequestType,
         subject_data: SubjectData,
     ) -> Result<(), ActorError> {
+        let gov = if matches!(subject_data, SubjectData::Tracker { .. })
+            || matches!(event_request, EventRequestType::Fact)
+        {
+            Some(get_gov(ctx, governance_id).await?)
+        } else {
+            None
+        };
+
+        if let SubjectData::Tracker {
+            schema_id,
+            namespace,
+            ..
+        } = &subject_data
+        {
+            let Some(gov) = gov.as_ref() else {
+                return Err(ActorError::FunctionalCritical {
+                    description:
+                        "Governance required for tracker signer authorization"
+                            .to_owned(),
+                });
+            };
+
+            if !gov.has_this_role(HashThisRole::Schema {
+                who: our_key.clone(),
+                role: RoleTypes::Creator,
+                schema_id: schema_id.clone(),
+                namespace: Namespace::from(namespace.clone()),
+            }) {
+                return Err(ActorError::Functional {
+                    description:
+                        "In tracker events, the node has to be a creator"
+                            .to_string(),
+                });
+            }
+        }
+
         match event_request {
             EventRequestType::Create
             | EventRequestType::Transfer
@@ -126,41 +165,54 @@ impl RequestHandler {
                     return Err(ActorError::Functional { description: "In the events of Create, Transfer, Confirm, Reject or EOL, the event must be signed by the node".to_string() });
                 }
             }
-            EventRequestType::Fact => {
-                let gov = get_gov(ctx, governance_id).await?;
-                match subject_data {
-                    SubjectData::Tracker {
+            EventRequestType::Fact => match subject_data {
+                SubjectData::Tracker {
+                    schema_id,
+                    namespace,
+                    ..
+                } => {
+                    let Some(gov) = gov.as_ref() else {
+                        return Err(ActorError::FunctionalCritical {
+                            description:
+                                "Governance required for fact signer authorization"
+                                    .to_owned(),
+                        });
+                    };
+
+                    if !gov.has_this_role(HashThisRole::Schema {
+                        who: signer,
+                        role: RoleTypes::Issuer,
                         schema_id,
-                        namespace,
-                        ..
-                    } => {
-                        if !gov.has_this_role(HashThisRole::Schema {
-                            who: signer,
-                            role: RoleTypes::Issuer,
-                            schema_id,
-                            namespace: Namespace::from(namespace),
-                        }) {
-                            return Err(ActorError::Functional {
+                        namespace: Namespace::from(namespace),
+                    }) {
+                        return Err(ActorError::Functional {
                             description:
                                 "In fact events, the signer has to be an issuer"
                                     .to_string(),
                         });
-                        }
-                    }
-                    SubjectData::Governance { .. } => {
-                        if !gov.has_this_role(HashThisRole::Gov {
-                            who: signer,
-                            role: RoleTypes::Issuer,
-                        }) {
-                            return Err(ActorError::Functional {
-                            description:
-                                "In fact events, the signer has to be an issuer"
-                                    .to_string(),
-                        });
-                        }
                     }
                 }
-            }
+                SubjectData::Governance { .. } => {
+                    let Some(gov) = gov.as_ref() else {
+                        return Err(ActorError::FunctionalCritical {
+                            description:
+                                "Governance required for fact signer authorization"
+                                    .to_owned(),
+                        });
+                    };
+
+                    if !gov.has_this_role(HashThisRole::Gov {
+                        who: signer,
+                        role: RoleTypes::Issuer,
+                    }) {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In fact events, the signer has to be an issuer"
+                                    .to_string(),
+                        });
+                    }
+                }
+            },
         }
 
         Ok(())
@@ -427,6 +479,12 @@ impl RequestHandler {
                 }
             }
             EventRequest::Fact(fact_request) => {
+                if is_gov && !fact_request.viewpoints.is_empty() {
+                    return Err(
+                        RequestHandlerError::GovFactViewpointsNotAllowed,
+                    );
+                }
+
                 if is_gov
                     && serde_json::from_value::<GovernanceEvent>(
                         fact_request.payload.0.clone(),
@@ -437,6 +495,76 @@ impl RequestHandler {
                 }
             }
             EventRequest::Reject(..) | EventRequest::EOL(..) => {}
+        }
+
+        Ok(())
+    }
+
+    async fn check_fact_viewpoints(
+        ctx: &mut ActorContext<Self>,
+        request: &EventRequest,
+        subject_data: &SubjectData,
+    ) -> Result<(), RequestHandlerError> {
+        let EventRequest::Fact(fact_request) = request else {
+            return Ok(());
+        };
+
+        match subject_data {
+            SubjectData::Governance { .. } => validate_fact_viewpoints(
+                &fact_request.viewpoints,
+                &ave_common::SchemaType::Governance,
+                None,
+            )
+            .map_err(RequestHandlerError::InvalidTrackerFactViewpoints),
+            SubjectData::Tracker {
+                governance_id,
+                schema_id,
+                ..
+            } => {
+                let governance = get_gov(ctx, governance_id).await?;
+                let Some(schema) = governance.schemas.get(schema_id) else {
+                    return Err(RequestHandlerError::Actor(
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "schema {} not found in governance {} while validating fact viewpoints",
+                                schema_id, governance_id
+                            ),
+                        },
+                    ));
+                };
+
+                validate_fact_viewpoints(
+                    &fact_request.viewpoints,
+                    schema_id,
+                    Some(&schema.viewpoints),
+                )
+                .map_err(RequestHandlerError::InvalidTrackerFactViewpoints)
+            }
+        }
+    }
+
+    async fn check_tracker_ledger_full(
+        ctx: &mut ActorContext<Self>,
+        request: &EventRequest,
+        subject_data: &SubjectData,
+    ) -> Result<(), RequestHandlerError> {
+        let SubjectData::Tracker { governance_id, .. } = subject_data else {
+            return Ok(());
+        };
+
+        if matches!(request, EventRequest::Create(..)) {
+            return Ok(());
+        }
+
+        let subject_id = request.get_subject_id();
+        let visibility_state =
+            get_tracker_visibility_state(ctx, governance_id, &subject_id)
+                .await?;
+
+        if !visibility_state.is_full() {
+            return Err(RequestHandlerError::TrackerLedgerNotFull(
+                subject_id.to_string(),
+            ));
         }
 
         Ok(())
@@ -683,7 +811,10 @@ impl RequestHandler {
             ));
         }
 
-        Self::check_signature(
+        Self::check_tracker_ledger_full(ctx, request.content(), &subject_data)
+            .await?;
+
+        Self::check_signer_authorization(
             ctx,
             our_key,
             signer.clone(),
@@ -692,6 +823,9 @@ impl RequestHandler {
             subject_data.clone(),
         )
         .await?;
+
+        Self::check_fact_viewpoints(ctx, request.content(), &subject_data)
+            .await?;
 
         Self::check_creation(ctx, subject_data, &event_request_type, signer)
             .await?;
@@ -1183,6 +1317,21 @@ impl Handler<Self> for RequestHandler {
                     ));
                 }
 
+                if let Err(e) = Self::check_tracker_ledger_full(
+                    ctx,
+                    request.content(),
+                    &subject_data,
+                )
+                .await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Tracker full ledger check failed"
+                    );
+                    return Err(ActorError::from(e));
+                }
+
                 if let Err(e) =
                     Self::check_event_request(request.content(), is_gov)
                 {
@@ -1194,7 +1343,22 @@ impl Handler<Self> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                if let Err(e) = Self::check_signature(
+                if let Err(e) = Self::check_fact_viewpoints(
+                    ctx,
+                    request.content(),
+                    &subject_data,
+                )
+                .await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Fact viewpoints validation failed"
+                    );
+                    return Err(ActorError::from(e));
+                }
+
+                if let Err(e) = Self::check_signer_authorization(
                     ctx,
                     (*self.our_key).clone(),
                     signer.clone(),

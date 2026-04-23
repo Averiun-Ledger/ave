@@ -9,26 +9,31 @@ use common::{
     get_subject,
 };
 
+use ave_network::{NodeType, RoutingNode};
 use futures::future::join_all;
-use network::{NodeType, RoutingNode};
 use serde_json::json;
 use std::time::Duration;
 use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;
 
-use crate::common::{PORT_COUNTER, create_node, node_running};
+use crate::common::{
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
+    create_node, node_running,
+};
+
+const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
 #[test(tokio::test)]
 // Recibe la copia de un sujeto sin tener la gobernanza
 async fn test_witeness_not_gov() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
@@ -99,7 +104,7 @@ async fn test_witeness_not_gov() {
                                     "name": "Alice",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Bob", "Witnesses"],
+                                    "witnesses": [{"name": "Bob", "viewpoints": ["AllViewpoints"]}, {"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 }
                             ],
                             "issuer": [
@@ -158,14 +163,14 @@ async fn test_witeness_not_gov() {
 
 #[test(tokio::test)]
 async fn test_not_access() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let witness_alice = &nodes[1].api;
     let witness_bob = &nodes[2].api;
@@ -233,7 +238,7 @@ async fn test_not_access() {
                                     "name": "Alice",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Owner"],
+                                    "witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Bob",
@@ -273,7 +278,7 @@ async fn test_not_access() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -300,7 +305,7 @@ async fn test_not_access() {
     .await
     .unwrap();
 
-    let state = get_subject(witness_alice, subject_id_1.clone(), Some(0))
+    let state = get_subject(witness_alice, subject_id_1.clone(), Some(0), true)
         .await
         .unwrap();
 
@@ -354,14 +359,14 @@ async fn test_not_access() {
 
 #[test(tokio::test)]
 async fn test_basic_access() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
@@ -429,7 +434,7 @@ async fn test_basic_access() {
                                     "name": "Alice",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Owner"],
+                                    "witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Bob",
@@ -505,11 +510,11 @@ async fn test_basic_access() {
     .await
     .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -523,17 +528,14 @@ async fn test_basic_access() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -558,7 +560,7 @@ async fn test_basic_access() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(1))
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -585,7 +587,7 @@ async fn test_basic_access() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -614,7 +616,7 @@ async fn test_basic_access() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -643,7 +645,7 @@ async fn test_basic_access() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 }
@@ -653,14 +655,14 @@ async fn test_basic_access() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_transfers() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
@@ -856,7 +858,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -864,10 +866,10 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(3))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(3), true)
         .await
         .unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(3))
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -880,15 +882,16 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     witness_alice
         .auth_subject(
@@ -902,9 +905,10 @@ async fn test_basic_transfers() {
         .update_subject(subject_id_3.clone())
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     emit_transfer(
         &witness_bob,
@@ -928,18 +932,20 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(5))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_3.clone(), Some(5), true)
+            .await
+            .unwrap();
 
     emit_confirm(&witness_charlie, subject_id_3.clone(), None, true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(6))
-        .await
-        .unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(6))
+    let _state =
+        get_subject(&witness_charlie, subject_id_3.clone(), Some(6), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -952,13 +958,14 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(7))
+    let _state =
+        get_subject(&witness_charlie, subject_id_3.clone(), Some(7), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(7), true)
         .await
         .unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(7))
-        .await
-        .unwrap();
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(5))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -974,7 +981,7 @@ async fn test_basic_transfers() {
         .update_subject(subject_id_3.clone())
         .await
         .unwrap();
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -1011,7 +1018,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -1019,10 +1026,10 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(3))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(3), true)
         .await
         .unwrap();
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(3))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -1035,15 +1042,16 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     witness_alice
         .auth_subject(
@@ -1057,9 +1065,10 @@ async fn test_basic_transfers() {
         .update_subject(subject_id_1.clone())
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     // T08: A→B reject. N=B (propuesto rechazado) sin testigos → acceso hasta old_data.sn
     //
@@ -1093,7 +1102,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -1114,13 +1123,14 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(3))
-        .await
-        .unwrap();
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(3))
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(3), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -1143,17 +1153,14 @@ async fn test_basic_transfers() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -1175,7 +1182,7 @@ async fn test_basic_transfers() {
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(1))
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -1195,7 +1202,7 @@ async fn test_basic_transfers() {
 
     new_bob.update_subject(subject_id_2.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -1220,17 +1227,14 @@ async fn test_basic_transfers() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -1245,17 +1249,14 @@ async fn test_basic_transfers() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
@@ -1279,7 +1280,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(1))
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert!(
@@ -1300,7 +1301,7 @@ async fn test_basic_transfers() {
         .update_subject(subject_id_3.clone())
         .await
         .unwrap();
-    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(3))
+    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -1319,7 +1320,7 @@ async fn test_basic_transfers() {
         .unwrap();
 
     new_bob.update_subject(subject_id_3.clone()).await.unwrap();
-    let _state = get_subject(&new_bob, subject_id_3.clone(), Some(6))
+    let _state = get_subject(&new_bob, subject_id_3.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -1342,9 +1343,10 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, governance_id.clone(), Some(1))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     assert!(
         new_charlie
             .get_subject_state(subject_id_3.clone())
@@ -1363,7 +1365,7 @@ async fn test_basic_transfers() {
         .update_subject(subject_id_3.clone())
         .await
         .unwrap();
-    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(7))
+    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(7), true)
         .await
         .unwrap();
 }
@@ -1373,14 +1375,14 @@ async fn test_basic_transfers() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_explicit_witness() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -1454,13 +1456,13 @@ async fn test_basic_explicit_witness() {
                                     "name": "Alice",
                                     "namespace": ["Test1"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Bob"],
+                                    "witnesses": [{"name": "Bob", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Alice",
                                     "namespace": ["Test2"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Bob"],
+                                    "witnesses": [{"name": "Bob", "viewpoints": ["AllViewpoints"]}],
                                 },
                             ],
                             "issuer": [
@@ -1509,7 +1511,7 @@ async fn test_basic_explicit_witness() {
     // Verificación:
     //   witness_node.auth_subject → recibe hasta sn=5
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -1556,12 +1558,12 @@ async fn test_basic_explicit_witness() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test1"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 },
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -1584,15 +1586,16 @@ async fn test_basic_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(2))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -1606,17 +1609,14 @@ async fn test_basic_explicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -1638,7 +1638,7 @@ async fn test_basic_explicit_witness() {
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(3))
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -1658,7 +1658,7 @@ async fn test_basic_explicit_witness() {
 
     new_bob.update_subject(subject_id_1.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -1735,14 +1735,14 @@ async fn test_basic_explicit_witness() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_implicit_witness() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -1884,15 +1884,16 @@ async fn test_basic_implicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(1))
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -1924,15 +1925,16 @@ async fn test_basic_implicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(1))
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(1))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -1986,15 +1988,16 @@ async fn test_basic_implicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(2))
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(2))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -2008,17 +2011,14 @@ async fn test_basic_implicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -2040,7 +2040,7 @@ async fn test_basic_implicit_witness() {
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(3))
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -2060,7 +2060,7 @@ async fn test_basic_implicit_witness() {
 
     new_bob.update_subject(subject_id_2.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -2080,7 +2080,7 @@ async fn test_basic_implicit_witness() {
 
     new_bob.update_subject(subject_id_1.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -2147,14 +2147,14 @@ async fn test_basic_implicit_witness() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_explicit_witness() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -2233,7 +2233,7 @@ async fn test_explicit_witness() {
                                     "name": "Bob",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Alice", "Witnesses"],
+                                    "witnesses": [{"name": "Alice", "viewpoints": ["AllViewpoints"]}, {"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                             ],
                             "issuer": [
@@ -2307,7 +2307,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -2325,17 +2325,18 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     // T18: N fue owner, fue testigo explícito de B(nuevo), intervalo [gov_v3,gov_v7]
     //      cubre new_owner_gov_version=gov_v5 → max(sn_at_gov_v7, old_data.sn)
@@ -2409,7 +2410,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -2427,17 +2428,18 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_3.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     let json = json!({
         "roles": {
@@ -2450,7 +2452,7 @@ async fn test_explicit_witness() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -2474,17 +2476,18 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(5))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(5), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(5))
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(5), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_3.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     nodes[1].token.cancel();
     join_all(nodes[1].handler.iter_mut()).await;
@@ -2496,17 +2499,14 @@ async fn test_explicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (mut node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -2531,7 +2531,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(3))
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -2554,7 +2554,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -2577,7 +2577,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -2646,7 +2646,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -2664,7 +2664,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -2681,13 +2681,13 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -2701,17 +2701,14 @@ async fn test_explicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_alice.keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(node_new_alice.keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -2736,7 +2733,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(4))
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -2759,7 +2756,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 }
@@ -2769,14 +2766,14 @@ async fn test_explicit_witness() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_explicit_witness_2() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -2865,7 +2862,7 @@ async fn test_explicit_witness_2() {
                                     "name": "Alice",
                                     "namespace": ["Test1"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Charlie", "Witnesses"],
+                                    "witnesses": [{"name": "Charlie", "viewpoints": ["AllViewpoints"]}, {"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Alice",
@@ -2950,7 +2947,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -2968,21 +2965,23 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_1.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_1.clone(), Some(2), true)
+            .await
+            .unwrap();
 
     witness_charlie
         .auth_subject(
@@ -2997,9 +2996,10 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_1.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_1.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     // T21: N testigo activo de B, pero actual_lo > B.interval.hi
     //      (N se convirtió en testigo DESPUÉS de que B dejara de ser owner) → sin acceso
@@ -3053,7 +3053,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -3071,17 +3071,18 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert!(
         witness_charlie
@@ -3101,7 +3102,7 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3180,7 +3181,7 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3216,7 +3217,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -3234,21 +3235,23 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(1))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_3.clone(), Some(1), true)
+            .await
+            .unwrap();
 
     nodes[3].token.cancel();
     join_all(nodes[3].handler.iter_mut()).await;
@@ -3260,17 +3263,14 @@ async fn test_explicit_witness_2() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api.clone();
     node_running(&new_charlie).await.unwrap();
@@ -3295,9 +3295,10 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert!(
         new_charlie
@@ -3318,7 +3319,135 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1))
+    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+async fn test_explicit_witness_2_1() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_charlie],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Bob",
+                                    "namespace": ["Test1"],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": ["Test2"],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Alice",
+                                    "namespace": ["Test1"],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Charlie", "viewpoints": ["AllViewpoints"]}, {"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Alice",
+                                    "namespace": ["Test2"],
+                                    "quantity": "infinity",
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -3375,7 +3504,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_4.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_4.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -3393,26 +3522,27 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_4.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_4.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_4.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_4.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_4.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_4.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_4.clone())
             .await
             .is_err()
     );
 
-    new_charlie
+    witness_charlie
         .auth_subject(
             subject_id_4.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
@@ -3420,7 +3550,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .update_subject(subject_id_4.clone())
         .await
         .unwrap();
@@ -3428,7 +3558,7 @@ async fn test_explicit_witness_2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_4.clone())
             .await
             .is_err()
@@ -3453,12 +3583,12 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Owner"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 },
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Owner"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3513,7 +3643,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_5.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_5.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -3530,17 +3660,18 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_5.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_5.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_5.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_5.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_5.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_5.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     // gov_v sube a 4: añadir Charlie como testigo general del schema
     // actual_lo = 4 > Alice.interval.hi = 3 → sin acceso
@@ -3566,13 +3697,13 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_5.clone())
             .await
             .is_err()
     );
 
-    new_charlie
+    witness_charlie
         .auth_subject(
             subject_id_5.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
@@ -3580,7 +3711,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .update_subject(subject_id_5.clone())
         .await
         .unwrap();
@@ -3588,7 +3719,7 @@ async fn test_explicit_witness_2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_5.clone())
             .await
             .is_err()
@@ -3612,7 +3743,7 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 },
                             ]
                         },
@@ -3667,7 +3798,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_6.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_6.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -3684,24 +3815,26 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_6.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_6.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_6.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_6.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_6.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_6.clone(), Some(3), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_6.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_6.clone(), Some(2), true)
+            .await
+            .unwrap();
 
-    node_new_charlie.token.cancel();
-    join_all(node_new_charlie.handler.iter_mut()).await;
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let listen_address = format!("/memory/{}", port);
@@ -3710,17 +3843,14 @@ async fn test_explicit_witness_2() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie_2, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie_2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_charlie.keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie_2 = node_new_charlie_2.api;
     node_running(&new_charlie_2).await.unwrap();
@@ -3745,9 +3875,10 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie_2, governance_id.clone(), Some(6))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie_2, governance_id.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     assert!(
         new_charlie_2
@@ -3768,9 +3899,10 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie_2, subject_id_6.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie_2, subject_id_6.clone(), Some(3), true)
+            .await
+            .unwrap();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3778,14 +3910,14 @@ async fn test_explicit_witness_2() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_range() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -3859,7 +3991,7 @@ async fn test_range() {
                                     "name": "Alice",
                                     "namespace": ["Test1"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses", "Bob"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Bob", "viewpoints": ["AllViewpoints"]}],
                                 }
                             ],
                             "issuer": [
@@ -3960,7 +4092,7 @@ async fn test_range() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test1"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4008,7 +4140,7 @@ async fn test_range() {
                                     "name": "Alice",
                                     "namespace": ["Test2"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses", "Bob"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Bob", "viewpoints": ["AllViewpoints"]}],
                                 }
                             ],
                         }
@@ -4043,7 +4175,7 @@ async fn test_range() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4077,17 +4209,14 @@ async fn test_range() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -4109,7 +4238,7 @@ async fn test_range() {
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(6))
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -4129,13 +4258,14 @@ async fn test_range() {
 
     new_bob.update_subject(subject_id_1.clone()).await.unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
-        .await
-        .unwrap();
-    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1))
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(2), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -4155,13 +4285,14 @@ async fn test_range() {
 
     new_bob.update_subject(subject_id_2.clone()).await.unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(1))
-        .await
-        .unwrap();
-    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(0))
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(0), true)
         .await
         .unwrap();
 }
@@ -4171,14 +4302,14 @@ async fn test_range() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_ns_schema() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -4266,13 +4397,13 @@ async fn test_ns_schema() {
                                     "name": "Alice",
                                     "namespace": ["Org", "Team"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Alice",
                                     "namespace": ["Org"],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 }
                             ],
                             "issuer": [
@@ -4363,15 +4494,16 @@ async fn test_ns_schema() {
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(1), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(1))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(1), true)
+            .await
+            .unwrap();
 
     // T33: N testigo con namespace "org/team", sujeto en namespace "org" → sin acceso
     //      (descendiente no es ancestro)
@@ -4439,12 +4571,13 @@ async fn test_ns_schema() {
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(1))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(1), true)
+            .await
+            .unwrap();
 
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -4504,7 +4637,7 @@ async fn test_ns_schema() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(1))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -4537,14 +4670,14 @@ async fn test_ns_schema() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_multi_source() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -4623,13 +4756,13 @@ async fn test_multi_source() {
                                     "name": "Alice",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Bob",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                             ],
                             "issuer": [
@@ -4695,7 +4828,7 @@ async fn test_multi_source() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Alice"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Alice", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4731,7 +4864,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -4749,17 +4882,18 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     nodes[1].token.cancel();
     join_all(nodes[1].handler.iter_mut()).await;
@@ -4771,17 +4905,14 @@ async fn test_multi_source() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -4806,7 +4937,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(2))
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -4829,7 +4960,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -4862,7 +4993,7 @@ async fn test_multi_source() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Owner", "Charlie"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4913,7 +5044,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -4931,21 +5062,22 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_2.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_2.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     nodes[3].token.cancel();
     join_all(nodes[3].handler.iter_mut()).await;
@@ -4957,17 +5089,14 @@ async fn test_multi_source() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (mut node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
@@ -4992,9 +5121,10 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert!(
         new_charlie
@@ -5015,7 +5145,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&new_charlie, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -5046,15 +5176,15 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(1))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(1), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(1))
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(1), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1))
+    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -5069,7 +5199,7 @@ async fn test_multi_source() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Owner"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -5093,17 +5223,14 @@ async fn test_multi_source() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_charlie.keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(node_new_charlie.keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
@@ -5128,9 +5255,10 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, governance_id.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie, governance_id.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     assert!(
         new_charlie
@@ -5151,7 +5279,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1))
+    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1), true)
         .await
         .unwrap();
 }
@@ -5161,14 +5289,14 @@ async fn test_multi_source() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_more_cases() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -5257,19 +5385,19 @@ async fn test_more_cases() {
                                     "name": "Alice",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Bob",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses", "Dali"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Dali", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Charlie",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                             ],
                             "issuer": [
@@ -5350,7 +5478,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -5389,9 +5517,10 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_charlie, subject_id_1.clone(), Some(5))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_1.clone(), Some(5), true)
+            .await
+            .unwrap();
 
     emit_confirm(&witness_charlie, subject_id_1.clone(), None, true)
         .await
@@ -5406,16 +5535,18 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(6), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(5))
-        .await
-        .unwrap();
-    let _state = get_subject(&witness_dali, subject_id_1.clone(), Some(5))
-        .await
-        .unwrap();
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(7))
+    let _state =
+        get_subject(&witness_dali, subject_id_1.clone(), Some(5), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(7), true)
         .await
         .unwrap();
 
@@ -5429,17 +5560,14 @@ async fn test_more_cases() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_dali, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (mut node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[4].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[4].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_dali = node_new_dali.api;
     node_running(&new_dali).await.unwrap();
@@ -5464,7 +5592,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_dali, governance_id.clone(), Some(1))
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -5484,7 +5612,7 @@ async fn test_more_cases() {
 
     new_dali.update_subject(subject_id_1.clone()).await.unwrap();
 
-    let _state = get_subject(&new_dali, subject_id_1.clone(), Some(6))
+    let _state = get_subject(&new_dali, subject_id_1.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -5544,7 +5672,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -5565,9 +5693,10 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -5579,16 +5708,17 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(4))
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(4), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&new_dali, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
-    let _state = get_subject(&new_dali, subject_id_2.clone(), Some(3))
-        .await
-        .unwrap();
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -5602,17 +5732,14 @@ async fn test_more_cases() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_dali, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_dali.keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(node_new_dali.keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_dali = node_new_dali.api;
     node_running(&new_dali).await.unwrap();
@@ -5637,7 +5764,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_dali, governance_id.clone(), Some(1))
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -5657,7 +5784,146 @@ async fn test_more_cases() {
 
     new_dali.update_subject(subject_id_2.clone()).await.unwrap();
 
-    let _state = get_subject(&new_dali, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&new_dali, subject_id_2.clone(), Some(3), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+async fn test_more_cases_1_1() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+    let witness_dali = nodes[4].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![
+            &witness_alice,
+            &witness_bob,
+            &witness_charlie,
+            &witness_dali,
+        ],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                },
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie", "Dali"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Dali", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Charlie",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Alice", "viewpoints": ["AllViewpoints"]}]
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Charlie",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -5677,31 +5943,6 @@ async fn test_more_cases() {
     //   N.auth_subject → recibe hasta data.sn
     //   (check_current_owner para A devuelve ActualSearch::End inmediatamente,
     //    sin evaluar el rol de old_owner ni el testigo de B)
-
-    let json = json!({
-        "roles": {
-            "schema":
-                [
-                {
-                    "schema_id": "Example",
-                        "change": {
-                            "creator": [
-                                {
-                                    "actual_name": "Charlie",
-                                    "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Alice"]
-                                }
-                            ]
-                        },
-
-                }
-            ]
-        }
-    });
-
-    emit_fact(&owner, governance_id.clone(), json, true)
-        .await
-        .unwrap();
 
     let (subject_id_3, ..) = create_subject(
         &witness_alice,
@@ -5744,7 +5985,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2))
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -5761,6 +6002,14 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
+    witness_charlie
+        .auth_subject(
+            subject_id_3.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
     emit_transfer(
         &witness_bob,
         subject_id_3.clone(),
@@ -5770,22 +6019,10 @@ async fn test_more_cases() {
     .await
     .unwrap();
 
-    witness_charlie
-        .auth_subject(
-            subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
-        )
-        .await
-        .unwrap();
-
-    witness_charlie
-        .update_subject(subject_id_3.clone())
-        .await
-        .unwrap();
-
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(5))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_3.clone(), Some(5), true)
+            .await
+            .unwrap();
 
     emit_confirm(&witness_charlie, subject_id_3.clone(), None, true)
         .await
@@ -5796,20 +6033,23 @@ async fn test_more_cases() {
             "data": 300,
         }
     });
+
     emit_fact(&witness_charlie, subject_id_3.clone(), json, true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(7))
+    let _state =
+        get_subject(&witness_alice, subject_id_3.clone(), Some(7), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6), true)
         .await
         .unwrap();
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(5))
-        .await
-        .unwrap();
-    let _state = get_subject(&new_dali, subject_id_3.clone(), Some(5))
-        .await
-        .unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(7))
+    let _state =
+        get_subject(&witness_dali, subject_id_3.clone(), Some(5), true)
+            .await
+            .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(7), true)
         .await
         .unwrap();
 
@@ -5823,17 +6063,14 @@ async fn test_more_cases() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -5858,7 +6095,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(2))
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -5881,7 +6118,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(7))
+    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(7), true)
         .await
         .unwrap();
 }
@@ -5891,14 +6128,14 @@ async fn test_more_cases() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_more_cases_2() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -5977,13 +6214,13 @@ async fn test_more_cases_2() {
                                     "name": "Alice",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                                 {
                                     "name": "Bob",
                                     "namespace": [],
                                     "quantity": "infinity",
-                                    "witnesses": ["Witnesses"],
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
                                 },
                             ],
                             "issuer": [
@@ -6059,7 +6296,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6094,7 +6331,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6118,17 +6355,19 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(3))
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(3), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(3))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&witness_charlie, subject_id_1.clone(), Some(2))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_charlie, subject_id_1.clone(), Some(2), true)
+            .await
+            .unwrap();
 
     nodes[3].token.cancel();
     join_all(nodes[3].handler.iter_mut()).await;
@@ -6140,17 +6379,14 @@ async fn test_more_cases_2() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api.clone();
     node_running(&new_charlie).await.unwrap();
@@ -6175,9 +6411,10 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_charlie, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert!(
         new_charlie
@@ -6198,7 +6435,126 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_1.clone(), Some(2))
+    let _state = get_subject(&new_charlie, subject_id_1.clone(), Some(2), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+async fn test_more_cases_2_1() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_charlie],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                },
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -6254,7 +6610,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6279,7 +6635,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6325,7 +6681,7 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -6346,9 +6702,10 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(4))
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(4), true)
+            .await
+            .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -6360,19 +6717,20 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(5))
+    let _state =
+        get_subject(&witness_alice, subject_id_2.clone(), Some(5), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(5), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(5))
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4))
-        .await
-        .unwrap();
-
-    new_charlie
+    witness_charlie
         .auth_subject(
             subject_id_2.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
@@ -6380,7 +6738,7 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .update_subject(subject_id_2.clone())
         .await
         .unwrap();
@@ -6388,7 +6746,7 @@ async fn test_more_cases_2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_2.clone())
             .await
             .is_err()
@@ -6400,14 +6758,14 @@ async fn test_more_cases_2() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_more_cases_3() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -6558,7 +6916,7 @@ async fn test_more_cases_3() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Bob"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Bob", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6584,7 +6942,7 @@ async fn test_more_cases_3() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Bob", "Owner"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Bob", "viewpoints": ["AllViewpoints"]}, {"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6608,15 +6966,1482 @@ async fn test_more_cases_3() {
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(4))
+    let _state =
+        get_subject(&witness_alice, subject_id_1.clone(), Some(4), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// Ownership encadenado con varios old_owners y cambios de Witnesses entre medias.
+//
+// Secuencia:
+//   - Alice crea el subject y emite un fact.
+//   - Alice transfiere a Bob y Bob confirma.
+//   - Bob emite un fact.
+//   - Se quita `Witnesses` de Bob y se añade tarde a Alice, cuando Alice ya
+//     es old_owner.
+//   - Bob transfiere a Charlie y Charlie confirma.
+//   - Charlie emite un fact.
+//
+// Verificación:
+//   - Dali, como schema witness, solo debe recuperar el tramo real en el que
+//     Bob estuvo autorizado con `Witnesses`.
+//   - El grant tardío sobre Alice no debe reabrir su histórico de old_owner.
+//   - El corte exacto debe quedar en sn=4.
+async fn test_chained_old_owners_witness_range_cut() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+    let witness_dali = nodes[4].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![
+            &witness_alice,
+            &witness_bob,
+            &witness_charlie,
+            &witness_dali,
+        ],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice",
+                        "Bob",
+                        "Charlie",
+                        "Dali"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Dali",
+                                "namespace": []
+                            },
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Charlie",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Alice",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": []
+                            },
+                            {
+                                "name": "Charlie",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+    let _state =
+        get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state =
+        get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state =
+        get_subject(&witness_charlie, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state =
+        get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_fact(
+        &witness_alice,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 100
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
+
+    emit_confirm(&witness_bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_bob,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 200
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_bob,
+        subject_id.clone(),
+        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state =
+        get_subject(&witness_charlie, subject_id.clone(), Some(5), true)
+            .await
+            .unwrap();
+
+    emit_confirm(&witness_charlie, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &witness_charlie,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 300
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let _state =
+        get_subject(&witness_charlie, subject_id.clone(), Some(7), true)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&witness_dali, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    nodes[4].token.cancel();
+    join_all(nodes[4].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        keys: Some(nodes[4].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_dali = node_new_dali.api;
+    node_running(&new_dali).await.unwrap();
+
+    new_dali
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_dali, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    new_dali
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_dali.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(&new_dali, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    assert_eq!(state.sn, 4);
+    assert_eq!(state.owner, witness_bob.public_key());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, witness_alice.public_key());
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 200,
+            "two": 0,
+            "three": 0
+        })
+    );
+}
+
+#[test(tokio::test)]
+// Batería de cortes históricos sobre old_owner.
+//
+// Cubre tres bordes relacionados:
+//   - Ventanas discontinuas del mismo creator que no deben fusionarse.
+//   - Unión correcta entre acceso explícito y schema witness.
+//   - Un reject no debe abrir tramo por pending ownership no consolidado.
+async fn test_old_owner_cut_ranges_battery() {
+    // Caso 1:
+    // Witnesses on -> off -> on sobre el mismo creator, y luego pasa a old_owner.
+    {
+        let (mut nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0], vec![0], vec![0]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = nodes[0].api.clone();
+        let witness_alice = nodes[1].api.clone();
+        let witness_bob = nodes[2].api.clone();
+        let witness_dali = nodes[3].api.clone();
+
+        let governance_id = create_and_authorize_governance(
+            &owner,
+            vec![&witness_alice, &witness_bob, &witness_dali],
+        )
+        .await;
+
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Alice",
+                        "key": witness_alice.public_key()
+                    },
+                    {
+                        "name": "Bob",
+                        "key": witness_bob.public_key()
+                    },
+                    {
+                        "name": "Dali",
+                        "key": witness_dali.public_key()
+                    }
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": [
+                            "Alice",
+                            "Bob",
+                            "Dali"
+                        ]
+                    }
+                },
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Dali",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Witnesses",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Owner",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let _state =
+            get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+
+        let (subject_id, ..) = create_subject(
+            &witness_alice,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact(
+            &witness_alice,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 100
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "Witnesses",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        emit_fact(
+            &witness_alice,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 200
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_transfer(
+            &witness_alice,
+            subject_id.clone(),
+            PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        emit_confirm(&witness_bob, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+
+        emit_fact(
+            &witness_bob,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 300
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(5), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        nodes[3].token.cancel();
+        join_all(nodes[3].handler.iter_mut()).await;
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen_address = format!("/memory/{}", port);
+        let peers = vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }];
+
+        let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address,
+            peers,
+            always_accept: true,
+            keys: Some(nodes[3].keys.clone()),
+            ..Default::default()
+        })
+        .await;
+        let new_dali = node_new_dali.api;
+        node_running(&new_dali).await.unwrap();
+
+        assert!(
+            new_dali
+                .get_subject_state(governance_id.clone())
+                .await
+                .is_err()
+        );
+
+        new_dali
+            .auth_subject(
+                governance_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        new_dali
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
+        let _state =
+            get_subject(&new_dali, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        assert!(
+            new_dali
+                .get_subject_state(subject_id.clone())
+                .await
+                .is_err()
+        );
+
+        new_dali
+            .auth_subject(
+                subject_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        new_dali.update_subject(subject_id.clone()).await.unwrap();
+
+        let state = get_subject(&new_dali, subject_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 4);
+        assert_eq!(state.owner, witness_bob.public_key());
+        assert_eq!(state.new_owner, None);
+        assert_eq!(state.creator, witness_alice.public_key());
+        assert_eq!(
+            state.properties,
+            json!({
+                "one": 200,
+                "two": 0,
+                "three": 0
+            })
+        );
+    }
+
+    // Caso 2:
+    // Solape entre testigo explícito y schema witness sobre el mismo creator.
+    {
+        let (mut nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0], vec![0], vec![0]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = nodes[0].api.clone();
+        let witness_alice = nodes[1].api.clone();
+        let witness_bob = nodes[2].api.clone();
+        let witness_dali = nodes[3].api.clone();
+
+        let governance_id = create_and_authorize_governance(
+            &owner,
+            vec![&witness_alice, &witness_bob, &witness_dali],
+        )
+        .await;
+
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Alice",
+                        "key": witness_alice.public_key()
+                    },
+                    {
+                        "name": "Bob",
+                        "key": witness_bob.public_key()
+                    },
+                    {
+                        "name": "Dali",
+                        "key": witness_dali.public_key()
+                    }
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": [
+                            "Alice",
+                            "Bob",
+                            "Dali"
+                        ]
+                    }
+                },
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Dali",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Witnesses",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Owner",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let _state =
+            get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+
+        let (subject_id, ..) = create_subject(
+            &witness_alice,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact(
+            &witness_alice,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 100
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "Dali",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        emit_fact(
+            &witness_alice,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 200
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_transfer(
+            &witness_alice,
+            subject_id.clone(),
+            PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        witness_bob
+            .auth_subject(
+                subject_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        witness_bob
+            .update_subject(subject_id.clone())
+            .await
+            .unwrap();
+
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        emit_confirm(&witness_bob, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+
+        emit_fact(
+            &witness_bob,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 300
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(5), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        nodes[3].token.cancel();
+        join_all(nodes[3].handler.iter_mut()).await;
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen_address = format!("/memory/{}", port);
+        let peers = vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }];
+
+        let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address,
+            peers,
+            always_accept: true,
+            keys: Some(nodes[3].keys.clone()),
+            ..Default::default()
+        })
+        .await;
+        let new_dali = node_new_dali.api;
+        node_running(&new_dali).await.unwrap();
+
+        assert!(
+            new_dali
+                .get_subject_state(governance_id.clone())
+                .await
+                .is_err()
+        );
+        new_dali
+            .auth_subject(
+                governance_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        new_dali
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
+        let _state =
+            get_subject(&new_dali, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        assert!(
+            new_dali
+                .get_subject_state(subject_id.clone())
+                .await
+                .is_err()
+        );
+        new_dali
+            .auth_subject(
+                subject_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        new_dali.update_subject(subject_id.clone()).await.unwrap();
+
+        let state = get_subject(&new_dali, subject_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 4);
+        assert_eq!(state.owner, witness_bob.public_key());
+        assert_eq!(state.new_owner, None);
+        assert_eq!(state.creator, witness_alice.public_key());
+        assert_eq!(
+            state.properties,
+            json!({
+                "one": 200,
+                "two": 0,
+                "three": 0
+            })
+        );
+    }
+
+    // Caso 3:
+    // Cadena de ownership con reject en vez de confirm.
+    {
+        let (mut nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0], vec![0], vec![0]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = nodes[0].api.clone();
+        let witness_alice = nodes[1].api.clone();
+        let witness_bob = nodes[2].api.clone();
+        let witness_dali = nodes[3].api.clone();
+
+        let governance_id = create_and_authorize_governance(
+            &owner,
+            vec![&witness_alice, &witness_bob, &witness_dali],
+        )
+        .await;
+
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Alice",
+                        "key": witness_alice.public_key()
+                    },
+                    {
+                        "name": "Bob",
+                        "key": witness_bob.public_key()
+                    },
+                    {
+                        "name": "Dali",
+                        "key": witness_dali.public_key()
+                    }
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": [
+                            "Alice",
+                            "Bob",
+                            "Dali"
+                        ]
+                    }
+                },
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Dali",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Owner",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": []
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let _state =
+            get_subject(&witness_alice, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_bob, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let _state =
+            get_subject(&witness_dali, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+
+        let (subject_id, ..) = create_subject(
+            &witness_alice,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact(
+            &witness_alice,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 100
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Bob",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "Witnesses",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Bob",
+                                    "actual_namespace": [],
+                                    "new_witnesses": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        emit_transfer(
+            &witness_alice,
+            subject_id.clone(),
+            PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let _state =
+            get_subject(&witness_bob, subject_id.clone(), Some(2), true)
+                .await
+                .unwrap();
+
+        emit_reject(&witness_bob, subject_id.clone(), true)
+            .await
+            .unwrap();
+
+        let _state =
+            get_subject(&witness_alice, subject_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Bob",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "Witnesses",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        emit_fact(
+            &witness_alice,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": 200
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let _state =
+            get_subject(&witness_alice, subject_id.clone(), Some(4), true)
+                .await
+                .unwrap();
+        let _state = get_subject(&owner, subject_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+
+        witness_dali
+            .auth_subject(
+                subject_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        witness_dali
+            .update_subject(subject_id.clone())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            witness_dali
+                .get_subject_state(subject_id.clone())
+                .await
+                .is_err()
+        );
+
+        nodes[3].token.cancel();
+        join_all(nodes[3].handler.iter_mut()).await;
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen_address = format!("/memory/{}", port);
+        let peers = vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }];
+
+        let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address,
+            peers,
+            always_accept: true,
+            keys: Some(nodes[3].keys.clone()),
+            ..Default::default()
+        })
+        .await;
+        let new_dali = node_new_dali.api;
+        node_running(&new_dali).await.unwrap();
+
+        assert!(
+            new_dali
+                .get_subject_state(governance_id.clone())
+                .await
+                .is_err()
+        );
+        new_dali
+            .auth_subject(
+                governance_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        new_dali
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
+        let _state =
+            get_subject(&new_dali, governance_id.clone(), Some(4), true)
+                .await
+                .unwrap();
+
+        assert!(
+            new_dali
+                .get_subject_state(subject_id.clone())
+                .await
+                .is_err()
+        );
+        new_dali
+            .auth_subject(
+                subject_id.clone(),
+                AuthWitness::One(
+                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        new_dali.update_subject(subject_id.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            new_dali
+                .get_subject_state(subject_id.clone())
+                .await
+                .is_err()
+        );
+    }
 }

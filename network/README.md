@@ -31,7 +31,7 @@ If you need the complete node stack, use `ave-core` instead.
 
 ```toml
 [dependencies]
-ave-network = "0.9.0"
+ave-network = "0.9.1"
 ```
 
 ## Core concepts
@@ -148,7 +148,7 @@ At a high level:
 - inbound events are processed and optionally forwarded to helper components
 - monitor actors receive network state changes for runtime visibility
 
-The worker also keeps bounded per-peer and global pending queues so disconnections do not turn into unbounded memory growth.
+The worker also keeps bounded per-peer and global pending queues so disconnections do not turn into unbounded memory growth. Pending outbound messages are retried with backoff and can be dropped on hard send errors, queue limits, byte limits, or retry exhaustion; they are not kept forever waiting for the target peer to reconnect.
 
 ## Feature flags
 

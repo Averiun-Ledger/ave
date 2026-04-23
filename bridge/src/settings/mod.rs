@@ -269,7 +269,7 @@ mod tests {
         },
         subject::sinkdata::SinkTypes,
     };
-    use network::{MemoryLimitsConfig, NodeType, RoutingNode};
+    use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
 
     use crate::{
@@ -287,6 +287,10 @@ contracts_path = "/contracts"
 always_accept = true
 tracking_size = 200
 is_service = true
+only_clear_events = true
+
+[node.sync]
+ledger_batch_size = 150
 
 [node.sync.governance]
 interval_secs = 20
@@ -465,7 +469,9 @@ node:
   always_accept: true
   tracking_size: 200
   is_service: true
+  only_clear_events: true
   sync:
+    ledger_batch_size: 150
     governance:
       interval_secs: 20
       sample_size: 2
@@ -631,7 +637,9 @@ http:
     "always_accept": true,
     "tracking_size": 200,
     "is_service": true,
+    "only_clear_events": true,
     "sync": {
+      "ledger_batch_size": 150,
       "governance": {
         "interval_secs": 20,
         "sample_size": 2,
@@ -897,6 +905,8 @@ http:
         assert_eq!(node.contracts_path, PathBuf::from("/contracts"));
         assert_eq!(node.tracking_size, 200);
         assert!(node.is_service);
+        assert!(node.only_clear_events);
+        assert_eq!(node.sync.ledger_batch_size, 150);
         assert_eq!(node.sync.governance.interval_secs, 20);
         assert_eq!(node.sync.governance.sample_size, 2);
         assert_eq!(node.sync.governance.response_timeout_secs, 7);
@@ -1138,6 +1148,8 @@ http:
         );
         assert_eq!(config.node.tracking_size, 100);
         assert!(!config.node.is_service);
+        assert!(!config.node.only_clear_events);
+        assert_eq!(config.node.sync.ledger_batch_size, 100);
         assert_eq!(config.node.sync.governance.interval_secs, 60);
         assert_eq!(config.node.sync.governance.sample_size, 3);
         assert_eq!(config.node.sync.governance.response_timeout_secs, 10);

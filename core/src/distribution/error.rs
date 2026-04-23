@@ -33,7 +33,9 @@ pub enum DistributorError {
     #[error("updating subject, need to fetch first event")]
     UpdatingSubject,
 
-    #[error("actual_sn ({actual_sn}) is bigger than witness sn ({witness_sn})")]
+    #[error(
+        "actual_sn ({actual_sn}) is greater than or equal to witness sn ({witness_sn})"
+    )]
     ActualSnBiggerThanWitness { actual_sn: u64, witness_sn: u64 },
 
     #[error("sender is not the expected one")]
@@ -41,6 +43,9 @@ pub enum DistributorError {
 
     #[error("events list is empty")]
     EmptyEvents,
+
+    #[error("missing create event in create ledger for subject {subject_id}")]
+    MissingCreateEventInCreateLedger { subject_id: DigestIdentifier },
 
     #[error(
         "our governance version ({our_version}) is less than theirs ({their_version})"
@@ -72,6 +77,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::ActualSnBiggerThanWitness { .. }
             | DistributorError::UnexpectedSender
             | DistributorError::EmptyEvents
+            | DistributorError::MissingCreateEventInCreateLedger { .. }
             | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. } => {
                 Self::Functional {

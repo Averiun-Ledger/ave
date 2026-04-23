@@ -39,14 +39,15 @@ use ave_common::response::{
     RequestInfo, RequestInfoExtend, RequestsInManager,
     RequestsInManagerSubject, SinkEventsPage, SubjectDB, SubjsData,
 };
+use ave_network::{
+    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
+    NetworkWorkerRuntime,
+};
 use config::Config as AveBaseConfig;
 use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use network::{
-    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
-};
 
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
@@ -283,7 +284,7 @@ impl Api {
     /// Creates a new `Api`.
     pub async fn build(
         keys: KeyPair,
-        mut config: AveBaseConfig,
+        config: AveBaseConfig,
         sink_auth: SinkAuth,
         registry: &mut Registry,
         password: &str,
@@ -305,8 +306,6 @@ impl Api {
             e
         })?;
 
-        config.network.safe_mode = config.safe_mode;
-
         let newtork_monitor = Monitor::default();
         let newtork_monitor_actor = system
             .create_root_actor("network_monitor", newtork_monitor)
@@ -320,17 +319,20 @@ impl Api {
             })?;
 
         let spec = config.spec.map(MachineSpec::from);
-        let network_metrics = network::metrics::register(registry);
+        let network_metrics = ave_network::metrics::register(registry);
         crate::metrics::register(registry);
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
             &keys,
             config.network.clone(),
-            Some(newtork_monitor_actor.clone()),
-            graceful_token.clone(),
-            crash_token.clone(),
-            spec,
-            Some(network_metrics),
+            config.safe_mode,
+            NetworkWorkerRuntime {
+                monitor: Some(newtork_monitor_actor.clone()),
+                graceful_token: graceful_token.clone(),
+                crash_token: crash_token.clone(),
+                machine_spec: spec,
+                metrics: Some(network_metrics),
+            },
         )
         .map_err(|e| {
             error!(error = %e, "Can not create networt");
@@ -363,6 +365,8 @@ impl Api {
                     key_pair: keys.clone(),
                     hash: config.hash_algorithm,
                     is_service: config.is_service,
+                    only_clear_events: config.only_clear_events,
+                    ledger_batch_size: config.sync.ledger_batch_size as u64,
                     public_key: public_key.clone(),
                 }),
             )
@@ -947,12 +951,21 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
+        self.update_subject_with_options(subject_id, false).await
+    }
+
+    pub async fn update_subject_with_options(
+        &self,
+        subject_id: DigestIdentifier,
+        strict: bool,
+    ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         let response = self
             .auth
             .ask(AuthMessage::Update {
                 subject_id: subject_id.clone(),
                 objective: None,
+                strict,
             })
             .await
             .map_err(|e| {

@@ -11,6 +11,7 @@ use crate::{
         compiler::{
             CompilerResponse, ContractCompiler, ContractCompilerMessage,
         },
+        request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
@@ -24,8 +25,8 @@ use crate::{
             governance_event_update_creator_change,
         },
         model::{
-            CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
-            Schema, WitnessesData,
+            CreatorQuantity, CreatorWitness, HashThisRole, ProtocolTypes,
+            Quorum, RoleCreator, RoleTypes, Schema, WitnessesData,
         },
         role_register::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
@@ -38,8 +39,8 @@ use crate::{
         tracker_sync::{TrackerSync, TrackerSyncConfig},
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
-            WitnessesRegister, WitnessesRegisterMessage,
-            WitnessesRegisterResponse, WitnessesType,
+            CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
+            WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
         },
     },
     helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
@@ -47,11 +48,11 @@ use crate::{
         common::{
             emit_fail, get_last_event, purge_storage, subject::make_obsolete,
         },
-        event::{Protocols, ValidationMetadata},
+        event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject,
+        DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
@@ -70,8 +71,9 @@ use ave_actors::{
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
+    response::SubjectDB,
     schematype::ReservedWords,
 };
 
@@ -101,6 +103,17 @@ pub mod subject_register;
 pub mod tracker_sync;
 pub mod version_sync;
 pub mod witnesses_register;
+
+type SchemaCreatorsByNamespace =
+    BTreeMap<SchemaType, BTreeMap<PublicKey, BTreeSet<Namespace>>>;
+type SchemaIssuersByNamespace =
+    BTreeMap<SchemaType, (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool)>;
+
+struct SchemaRuntimeRoles<'a> {
+    creators_eval: &'a SchemaCreatorsByNamespace,
+    issuers_eval: &'a SchemaIssuersByNamespace,
+    creators_vali: &'a SchemaCreatorsByNamespace,
+}
 
 pub struct RolesUpdate {
     pub appr_quorum: Option<Quorum>,
@@ -150,14 +163,14 @@ pub struct RolesUpdateRemove {
 pub struct CreatorRoleUpdate {
     pub new_creator: HashMap<
         (SchemaType, String, PublicKey),
-        (CreatorQuantity, BTreeSet<String>),
+        (CreatorQuantity, BTreeSet<CreatorWitness>),
     >,
 
     pub update_creator_quantity:
         HashSet<(SchemaType, String, PublicKey, CreatorQuantity)>,
 
     pub update_creator_witnesses:
-        HashSet<(SchemaType, String, PublicKey, BTreeSet<String>)>,
+        HashSet<(SchemaType, String, PublicKey, BTreeSet<CreatorWitness>)>,
 
     pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
 }
@@ -287,7 +300,7 @@ impl Subject for Governance {
     async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<Option<SignedLedger>, ActorError> {
+    ) -> Result<Option<Ledger>, ActorError> {
         get_last_event(ctx).await
     }
 
@@ -354,7 +367,7 @@ impl Subject for Governance {
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
     ) -> Result<(), ActorError> {
         let Some(network) = ctx
             .system()
@@ -504,7 +517,7 @@ impl Subject for Governance {
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             Self::publish_sink(
                 ctx,
-                SinkDataMessage::UpdateState(Box::new(Metadata::from(
+                SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
                     self.clone(),
                 ))),
             )
@@ -519,6 +532,21 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn ledger_batch_size(
+        ctx: &ActorContext<Self>,
+    ) -> Result<usize, ActorError> {
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        Ok(config.ledger_batch_size)
+    }
+
     async fn up_approver_only(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -636,6 +664,10 @@ impl Governance {
             SchemaType,
             BTreeMap<PublicKey, BTreeSet<Namespace>>,
         >,
+        schema_issuers_eval: &BTreeMap<
+            SchemaType,
+            (BTreeMap<PublicKey, BTreeSet<Namespace>>, bool),
+        >,
         schema_creators_vali: &BTreeMap<
             SchemaType,
             BTreeMap<PublicKey, BTreeSet<Namespace>>,
@@ -653,9 +685,29 @@ impl Governance {
 
             actor
                 .tell(EvaluationSchemaMessage::Update {
+                    members: self
+                        .properties
+                        .members
+                        .values()
+                        .cloned()
+                        .collect(),
                     creators: schema_creators_eval
                         .get(schema_id)
                         .cloned()
+                        .unwrap_or_default(),
+                    issuers: schema_issuers_eval
+                        .get(schema_id)
+                        .map(|(issuers, _)| issuers.clone())
+                        .unwrap_or_default(),
+                    issuer_any: schema_issuers_eval
+                        .get(schema_id)
+                        .map(|(_, issuer_any)| *issuer_any)
+                        .unwrap_or(false),
+                    schema_viewpoints: self
+                        .properties
+                        .schemas
+                        .get(schema_id)
+                        .map(|schema| schema.viewpoints.clone())
                         .unwrap_or_default(),
                     sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
@@ -723,14 +775,7 @@ impl Governance {
     async fn up_schemas(
         &self,
         ctx: &mut ActorContext<Self>,
-        schema_creators_eval: &BTreeMap<
-            SchemaType,
-            BTreeMap<PublicKey, BTreeSet<Namespace>>,
-        >,
-        schema_creators_vali: &BTreeMap<
-            SchemaType,
-            BTreeMap<PublicKey, BTreeSet<Namespace>>,
-        >,
+        schema_roles: SchemaRuntimeRoles<'_>,
         up_eval: &BTreeMap<SchemaType, ValueWrapper>,
         up_vali: &BTreeMap<SchemaType, ValueWrapper>,
         hash_network: (&HashAlgorithm, &Arc<NetworkSender>),
@@ -741,9 +786,27 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
-                creators: schema_creators_eval
+                members: self.properties.members.values().cloned().collect(),
+                creators: schema_roles
+                    .creators_eval
                     .get(schema_id)
                     .cloned()
+                    .unwrap_or_default(),
+                issuers: schema_roles
+                    .issuers_eval
+                    .get(schema_id)
+                    .map(|(issuers, _)| issuers.clone())
+                    .unwrap_or_default(),
+                issuer_any: schema_roles
+                    .issuers_eval
+                    .get(schema_id)
+                    .map(|(_, issuer_any)| *issuer_any)
+                    .unwrap_or(false),
+                schema_viewpoints: self
+                    .properties
+                    .schemas
+                    .get(schema_id)
+                    .map(|schema| schema.viewpoints.clone())
                     .unwrap_or_default(),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
@@ -764,7 +827,8 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
-                creators: schema_creators_vali
+                creators: schema_roles
+                    .creators_vali
                     .get(schema_id)
                     .cloned()
                     .unwrap_or_default(),
@@ -897,7 +961,10 @@ impl Governance {
 
         let schema_creators_eval = self
             .properties
-            .schema_creators_namespace(schemas_namespace_eval);
+            .schema_creators_namespace(schemas_namespace_eval.clone());
+        let schema_issuers_eval = self
+            .properties
+            .schema_issuers_namespace(schemas_namespace_eval);
 
         let up_eval = new_schemas_eval
             .clone()
@@ -923,8 +990,11 @@ impl Governance {
         // Up
         self.up_schemas(
             ctx,
-            &schema_creators_eval,
-            &schema_creators_vali,
+            SchemaRuntimeRoles {
+                creators_eval: &schema_creators_eval,
+                issuers_eval: &schema_issuers_eval,
+                creators_vali: &schema_creators_vali,
+            },
             &up_eval,
             &up_vali,
             (&hash, &network),
@@ -949,6 +1019,7 @@ impl Governance {
         self.update_schemas(
             ctx,
             &schema_creators_eval,
+            &schema_issuers_eval,
             &schema_creators_vali,
             &update_eval,
             &update_vali,
@@ -961,9 +1032,12 @@ impl Governance {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
             evaluator
-                .tell(EvalWorkerMessage::UpdateGovVersion {
+                .tell(EvalWorkerMessage::Update {
                     gov_version: self.properties.version,
+                    issuers,
+                    issuer_any,
                 })
                 .await?;
         }
@@ -1246,7 +1320,10 @@ impl Governance {
 
         let schema_creators_eval = self
             .properties
-            .schema_creators_namespace(schemas_namespace_eval);
+            .schema_creators_namespace(schemas_namespace_eval.clone());
+        let schema_issuers_eval = self
+            .properties
+            .schema_issuers_namespace(schemas_namespace_eval);
 
         let schemas_namespace_vali = self
             .properties
@@ -1262,8 +1339,11 @@ impl Governance {
 
         self.up_schemas(
             ctx,
-            &schema_creators_eval,
-            &schema_creators_vali,
+            SchemaRuntimeRoles {
+                creators_eval: &schema_creators_eval,
+                issuers_eval: &schema_issuers_eval,
+                creators_vali: &schema_creators_vali,
+            },
             &new_schemas_eval,
             &new_schemas_vali,
             (hash, network),
@@ -1321,6 +1401,7 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Evaluator,
         }) {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
             // If we are a evaluator
             let evaluator = EvalWorker {
                 node_key: node_key.clone(),
@@ -1328,6 +1409,10 @@ impl Governance {
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
                 sn: self.subject_metadata.sn,
+                context: EvalWorkerContext::Governance {
+                    issuers,
+                    issuer_any,
+                },
                 init_state: None,
                 hash: *hash,
                 network: network.clone(),
@@ -1449,12 +1534,18 @@ impl Governance {
                 actor.ask_stop().await?;
             }
             (false, true) => {
+                let (issuers, issuer_any) =
+                    self.properties.governance_issuers();
                 let evaluator = EvalWorker {
                     node_key: node_key.clone(),
                     our_key: self.our_key.clone(),
                     governance_id: self.subject_metadata.subject_id.clone(),
                     gov_version: self.properties.version,
                     sn: self.subject_metadata.sn,
+                    context: EvalWorkerContext::Governance {
+                        issuers,
+                        issuer_any,
+                    },
                     init_state: None,
                     hash: *hash,
                     network: network.clone(),
@@ -1624,6 +1715,7 @@ impl Governance {
             let Schema {
                 contract,
                 initial_value,
+                viewpoints: _,
             } = schema;
 
             let response = compiler
@@ -1770,20 +1862,82 @@ impl Governance {
         new_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     ) -> (SubjectRegisterMessage, WitnessesRegisterMessage) {
+        let creator_registration = |schema_id: &SchemaType,
+                                    namespace: &str,
+                                    creator: &PublicKey,
+                                    witnesses: Vec<WitnessesType>|
+         -> CreatorWitnessRegistration {
+            let namespace_value = Namespace::from(namespace.to_owned());
+            let creator_name = self
+                .properties
+                .members
+                .iter()
+                .find(|(_, key)| *key == creator)
+                .map(|(name, _)| name.clone());
+
+            let grants = creator_name
+                .and_then(|creator_name| {
+                    self.properties
+                        .roles_schema
+                        .get(schema_id)
+                        .and_then(|roles_schema| {
+                            roles_schema.creator.get(&RoleCreator::create(
+                                &creator_name,
+                                namespace_value,
+                            ))
+                        })
+                        .map(|creator_role| {
+                            creator_role
+                                .witnesses
+                                .iter()
+                                .filter_map(|witness| {
+                                    let witness_type = if witness.name
+                                        == ReservedWords::Witnesses.to_string()
+                                    {
+                                        Some(WitnessesType::Witnesses)
+                                    } else {
+                                        self.properties
+                                            .members
+                                            .get(&witness.name)
+                                            .cloned()
+                                            .map(WitnessesType::User)
+                                    }?;
+
+                                    let grant = if witness.viewpoints.contains(
+                                        &ReservedWords::AllViewpoints
+                                            .to_string(),
+                                    ) {
+                                        CreatorWitnessGrant::Full
+                                    } else if witness.viewpoints.is_empty() {
+                                        CreatorWitnessGrant::Hash
+                                    } else {
+                                        CreatorWitnessGrant::Clear(
+                                            witness.viewpoints.clone(),
+                                        )
+                                    };
+
+                                    Some((witness_type, grant))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .unwrap_or_default();
+
+            CreatorWitnessRegistration { witnesses, grants }
+        };
+
         let mut data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)> =
             vec![];
 
         let mut new_creator_data: HashMap<
             (SchemaType, String, PublicKey),
-            Vec<WitnessesType>,
+            CreatorWitnessRegistration,
         > = HashMap::new();
 
-        let mut update_creator_witnesses_data: HashSet<(
-            SchemaType,
-            String,
-            PublicKey,
-            Vec<WitnessesType>,
-        )> = HashSet::new();
+        let mut update_creator_witnesses_data: HashMap<
+            (SchemaType, String, PublicKey),
+            CreatorWitnessRegistration,
+        > = HashMap::new();
 
         for ((schema_id, ns, creator), (quantity, witnesses)) in
             new_creator.iter()
@@ -1797,7 +1951,7 @@ impl Governance {
 
             new_creator_data.insert(
                 (schema_id.clone(), ns.clone(), creator.clone()),
-                witnesses.clone(),
+                creator_registration(schema_id, ns, creator, witnesses.clone()),
             );
         }
 
@@ -1822,16 +1976,18 @@ impl Governance {
 
             let mut witnesses = vec![];
             for witness in creator_witnesses.iter() {
-                if witness == &ReservedWords::Witnesses.to_string() {
+                if witness.name == ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
-                } else if let Some(w) = self.properties.members.get(witness) {
+                } else if let Some(w) =
+                    self.properties.members.get(&witness.name)
+                {
                     witnesses.push(WitnessesType::User(w.clone()));
                 }
             }
 
             new_creator_data.insert(
                 (schema_id.clone(), ns.clone(), creator.clone()),
-                witnesses,
+                creator_registration(schema_id, ns, creator, witnesses),
             );
         }
 
@@ -1851,19 +2007,19 @@ impl Governance {
         {
             let mut witnesses = vec![];
             for witness in creator_witnesses.iter() {
-                if witness == &ReservedWords::Witnesses.to_string() {
+                if witness.name == ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
-                } else if let Some(w) = self.properties.members.get(witness) {
+                } else if let Some(w) =
+                    self.properties.members.get(&witness.name)
+                {
                     witnesses.push(WitnessesType::User(w.clone()));
                 }
             }
 
-            update_creator_witnesses_data.insert((
-                schema_id.clone(),
-                ns.clone(),
-                creator.clone(),
-                witnesses,
-            ));
+            update_creator_witnesses_data.insert(
+                (schema_id.clone(), ns.clone(), creator.clone()),
+                creator_registration(schema_id, ns, creator, witnesses),
+            );
         }
 
         for (schema_id, ns, creator) in creator_update.remove_creator.iter() {
@@ -2079,7 +2235,7 @@ impl Governance {
     async fn verify_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
         hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let mut iter = events.into_iter();
@@ -2117,6 +2273,10 @@ impl Governance {
 
             self.first_role_register(ctx).await?;
 
+            let (issuer, event_request_timestamp) =
+                first.get_issuer_event_request_timestamp();
+            let event_request = first.get_event_request();
+
             Self::event_to_sink(
                 ctx,
                 DataForSink {
@@ -2126,29 +2286,19 @@ impl Governance {
                     owner: self.subject_metadata.owner.to_string(),
                     namespace: String::default(),
                     schema_id: self.subject_metadata.schema_id.clone(),
-                    issuer: first
-                        .content()
-                        .event_request
-                        .signature()
-                        .signer
-                        .to_string(),
+                    issuer,
                     event_ledger_timestamp: first
-                        .signature()
+                        .ledger_seal_signature
                         .timestamp
                         .as_nanos(),
-                    event_request_timestamp: first
-                        .content()
-                        .event_request
-                        .signature()
-                        .timestamp
-                        .as_nanos(),
-                    gov_version: first.content().gov_version,
+                    event_request_timestamp,
+                    gov_version: first.gov_version,
                     event_data_ledger: EventLedgerDataForSink::build(
-                        &first.content().protocols,
+                        &first.protocols,
                         &self.properties.to_value_wrapper().0,
                     ),
                 },
-                first.content().event_request.content(),
+                event_request,
             )
             .await?;
 
@@ -2157,7 +2307,7 @@ impl Governance {
 
         for event in iter {
             let actual_ledger_hash =
-                hash_borsh(&*hash.hasher(), &last_ledger.0).map_err(|e| {
+                last_ledger.ledger_hash(*hash).map_err(|e| {
                     ActorError::FunctionalCritical {
                         description: format!(
                             "Can not creacte actual ledger event hash: {}",
@@ -2165,21 +2315,23 @@ impl Governance {
                         ),
                     }
                 })?;
+
             let last_data = LastData {
-                gov_version: last_ledger.content().gov_version,
-                vali_data: last_ledger
-                    .content()
-                    .protocols
-                    .get_validation_data(),
+                gov_version: last_ledger.gov_version,
+                vali_data: last_ledger.protocols.get_validation_data(),
             };
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
                 ctx,
-                &event,
-                Metadata::from(self.clone()),
-                actual_ledger_hash,
-                last_data,
-                hash,
+                Self::verify_new_ledger_event_args(
+                    &event,
+                    Metadata::from(self.clone()),
+                    actual_ledger_hash,
+                    last_data,
+                    hash,
+                    true,
+                    false,
+                ),
             )
             .await
             {
@@ -2196,8 +2348,22 @@ impl Governance {
                     }
                 }
             };
+
+            let Some(event_request) = event.get_event_request() else {
+                error!(
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = event.sn,
+                    "Governance replay event is missing clear event_request"
+                );
+                return Err(ActorError::Functional {
+                    description:
+                        "Governance replay event is missing clear event_request"
+                            .to_owned(),
+                });
+            };
+
             let (update_fact, update_confirm) = if last_event_is_ok {
-                match event.content().event_request.content().clone() {
+                match &event_request {
                     EventRequest::Transfer(transfer_request) => {
                         self.transfer(
                             ctx,
@@ -2232,66 +2398,31 @@ impl Governance {
                     _ => {}
                 };
 
-                Self::event_to_sink(
-                    ctx,
-                    DataForSink {
-                        gov_id: None,
-                        subject_id: self
-                            .subject_metadata
-                            .subject_id
-                            .to_string(),
-                        sn: self.subject_metadata.sn,
-                        owner: self.subject_metadata.owner.to_string(),
-                        namespace: String::default(),
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        issuer: event
-                            .content()
-                            .event_request
-                            .signature()
-                            .signer
-                            .to_string(),
-                        event_ledger_timestamp: event
-                            .signature()
-                            .timestamp
-                            .as_nanos(),
-                        event_request_timestamp: event
-                            .content()
-                            .event_request
-                            .signature()
-                            .timestamp
-                            .as_nanos(),
-                        gov_version: event.content().gov_version,
-                        event_data_ledger: EventLedgerDataForSink::build(
-                            &event.content().protocols,
-                            &self.properties.to_value_wrapper().0,
-                        ),
-                    },
-                    event.content().event_request.content(),
-                )
-                .await?;
-
-                let update_confirm = if let EventRequest::Confirm(..) =
-                    &event.content().event_request.content()
-                {
-                    self.confirm(ctx, event.signature().signer.clone(), 0)
+                let update_confirm =
+                    if let EventRequest::Confirm(..) = &event_request {
+                        self.confirm(
+                            ctx,
+                            event.ledger_seal_signature.signer.clone(),
+                            0,
+                        )
                         .await?;
 
-                    if let Some(new_owner_key) =
-                        &self.subject_metadata.new_owner
-                    {
-                        Some(self.properties.roles_update_remove_confirm(
-                            &self.subject_metadata.owner,
-                            new_owner_key,
-                        ))
+                        if let Some(new_owner_key) =
+                            &self.subject_metadata.new_owner
+                        {
+                            Some(self.properties.roles_update_remove_confirm(
+                                &self.subject_metadata.owner,
+                                new_owner_key,
+                            ))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
 
                 let update_fact = if let EventRequest::Fact(fact_request) =
-                    &event.content().event_request.content()
+                    &event_request
                 {
                     let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
                             ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
@@ -2333,6 +2464,33 @@ impl Governance {
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
+
+            let (issuer, event_request_timestamp) =
+                event.get_issuer_event_request_timestamp();
+            Self::event_to_sink(
+                ctx,
+                DataForSink {
+                    gov_id: None,
+                    subject_id: self.subject_metadata.subject_id.to_string(),
+                    sn: self.subject_metadata.sn,
+                    owner: self.subject_metadata.owner.to_string(),
+                    namespace: String::default(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    issuer,
+                    event_ledger_timestamp: event
+                        .ledger_seal_signature
+                        .timestamp
+                        .as_nanos(),
+                    event_request_timestamp,
+                    gov_version: event.gov_version,
+                    event_data_ledger: EventLedgerDataForSink::build(
+                        &event.protocols,
+                        &self.properties.to_value_wrapper().0,
+                    ),
+                },
+                Some(event_request.clone()),
+            )
+            .await?;
 
             if let Some((event, creator_update, rm_roles)) = update_fact {
                 let update = governance_event_roles_update_fact(
@@ -2449,7 +2607,10 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .create_child(
+                "witnesses_register",
+                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+            )
             .await
         {
             Ok(actor) => Some(actor),
@@ -2750,7 +2911,10 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .create_child(
+                "witnesses_register",
+                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+            )
             .await
         {
             Ok(actor) => Some(actor),
@@ -2815,7 +2979,7 @@ pub enum GovernanceMessage {
     GetLastLedger,
     DeleteTrackerReferences { subject_id: DigestIdentifier },
     DeleteGovernanceStorage,
-    UpdateLedger { events: Vec<SignedLedger> },
+    UpdateLedger { events: Vec<Ledger> },
     GetGovernance,
     GetVersion,
 }
@@ -2828,11 +2992,11 @@ pub enum GovernanceResponse {
     Metadata(Box<Metadata>),
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
-        ledger: Vec<SignedLedger>,
+        ledger: Vec<Ledger>,
         is_all: bool,
     },
     LastLedger {
-        ledger_event: Box<Option<SignedLedger>>,
+        ledger_event: Box<Option<Ledger>>,
     },
     Governance(Box<GovernanceData>),
     NewCompilers(Vec<SchemaType>),
@@ -2844,7 +3008,7 @@ impl Response for GovernanceResponse {}
 
 #[async_trait]
 impl Actor for Governance {
-    type Event = SignedLedger;
+    type Event = Ledger;
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
 
@@ -2975,7 +3139,10 @@ impl Actor for Governance {
         }
 
         if let Err(e) = ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .create_child(
+                "witnesses_register",
+                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+            )
             .await
         {
             error!(
@@ -3207,11 +3374,7 @@ impl Handler<Self> for Governance {
         }
     }
 
-    async fn on_event(
-        &mut self,
-        event: SignedLedger,
-        ctx: &mut ActorContext<Self>,
-    ) {
+    async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
                 error = %e,
@@ -3286,11 +3449,26 @@ impl PersistentActor for Governance {
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        match (
-            event.content().event_request.content(),
-            &event.content().protocols,
-        ) {
-            (EventRequest::Create(..), Protocols::Create { validation }) => {
+        match &event.protocols {
+            Protocols::Create {
+                validation,
+                event_request,
+            } => {
+                if let EventRequest::Create(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Create",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance create apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In create event, event request must be Create"
+                                .to_owned(),
+                    });
+                };
+
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
@@ -3324,15 +3502,28 @@ impl PersistentActor for Governance {
 
                 return Ok(());
             }
-            (
-                EventRequest::Fact(..),
-                Protocols::GovFact {
-                    evaluation,
-                    approval,
-                    ..
-                },
-            ) => {
-                if let Some(eval_res) = evaluation.evaluator_res() {
+            Protocols::GovFact {
+                evaluation,
+                approval,
+                event_request,
+                ..
+            } => {
+                if let EventRequest::Fact(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Fact",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance fact apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In fact event, event request must be Fact"
+                                .to_owned(),
+                    });
+                };
+
+                if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
                             self.apply_patch(eval_res.patch)?;
@@ -3360,11 +3551,29 @@ impl PersistentActor for Governance {
                     }
                 }
             }
-            (
-                EventRequest::Transfer(transfer_request),
-                Protocols::Transfer { evaluation, .. },
-            ) => {
-                if evaluation.evaluator_res().is_some() {
+
+            Protocols::Transfer {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                let EventRequest::Transfer(transfer_request) =
+                    event_request.content()
+                else {
+                    error!(
+                        event_type = "Transfer",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance transfer apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In transfer event, event request must be Transfer"
+                                .to_owned(),
+                    });
+                };
+
+                if evaluation.evaluator_response_ok().is_some() {
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
@@ -3375,11 +3584,28 @@ impl PersistentActor for Governance {
                     );
                 }
             }
-            (
-                EventRequest::Confirm(..),
-                Protocols::GovConfirm { evaluation, .. },
-            ) => {
-                if let Some(eval_res) = evaluation.evaluator_res() {
+
+            Protocols::GovConfirm {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                if let EventRequest::Confirm(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance confirm apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In confirm event, event request must be Confirm"
+                                .to_owned(),
+                    });
+                };
+
+                if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(new_owner) =
                         self.subject_metadata.new_owner.take()
                     {
@@ -3404,7 +3630,22 @@ impl PersistentActor for Governance {
                     }
                 }
             }
-            (EventRequest::Reject(..), Protocols::Reject { .. }) => {
+            Protocols::Reject { event_request, .. } => {
+                if let EventRequest::Reject(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Reject",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance reject apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In reject event, event request must be Reject"
+                                .to_owned(),
+                    });
+                };
+
                 self.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
@@ -3412,7 +3653,21 @@ impl PersistentActor for Governance {
                     "Applied reject event"
                 );
             }
-            (EventRequest::EOL(..), Protocols::EOL { .. }) => {
+            Protocols::EOL { event_request, .. } => {
+                if let EventRequest::EOL(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "EOL",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance eol apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In EOL event, event request must be EOL"
+                            .to_owned(),
+                    });
+                };
+
                 self.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
@@ -3432,13 +3687,13 @@ impl PersistentActor for Governance {
             }
         }
 
-        if event.content().protocols.is_success() {
+        if event.protocols.is_success() {
             self.properties.version += 1;
         }
 
         self.subject_metadata.sn += 1;
         self.subject_metadata.prev_ledger_event_hash =
-            event.content().prev_ledger_event_hash.clone();
+            event.prev_ledger_event_hash.clone();
 
         Ok(())
     }

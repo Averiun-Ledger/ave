@@ -6,22 +6,23 @@ use std::{
 use test_log::test;
 
 use ave_bridge::ave_common::{
-    SchemaType,
+    DataToSinkEvent, SchemaType,
     bridge::request::ApprovalState,
     identity::{KeyPair, keys::Ed25519Signer},
     response::{
         ApprovalEntry, GovsData, LedgerDB, PaginatorEvents, RequestData,
-        RequestInfo, RequestInfoExtend, RequestState, SubjectDB, SubjsData,
-        TransferSubject,
+        RequestInfo, RequestInfoExtend, RequestState, SinkEventsPage,
+        SubjectDB, SubjsData, TransferSubject,
     },
 };
 use reqwest::Client;
 use serde_json::{Value, json};
 
 use crate::common::{
-    TestServer, add_governance_member_as_witness, create_governance,
-    create_subject, make_request, materialize_role_test_path,
-    role_test_request_body, server_main_route_catalog,
+    TestServer, add_example_schema_to_governance,
+    add_governance_member_as_witness, create_governance, create_subject,
+    make_request, materialize_role_test_path, role_test_request_body,
+    server_main_route_catalog, wait_request_finish,
 };
 
 pub mod common;
@@ -1658,6 +1659,295 @@ async fn test_subject_deserialization() {
     assert!(!status.is_success());
 }
 
+#[test(tokio::test)]
+async fn test_sink_events_deserialization_includes_failed_governance_events() {
+    let Some((server1, _dirs1)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let body = create_governance(&client, &server1, None).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    let governance_id = request_data.subject_id.clone();
+    wait_request_finish(&client, &server1, None, &request_data.request_id)
+        .await;
+
+    let (status, body) =
+        make_request(&client, &server1.url("/peer-id"), "GET", None, None)
+            .await;
+    assert!(status.is_success(), "{body}");
+    let bootstrap_peer_id: String = serde_json::from_value(body).unwrap();
+
+    let Some((server2, _dirs2)) = TestServer::build(
+        false,
+        true,
+        Some((bootstrap_peer_id, server1.memory_port())),
+    )
+    .await
+    else {
+        return;
+    };
+
+    let (status, body) =
+        make_request(&client, &server2.url("/public-key"), "GET", None, None)
+            .await;
+    assert!(status.is_success(), "{body}");
+    let public_key_2: String = serde_json::from_value(body).unwrap();
+
+    let (status, body) =
+        make_request(&client, &server1.url("/public-key"), "GET", None, None)
+            .await;
+    assert!(status.is_success(), "{body}");
+    let public_key_1: String = serde_json::from_value(body).unwrap();
+
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!("/auth/{}", governance_id)),
+        "PUT",
+        None,
+        Some(json!([public_key_1])),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server1.url(&format!("/auth/{}", governance_id)),
+        "PUT",
+        None,
+        Some(json!([public_key_2.clone()])),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    let body = add_governance_member_as_witness(
+        &client,
+        &server1,
+        None,
+        &governance_id,
+        &public_key_2,
+    )
+    .await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server1, None, &request_data.request_id)
+        .await;
+
+    let body = add_governance_member_as_witness(
+        &client,
+        &server1,
+        None,
+        &governance_id,
+        &public_key_2,
+    )
+    .await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server1, None, &request_data.request_id)
+        .await;
+
+    let body =
+        transfer_req(&client, &server1, &governance_id, &public_key_1).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server1, None, &request_data.request_id)
+        .await;
+
+    let body =
+        transfer_req(&client, &server1, &governance_id, &public_key_2).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server1, None, &request_data.request_id)
+        .await;
+
+    let mut transfer_visible_in_server2 = false;
+    for _ in 0..60 {
+        let (status, body) = make_request(
+            &client,
+            &server2.url(&format!("/state/{}", governance_id)),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{body}");
+        if body["new_owner"] == json!(public_key_2) {
+            transfer_visible_in_server2 = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(transfer_visible_in_server2);
+
+    let (status, body) = make_request(
+        &client,
+        &server2.url("/request"),
+        "POST",
+        None,
+        Some(json!({
+            "request": {
+                "event": "confirm",
+                "data": {
+                    "subject_id": governance_id,
+                    "name_old_owner": "Owner"
+                }
+            }
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server2, None, &request_data.request_id)
+        .await;
+
+    let mut sink_page = None;
+    for _ in 0..60 {
+        let (status, body) = make_request(
+            &client,
+            &server2.url(&format!("/sink-events/{}", governance_id)),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{body}");
+        let page: SinkEventsPage = serde_json::from_value(body).unwrap();
+
+        let has_failed_fact = page.events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DataToSinkEvent::FactFull {
+                    success: false,
+                    payload: None,
+                    patch: None,
+                    error: Some(_),
+                    ..
+                }
+            )
+        });
+        let has_failed_transfer = page.events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DataToSinkEvent::Transfer {
+                    success: false,
+                    error: Some(_),
+                    ..
+                }
+            )
+        });
+        let has_failed_confirm = page.events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DataToSinkEvent::Confirm {
+                    success: false,
+                    patch: None,
+                    error: Some(_),
+                    ..
+                }
+            )
+        });
+
+        if has_failed_fact && has_failed_transfer && has_failed_confirm {
+            sink_page = Some(page);
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let sink_page =
+        sink_page.expect("sink page did not include failed governance events");
+
+    assert!(sink_page.events.len() >= 5);
+}
+
+#[test(tokio::test)]
+async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
+    let Some((server, _dirs)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let body = create_governance(&client, &server, None).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    let governance_id = request_data.subject_id.clone();
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
+
+    let tracker_member_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+    let body = add_example_schema_to_governance(
+        &client,
+        &server,
+        None,
+        &governance_id,
+        &tracker_member_key,
+    )
+    .await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
+
+    let body = create_subject(
+        &client,
+        &server,
+        None,
+        &governance_id,
+        "Example1",
+        "Tracker Subject",
+    )
+    .await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    let tracker_id = request_data.subject_id.clone();
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
+
+    let (status, body) = make_request(
+        &client,
+        &server.url("/request"),
+        "POST",
+        None,
+        Some(json!({
+            "request": {
+                "event": "fact",
+                "data": {
+                    "subject_id": tracker_id,
+                    "viewpoints": [],
+                    "payload": {
+                        "InvalidPayload": {
+                            "data": 1
+                        }
+                    }
+                }
+            }
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/sink-events/{}", tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let sink_page: SinkEventsPage = serde_json::from_value(body).unwrap();
+
+    assert!(sink_page.events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            DataToSinkEvent::FactFull {
+                success: false,
+                payload: None,
+                patch: None,
+                error: Some(_),
+                ..
+            }
+        )
+    }));
+}
+
 // --- System Info Endpoints ---
 #[test(tokio::test)]
 async fn test_system_info_deserialization() {
@@ -1719,6 +2009,29 @@ async fn test_system_info_deserialization() {
 
     assert_eq!(config.node.tracking_size, 200);
     assert!(config.node.is_service);
+    assert_eq!(config.node.sync.ledger_batch_size, 100);
+    assert_eq!(config.node.sync.governance.interval_secs, 60);
+    assert_eq!(config.node.sync.governance.sample_size, 3);
+    assert_eq!(config.node.sync.governance.response_timeout_secs, 10);
+    assert_eq!(config.node.sync.tracker.interval_secs, 30);
+    assert_eq!(config.node.sync.tracker.page_size, 50);
+    assert_eq!(config.node.sync.tracker.response_timeout_secs, 10);
+    assert_eq!(config.node.sync.tracker.update_batch_size, 2);
+    assert_eq!(config.node.sync.tracker.update_timeout_secs, 10);
+    assert_eq!(config.node.sync.update.round_retry_interval_secs, 8);
+    assert_eq!(config.node.sync.update.max_round_retries, 3);
+    assert_eq!(config.node.sync.update.witness_retry_count, 1);
+    assert_eq!(config.node.sync.update.witness_retry_interval_secs, 5);
+    assert_eq!(config.node.sync.reboot.stability_check_interval_secs, 5);
+    assert_eq!(config.node.sync.reboot.stability_check_max_retries, 3);
+    assert_eq!(
+        config.node.sync.reboot.diff_retry_schedule_secs,
+        vec![10, 20, 30, 60]
+    );
+    assert_eq!(
+        config.node.sync.reboot.timeout_retry_schedule_secs,
+        vec![5, 5, 5, 5]
+    );
 
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);

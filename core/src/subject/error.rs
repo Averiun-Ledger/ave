@@ -16,6 +16,15 @@ pub enum SubjectError {
     #[error("incorrect signer: expected {expected}, got {actual}")]
     IncorrectSigner { expected: String, actual: String },
 
+    #[error(
+        "event request signer is invalid for {event}: expected {expected}, got {actual}"
+    )]
+    InvalidEventRequestSigner {
+        event: String,
+        expected: String,
+        actual: String,
+    },
+
     #[error("validation request signature is invalid")]
     InvalidValidationRequestSignature,
 
@@ -30,6 +39,9 @@ pub enum SubjectError {
 
     #[error("previous ledger event hash does not match")]
     PreviousHashMismatch,
+
+    #[error("subject id mismatch: expected {expected}, got {actual}")]
+    SubjectIdMismatch { expected: String, actual: String },
 
     #[error("ledger event hash mismatch: expected {expected}, got {actual}")]
     LedgerHashMismatch { expected: String, actual: String },
@@ -72,6 +84,11 @@ pub enum SubjectError {
 
     #[error("validation metadata must be of type Metadata in creation event")]
     InvalidValidationMetadata,
+
+    #[error(
+        "validation metadata must be of type ModifiedMetadataHash in non-creation event"
+    )]
+    InvalidNonCreationValidationMetadata,
 
     #[error("in creation event, sequence number must be 0")]
     InvalidCreationSequenceNumber,
@@ -120,6 +137,14 @@ pub enum SubjectError {
     #[error("protocols data is for Tracker but this is a Governance")]
     TrackerProtocolsInGovernance,
 
+    #[error(
+        "node configured for clear events cannot accept tracker opaque events"
+    )]
+    OnlyClearEventsCannotAcceptTrackerOpaque,
+
+    #[error("governance fact event cannot contain viewpoints")]
+    GovernanceFactViewpointsNotAllowed,
+
     // Hash errors
     #[error("failed to create hash: {details}")]
     HashCreationFailed { details: String },
@@ -129,6 +154,23 @@ pub enum SubjectError {
 
     #[error("modified metadata hash could not be obtained: {details}")]
     ModifiedMetadataHashFailed { details: String },
+
+    #[error(
+        "modified metadata without properties hash mismatch: expected {expected}, got {actual}"
+    )]
+    ModifiedMetadataWithoutPropertiesHashMismatch {
+        expected: String,
+        actual: String,
+    },
+
+    #[error("properties hash mismatch: expected {expected}, got {actual}")]
+    PropertiesHashMismatch { expected: String, actual: String },
+
+    #[error("event request hash mismatch: expected {expected}, got {actual}")]
+    EventRequestHashMismatch { expected: String, actual: String },
+
+    #[error("viewpoints hash mismatch: expected {expected}, got {actual}")]
+    ViewpointsHashMismatch { expected: String, actual: String },
 
     // Actor and system errors
     #[error("actor not found: {path}")]

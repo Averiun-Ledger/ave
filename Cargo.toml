@@ -1,6 +1,6 @@
 [package]
 name = "ave"
-version = "0.9.0"
+version = "0.10.0"
 edition.workspace = true
 authors.workspace = true
 description = "Aggregated Ave crate re-exporting the main public workspace crates"
@@ -33,7 +33,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
 description = "Averiun Ledger library"
@@ -42,23 +42,26 @@ homepage = "https://averiun.com"
 repository = "https://github.com/Averiun-Ledger/ave"
 license = "AGPL-3.0-only"
 keywords = ["traceability", "distributed-ledger", "Averiun", "sustainability"]
-rust-version = "1.91.0"
+rust-version = "1.95.0"
 
 [workspace.dependencies]
+ave-core = { path = "core", version = "0.10.0", default-features = false }
+ave-bridge = { path = "bridge", version = "0.10.0", default-features = false }
+ave-network = { path = "network", version = "0.9.1" }
 ave-identity = { path = "identity", version = "0.3.0" }
-ave-common = { path = "common", version = "0.8.0" }
+ave-common = { path = "common", version = "0.9.0" }
 pkcs8 = { version = "0.10.2" }
-axum = { version = "0.8.8" }
+axum = { version = "0.8.9" }
 utoipa = { version = "5.4.0" }
 async-trait = "0.1.89"
 bs58 = "0.5.1"
 base64 = "0.22.1"
-blake3 = "1.8.3"
-borsh = { version = "1.6.0", features = ["std", "derive"] }
+blake3 = "1.8.4"
+borsh = { version = "1.6.1", features = ["std", "derive"] }
 ed25519-dalek = { version = "2", features = ["alloc", "pkcs8"] }
 futures = "0.3.32"
 futures-timer = "3.0"
-prometheus-client = "0.24.0"
+prometheus-client = "0.24.1"
 getrandom = "0.4.2"
 ip_network = "0.4"
 bytes = { version = "1.11.1", features = ["serde"] }
@@ -66,36 +69,36 @@ libp2p = { version = "0.56.0", default-features = false}
 libp2p-swarm-test = { version = "0.6.0" }
 memsecurity = { version = "3.5.2", features = ["encryption"] }
 metrics = "0.24.3"
-rand = "0.10.0"
+rand = "0.10.1"
 rmp-serde = "1.3"
 serial_test = "3.4.0"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tempfile = "3.27.0"
 time = "0.3.47"
 thiserror = "2.0.18"
-tokio = { version = "1.50.0" }
+tokio = { version = "1.52.1" }
 tokio-util = { version = "0.7.18" }
 tracing ={ version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-tracing-appender = "0.2.4"
+tracing-appender = "0.2.5"
 file-rotate = "0.8"
-test-log = {version = "0.2.19", features = ["trace"] }
-ave-actors = { path = "../ave-actors", version = "0.11.0", default-features = false }
+test-log = {version = "0.2.20", features = ["trace"] }
+ave-actors = { path = "../ave-actors", version = "0.11.1", default-features = false }
 reqwest = { version = "0.13.2", features = ["json"] }
 config = { version = "0.15.22", features = ["json", "toml", "yaml"]}
 zeroize = "1.8"
 subtle = "2.6"
-lru = "0.16.3"
+lru = "0.17.0"
 
 [dependencies]
 ave-identity = { path = "identity", version = "0.3.0" }
-ave-common = { path = "common", version = "0.8.0" }
-ave-network = { path = "network", version = "0.9.0" }
-ave-core = { path = "core", version = "0.9.0", default-features = false }
-ave-bridge = { path = "bridge", version = "0.9.0", default-features = false }
-ave-http = { path = "http", version = "0.9.0", default-features = false, optional = true }
+ave-common = { path = "common", version = "0.9.0" }
+ave-network = { path = "network", version = "0.9.1" }
+ave-core = { path = "core", version = "0.10.0", default-features = false }
+ave-bridge = { path = "bridge", version = "0.10.0", default-features = false }
+ave-http = { path = "http", version = "0.10.0", default-features = false, optional = true }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]

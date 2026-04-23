@@ -309,6 +309,8 @@ pub struct AveConfigHttp {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
+    /// Whether the node rejects tracker opaque events
+    pub only_clear_events: bool,
     /// Sync protocol configuration
     pub sync: SyncConfigHttp,
 
@@ -317,8 +319,11 @@ pub struct AveConfigHttp {
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SyncConfigHttp {
+    pub ledger_batch_size: usize,
     pub governance: GovernanceSyncConfigHttp,
     pub tracker: TrackerSyncConfigHttp,
+    pub update: UpdateSyncConfigHttp,
+    pub reboot: RebootSyncConfigHttp,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -337,6 +342,22 @@ pub struct TrackerSyncConfigHttp {
     pub update_timeout_secs: u64,
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct UpdateSyncConfigHttp {
+    pub round_retry_interval_secs: u64,
+    pub max_round_retries: usize,
+    pub witness_retry_count: usize,
+    pub witness_retry_interval_secs: u64,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct RebootSyncConfigHttp {
+    pub stability_check_interval_secs: u64,
+    pub stability_check_max_retries: u64,
+    pub diff_retry_schedule_secs: Vec<u64>,
+    pub timeout_retry_schedule_secs: Vec<u64>,
+}
+
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
     fn from(value: ave_bridge::AveConfig) -> Self {
         Self {
@@ -350,7 +371,9 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
+            only_clear_events: value.only_clear_events,
             sync: SyncConfigHttp {
+                ledger_batch_size: value.sync.ledger_batch_size,
                 governance: GovernanceSyncConfigHttp {
                     interval_secs: value.sync.governance.interval_secs,
                     sample_size: value.sync.governance.sample_size,
@@ -368,6 +391,36 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
                         .response_timeout_secs,
                     update_batch_size: value.sync.tracker.update_batch_size,
                     update_timeout_secs: value.sync.tracker.update_timeout_secs,
+                },
+                update: UpdateSyncConfigHttp {
+                    round_retry_interval_secs: value
+                        .sync
+                        .update
+                        .round_retry_interval_secs,
+                    max_round_retries: value.sync.update.max_round_retries,
+                    witness_retry_count: value.sync.update.witness_retry_count,
+                    witness_retry_interval_secs: value
+                        .sync
+                        .update
+                        .witness_retry_interval_secs,
+                },
+                reboot: RebootSyncConfigHttp {
+                    stability_check_interval_secs: value
+                        .sync
+                        .reboot
+                        .stability_check_interval_secs,
+                    stability_check_max_retries: value
+                        .sync
+                        .reboot
+                        .stability_check_max_retries,
+                    diff_retry_schedule_secs: value
+                        .sync
+                        .reboot
+                        .diff_retry_schedule_secs,
+                    timeout_retry_schedule_secs: value
+                        .sync
+                        .reboot
+                        .timeout_retry_schedule_secs,
                 },
             },
             spec: value.spec.map(MachineSpecHttp::from),

@@ -39,8 +39,10 @@ impl AuthDatabase {
         if is_management {
             return Ok(ApiKeyQuotaStatus {
                 api_key_id: key_id.to_string(),
+                api_key_name: None,
                 usage_month,
                 plan_id: None,
+                plan_name: None,
                 plan_limit: None,
                 extensions_total: 0,
                 effective_limit: None,
@@ -52,8 +54,8 @@ impl AuthDatabase {
 
         let plan_info = Self::get_plan_for_key_internal(conn, key_id)?;
 
-        let (plan_id, plan_limit, extensions_total, effective_limit) =
-            if let Some((plan_id, plan_limit)) = plan_info {
+        let (plan_id, plan_name, plan_limit, extensions_total, effective_limit) =
+            if let Some((plan_id, plan_name, plan_limit)) = plan_info {
                 let extensions_total = Self::get_extensions_total_internal(
                     conn,
                     key_id,
@@ -93,6 +95,7 @@ impl AuthDatabase {
 
                 (
                     Some(plan_id),
+                    Some(plan_name),
                     Some(plan_limit),
                     extensions_total,
                     Some(effective_limit),
@@ -107,7 +110,7 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-                (None, None, 0, None)
+                (None, None, None, 0, None)
             };
 
         let used_events =
@@ -117,8 +120,10 @@ impl AuthDatabase {
 
         Ok(ApiKeyQuotaStatus {
             api_key_id: key_id.to_string(),
+            api_key_name: None,
             usage_month,
             plan_id,
+            plan_name,
             plan_limit,
             extensions_total,
             effective_limit,
@@ -267,14 +272,33 @@ impl AuthDatabase {
     fn get_plan_for_key_internal(
         conn: &rusqlite::Connection,
         key_id: &str,
-    ) -> Result<Option<(String, i64)>, DatabaseError> {
+    ) -> Result<Option<(String, String, i64)>, DatabaseError> {
         conn.query_row(
-            "SELECT p.id, p.monthly_events
+            "SELECT p.id, p.name, p.monthly_events
              FROM api_key_plans kp
              INNER JOIN usage_plans p ON p.id = kp.plan_id
              WHERE kp.api_key_id = ?1",
             params![key_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| DatabaseError::Query(e.to_string()))
+    }
+
+    fn get_api_key_name_internal(
+        conn: &rusqlite::Connection,
+        key_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        conn.query_row(
+            "SELECT name FROM api_keys WHERE id = ?1",
+            params![key_id],
+            |row| row.get(0),
         )
         .optional()
         .map_err(|e| DatabaseError::Query(e.to_string()))
@@ -636,19 +660,27 @@ impl AuthDatabase {
 
         let row = conn
             .query_row(
-                "SELECT id, api_key_id, usage_month, extra_events, reason, created_by, created_at
+                "SELECT quota_extensions.id, quota_extensions.api_key_id,
+                        api_keys.name, quota_extensions.usage_month,
+                        quota_extensions.extra_events, quota_extensions.reason,
+                        quota_extensions.created_by, users.username,
+                        quota_extensions.created_at
                  FROM quota_extensions
-                 WHERE id = ?1",
+                 LEFT JOIN api_keys ON quota_extensions.api_key_id = api_keys.id
+                 LEFT JOIN users ON quota_extensions.created_by = users.id
+                 WHERE quota_extensions.id = ?1",
                 params![id],
                 |row| {
                     Ok(QuotaExtensionInfo {
                         id: row.get(0)?,
                         api_key_id: row.get(1)?,
-                        usage_month: row.get(2)?,
-                        extra_events: row.get(3)?,
-                        reason: row.get(4)?,
-                        created_by: row.get(5)?,
-                        created_at: row.get(6)?,
+                        api_key_name: row.get(2)?,
+                        usage_month: row.get(3)?,
+                        extra_events: row.get(4)?,
+                        reason: row.get(5)?,
+                        created_by: row.get(6)?,
+                        created_by_username: row.get(7)?,
+                        created_at: row.get(8)?,
                     })
                 },
             )
@@ -757,12 +789,15 @@ impl AuthDatabase {
 
         let conn = self.lock_conn()?;
         let is_management = Self::is_management_key_internal(&conn, key_id)?;
+        let api_key_name = Self::get_api_key_name_internal(&conn, key_id)?;
 
         if is_management {
             return Ok(ApiKeyQuotaStatus {
                 api_key_id: key_id.to_string(),
+                api_key_name,
                 usage_month,
                 plan_id: None,
+                plan_name: None,
                 plan_limit: None,
                 extensions_total: 0,
                 effective_limit: None,
@@ -778,11 +813,12 @@ impl AuthDatabase {
 
         let (
             plan_id,
+            plan_name,
             plan_limit,
             extensions_total,
             effective_limit,
             remaining_events,
-        ) = if let Some((plan_id, plan_limit)) = plan_info {
+        ) = if let Some((plan_id, plan_name, plan_limit)) = plan_info {
             let extensions_total = Self::get_extensions_total_internal(
                 &conn,
                 key_id,
@@ -792,19 +828,22 @@ impl AuthDatabase {
             let remaining = std::cmp::max(0, effective_limit - used_events);
             (
                 Some(plan_id),
+                Some(plan_name),
                 Some(plan_limit),
                 extensions_total,
                 Some(effective_limit),
                 Some(remaining),
             )
         } else {
-            (None, None, 0, None, None)
+            (None, None, None, 0, None, None)
         };
 
         Ok(ApiKeyQuotaStatus {
             api_key_id: key_id.to_string(),
+            api_key_name,
             usage_month,
             plan_id,
+            plan_name,
             plan_limit,
             extensions_total,
             effective_limit,

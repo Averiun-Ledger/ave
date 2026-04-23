@@ -2,7 +2,10 @@ use ave_actors::ActorError;
 use ave_common::identity::DigestIdentifier;
 use thiserror::Error;
 
-use crate::{governance::error::GovernanceError, model::event::ProtocolsError};
+use crate::{
+    governance::error::GovernanceError,
+    model::error::{LedgerError, ProtocolsError},
+};
 
 #[derive(Debug, Error, Clone)]
 pub enum RequestHandlerError {
@@ -12,6 +15,17 @@ pub enum RequestHandlerError {
 
     #[error("the payload cannot be deserialized as a governance event")]
     GovFactInvalidEvent,
+
+    #[error("governance fact events cannot define viewpoints")]
+    GovFactViewpointsNotAllowed,
+
+    #[error("invalid tracker fact viewpoints: {0}")]
+    InvalidTrackerFactViewpoints(String),
+
+    #[error(
+        "tracker subject '{0}' cannot emit events because the local ledger is not full"
+    )]
+    TrackerLedgerNotFull(String),
 
     /// Attempted to mark an approval as obsolete.
     #[error("a user cannot mark a request approval as obsolete")]
@@ -179,6 +193,15 @@ pub enum RequestManagerError {
         governance_id: DigestIdentifier,
     },
 
+    #[error(
+        "governance version changed for '{governance_id}': expected {expected}, got {current}"
+    )]
+    GovernanceVersionChanged {
+        governance_id: DigestIdentifier,
+        expected: u64,
+        current: u64,
+    },
+
     // Governance errors
     #[error("governance error: {0}")]
     Governance(#[from] GovernanceError),
@@ -197,6 +220,9 @@ pub enum RequestManagerError {
     #[error("failed to build protocols: {0}")]
     ProtocolsBuild(#[from] ProtocolsError),
 
+    #[error("ledger error: {0}")]
+    Ledger(#[from] LedgerError),
+
     // Wrapped ActorError for operations that return ActorError
     #[error("actor error: {0}")]
     ActorError(#[from] ActorError),
@@ -206,6 +232,9 @@ pub enum RequestManagerError {
 
     #[error("In fact events, the signer has to be an issuer")]
     NotIssuer,
+
+    #[error("In create tracker events, the signer has to be a creator")]
+    NotCreator,
 }
 
 /*

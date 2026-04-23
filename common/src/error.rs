@@ -24,6 +24,9 @@ pub enum ConversionError {
     #[error("invalid namespace: {0}")]
     InvalidNamespace(String),
 
+    #[error("invalid viewpoints: {0}")]
+    InvalidViewpoints(String),
+
     #[error("missing governance identifier")]
     MissingGovernanceId,
 

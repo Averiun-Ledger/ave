@@ -45,6 +45,7 @@ pub enum ReservedWords {
     Any,
     Witnesses,
     Owner,
+    AllViewpoints,
 }
 
 impl Display for ReservedWords {
@@ -55,6 +56,7 @@ impl Display for ReservedWords {
             Self::Any => write!(f, "Any"),
             Self::Witnesses => write!(f, "Witnesses"),
             Self::Owner => write!(f, "Owner"),
+            Self::AllViewpoints => write!(f, "AllViewpoints"),
         }
     }
 }

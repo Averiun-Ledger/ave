@@ -837,14 +837,20 @@ impl AveSink {
     fn event_id_components(
         data: &DataToSink,
     ) -> (&'static str, &str, String, u64) {
-        match &data.event {
+        match &data.payload {
             ave_common::DataToSinkEvent::Create {
                 subject_id,
                 schema_id,
                 sn,
                 ..
             } => ("create", subject_id.as_str(), schema_id.to_string(), *sn),
-            ave_common::DataToSinkEvent::Fact {
+            ave_common::DataToSinkEvent::FactFull {
+                subject_id,
+                schema_id,
+                sn,
+                ..
+            }
+            | ave_common::DataToSinkEvent::FactOpaque {
                 subject_id,
                 schema_id,
                 sn,
@@ -1279,7 +1285,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
             SinkDataEvent::State(..) => return,
         };
 
-        let (subject_id, schema_id) = data.event.get_subject_schema();
+        let (subject_id, schema_id) = data.payload.get_subject_schema();
         let Some(servers) = self.0.sinks.get(&schema_id) else {
             debug!(
                 target: TARGET,
@@ -1466,7 +1472,7 @@ mod tests {
 
     fn sample_data(schema_id: SchemaType) -> DataToSink {
         DataToSink {
-            event: DataToSinkEvent::Create {
+            payload: DataToSinkEvent::Create {
                 governance_id: None,
                 subject_id: "subject-1".to_owned(),
                 owner: "owner-1".to_owned(),
@@ -1965,12 +1971,12 @@ mod tests {
         );
 
         let mut first = sample_data(SchemaType::Type("schema-a".to_owned()));
-        if let DataToSinkEvent::Create { subject_id, .. } = &mut first.event {
+        if let DataToSinkEvent::Create { subject_id, .. } = &mut first.payload {
             *subject_id = "subject-1".to_owned();
         }
         let mut second = sample_data(SchemaType::Type("schema-a".to_owned()));
         if let DataToSinkEvent::Create { subject_id, sn, .. } =
-            &mut second.event
+            &mut second.payload
         {
             *subject_id = "subject-2".to_owned();
             *sn = 2;
@@ -2257,6 +2263,156 @@ mod tests {
                 Some("Bearer fresh-after-401".to_owned()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn notify_sends_failed_fact_transfer_and_confirm_events() {
+        let sink_calls = Arc::new(TestCounter::new());
+        let received = Arc::new(Mutex::new(Vec::<DataToSink>::new()));
+
+        let server = TestServer::spawn(Router::new().route(
+            "/sink/{subject_id}/{schema_id}",
+            post({
+                let sink_calls = Arc::clone(&sink_calls);
+                let received = Arc::clone(&received);
+                move |_path: Path<(String, String)>,
+                      Json(payload): Json<DataToSink>| {
+                    let sink_calls = Arc::clone(&sink_calls);
+                    let received = Arc::clone(&received);
+                    async move {
+                        sink_calls.increment();
+                        received.lock().await.push(payload);
+                        StatusCode::OK
+                    }
+                }
+            }),
+        ))
+        .await;
+
+        let sink = build_sink_with_servers(
+            "schema-a",
+            vec![sample_server_with(
+                &format!(
+                    "{}/sink/{{{{subject-id}}}}/{{{{schema-id}}}}",
+                    server.base_url
+                ),
+                false,
+                [SinkTypes::All],
+                1,
+                32,
+                SinkQueuePolicy::DropNewest,
+                SinkRoutingStrategy::OrderedBySubject,
+                2_000,
+                1_000,
+                0,
+            )],
+            "",
+            None,
+        );
+
+        sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
+            payload: DataToSinkEvent::FactFull {
+                governance_id: Some("gov-1".to_owned()),
+                subject_id: "subject-1".to_owned(),
+                schema_id: SchemaType::Type("schema-a".to_owned()),
+                viewpoints: vec!["agua".to_owned()],
+                issuer: "issuer-1".to_owned(),
+                owner: "owner-1".to_owned(),
+                payload: None,
+                patch: None,
+                success: false,
+                error: Some("invalid contract payload".to_owned()),
+                sn: 1,
+                gov_version: 1,
+            },
+            public_key: "pubkey-1".to_owned(),
+            event_request_timestamp: 1,
+            event_ledger_timestamp: 2,
+            sink_timestamp: 3,
+        })))
+        .await;
+
+        sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
+            payload: DataToSinkEvent::Transfer {
+                governance_id: Some("gov-1".to_owned()),
+                subject_id: "subject-1".to_owned(),
+                schema_id: SchemaType::Type("schema-a".to_owned()),
+                owner: "owner-1".to_owned(),
+                new_owner: "owner-2".to_owned(),
+                success: false,
+                error: Some("new owner is invalid".to_owned()),
+                sn: 2,
+                gov_version: 1,
+            },
+            public_key: "pubkey-1".to_owned(),
+            event_request_timestamp: 4,
+            event_ledger_timestamp: 5,
+            sink_timestamp: 6,
+        })))
+        .await;
+
+        sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
+            payload: DataToSinkEvent::Confirm {
+                governance_id: Some("gov-1".to_owned()),
+                subject_id: "subject-1".to_owned(),
+                schema_id: SchemaType::Type("schema-a".to_owned()),
+                sn: 3,
+                patch: None,
+                success: false,
+                error: Some("reserved old owner name".to_owned()),
+                gov_version: 1,
+                name_old_owner: Some("Owner".to_owned()),
+            },
+            public_key: "pubkey-2".to_owned(),
+            event_request_timestamp: 7,
+            event_ledger_timestamp: 8,
+            sink_timestamp: 9,
+        })))
+        .await;
+
+        let attempts = sink_calls
+            .wait_for_at_least(
+                3,
+                "sink did not receive the failed events in time",
+            )
+            .await;
+        assert_eq!(attempts, 3);
+
+        let received = received.lock().await;
+        assert_eq!(received.len(), 3);
+        assert!(received.iter().any(|data| {
+            matches!(
+                &data.payload,
+                DataToSinkEvent::FactFull {
+                    success: false,
+                    payload: None,
+                    patch: None,
+                    error: Some(_),
+                    ..
+                }
+            )
+        }));
+        assert!(received.iter().any(|data| {
+            matches!(
+                &data.payload,
+                DataToSinkEvent::Transfer {
+                    success: false,
+                    error: Some(_),
+                    ..
+                }
+            )
+        }));
+        assert!(received.iter().any(|data| {
+            matches!(
+                &data.payload,
+                DataToSinkEvent::Confirm {
+                    success: false,
+                    patch: None,
+                    error: Some(_),
+                    ..
+                }
+            )
+        }));
     }
 
     #[tokio::test(flavor = "current_thread")]

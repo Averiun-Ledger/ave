@@ -42,14 +42,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-http = "0.9.0"
+ave-http = "0.10.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-http = { version = "0.9.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-http = { version = "0.10.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Running the server
@@ -89,6 +89,11 @@ The HTTP server exposes endpoints for:
 - auth subject and witness management
 - administrative auth operations such as users, roles, permissions, API keys, quotas, audit logs, and system configuration
 
+Manual update supports a `strict` query flag on `POST /update/{subject_id}`.
+The default is `strict=false`, which allows the runtime to use governance-based
+witness discovery. With `strict=true`, the update only uses nodes explicitly
+configured in auth.
+
 ## Authentication and admin system
 
 `ave-http` includes its own HTTP auth subsystem on top of the runtime. That subsystem covers:
@@ -102,6 +107,21 @@ The HTTP server exposes endpoints for:
 - usage plans and quota extensions
 
 This makes the crate suitable not just as a transport wrapper, but as the operational control plane for an Ave deployment.
+
+API key expiration is resolved when the key is created or rotated:
+
+- `expires_in_seconds = null` uses `api_key_default_ttl_seconds`
+- `expires_in_seconds = 0` creates a non-expiring key
+- `expires_in_seconds > 0` uses the requested TTL exactly
+
+The maintenance cleanup task only removes already-expired keys; it does not
+backfill or change expiration on existing non-expiring keys.
+
+Admin responses keep numeric identifiers as the stable source of truth and add
+human-readable names where useful. Audit logs include `username` and
+`api_key_name`, API key responses include `username` and `plan_name`, quota
+responses include API key and creator names, and system config responses include
+`updated_by_username`.
 
 ## Safe mode and maintenance
 
@@ -120,6 +140,9 @@ normal network participation.
 
 The crate generates an OpenAPI description with `utoipa` and can expose Swagger UI routes. That is useful both for interactive exploration and for integrating the API into external tooling.
 
+Audit and rate-limit statistics are returned through typed response models and
+are included in the generated OpenAPI schema.
+
 ## TLS and deployment options
 
 `ave-http` supports:
@@ -129,6 +152,10 @@ The crate generates an OpenAPI description with `utoipa` and can expose Swagger 
 - optional self-signed certificate generation and renewal support
 - proxy-aware request metadata and forwarded-IP handling
 - CORS configuration for browser-based clients
+
+The provided Docker images run as the non-root `ave` user (`uid=10001`,
+`gid=10001`). Writable mounts for `/app/db`, `/app/logs`, or `/contracts` must
+be owned by, or writable by, that user.
 
 ## Configuration shape
 

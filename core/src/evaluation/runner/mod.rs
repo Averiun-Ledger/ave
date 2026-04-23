@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -30,14 +30,14 @@ use crate::{
             SchemasEvent, gov_policie_change_is_empty,
             gov_role_event_check_data, gov_role_event_is_empty,
             governance_event_is_empty, member_event_is_empty,
-            policies_event_is_empty, quorum_to_core, roles_event_is_empty,
+            policies_event_is_empty, roles_event_is_empty,
             schema_change_is_empty, schema_id_policie_is_empty,
             schema_id_role_check_data, schema_id_role_is_empty,
             schema_policie_change_is_empty, schemas_event_is_empty,
             tracker_schemas_role_event_check_data,
             tracker_schemas_role_event_is_empty,
         },
-        model::{HashThisRole, RoleTypes, Schema},
+        model::{CreatorWitness, RoleCreator, Schema},
     },
     metrics::try_core_metrics,
     model::common::contract::{
@@ -58,6 +58,48 @@ pub mod types;
 pub struct Runner;
 
 impl Runner {
+    fn adapt_creator_witnesses_to_schema_viewpoints(
+        governance: &mut GovernanceData,
+        schema_id: &SchemaType,
+        schema_viewpoints: &BTreeSet<String>,
+    ) {
+        let Some(roles_schema) = governance.roles_schema.get_mut(schema_id)
+        else {
+            return;
+        };
+
+        roles_schema.creator = roles_schema
+            .creator
+            .iter()
+            .map(|creator| {
+                let mut creator = creator.clone();
+                creator.witnesses = creator
+                    .witnesses
+                    .iter()
+                    .map(|witness| {
+                        if witness.viewpoints.is_empty()
+                            || witness.viewpoints.contains(
+                                &ReservedWords::AllViewpoints.to_string(),
+                            )
+                        {
+                            witness.clone()
+                        } else {
+                            CreatorWitness {
+                                name: witness.name.clone(),
+                                viewpoints: witness
+                                    .viewpoints
+                                    .intersection(schema_viewpoints)
+                                    .cloned()
+                                    .collect(),
+                            }
+                        }
+                    })
+                    .collect();
+                creator
+            })
+            .collect::<BTreeSet<RoleCreator>>();
+    }
+
     async fn execute_contract(
         ctx: &ActorContext<Self>,
         data: &EvaluateInfo,
@@ -91,13 +133,15 @@ impl Runner {
                 .await
             }
             EvaluateInfo::TrackerSchemasTransfer {
-                governance_data,
                 new_owner,
                 old_owner,
                 namespace,
                 schema_id,
+                members,
+                creators,
             } => Self::execute_transfer_not_gov(
-                governance_data,
+                members,
+                creators,
                 new_owner,
                 old_owner,
                 namespace.clone(),
@@ -107,7 +151,8 @@ impl Runner {
     }
 
     fn execute_transfer_not_gov(
-        governance: &GovernanceData,
+        members: &BTreeSet<PublicKey>,
+        creators: &BTreeMap<PublicKey, BTreeSet<Namespace>>,
         new_owner: &PublicKey,
         old_owner: &PublicKey,
         namespace: Namespace,
@@ -131,7 +176,7 @@ impl Runner {
             });
         }
 
-        if !governance.is_member(new_owner) {
+        if !members.contains(new_owner) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
                 kind: error::InvalidEventKind::NotMember {
@@ -140,11 +185,10 @@ impl Runner {
             });
         }
 
-        if !governance.has_this_role(HashThisRole::Schema {
-            who: new_owner.clone(),
-            role: RoleTypes::Creator,
-            schema_id: schema_id.to_owned(),
-            namespace: namespace.clone(),
+        if !creators.get(new_owner).is_some_and(|namespaces| {
+            namespaces.iter().any(|creator_namespace| {
+                creator_namespace.is_ancestor_or_equal_of(&namespace)
+            })
         }) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
@@ -548,7 +592,6 @@ impl Runner {
             let mut new_policies = governance.policies_gov.clone();
 
             if let Some(approve) = gov.change.approve {
-                let approve = quorum_to_core(&approve);
                 approve.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -570,7 +613,6 @@ impl Runner {
             }
 
             if let Some(evaluate) = gov.change.evaluate {
-                let evaluate = quorum_to_core(&evaluate);
                 evaluate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -592,7 +634,6 @@ impl Runner {
             }
 
             if let Some(validate) = gov.change.validate {
-                let validate = quorum_to_core(&validate);
                 validate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -670,7 +711,6 @@ impl Runner {
                 }
 
                 if let Some(evaluate) = schema.change.evaluate {
-                    let evaluate = quorum_to_core(&evaluate);
                     evaluate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -698,7 +738,6 @@ impl Runner {
                 }
 
                 if let Some(validate) = schema.change.validate {
-                    let validate = quorum_to_core(&validate);
                     validate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -845,6 +884,70 @@ impl Runner {
         schema_event: &SchemasEvent,
         governance: &mut GovernanceData,
     ) -> Result<AddRemoveChangeSchema, RunnerError> {
+        fn validate_viewpoints(
+            schema_id: &SchemaType,
+            viewpoints: &[String],
+            field: &str,
+        ) -> Result<BTreeSet<String>, RunnerError> {
+            let mut unique = BTreeSet::new();
+
+            for viewpoint in viewpoints {
+                if viewpoint != viewpoint.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: format!("{field} for schema {}", schema_id),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
+                        },
+                    });
+                }
+
+                if viewpoint.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::Empty {
+                            what: format!("{field} for schema {}", schema_id),
+                        },
+                    });
+                }
+
+                if viewpoint == &ReservedWords::AllViewpoints.to_string() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::ReservedWord {
+                            field: format!("{field} for schema {}", schema_id),
+                            value: ReservedWords::AllViewpoints.to_string(),
+                        },
+                    });
+                }
+
+                if viewpoint.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: format!("{field} for schema {}", schema_id),
+                            actual: viewpoint.len(),
+                            max: 100,
+                        },
+                    });
+                }
+
+                if !unique.insert(viewpoint.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::Duplicate {
+                            what: field.to_owned(),
+                            id: viewpoint.clone(),
+                        },
+                    });
+                }
+            }
+
+            Ok(unique)
+        }
+
         if schemas_event_is_empty(schema_event) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_schemas",
@@ -995,6 +1098,11 @@ impl Runner {
                                 new_schema.initial_value,
                             ),
                             contract: new_schema.contract,
+                            viewpoints: validate_viewpoints(
+                                &new_schema.id,
+                                &new_schema.viewpoints,
+                                "viewpoints",
+                            )?,
                         },
                     )
                     .is_some()
@@ -1148,6 +1256,33 @@ impl Runner {
                     }
 
                     schema_data.initial_value = ValueWrapper(init_value);
+                }
+
+                if let Some(new_viewpoints) = change_schema.new_viewpoints {
+                    let new_viewpoints = validate_viewpoints(
+                        &change_schema.actual_id,
+                        &new_viewpoints,
+                        "new viewpoints",
+                    )?;
+
+                    if new_viewpoints == schema_data.viewpoints {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "check_schemas",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "viewpoints for schema {}",
+                                    change_schema.actual_id
+                                ),
+                            },
+                        });
+                    }
+
+                    schema_data.viewpoints = new_viewpoints;
+                    Self::adapt_creator_witnesses_to_schema_viewpoints(
+                        governance,
+                        &change_schema.actual_id,
+                        &schema_data.viewpoints,
+                    );
                 }
 
                 change_schemas.insert(change_schema.actual_id);

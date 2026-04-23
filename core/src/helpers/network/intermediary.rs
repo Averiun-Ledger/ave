@@ -30,16 +30,16 @@ use super::ActorMessage;
 use super::{NetworkMessage, service::NetworkSender};
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
+use ave_network::Command as NetworkCommand;
+use ave_network::CommandHelper as Command;
+use ave_network::{PeerId, PublicKeyEd25519};
 use bytes::Bytes;
-use network::Command as NetworkCommand;
-use network::CommandHelper as Command;
-use network::{PeerId, PublicKeyEd25519};
 use rmp_serde::Deserializer;
 use serde::Deserialize;
 use std::{io::Cursor, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 pub struct Intermediary;
 
@@ -56,13 +56,23 @@ impl Intermediary {
             loop {
                 tokio::select! {
                     command = command_receiver.recv() => {
-                        if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await
-                                && let IntermediaryError::NetworkSendFailed { .. } = e {
+                        if let Some(command) = command
+                            && let Err(e) = Self::handle_command(command, &system, &network_sender).await
+                        {
+                            match e {
+                                IntermediaryError::NetworkSendFailed { .. } => {
                                     error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
                                     crash_token.cancel();
                                     break;
                                 }
-
+                                _ => {
+                                    warn!(
+                                        error = %e,
+                                        "Intermediary command failed with non-fatal error"
+                                    );
+                                }
+                            }
+                        }
                     },
                     _ = graceful_token.cancelled() => {
                         debug!("Network intermediary cancelled, stopping");
@@ -178,6 +188,7 @@ impl Intermediary {
                 match message.message {
                     ActorMessage::DistributionGetLastSn {
                         subject_id,
+                        actual_sn,
                         receiver_actor,
                     } => {
                         let actor = system
@@ -190,6 +201,7 @@ impl Intermediary {
                         actor
                             .tell(DistriWorkerMessage::GetLastSn {
                                 subject_id,
+                                actual_sn,
                                 info: message.info,
                                 sender: sender.clone(),
                                 receiver_actor,
@@ -202,7 +214,7 @@ impl Intermediary {
                                 }
                             })?;
                     }
-                    ActorMessage::AuthLastSn { sn } => {
+                    ActorMessage::UpdateOffer { offer } => {
                         let actor = system
                             .get_actor::<Updater>(&path)
                             .await
@@ -211,7 +223,26 @@ impl Intermediary {
                             })?;
                         actor
                             .tell(UpdaterMessage::NetworkResponse {
-                                sn,
+                                offer,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::UpdateNoOffer => {
+                        let actor = system
+                            .get_actor::<Updater>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(UpdaterMessage::NetworkNoOffer {
                                 sender: sender.clone(),
                             })
                             .await
@@ -508,6 +539,7 @@ impl Intermediary {
                     }
                     ActorMessage::DistributionLedgerReq {
                         actual_sn,
+                        target_sn,
                         subject_id,
                     } => {
                         let actor = system
@@ -520,6 +552,7 @@ impl Intermediary {
                         actor
                             .tell(DistriWorkerMessage::SendDistribution {
                                 actual_sn,
+                                target_sn,
                                 subject_id,
                                 info: message.info,
                                 sender: sender.clone(),
@@ -684,7 +717,7 @@ impl Intermediary {
                             }
                         })?;
 
-                let pk = network::PublicKeyLibP2P::from(pk_ed);
+                let pk = ave_network::PublicKeyLibP2P::from(pk_ed);
                 Ok(pk.to_peer_id())
             }
         }

@@ -32,7 +32,7 @@ use ave_common::{
     },
 };
 
-use request::EvaluationReq;
+use request::{EvalWorkerContext, EvaluationReq};
 use response::{EvaluationRes, EvaluatorResponse as EvalRes};
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -51,7 +51,7 @@ pub struct Evaluation {
     // Quorum
     quorum: Quorum,
     // Actual responses
-    evaluators_response: Vec<EvalRes>,
+    evaluators_response: Vec<(EvalRes, DigestIdentifier)>,
     // Evaluators quantity
     evaluators_quantity: u32,
 
@@ -67,7 +67,7 @@ pub struct Evaluation {
 
     version: u64,
 
-    errors: Vec<EvaluatorError>,
+    errors: Vec<(EvaluatorError, DigestIdentifier)>,
 
     evaluation_request_hash: DigestIdentifier,
 
@@ -78,6 +78,8 @@ pub struct Evaluation {
     pending_evaluators: HashSet<PublicKey>,
 
     init_state: Option<ValueWrapper>,
+
+    context: EvalWorkerContext,
 }
 
 impl Evaluation {
@@ -92,6 +94,7 @@ impl Evaluation {
         request: Signed<EvaluationReq>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
+        context: EvalWorkerContext,
         hash: HashAlgorithm,
         network: Arc<NetworkSender>,
     ) -> Self {
@@ -102,6 +105,7 @@ impl Evaluation {
             request,
             quorum,
             init_state,
+            context,
             current_evaluators: HashSet::new(),
             errors: vec![],
             evaluation_request_hash: DigestIdentifier::default(),
@@ -119,6 +123,24 @@ impl Evaluation {
         self.current_evaluators.remove(&evaluator)
     }
 
+    fn worker_context(&self) -> EvalWorkerContext {
+        match &self.request.content().data {
+            request::EvaluateData::GovFact { state }
+            | request::EvaluateData::GovTransfer { state }
+            | request::EvaluateData::GovConfirm { state } => {
+                let (issuers, issuer_any) = state.governance_issuers();
+                EvalWorkerContext::Governance {
+                    issuers,
+                    issuer_any,
+                }
+            }
+            request::EvaluateData::TrackerSchemasFact { .. }
+            | request::EvaluateData::TrackerSchemasTransfer { .. } => {
+                self.context.clone()
+            }
+        }
+    }
+
     async fn create_evaluators(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -133,6 +155,7 @@ impl Evaluation {
                         self.request_id.to_string(),
                         self.version,
                         self.network.clone(),
+                        self.hash,
                     ),
                 )
                 .await?;
@@ -158,6 +181,7 @@ impl Evaluation {
                             .clone(),
                         gov_version: self.request.content().gov_version,
                         sn: self.request.content().sn,
+                        context: self.worker_context(),
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,
@@ -176,9 +200,9 @@ impl Evaluation {
     }
 
     fn check_responses(&self) -> ResponseSummary {
-        let res_set: HashSet<EvalRes> =
+        let res_set: HashSet<(EvalRes, DigestIdentifier)> =
             HashSet::from_iter(self.evaluators_response.iter().cloned());
-        let error_set: HashSet<EvaluatorError> =
+        let error_set: HashSet<(EvaluatorError, DigestIdentifier)> =
             HashSet::from_iter(self.errors.iter().cloned());
 
         if res_set.len() == 1 && error_set.is_empty() {
@@ -199,16 +223,20 @@ impl Evaluation {
                 eval_req_signature: self.request.signature().clone(),
                 eval_req_hash: self.evaluation_request_hash.clone(),
                 evaluators_signatures: self.evaluators_signatures.clone(),
-                response: EvaluationResponse::Ok(
-                    self.evaluators_response[0].clone(),
-                ),
+                response: EvaluationResponse::Ok {
+                    result: self.evaluators_response[0].0.clone(),
+                    result_hash: self.evaluators_response[0].1.clone(),
+                },
             })
         } else {
             Ok(EvaluationData {
                 eval_req_signature: self.request.signature().clone(),
                 eval_req_hash: self.evaluation_request_hash.clone(),
                 evaluators_signatures: self.evaluators_signatures.clone(),
-                response: EvaluationResponse::Error(self.errors[0].clone()),
+                response: EvaluationResponse::Error {
+                    result: self.errors[0].0.clone(),
+                    result_hash: self.errors[0].1.clone(),
+                },
             })
         }
     }
@@ -232,6 +260,56 @@ impl Evaluation {
     fn create_eval_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
         hash_borsh(&*self.hash.hasher(), &self.request)
     }
+
+    fn ensure_eval_req_hash(
+        &self,
+        eval_req_hash: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        if eval_req_hash != self.evaluation_request_hash {
+            error!(
+                msg_type = "Response",
+                expected_hash = %self.evaluation_request_hash,
+                received_hash = %eval_req_hash,
+                "Invalid evaluation request hash"
+            );
+            return Err(ActorError::Functional {
+                description:
+                    "Evaluation Response, Invalid evaluation request hash"
+                        .to_owned(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn store_response_result(
+        &mut self,
+        result: response::EvaluationResult,
+        result_hash: DigestIdentifier,
+        result_hash_signature: Signature,
+    ) -> Result<(), ActorError> {
+        match result {
+            response::EvaluationResult::Ok {
+                response,
+                eval_req_hash,
+                ..
+            } => {
+                self.ensure_eval_req_hash(eval_req_hash)?;
+                self.evaluators_response.push((response, result_hash));
+            }
+            response::EvaluationResult::Error {
+                error,
+                eval_req_hash,
+                ..
+            } => {
+                self.ensure_eval_req_hash(eval_req_hash)?;
+                self.errors.push((error, result_hash));
+            }
+        }
+
+        self.evaluators_signatures.push(result_hash_signature);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -244,7 +322,6 @@ pub enum EvaluationMessage {
     Response {
         evaluation_res: EvaluationRes,
         sender: PublicKey,
-        signature: Option<Signature>,
     },
 }
 
@@ -340,7 +417,6 @@ impl Handler<Self> for Evaluation {
             EvaluationMessage::Response {
                 evaluation_res,
                 sender,
-                signature,
             } => {
                 if !self.reboot {
                     // If node is in evaluator list
@@ -348,36 +424,15 @@ impl Handler<Self> for Evaluation {
                         // Check type of validation
                         match evaluation_res {
                             EvaluationRes::Response {
-                                response,
-                                eval_req_hash,
-                                ..
+                                result,
+                                result_hash,
+                                result_hash_signature,
                             } => {
-                                let Some(signature) = signature else {
-                                    error!(
-                                        msg_type = "Response",
-                                        sender = %sender,
-                                        "Evaluation response without signature"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Response solver without signature".to_owned(),
-                                    });
-                                };
-
-                                if eval_req_hash != self.evaluation_request_hash
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        expected_hash = %self.evaluation_request_hash,
-                                        received_hash = %eval_req_hash,
-                                        "Invalid evaluation request hash"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Response, Invalid evaluation request hash".to_owned(),
-                                    });
-                                }
-
-                                self.evaluators_signatures.push(signature);
-                                self.evaluators_response.push(response);
+                                self.store_response_result(
+                                    result,
+                                    result_hash,
+                                    result_hash_signature,
+                                )?;
                             }
                             EvaluationRes::TimeOut => {
                                 Self::observe_event("timeout");
@@ -413,38 +468,6 @@ impl Handler<Self> for Evaluation {
                                 );
 
                                 return Ok(());
-                            }
-                            EvaluationRes::Error {
-                                error,
-                                eval_req_hash,
-                                ..
-                            } => {
-                                if let Some(signature) = signature {
-                                    self.evaluators_signatures.push(signature);
-                                } else {
-                                    error!(
-                                        msg_type = "Response",
-                                        sender = %sender,
-                                        "Evaluation error without signature"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Error solver without signature".to_owned(),
-                                    });
-                                }
-
-                                if eval_req_hash != self.evaluation_request_hash
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        expected_hash = %self.evaluation_request_hash,
-                                        received_hash = %eval_req_hash,
-                                        "Invalid evaluation request hash"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Response, Invalid evaluation request hash".to_owned(),
-                                    });
-                                }
-                                self.errors.push(error);
                             }
                             EvaluationRes::Reboot => {
                                 Self::observe_event("reboot");
@@ -500,6 +523,7 @@ impl Handler<Self> for Evaluation {
                             }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                return Ok(());
                             }
 
                             let response = match self
@@ -901,6 +925,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: payload.clone(),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -1052,6 +1077,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: payload.clone(),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1172,6 +1198,7 @@ pub mod tests {
                     ]
                 }
             })),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1350,6 +1377,7 @@ pub mod tests {
                     ]
                 }
             })),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1574,6 +1602,7 @@ pub mod tests {
                     ]
                 }
             })),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -1846,7 +1875,7 @@ pub mod tests {
         let event = &replay.events[0];
         assert!(!event.public_key.is_empty());
         assert!(event.sink_timestamp > 0);
-        match &event.event {
+        match &event.payload {
             DataToSinkEvent::Create {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -1897,6 +1926,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(payload.clone()),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1913,7 +1943,7 @@ pub mod tests {
         assert_eq!(first_page.events.len(), 1);
         assert!(first_page.has_more);
         assert_eq!(first_page.next_sn, Some(1));
-        match &first_page.events[0].event {
+        match &first_page.events[0].payload {
             DataToSinkEvent::Create {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -1935,11 +1965,12 @@ pub mod tests {
         assert_eq!(second_page.events.len(), 1);
         assert!(!second_page.has_more);
         assert!(second_page.next_sn.is_none());
-        match &second_page.events[0].event {
-            DataToSinkEvent::Fact {
+        match &second_page.events[0].payload {
+            DataToSinkEvent::FactFull {
                 governance_id,
                 subject_id: replay_subject_id,
                 payload: replay_payload,
+                success,
                 sn,
                 gov_version,
                 ..
@@ -1949,7 +1980,8 @@ pub mod tests {
                     Some(gov_id.to_string().as_str())
                 );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
-                assert_eq!(replay_payload, &payload);
+                assert_eq!(replay_payload.as_ref(), Some(&payload));
+                assert!(*success);
                 assert_eq!(*sn, 1);
                 assert_eq!(*gov_version, 1);
             }
@@ -1977,7 +2009,7 @@ pub mod tests {
         assert!(!replay.has_more);
         assert!(replay.next_sn.is_none());
 
-        match &replay.events[0].event {
+        match &replay.events[0].payload {
             DataToSinkEvent::Create {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -2033,7 +2065,7 @@ pub mod tests {
         assert!(!replay.has_more);
         assert!(replay.next_sn.is_none());
 
-        match &replay.events[0].event {
+        match &replay.events[0].payload {
             DataToSinkEvent::Transfer {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -2042,6 +2074,7 @@ pub mod tests {
                 new_owner,
                 sn,
                 gov_version,
+                ..
             } => {
                 assert_eq!(
                     governance_id.as_deref(),
@@ -2158,6 +2191,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(payload.clone()),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -2175,13 +2209,15 @@ pub mod tests {
             get_subject_state(&db, &request_data.subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
-        let RequestEventDB::TrackerFact {
+        let RequestEventDB::TrackerFactFull {
             payload: payload_db,
+            viewpoints,
             evaluation_response,
         } = event.event
         else {
             panic!()
         };
+        assert!(viewpoints.is_empty());
 
         let EvalResDB::Patch(_) = evaluation_response else {
             panic!("");
@@ -2260,6 +2296,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(payload.clone()),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -2277,13 +2314,15 @@ pub mod tests {
             get_subject_state(&db, &request_data.subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
-        let RequestEventDB::TrackerFact {
+        let RequestEventDB::TrackerFactFull {
             payload: payload_db,
+            viewpoints,
             evaluation_response,
         } = event.event
         else {
             panic!()
         };
+        assert!(viewpoints.is_empty());
 
         let EvalResDB::Error(e) = evaluation_response else {
             panic!("");

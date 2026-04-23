@@ -6,10 +6,12 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
+    fmt,
     hash::Hash,
 };
 
-use serde::{Deserialize, Serialize, Serializer};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 #[cfg(feature = "typescript")]
@@ -17,10 +19,6 @@ use ts_rs::TS;
 
 use crate::identity::PublicKey;
 use crate::{Namespace, SchemaType};
-
-fn default_witnesses_creator() -> BTreeSet<String> {
-    BTreeSet::from(["Witnesses".to_owned()])
-}
 
 pub type MemberName = String;
 
@@ -180,7 +178,7 @@ pub struct RoleCreatorChange {
     pub actual_name: MemberName,
     pub actual_namespace: Namespace,
     pub new_namespace: Option<Namespace>,
-    pub new_witnesses: Option<BTreeSet<String>>,
+    pub new_witnesses: Option<BTreeSet<CreatorWitness>>,
     pub new_quantity: Option<CreatorQuantity>,
 }
 
@@ -212,6 +210,8 @@ pub struct SchemaAdd {
     pub id: SchemaType,
     pub contract: String,
     pub initial_value: Value,
+    #[serde(default)]
+    pub viewpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -221,6 +221,8 @@ pub struct SchemaChange {
     pub actual_id: SchemaType,
     pub new_contract: Option<String>,
     pub new_initial_value: Option<Value>,
+    #[serde(default)]
+    pub new_viewpoints: Option<Vec<String>>,
 }
 
 ///// Policies /////
@@ -267,7 +269,16 @@ pub struct SchemaPolicieChange {
 /// Governance-wide quorum policy.
 /// Governance quorum.
 #[derive(
-    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Hash, Eq,
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Hash,
+    Eq,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -279,7 +290,17 @@ pub enum Quorum {
     Percentage(u8),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export, type = "number | \"infinity\""))]
 pub enum CreatorQuantity {
@@ -324,8 +345,27 @@ impl Serialize for CreatorQuantity {
     }
 }
 
+impl CreatorQuantity {
+    pub const fn check(&self) -> bool {
+        match self {
+            Self::Quantity(quantity) => *quantity != 0,
+            Self::Infinity => true,
+        }
+    }
+}
+
 #[derive(
-    Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq, PartialOrd, Ord,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    PartialEq,
+    Hash,
+    Eq,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -334,15 +374,181 @@ pub struct Role {
     pub namespace: Namespace,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(
+    Debug,
+    Serialize,
+    Clone,
+    PartialEq,
+    Hash,
+    Eq,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct CreatorWitness {
+    pub name: String,
+    #[cfg_attr(feature = "typescript", ts(type = "string[] | undefined"))]
+    pub viewpoints: BTreeSet<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct UniqueViewpoints(BTreeSet<String>);
+
+impl From<UniqueViewpoints> for BTreeSet<String> {
+    fn from(value: UniqueViewpoints) -> Self {
+        value.0
+    }
+}
+
+impl<'de> Deserialize<'de> for UniqueViewpoints {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let viewpoints =
+            <Vec<String> as serde::Deserialize>::deserialize(deserializer)?;
+        let mut unique = BTreeSet::new();
+
+        for viewpoint in viewpoints {
+            if !unique.insert(viewpoint.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicated viewpoint '{viewpoint}'"
+                )));
+            }
+        }
+
+        Ok(Self(unique))
+    }
+}
+
+#[derive(Deserialize)]
+struct CreatorWitnessDef {
+    name: String,
+    #[serde(default)]
+    viewpoints: UniqueViewpoints,
+}
+
+impl<'de> Deserialize<'de> for CreatorWitness {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let CreatorWitnessDef { name, viewpoints } =
+            CreatorWitnessDef::deserialize(deserializer)?;
+
+        Ok(Self {
+            name,
+            viewpoints: viewpoints.into(),
+        })
+    }
+}
+
+fn default_creator_witnesses() -> BTreeSet<CreatorWitness> {
+    BTreeSet::from([CreatorWitness {
+        name: "Witnesses".to_owned(),
+        viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+    }])
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CreatorWitnessInput {
+    Name(String),
+    Detailed(CreatorWitness),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreatorWitnesses(BTreeSet<CreatorWitness>);
+
+impl From<CreatorWitnesses> for BTreeSet<CreatorWitness> {
+    fn from(value: CreatorWitnesses) -> Self {
+        value.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CreatorWitnesses {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values =
+            <Vec<CreatorWitnessInput> as serde::Deserialize>::deserialize(
+                deserializer,
+            )?;
+        let mut by_name = HashSet::new();
+        let mut out = BTreeSet::new();
+
+        for value in values {
+            let witness = match value {
+                CreatorWitnessInput::Name(name) => CreatorWitness {
+                    name,
+                    viewpoints: BTreeSet::new(),
+                },
+                CreatorWitnessInput::Detailed(witness) => witness,
+            };
+
+            if !by_name.insert(witness.name.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicated creator witness '{}'",
+                    witness.name
+                )));
+            }
+
+            out.insert(witness);
+        }
+
+        Ok(Self(out))
+    }
+}
+
+#[derive(Debug, Serialize, Clone, BorshDeserialize, BorshSerialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct RoleCreator {
     pub name: String,
     pub namespace: Namespace,
-    #[serde(default = "default_witnesses_creator")]
-    pub witnesses: BTreeSet<String>,
+    #[cfg_attr(
+        feature = "typescript",
+        ts(type = "(string | CreatorWitness)[] | undefined")
+    )]
+    pub witnesses: BTreeSet<CreatorWitness>,
     pub quantity: CreatorQuantity,
+}
+
+#[derive(Deserialize)]
+struct RoleCreatorDef {
+    name: String,
+    pub namespace: Namespace,
+    #[serde(default)]
+    witnesses: Option<CreatorWitnesses>,
+    pub quantity: CreatorQuantity,
+}
+
+impl<'de> Deserialize<'de> for RoleCreator {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RoleCreatorDef {
+            name,
+            namespace,
+            witnesses,
+            quantity,
+        } = RoleCreatorDef::deserialize(deserializer)?;
+
+        let witnesses = witnesses
+            .map_or_else(default_creator_witnesses, |values| values.into());
+
+        Ok(Self {
+            name,
+            namespace,
+            witnesses,
+            quantity,
+        })
+    }
 }
 
 impl Hash for RoleCreator {
@@ -372,3 +578,167 @@ impl PartialEq for RoleCreator {
 }
 
 impl Eq for RoleCreator {}
+
+impl RoleCreator {
+    pub fn create(name: &str, namespace: Namespace) -> Self {
+        Self {
+            name: name.to_owned(),
+            namespace,
+            witnesses: default_creator_witnesses(),
+            quantity: CreatorQuantity::Infinity,
+        }
+    }
+}
+
+impl Quorum {
+    pub fn check_values(&self) -> Result<(), String> {
+        if let Self::Percentage(percentage) = self
+            && (*percentage == 0_u8 || *percentage > 100_u8)
+        {
+            return Err("the percentage must be between 1 and 100".to_owned());
+        }
+
+        Ok(())
+    }
+
+    pub fn get_signers(&self, total_members: u32, pending: u32) -> u32 {
+        let signers = match self {
+            Self::Fixed(fixed) => {
+                let min = std::cmp::min(fixed, &total_members);
+                *min
+            }
+            Self::Majority => total_members / 2 + 1,
+            Self::Percentage(percentage) => {
+                total_members * (percentage / 100) as u32
+            }
+        };
+
+        std::cmp::min(signers, pending)
+    }
+
+    pub fn check_quorum(&self, total_members: u32, signers: u32) -> bool {
+        match self {
+            Self::Fixed(fixed) => {
+                let min = std::cmp::min(fixed, &total_members);
+                signers >= *min
+            }
+            Self::Majority => signers > total_members / 2,
+            Self::Percentage(percentage) => {
+                signers >= (total_members * (percentage / 100) as u32)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreatorWitness, RoleCreator, SchemaAdd, SchemaChange};
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn test_schema_add_allows_duplicated_viewpoints_deserialization() {
+        let schema = serde_json::from_value::<SchemaAdd>(json!({
+            "id": "Example",
+            "contract": "contract",
+            "initial_value": {},
+            "viewpoints": ["agua", "agua"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            schema.viewpoints,
+            vec!["agua".to_owned(), "agua".to_owned()]
+        );
+    }
+
+    #[test]
+    fn test_schema_change_allows_duplicated_viewpoints_deserialization() {
+        let change = serde_json::from_value::<SchemaChange>(json!({
+            "actual_id": "Example",
+            "new_viewpoints": ["agua", "agua"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            change.new_viewpoints,
+            Some(vec!["agua".to_owned(), "agua".to_owned()])
+        );
+    }
+
+    #[test]
+    fn test_creator_witness_rejects_duplicated_viewpoints() {
+        let error = serde_json::from_value::<CreatorWitness>(json!({
+            "name": "pepito",
+            "viewpoints": ["agua", "agua"]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicated viewpoint"));
+    }
+
+    #[test]
+    fn test_role_creator_defaults_to_generic_all_viewpoints() {
+        let creator = serde_json::from_value::<RoleCreator>(json!({
+            "name": "Owner",
+            "namespace": [],
+            "quantity": 1
+        }))
+        .unwrap();
+
+        assert_eq!(
+            creator.witnesses,
+            BTreeSet::from([CreatorWitness {
+                name: "Witnesses".to_owned(),
+                viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+            }])
+        );
+    }
+
+    #[test]
+    fn test_role_creator_allows_legacy_string_witnesses() {
+        let creator = serde_json::from_value::<RoleCreator>(json!({
+            "name": "Owner",
+            "namespace": [],
+            "witnesses": ["Alice"],
+            "quantity": 1
+        }))
+        .unwrap();
+
+        assert_eq!(
+            creator.witnesses,
+            BTreeSet::from([CreatorWitness {
+                name: "Alice".to_owned(),
+                viewpoints: BTreeSet::new(),
+            }])
+        );
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct Member {
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub id: PublicKey,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub enum ProtocolTypes {
+    Approval,
+    Evaluation,
+    Validation,
+}
+
+impl fmt::Display for ProtocolTypes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Approval => write!(f, "Approval"),
+            Self::Evaluation => write!(f, "Evaluation"),
+            Self::Validation => write!(f, "Validation"),
+        }
+    }
+}

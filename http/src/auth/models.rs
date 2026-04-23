@@ -232,6 +232,7 @@ pub struct ApiKeyInfo {
     pub last_used_at: Option<i64>,
     pub last_used_ip: Option<String>,
     pub plan_id: Option<String>,
+    pub plan_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -305,10 +306,12 @@ pub struct CreateQuotaExtensionRequest {
 pub struct QuotaExtensionInfo {
     pub id: i64,
     pub api_key_id: String,
+    pub api_key_name: Option<String>,
     pub usage_month: String,
     pub extra_events: i64,
     pub reason: Option<String>,
     pub created_by: Option<i64>,
+    pub created_by_username: Option<String>,
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
 }
@@ -316,8 +319,10 @@ pub struct QuotaExtensionInfo {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiKeyQuotaStatus {
     pub api_key_id: String,
+    pub api_key_name: Option<String>,
     pub usage_month: String,
     pub plan_id: Option<String>,
+    pub plan_name: Option<String>,
     pub plan_limit: Option<i64>,
     pub extensions_total: i64,
     pub effective_limit: Option<i64>,
@@ -336,7 +341,9 @@ pub struct AuditLog {
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub timestamp: i64,
     pub user_id: Option<i64>,
+    pub username: Option<String>,
     pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
     pub action_type: String,
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
@@ -375,6 +382,87 @@ pub struct AuditLogPage {
     pub offset: i64,
     pub total: i64,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AuditValueCount {
+    pub value: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AuditUserCount {
+    pub user_id: i64,
+    pub username: Option<String>,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AuditApiKeyCount {
+    pub api_key_id: String,
+    pub api_key_name: Option<String>,
+    pub user_id: Option<i64>,
+    pub username: Option<String>,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AuditStats {
+    pub total_logs: i64,
+    pub success_count: i64,
+    pub failure_count: i64,
+    pub success_rate: f64,
+    pub top_action_types: Vec<AuditValueCount>,
+    pub top_users: Vec<AuditUserCount>,
+    pub top_api_keys: Vec<AuditApiKeyCount>,
+    pub top_endpoints: Vec<AuditValueCount>,
+    pub top_http_methods: Vec<AuditValueCount>,
+    pub top_ip_addresses: Vec<AuditValueCount>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RateLimitApiKeyStats {
+    pub api_key_id: Option<String>,
+    pub key_name: Option<String>,
+    pub user_id: Option<i64>,
+    pub username: Option<String>,
+    pub total_requests: i64,
+    pub last_request_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RateLimitIpStats {
+    pub ip_address: Option<String>,
+    pub total_requests: i64,
+    pub last_request_at: Option<String>,
+    pub unique_api_keys: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RateLimitEndpointStats {
+    pub endpoint: Option<String>,
+    pub total_requests: i64,
+    pub last_request_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RateLimitIpEndpointStats {
+    pub ip_address: Option<String>,
+    pub endpoint: Option<String>,
+    pub total_requests: i64,
+    pub last_request_at: Option<String>,
+    pub unique_api_keys: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RateLimitStats {
+    pub total_requests: i64,
+    pub window_seconds: i64,
+    pub max_requests_per_window: u32,
+    pub by_api_key: Vec<RateLimitApiKeyStats>,
+    pub by_ip: Vec<RateLimitIpStats>,
+    pub by_endpoint: Vec<RateLimitEndpointStats>,
+    pub by_ip_endpoint: Vec<RateLimitIpEndpointStats>,
 }
 
 // =============================================================================
@@ -467,6 +555,7 @@ pub struct SystemConfig {
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub updated_at: i64,
     pub updated_by: Option<i64>,
+    pub updated_by_username: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

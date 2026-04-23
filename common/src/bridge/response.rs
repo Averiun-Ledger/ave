@@ -152,9 +152,14 @@ pub enum RequestEventDB {
         schema_id: String,
         namespace: String,
     },
-    TrackerFact {
+    TrackerFactFull {
         payload: Value,
+        viewpoints: Vec<String>,
         evaluation_response: EvalResDB,
+    },
+    TrackerFactOpaque {
+        viewpoints: Vec<String>,
+        evaluation_success: bool,
     },
     GovernanceFact {
         payload: Value,
@@ -178,9 +183,9 @@ impl RequestEventDB {
     pub const fn get_event_type(&self) -> EventRequestType {
         match self {
             Self::Create { .. } => EventRequestType::Create,
-            Self::TrackerFact { .. } | Self::GovernanceFact { .. } => {
-                EventRequestType::Fact
-            }
+            Self::TrackerFactFull { .. }
+            | Self::GovernanceFact { .. }
+            | Self::TrackerFactOpaque { .. } => EventRequestType::Fact,
             Self::Transfer { .. } => EventRequestType::Transfer,
             Self::TrackerConfirm | Self::GovernanceConfirm { .. } => {
                 EventRequestType::Confirm
@@ -198,6 +203,67 @@ impl RequestEventDB {
 pub enum EvalResDB {
     Patch(Value),
     Error(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum TrackerVisibilityModeDB {
+    Full,
+    Opaque,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrackerStoredVisibilityDB {
+    Full,
+    Only { viewpoints: Vec<String> },
+    None,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct TrackerStoredVisibilityRangeDB {
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub visibility: TrackerStoredVisibilityDB,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrackerEventVisibilityDB {
+    NonFact,
+    Fact { viewpoints: Vec<String> },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct TrackerEventVisibilityRangeDB {
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub visibility: TrackerEventVisibilityDB,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct TrackerVisibilityStateDB {
+    pub mode: TrackerVisibilityModeDB,
+    pub stored_ranges: Vec<TrackerStoredVisibilityRangeDB>,
+    pub event_ranges: Vec<TrackerEventVisibilityRangeDB>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +284,7 @@ pub struct SubjectDB {
     pub owner: String,
     pub new_owner: Option<String>,
     pub active: bool,
+    pub tracker_visibility: Option<TrackerVisibilityStateDB>,
     pub properties: Value,
 }
 

@@ -1,3 +1,7 @@
+#[cfg(feature = "test")]
+use std::env;
+#[cfg(feature = "test")]
+use std::io::ErrorKind;
 use std::{
     collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash as StdHash, Hasher},
@@ -16,6 +20,8 @@ use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(feature = "test")]
+use tokio::time::{Duration, sleep};
 use tokio::{fs, process::Command, sync::RwLock};
 use tracing::debug;
 use wasmtime::{ExternType, Module, Store};
@@ -76,6 +82,10 @@ impl CompilerSupport {
     const ARTIFACT_WASM: &'static str = "contract.wasm";
     const ARTIFACT_PRECOMPILED: &'static str = "contract.cwasm";
     const LEGACY_ARTIFACT_METADATA: &'static str = "contract.json";
+    #[cfg(feature = "test")]
+    const GLOBAL_CACHE_DIR: &'static str = "ave-contract-artifacts";
+    #[cfg(feature = "test")]
+    const GLOBAL_CACHE_METADATA: &'static str = "metadata.borsh";
 
     fn observe_contract_prepare(
         kind: &'static str,
@@ -108,8 +118,18 @@ impl CompilerSupport {
             })
     }
 
+    #[cfg(feature = "test")]
+    fn artifact_wasm_path_in(base_path: &Path) -> PathBuf {
+        base_path.join(Self::ARTIFACT_WASM)
+    }
+
     fn artifact_wasm_path(contract_path: &Path) -> PathBuf {
         contract_path.join(Self::ARTIFACT_WASM)
+    }
+
+    #[cfg(feature = "test")]
+    fn artifact_precompiled_path_in(base_path: &Path) -> PathBuf {
+        base_path.join(Self::ARTIFACT_PRECOMPILED)
     }
 
     fn artifact_precompiled_path(contract_path: &Path) -> PathBuf {
@@ -118,6 +138,33 @@ impl CompilerSupport {
 
     fn legacy_artifact_metadata_path(contract_path: &Path) -> PathBuf {
         contract_path.join(Self::LEGACY_ARTIFACT_METADATA)
+    }
+
+    #[cfg(feature = "test")]
+    fn global_cache_root() -> PathBuf {
+        env::temp_dir().join(Self::GLOBAL_CACHE_DIR)
+    }
+
+    #[cfg(feature = "test")]
+    fn global_cache_entry_dir(
+        contract_hash: &DigestIdentifier,
+        manifest_hash: &DigestIdentifier,
+        engine_fingerprint: &DigestIdentifier,
+        toolchain_fingerprint: &DigestIdentifier,
+    ) -> PathBuf {
+        Self::global_cache_root().join(format!(
+            "{contract_hash}_{manifest_hash}_{engine_fingerprint}_{toolchain_fingerprint}"
+        ))
+    }
+
+    #[cfg(feature = "test")]
+    fn global_cache_metadata_path(cache_dir: &Path) -> PathBuf {
+        cache_dir.join(Self::GLOBAL_CACHE_METADATA)
+    }
+
+    #[cfg(feature = "test")]
+    fn global_cache_lock_path(cache_dir: &Path) -> PathBuf {
+        cache_dir.with_extension("lock")
     }
 
     fn cargo_config_path(contract_path: &Path) -> PathBuf {
@@ -266,10 +313,36 @@ impl CompilerSupport {
             })
     }
 
+    #[cfg(feature = "test")]
+    async fn load_artifact_wasm_from(
+        base_path: &Path,
+    ) -> Result<Vec<u8>, CompilerError> {
+        let wasm_path = Self::artifact_wasm_path_in(base_path);
+        fs::read(&wasm_path)
+            .await
+            .map_err(|e| CompilerError::FileReadFailed {
+                path: wasm_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })
+    }
+
     async fn load_artifact_precompiled(
         contract_path: &Path,
     ) -> Result<Vec<u8>, CompilerError> {
         let precompiled_path = Self::artifact_precompiled_path(contract_path);
+        fs::read(&precompiled_path).await.map_err(|e| {
+            CompilerError::FileReadFailed {
+                path: precompiled_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })
+    }
+
+    #[cfg(feature = "test")]
+    async fn load_artifact_precompiled_from(
+        base_path: &Path,
+    ) -> Result<Vec<u8>, CompilerError> {
+        let precompiled_path = Self::artifact_precompiled_path_in(base_path);
         fs::read(&precompiled_path).await.map_err(|e| {
             CompilerError::FileReadFailed {
                 path: precompiled_path.to_string_lossy().to_string(),
@@ -316,6 +389,152 @@ impl CompilerSupport {
         let _ = fs::remove_file(&legacy_metadata_path).await;
 
         Ok(())
+    }
+
+    #[cfg(feature = "test")]
+    async fn persist_global_cache_artifact(
+        cache_dir: &Path,
+        metadata: &ContractArtifactRecord,
+        wasm_bytes: &[u8],
+        precompiled_bytes: &[u8],
+    ) -> Result<(), CompilerError> {
+        fs::create_dir_all(cache_dir).await.map_err(|e| {
+            CompilerError::DirectoryCreationFailed {
+                path: cache_dir.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        let artifact_path = Self::artifact_wasm_path_in(cache_dir);
+        fs::write(&artifact_path, wasm_bytes).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: artifact_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        let precompiled_path = Self::artifact_precompiled_path_in(cache_dir);
+        fs::write(&precompiled_path, precompiled_bytes)
+            .await
+            .map_err(|e| CompilerError::FileWriteFailed {
+                path: precompiled_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })?;
+
+        let metadata_path = Self::global_cache_metadata_path(cache_dir);
+        fs::write(
+            &metadata_path,
+            to_vec(metadata).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "global cache metadata",
+                    details: e.to_string(),
+                }
+            })?,
+        )
+        .await
+        .map_err(|e| CompilerError::FileWriteFailed {
+            path: metadata_path.to_string_lossy().to_string(),
+            details: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "test")]
+    async fn try_acquire_global_cache_lock(
+        cache_dir: &Path,
+    ) -> Result<Option<GlobalCacheLock>, CompilerError> {
+        fs::create_dir_all(Self::global_cache_root())
+            .await
+            .map_err(|e| CompilerError::DirectoryCreationFailed {
+                path: Self::global_cache_root().to_string_lossy().to_string(),
+                details: e.to_string(),
+            })?;
+
+        let lock_path = Self::global_cache_lock_path(cache_dir);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .await
+        {
+            Ok(_) => Ok(Some(GlobalCacheLock { path: lock_path })),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(CompilerError::FileWriteFailed {
+                path: lock_path.to_string_lossy().to_string(),
+                details: error.to_string(),
+            }),
+        }
+    }
+
+    #[cfg(feature = "test")]
+    async fn wait_for_global_cache<A: Actor>(
+        hash: HashAlgorithm,
+        ctx: &ActorContext<A>,
+        initial_value: Value,
+        contract_hash: &DigestIdentifier,
+        manifest_hash: &DigestIdentifier,
+        engine_fingerprint: &DigestIdentifier,
+        toolchain_fingerprint: &DigestIdentifier,
+    ) -> Result<
+        Option<(
+            Arc<Module>,
+            ContractArtifactRecord,
+            &'static str,
+            Vec<u8>,
+            Vec<u8>,
+        )>,
+        CompilerError,
+    > {
+        let cache_dir = Self::global_cache_entry_dir(
+            contract_hash,
+            manifest_hash,
+            engine_fingerprint,
+            toolchain_fingerprint,
+        );
+        let lock_path = Self::global_cache_lock_path(&cache_dir);
+
+        loop {
+            if let Some(hit) = Self::try_load_global_cache(
+                hash,
+                ctx,
+                initial_value.clone(),
+                contract_hash,
+                manifest_hash,
+                engine_fingerprint,
+                toolchain_fingerprint,
+            )
+            .await?
+            {
+                return Ok(Some(hit));
+            }
+
+            if fs::metadata(&lock_path).await.is_err() {
+                return Ok(None);
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[cfg(feature = "test")]
+    async fn load_global_cache_metadata(
+        cache_dir: &Path,
+    ) -> Result<ContractArtifactRecord, CompilerError> {
+        let metadata_path = Self::global_cache_metadata_path(cache_dir);
+        let metadata_bytes = fs::read(&metadata_path).await.map_err(|e| {
+            CompilerError::FileReadFailed {
+                path: metadata_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        ContractArtifactRecord::try_from_slice(&metadata_bytes).map_err(|e| {
+            CompilerError::SerializationError {
+                context: "global cache metadata",
+                details: e.to_string(),
+            }
+        })
     }
 
     fn deserialize_precompiled(
@@ -616,7 +835,179 @@ impl CompilerSupport {
             toolchain_fingerprint,
         )?;
 
+        #[cfg(feature = "test")]
+        {
+            let global_cache_dir = Self::global_cache_entry_dir(
+                &metadata.contract_hash,
+                &metadata.manifest_hash,
+                &metadata.engine_fingerprint,
+                &metadata.toolchain_fingerprint,
+            );
+            if let Err(error) = Self::persist_global_cache_artifact(
+                &global_cache_dir,
+                &metadata,
+                &wasm_bytes,
+                &precompiled_bytes,
+            )
+            .await
+            {
+                debug!(
+                    error = %error,
+                    path = %global_cache_dir.display(),
+                    "Failed to persist global contract cache artifact"
+                );
+            }
+        }
+
         Ok((Arc::new(module), metadata))
+    }
+
+    #[cfg(feature = "test")]
+    async fn try_load_global_cache<A: Actor>(
+        hash: HashAlgorithm,
+        ctx: &ActorContext<A>,
+        initial_value: Value,
+        contract_hash: &DigestIdentifier,
+        manifest_hash: &DigestIdentifier,
+        engine_fingerprint: &DigestIdentifier,
+        toolchain_fingerprint: &DigestIdentifier,
+    ) -> Result<
+        Option<(
+            Arc<Module>,
+            ContractArtifactRecord,
+            &'static str,
+            Vec<u8>,
+            Vec<u8>,
+        )>,
+        CompilerError,
+    > {
+        let cache_dir = Self::global_cache_entry_dir(
+            contract_hash,
+            manifest_hash,
+            engine_fingerprint,
+            toolchain_fingerprint,
+        );
+
+        let persisted = match Self::load_global_cache_metadata(&cache_dir).await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    path = %cache_dir.display(),
+                    "Global contract cache metadata unavailable"
+                );
+                return Ok(None);
+            }
+        };
+
+        if !Self::metadata_matches(
+            &persisted,
+            contract_hash,
+            manifest_hash,
+            engine_fingerprint,
+            toolchain_fingerprint,
+        ) {
+            return Ok(None);
+        }
+
+        let wasm_runtime = Self::wasm_runtime(ctx).await?;
+        let wasm_bytes = match Self::load_artifact_wasm_from(&cache_dir).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    path = %cache_dir.display(),
+                    "Global contract cache wasm artifact unavailable"
+                );
+                return Ok(None);
+            }
+        };
+
+        let wasm_hash =
+            Self::hash_bytes(hash, &wasm_bytes, "global cache wasm artifact")?;
+        if wasm_hash != persisted.wasm_hash {
+            debug!(
+                expected = %persisted.wasm_hash,
+                actual = %wasm_hash,
+                path = %cache_dir.display(),
+                "Global cache wasm artifact hash mismatch"
+            );
+            return Ok(None);
+        }
+
+        if let Ok(precompiled_bytes) =
+            Self::load_artifact_precompiled_from(&cache_dir).await
+        {
+            let precompiled_hash = Self::hash_bytes(
+                hash,
+                &precompiled_bytes,
+                "global cache cwasm artifact",
+            )?;
+            if precompiled_hash == persisted.cwasm_hash
+                && let Ok(module) = Self::deserialize_precompiled(
+                    &wasm_runtime,
+                    &precompiled_bytes,
+                )
+                && Self::validate_module(
+                    ctx,
+                    &module,
+                    ValueWrapper(initial_value.clone()),
+                )
+                .await
+                .is_ok()
+            {
+                return Ok(Some((
+                    Arc::new(module),
+                    persisted,
+                    "global_cwasm_hit",
+                    wasm_bytes,
+                    precompiled_bytes,
+                )));
+            }
+        }
+
+        if let Ok((precompiled_bytes, module)) =
+            Self::precompile_module(&wasm_runtime, &wasm_bytes)
+            && Self::validate_module(ctx, &module, ValueWrapper(initial_value))
+                .await
+                .is_ok()
+        {
+            let refreshed_record = Self::build_contract_record(
+                hash,
+                contract_hash.clone(),
+                manifest_hash.clone(),
+                &wasm_bytes,
+                &precompiled_bytes,
+                engine_fingerprint.clone(),
+                toolchain_fingerprint.clone(),
+            )?;
+
+            if let Err(error) = Self::persist_global_cache_artifact(
+                &cache_dir,
+                &refreshed_record,
+                &wasm_bytes,
+                &precompiled_bytes,
+            )
+            .await
+            {
+                debug!(
+                    error = %error,
+                    path = %cache_dir.display(),
+                    "Failed to refresh global contract cache artifact"
+                );
+            }
+
+            return Ok(Some((
+                Arc::new(module),
+                refreshed_record,
+                "global_wasm_hit",
+                wasm_bytes,
+                precompiled_bytes,
+            )));
+        }
+
+        Ok(None)
     }
 
     async fn compile_or_load_registered<A: Actor>(
@@ -846,6 +1237,100 @@ impl CompilerSupport {
                 }
             }
 
+            #[cfg(feature = "test")]
+            let cache_dir = Self::global_cache_entry_dir(
+                &contract_hash,
+                &manifest_hash,
+                &engine_fingerprint,
+                &toolchain_fingerprint,
+            );
+
+            #[cfg(feature = "test")]
+            if let Some((
+                module,
+                metadata,
+                prepare_result,
+                wasm_bytes,
+                precompiled_bytes,
+            )) = Self::try_load_global_cache(
+                hash,
+                ctx,
+                initial_value.clone(),
+                &contract_hash,
+                &manifest_hash,
+                &engine_fingerprint,
+                &toolchain_fingerprint,
+            )
+            .await?
+            {
+                Self::persist_artifact(
+                    contract_path,
+                    &wasm_bytes,
+                    &precompiled_bytes,
+                )
+                .await?;
+
+                register
+                    .tell(ContractRegisterMessage::SetMetadata {
+                        contract_name: contract_name.to_owned(),
+                        metadata: metadata.clone(),
+                    })
+                    .await
+                    .map_err(|e| CompilerError::ContractRegisterFailed {
+                        details: e.to_string(),
+                    })?;
+
+                return Ok((module, metadata, prepare_result));
+            }
+
+            #[cfg(feature = "test")]
+            let global_cache_lock =
+                match Self::try_acquire_global_cache_lock(&cache_dir).await? {
+                    Some(lock) => Some(lock),
+                    None => {
+                        if let Some((
+                            module,
+                            metadata,
+                            prepare_result,
+                            wasm_bytes,
+                            precompiled_bytes,
+                        )) = Self::wait_for_global_cache(
+                            hash,
+                            ctx,
+                            initial_value.clone(),
+                            &contract_hash,
+                            &manifest_hash,
+                            &engine_fingerprint,
+                            &toolchain_fingerprint,
+                        )
+                        .await?
+                        {
+                            Self::persist_artifact(
+                                contract_path,
+                                &wasm_bytes,
+                                &precompiled_bytes,
+                            )
+                            .await?;
+
+                            register
+                                .tell(ContractRegisterMessage::SetMetadata {
+                                    contract_name: contract_name.to_owned(),
+                                    metadata: metadata.clone(),
+                                })
+                                .await
+                                .map_err(|e| {
+                                    CompilerError::ContractRegisterFailed {
+                                        details: e.to_string(),
+                                    }
+                                })?;
+
+                            return Ok((module, metadata, prepare_result));
+                        }
+
+                        Self::try_acquire_global_cache_lock(&cache_dir).await?
+                    }
+                };
+
             let (module, metadata) = Self::compile_fresh(
                 hash,
                 ctx,
@@ -854,6 +1339,9 @@ impl CompilerSupport {
                 initial_value,
             )
             .await?;
+
+            #[cfg(feature = "test")]
+            drop(global_cache_lock);
 
             register
                 .tell(ContractRegisterMessage::SetMetadata {
@@ -928,5 +1416,17 @@ impl CompilerSupport {
         ["alloc", "write_byte", "pointer_len", "read_byte"]
             .into_iter()
             .collect()
+    }
+}
+
+#[cfg(feature = "test")]
+struct GlobalCacheLock {
+    path: PathBuf,
+}
+
+#[cfg(feature = "test")]
+impl Drop for GlobalCacheLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }

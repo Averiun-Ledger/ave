@@ -5,7 +5,7 @@ pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery, SinkEventsQuery,
+        EventRequestType, EventsQuery, SinkEventsQuery, UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -29,11 +29,11 @@ pub use ave_core::{
     error::Error,
 };
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
-use config::Config;
-pub use network::{
+pub use ave_network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
     RoutingConfig, RoutingNode,
 };
+use config::Config;
 use prometheus_client::registry::Registry;
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -389,11 +389,18 @@ impl Bridge {
     pub async fn post_update_subject(
         &self,
         subject_id: String,
+        query: UpdateSubjectQuery,
     ) -> Result<String, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(self.api.update_subject(subject_id).await?)
+        Ok(self
+            .api
+            .update_subject_with_options(
+                subject_id,
+                query.strict.unwrap_or(false),
+            )
+            .await?)
     }
 
     pub async fn delete_subject(

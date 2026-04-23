@@ -7,7 +7,6 @@ use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
-use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -17,16 +16,15 @@ use tracing::{Span, debug, error, info, info_span, warn};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::get_subject_data;
 use crate::model::common::subject::{
-    get_gov, get_gov_sn, get_tracker_sn_creator,
+    get_gov, get_gov_sn, get_tracker_sn_owner,
 };
 use crate::node::SubjectData;
 use crate::update::UpdateType;
 use crate::{
-    ActorMessage, NetworkMessage,
     db::Storable,
     governance::model::WitnessesData,
     model::common::emit_fail,
-    update::{Update, UpdateMessage, UpdateNew},
+    update::{Update, UpdateMessage, UpdateNew, UpdateSubjectKind},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,7 +35,29 @@ pub struct Auth {
     #[serde(skip)]
     our_key: Arc<PublicKey>,
 
+    #[serde(skip)]
+    round_retry_interval_secs: u64,
+
+    #[serde(skip)]
+    max_round_retries: usize,
+
+    #[serde(skip)]
+    witness_retry_count: usize,
+
+    #[serde(skip)]
+    witness_retry_interval_secs: u64,
+
     auth: HashMap<DigestIdentifier, HashSet<PublicKey>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthInitParams {
+    pub network: Arc<NetworkSender>,
+    pub our_key: Arc<PublicKey>,
+    pub round_retry_interval_secs: u64,
+    pub max_round_retries: usize,
+    pub witness_retry_count: usize,
+    pub witness_retry_interval_secs: u64,
 }
 
 #[derive(
@@ -74,18 +94,50 @@ impl BorshDeserialize for Auth {
             network,
             auth,
             our_key,
+            round_retry_interval_secs: 10,
+            max_round_retries: 3,
+            witness_retry_count: 3,
+            witness_retry_interval_secs: 10,
         })
     }
 }
 
 impl Auth {
+    async fn build_update_state(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(Option<u64>, Option<UpdateSubjectKind>), ActorError> {
+        let data = get_subject_data(ctx, subject_id).await?;
+
+        match data {
+            Some(SubjectData::Tracker { governance_id, .. }) => {
+                let actual_sn =
+                    get_tracker_sn_owner(ctx, &governance_id, subject_id)
+                        .await?
+                        .map(|(_, actual_sn)| actual_sn);
+
+                Ok((actual_sn, Some(UpdateSubjectKind::Tracker)))
+            }
+            Some(SubjectData::Governance { .. }) => {
+                let sn = get_gov_sn(ctx, subject_id).await?;
+                Ok((Some(sn), Some(UpdateSubjectKind::Governance)))
+            }
+            None => Ok((None, None)),
+        }
+    }
+
     async fn build_update_data(
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
-    ) -> Result<(HashSet<PublicKey>, Option<u64>), ActorError> {
+    ) -> Result<
+        (HashSet<PublicKey>, Option<u64>, Option<UpdateSubjectKind>),
+        ActorError,
+    > {
         let data = get_subject_data(ctx, subject_id).await?;
 
-        let (witnesses, actual_sn) = if let Some(data) = &data {
+        let (witnesses, actual_sn, subject_kind_hint) = if let Some(data) =
+            &data
+        {
             match data {
                 SubjectData::Tracker {
                     governance_id,
@@ -93,14 +145,14 @@ impl Auth {
                     namespace,
                     ..
                 } => {
-                    if let Some((creator, sn)) =
-                        get_tracker_sn_creator(ctx, governance_id, subject_id)
+                    if let Some((owner, actual_sn)) =
+                        get_tracker_sn_owner(ctx, governance_id, subject_id)
                             .await?
                     {
                         let gov = get_gov(ctx, governance_id).await?;
                         let witnesses = gov
                             .get_witnesses(WitnessesData::Schema {
-                                creator,
+                                creator: owner,
                                 schema_id: schema_id.clone(),
                                 namespace: Namespace::from(
                                     namespace.to_owned(),
@@ -118,9 +170,17 @@ impl Auth {
                                 }
                             })?;
 
-                        (witnesses, Some(sn))
+                        (
+                            witnesses,
+                            Some(actual_sn),
+                            Some(UpdateSubjectKind::Tracker),
+                        )
                     } else {
-                        (HashSet::default(), None)
+                        (
+                            HashSet::default(),
+                            None,
+                            Some(UpdateSubjectKind::Tracker),
+                        )
                     }
                 }
                 SubjectData::Governance { .. } => {
@@ -139,14 +199,14 @@ impl Auth {
 
                     let sn = get_gov_sn(ctx, subject_id).await?;
 
-                    (witnesses, Some(sn))
+                    (witnesses, Some(sn), Some(UpdateSubjectKind::Governance))
                 }
             }
         } else {
-            (HashSet::default(), None)
+            (HashSet::default(), None, None)
         };
 
-        Ok((witnesses, actual_sn))
+        Ok((witnesses, actual_sn, subject_kind_hint))
     }
 }
 
@@ -166,6 +226,7 @@ pub enum AuthMessage {
     Update {
         subject_id: DigestIdentifier,
         objective: Option<PublicKey>,
+        strict: bool,
     },
 }
 
@@ -219,6 +280,7 @@ impl Actor for Auth {
             );
             return Err(e);
         }
+
         Ok(())
     }
 }
@@ -242,6 +304,11 @@ impl Handler<Self> for Auth {
 
                     return Ok(AuthResponse::Witnesses(witnesses.clone()));
                 } else {
+                    debug!(
+                        msg_type = "GetAuth",
+                        subject_id = %subject_id,
+                        "Subject is not authorized"
+                    );
                     return Err(ActorError::Functional {
                         description: "The subject has not been authorized"
                             .to_owned(),
@@ -282,6 +349,12 @@ impl Handler<Self> for Auth {
                         subject_id = %subject_id,
                         "New auth created successfully"
                     );
+                } else {
+                    warn!(
+                        msg_type = "NewAuth",
+                        witness = ?witness,
+                        "Ignoring auth creation with empty subject_id"
+                    );
                 }
             }
             AuthMessage::GetAuths => {
@@ -297,6 +370,7 @@ impl Handler<Self> for Auth {
             AuthMessage::Update {
                 subject_id,
                 objective,
+                strict,
             } => {
                 let Some(network) = self.network.clone() else {
                     error!(
@@ -309,24 +383,39 @@ impl Handler<Self> for Auth {
                     });
                 };
 
-                let (witnesses, actual_sn) = {
-                    let (mut witnesses, actual_sn) =
-                        Self::build_update_data(ctx, &subject_id).await?;
-
-                    if let Some(witness) = objective {
-                        witnesses.insert(witness);
-                    }
-
+                let (witnesses, actual_sn, subject_kind_hint) = {
                     let auth_witnesses =
                         self.auth.get(&subject_id).cloned().unwrap_or_default();
+                    let (mut witnesses, actual_sn, subject_kind_hint) =
+                        if strict {
+                            let (actual_sn, subject_kind_hint) =
+                                Self::build_update_state(ctx, &subject_id)
+                                    .await?;
+                            (auth_witnesses, actual_sn, subject_kind_hint)
+                        } else {
+                            let (
+                                mut governance_witnesses,
+                                actual_sn,
+                                subject_kind_hint,
+                            ) = Self::build_update_data(ctx, &subject_id)
+                                .await?;
 
-                    let mut witnesses = witnesses
-                        .union(&auth_witnesses)
-                        .cloned()
-                        .collect::<HashSet<PublicKey>>();
+                            if let Some(witness) = objective {
+                                governance_witnesses.insert(witness);
+                            }
+
+                            (
+                                governance_witnesses
+                                    .union(&auth_witnesses)
+                                    .cloned()
+                                    .collect::<HashSet<PublicKey>>(),
+                                actual_sn,
+                                subject_kind_hint,
+                            )
+                        };
                     witnesses.remove(&self.our_key);
 
-                    (witnesses, actual_sn)
+                    (witnesses, actual_sn, subject_kind_hint)
                 };
 
                 if witnesses.is_empty() {
@@ -338,44 +427,6 @@ impl Handler<Self> for Auth {
                     return Err(ActorError::Functional {
                         description: "The subject has no witnesses to try to ask for an update".to_owned(),
                     });
-                } else if witnesses.len() == 1 {
-                    let objetive = witnesses.iter().next().expect("len is 1");
-                    let info = ComunicateInfo {
-                        receiver: objetive.clone(),
-                        request_id: String::default(),
-                        version: 0,
-                        receiver_actor: format!(
-                            "/user/node/distributor_{}",
-                            subject_id
-                        ),
-                    };
-
-                    if let Err(e) = network
-                        .send_command(network::CommandHelper::SendMessage {
-                            message: NetworkMessage {
-                                info,
-                                message: ActorMessage::DistributionLedgerReq {
-                                    actual_sn,
-                                    subject_id: subject_id.clone(),
-                                },
-                            },
-                        })
-                        .await
-                    {
-                        error!(
-                            msg_type = "Update",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Cannot send response to network"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    };
-
-                    debug!(
-                        msg_type = "Update",
-                        subject_id = %subject_id,
-                        "Update message sent to single witness"
-                    );
                 } else {
                     let data = UpdateNew {
                         network,
@@ -383,6 +434,13 @@ impl Handler<Self> for Auth {
                         our_sn: actual_sn,
                         witnesses,
                         update_type: UpdateType::Auth,
+                        subject_kind_hint,
+                        round_retry_interval_secs: self
+                            .round_retry_interval_secs,
+                        max_round_retries: self.max_round_retries,
+                        witness_retry_count: self.witness_retry_count,
+                        witness_retry_interval_secs: self
+                            .witness_retry_interval_secs,
                     };
 
                     let updater = Update::new(data);
@@ -450,7 +508,7 @@ impl Handler<Self> for Auth {
 #[async_trait]
 impl PersistentActor for Auth {
     type Persistence = LightPersistence;
-    type InitParams = (Arc<NetworkSender>, Arc<PublicKey>);
+    type InitParams = AuthInitParams;
 
     fn update(&mut self, state: Self) {
         self.auth = state.auth;
@@ -458,9 +516,13 @@ impl PersistentActor for Auth {
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            network: Some(params.0),
+            network: Some(params.network),
             auth: HashMap::new(),
-            our_key: params.1,
+            our_key: params.our_key,
+            round_retry_interval_secs: params.round_retry_interval_secs,
+            max_round_retries: params.max_round_retries,
+            witness_retry_count: params.witness_retry_count,
+            witness_retry_interval_secs: params.witness_retry_interval_secs,
         }
     }
 

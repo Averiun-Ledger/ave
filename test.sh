@@ -11,9 +11,10 @@
 #
 #   ./test.sh -r
 #     Runs pre-compilation first and then executes tests.
-#     Timing is split in two phases:
-#       - Warmup duration: pre-compilation time
-#       - Total duration: test execution time after warmup
+#     Timing is split in three values:
+#       - Compilation duration: pre-compilation time
+#       - Test duration: test execution time after compilation
+#       - Total duration: full run time
 #     This is equivalent to running `./test.sh -c` and then `./test.sh`,
 #     but in a single command with separated timing.
 
@@ -24,7 +25,8 @@ INSTALL_FLAGS="${INSTALL_FLAGS:---locked}"
 LOG_DIR="${LOG_DIR:-target/test-logs}"
 COMPILE_ONLY=0
 RUN_AFTER_COMPILE=0
-WARMUP_DURATION=0
+COMPILE_DURATION=0
+TEST_DURATION=0
 
 # OPTIMIZATION: Run tests in parallel
 PARALLEL_JOBS="${PARALLEL_JOBS:-$(nproc)}"
@@ -35,7 +37,7 @@ ave-identity|--all-features
 ave-network|--all-features
 ave-core|--no-default-features --features sqlite,ext-sqlite,test;--no-default-features --features rocksdb,ext-sqlite,test
 ave-bridge|--no-default-features --features sqlite,ext-sqlite,test;--no-default-features --features rocksdb,ext-sqlite,test
-ave-http|--no-default-features --features sqlite,ext-sqlite,prometheus;--no-default-features --features rocksdb,ext-sqlite,prometheus
+ave-http|--no-default-features --features sqlite,ext-sqlite,prometheus,test;--no-default-features --features rocksdb,ext-sqlite,prometheus,test
 EOF
 
 # Global state
@@ -119,7 +121,9 @@ ensure_tools() {
   echo "${BLUE}ℹ${RESET} sccache: DISABLED (better performance without cache)"
 
   mkdir -p "${LOG_DIR}"
+  find "${LOG_DIR}" -mindepth 1 -delete 2>/dev/null || true
   echo "${GREEN}✔${RESET} Log directory: ${LOG_DIR}"
+  echo "${BLUE}ℹ${RESET} Previous logs: CLEANED"
   echo "${BLUE}⚡${RESET} Parallel jobs: ${PARALLEL_JOBS}"
 }
 
@@ -390,10 +394,9 @@ print_summary() {
   echo "${BOLD}Statistics:${RESET}"
   echo "  ${GREEN}✔${RESET} Successful tests:  ${#SUCCESSES[@]}"
   echo "  ${RED}✖${RESET} Failed tests:      ${#FAIL_LABELS[@]}"
+  echo "  ${CYAN}↻${RESET} Compilation:       $(format_duration "${COMPILE_DURATION}")"
+  echo "  ${MAGENTA}▶${RESET} Test execution:    $(format_duration "${TEST_DURATION}")"
   echo "  ${BLUE}⧗${RESET} Total duration:    $(format_duration $duration)"
-  if [ "${WARMUP_DURATION}" -gt 0 ]; then
-    echo "  ${CYAN}↻${RESET} Warmup duration:   $(format_duration "${WARMUP_DURATION}")"
-  fi
   echo "  ${MAGENTA}Σ${RESET} Tests executed:    $TOTAL_TESTS"
 
   if [ $TOTAL_TESTS -gt 0 ]; then
@@ -489,17 +492,31 @@ main() {
   build_groups "$@"
 
   if [[ "${COMPILE_ONLY}" -eq 1 ]]; then
+    local compile_start
+    compile_start=$(date +%s)
     run_precompile_groups
+    COMPILE_DURATION=$(( $(date +%s) - compile_start ))
   elif [[ "${RUN_AFTER_COMPILE}" -eq 1 ]]; then
-    local warmup_start
-    warmup_start=$(date +%s)
+    local compile_start
+    compile_start=$(date +%s)
     run_precompile_groups
-    WARMUP_DURATION=$(( $(date +%s) - warmup_start ))
-    START_TIME=$(date +%s)
+    COMPILE_DURATION=$(( $(date +%s) - compile_start ))
+
+    local test_start
+    test_start=$(date +%s)
     run_test_groups
+    TEST_DURATION=$(( $(date +%s) - test_start ))
   else
+    local compile_start
+    compile_start=$(date +%s)
     run_precompile_groups
+
+    COMPILE_DURATION=$(( $(date +%s) - compile_start ))
+
+    local test_start
+    test_start=$(date +%s)
     run_test_groups
+    TEST_DURATION=$(( $(date +%s) - test_start ))
   fi
 
   print_summary

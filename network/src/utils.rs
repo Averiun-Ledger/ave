@@ -1,11 +1,9 @@
 use crate::{Error, routing::RoutingNode};
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use ip_network::IpNetwork;
 use libp2p::{
     Multiaddr, PeerId,
     identity::{self},
-    multiaddr::Protocol,
     multihash::Multihash,
     swarm::ConnectionId,
 };
@@ -20,6 +18,11 @@ use std::{
     str::FromStr,
     time::Duration,
 };
+
+#[cfg(not(any(test, feature = "test")))]
+use ip_network::IpNetwork;
+#[cfg(not(any(test, feature = "test")))]
+use libp2p::multiaddr::Protocol;
 
 const TARGET: &str = "ave::network::utils";
 pub const NOISE_PROTOCOL: &str = "ave-p2p-v1";
@@ -72,7 +75,9 @@ pub fn peer_id_to_ed25519_pubkey_bytes(
 #[derive(Clone)]
 pub struct LimitsConfig {
     pub yamux_max_num_streams: usize,
+    #[cfg_attr(any(test, feature = "test"), allow(dead_code))]
     pub tcp_listen_backlog: u32,
+    #[cfg_attr(any(test, feature = "test"), allow(dead_code))]
     pub tcp_nodelay: bool,
     pub reqres_max_concurrent_streams: usize,
     pub reqres_request_timeout: u64,

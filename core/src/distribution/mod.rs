@@ -6,15 +6,15 @@ use ave_actors::{
     NotPersistentActor,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::emit_fail,
+    model::{common::emit_fail, event::Ledger},
     request::manager::{RequestManager, RequestManagerMessage},
-    subject::SignedLedger,
+    request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
 
 pub mod coordinator;
@@ -60,10 +60,22 @@ impl Distribution {
         self.witnesses.remove(&witness)
     }
 
-    async fn create_distributors(
+    fn project_ledger_for_mode(
+        ledger: &Ledger,
+        mode: &DistributionPlanMode,
+    ) -> Result<Ledger, ActorError> {
+        match mode {
+            DistributionPlanMode::Clear => Ok(ledger.clone()),
+            DistributionPlanMode::Opaque => {
+                ledger.to_tracker_opaque().map_err(Into::into)
+            }
+        }
+    }
+
+    async fn create_distributor(
         &self,
         ctx: &mut ActorContext<Self>,
-        ledger: SignedLedger,
+        ledger: Ledger,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         let child = ctx
@@ -141,8 +153,8 @@ impl Actor for Distribution {
 #[derive(Debug, Clone)]
 pub enum DistributionMessage {
     Create {
-        ledger: Box<SignedLedger>,
-        witnesses: HashSet<PublicKey>,
+        ledger: Box<Ledger>,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     Response {
         sender: PublicKey,
@@ -162,25 +174,49 @@ impl Handler<Self> for Distribution {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            DistributionMessage::Create { ledger, witnesses } => {
-                self.witnesses.clone_from(&witnesses);
-                self.subject_id = ledger.content().get_subject_id();
+            DistributionMessage::Create {
+                ledger,
+                distribution_plan,
+            } => {
+                self.witnesses = distribution_plan
+                    .iter()
+                    .map(|entry| entry.node.clone())
+                    .collect();
+                self.subject_id = ledger.get_subject_id();
+                let clear_ledger = (*ledger).clone();
+                let opaque_ledger = if distribution_plan.iter().any(|entry| {
+                    matches!(entry.mode, DistributionPlanMode::Opaque)
+                }) {
+                    Some(Self::project_ledger_for_mode(
+                        &clear_ledger,
+                        &DistributionPlanMode::Opaque,
+                    )?)
+                } else {
+                    None
+                };
 
                 debug!(
                     msg_type = "Create",
                     subject_id = %self.subject_id,
-                    witnesses_count = witnesses.len(),
+                    witnesses_count = distribution_plan.len(),
                     distribution_type = ?self.distribution_type,
                     "Starting distribution to witnesses"
                 );
 
-                for witness in witnesses.iter() {
-                    self.create_distributors(
-                        ctx,
-                        *ledger.clone(),
-                        witness.clone(),
-                    )
-                    .await?
+                for entry in distribution_plan {
+                    let ledger = match entry.mode {
+                        DistributionPlanMode::Clear => clear_ledger.clone(),
+                        DistributionPlanMode::Opaque => opaque_ledger
+                            .clone()
+                            .ok_or_else(|| ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Missing opaque distribution projection for subject {}",
+                                    self.subject_id
+                                ),
+                            })?,
+                    };
+
+                    self.create_distributor(ctx, ledger, entry.node).await?
                 }
 
                 debug!(
@@ -190,17 +226,29 @@ impl Handler<Self> for Distribution {
                 );
             }
             DistributionMessage::Response { sender } => {
+                let removed = self.check_witness(sender.clone());
+                let remaining_witnesses = self.witnesses.len();
+
+                if !removed {
+                    warn!(
+                        msg_type = "Response",
+                        subject_id = %self.subject_id,
+                        sender = %sender,
+                        remaining_witnesses = remaining_witnesses,
+                        "Ignoring response from unexpected or already-processed witness"
+                    );
+                    return Ok(());
+                }
+
                 debug!(
                     msg_type = "Response",
                     subject_id = %self.subject_id,
                     sender = %sender,
-                    remaining_witnesses = self.witnesses.len(),
+                    remaining_witnesses = remaining_witnesses,
                     "Distribution response received"
                 );
 
-                if self.check_witness(sender.clone())
-                    && self.witnesses.is_empty()
-                {
+                if remaining_witnesses == 0 {
                     Self::observe_event("success");
                     debug!(
                         msg_type = "Response",

@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct DataToSink {
-    pub event: DataToSinkEvent,
+    pub payload: DataToSinkEvent,
     pub public_key: String,
     pub event_request_timestamp: u64,
     pub event_ledger_timestamp: u64,
@@ -40,14 +40,27 @@ pub enum DataToSinkEvent {
         gov_version: u64,
         state: Value,
     },
-    Fact {
+    FactFull {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
+        viewpoints: Vec<String>,
         issuer: String,
         owner: String,
-        payload: Value,
-        patch: Value,
+        payload: Option<Value>,
+        patch: Option<Value>,
+        success: bool,
+        error: Option<String>,
+        sn: u64,
+        gov_version: u64,
+    },
+    FactOpaque {
+        governance_id: Option<String>,
+        subject_id: String,
+        schema_id: SchemaType,
+        viewpoints: Vec<String>,
+        owner: String,
+        success: bool,
         sn: u64,
         gov_version: u64,
     },
@@ -57,6 +70,8 @@ pub enum DataToSinkEvent {
         schema_id: SchemaType,
         owner: String,
         new_owner: String,
+        success: bool,
+        error: Option<String>,
         sn: u64,
         gov_version: u64,
     },
@@ -66,6 +81,8 @@ pub enum DataToSinkEvent {
         schema_id: SchemaType,
         sn: u64,
         patch: Option<Value>,
+        success: bool,
+        error: Option<String>,
         gov_version: u64,
         name_old_owner: Option<String>,
     },
@@ -94,7 +111,12 @@ impl DataToSinkEvent {
                 schema_id,
                 ..
             }
-            | Self::Fact {
+            | Self::FactFull {
+                subject_id,
+                schema_id,
+                ..
+            }
+            | Self::FactOpaque {
                 subject_id,
                 schema_id,
                 ..

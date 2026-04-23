@@ -10,7 +10,7 @@ use crate::helpers::network::ActorMessage;
 use async_trait::async_trait;
 use ave_common::identity::{PublicKey, Signed};
 
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction,
@@ -93,8 +93,10 @@ impl Handler<Self> for ValiCoordinator {
     ) -> Result<(), ActorError> {
         match msg {
             ValiCoordinatorMessage::EndRetry => {
-                debug!(
+                warn!(
                     node_key = %self.node_key,
+                    request_id = %self.request_id,
+                    version = self.version,
                     "Retry exhausted, notifying parent and stopping"
                 );
 
@@ -125,6 +127,7 @@ impl Handler<Self> for ValiCoordinator {
                     }
                     Err(e) => {
                         error!(
+                            error = %e,
                             path = %ctx.path().parent(),
                             "Validation actor not found"
                         );
@@ -237,7 +240,9 @@ impl Handler<Self> for ValiCoordinator {
                             "Validation response sender mismatch"
                         );
                         return Err(ActorError::Functional {
-                            description: "We received a validation where the request indicates one subject but the info indicates another".to_string()
+                            description:
+                                "We received a validation response from an unexpected sender"
+                                    .to_string(),
                         });
                     }
 
@@ -280,6 +285,7 @@ impl Handler<Self> for ValiCoordinator {
                         Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
+                                error = %e,
                                 path = %ctx.path().parent(),
                                 "Validation actor not found"
                             );
@@ -293,12 +299,17 @@ impl Handler<Self> for ValiCoordinator {
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
+                            debug!(
+                                msg_type = "NetworkResponse",
+                                sender = %sender,
+                                "Retry actor not found while closing validation coordinator"
+                            );
                             // Aquí me da igual, porque al parar este actor para el hijo
                             break 'retry;
                         };
 
                         if let Err(e) = retry.tell(RetryMessage::End).await {
-                            error!(
+                            warn!(
                                 msg_type = "NetworkResponse",
                                 error = %e,
                                 "Failed to end retry actor"

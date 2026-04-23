@@ -13,17 +13,15 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{Auth, AuthMessage, AuthResponse},
+    auth::{Auth, AuthInitParams, AuthMessage, AuthResponse},
     db::Storable,
     distribution::worker::DistriWorker,
     governance::{Governance, GovernanceMessage, GovernanceResponse},
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
-    model::common::node::SignTypesNode,
+    model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
-    subject::{
-        SignedLedger, replay_sink_events as replay_ledgers_to_sink_events,
-    },
+    subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
@@ -137,6 +135,10 @@ pub struct Node {
     hash: Option<HashAlgorithm>,
     #[serde(skip)]
     is_service: bool,
+    #[serde(skip)]
+    only_clear_events: bool,
+    #[serde(skip)]
+    ledger_batch_size: u64,
     /// The node's owned subjects.
     owned_subjects: HashMap<DigestIdentifier, SubjectData>,
     /// The node's known subjects.
@@ -192,11 +194,13 @@ impl BorshDeserialize for Node {
             hash,
             our_key,
             owner,
+            ledger_batch_size: 100,
             owned_subjects,
             known_subjects,
             transfer_subjects,
             reject_subjects,
             is_service: false,
+            only_clear_events: false,
         })
     }
 }
@@ -230,7 +234,7 @@ impl Node {
 
     pub fn delete_transfer(&mut self, subject_id: &DigestIdentifier) {
         if let Some(data) = self.transfer_subjects.remove(subject_id)
-            && data.actual_owner == *self.our_key
+            && data.new_owner == *self.our_key
         {
             self.reject_subjects.insert(subject_id.clone());
         }
@@ -363,6 +367,7 @@ impl Node {
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
+                        ledger_batch_size: self.ledger_batch_size,
                     },
                 )
                 .await?;
@@ -381,6 +386,7 @@ impl Node {
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
+                        ledger_batch_size: self.ledger_batch_size,
                     },
                 )
                 .await?;
@@ -415,7 +421,7 @@ impl Node {
         actor: &ave_actors::ActorRef<Tracker>,
         lo_sn: Option<u64>,
         hi_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+    ) -> Result<(Vec<Ledger>, bool), ActorError> {
         let response = actor
             .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
             .await?;
@@ -434,7 +440,7 @@ impl Node {
         actor: &ave_actors::ActorRef<Governance>,
         lo_sn: Option<u64>,
         hi_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+    ) -> Result<(Vec<Ledger>, bool), ActorError> {
         let response = actor
             .ask(GovernanceMessage::GetLedger { lo_sn, hi_sn })
             .await?;
@@ -451,10 +457,11 @@ impl Node {
     }
 
     async fn collect_tracker_ledger(
+        &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
-    ) -> Result<Vec<SignedLedger>, ActorError> {
+    ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
@@ -462,15 +469,25 @@ impl Node {
         let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
+        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
-            let (mut batch, is_all) =
-                Self::get_tracker_ledger_batch(ctx, &tracker, lo_sn, hi_sn)
-                    .await?;
+            let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
+            let batch_hi_sn = from_sn
+                .saturating_add(ledger_batch_size)
+                .saturating_sub(1)
+                .min(hi_sn);
+            let (mut batch, is_all) = Self::get_tracker_ledger_batch(
+                ctx,
+                &tracker,
+                lo_sn,
+                batch_hi_sn,
+            )
+            .await?;
             if batch.is_empty() {
                 break;
             }
-            lo_sn = batch.last().map(|event| event.content().sn);
+            lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
             if is_all {
                 break;
@@ -481,10 +498,11 @@ impl Node {
     }
 
     async fn collect_governance_ledger(
+        &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
-    ) -> Result<Vec<SignedLedger>, ActorError> {
+    ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
@@ -492,19 +510,25 @@ impl Node {
         let governance = ctx.system().get_actor::<Governance>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
+        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
+            let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
+            let batch_hi_sn = from_sn
+                .saturating_add(ledger_batch_size)
+                .saturating_sub(1)
+                .min(hi_sn);
             let (mut batch, is_all) = Self::get_governance_ledger_batch(
                 ctx,
                 &governance,
                 lo_sn,
-                hi_sn,
+                batch_hi_sn,
             )
             .await?;
             if batch.is_empty() {
                 break;
             }
-            lo_sn = batch.last().map(|event| event.content().sn);
+            lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
             if is_all {
                 break;
@@ -573,9 +597,9 @@ impl Node {
                 let hi_sn = to_sn
                     .map(|to_sn| to_sn.min(metadata.sn))
                     .unwrap_or(metadata.sn);
-                let ledger =
-                    Self::collect_governance_ledger(ctx, &subject_id, hi_sn)
-                        .await?;
+                let ledger = self
+                    .collect_governance_ledger(ctx, &subject_id, hi_sn)
+                    .await?;
                 replay_ledgers_to_sink_events(
                     &ledger,
                     &public_key,
@@ -618,9 +642,9 @@ impl Node {
                     let hi_sn = to_sn
                         .map(|to_sn| to_sn.min(metadata.sn))
                         .unwrap_or(metadata.sn);
-                    let ledger =
-                        Self::collect_tracker_ledger(ctx, &subject_id, hi_sn)
-                            .await?;
+                    let ledger = self
+                        .collect_tracker_ledger(ctx, &subject_id, hi_sn)
+                        .await?;
                     replay_ledgers_to_sink_events(
                         &ledger,
                         &public_key,
@@ -849,6 +873,7 @@ impl Actor for Node {
                     self.our_key.clone(),
                     hash,
                     self.is_service,
+                    self.only_clear_events,
                 ),
             )
             .await
@@ -873,7 +898,18 @@ impl Actor for Node {
         if let Err(e) = ctx
             .create_child(
                 "auth",
-                Auth::initial((network.clone(), self.our_key.clone())),
+                Auth::initial(AuthInitParams {
+                    network: network.clone(),
+                    our_key: self.our_key.clone(),
+                    round_retry_interval_secs: config
+                        .sync_update
+                        .round_retry_interval_secs,
+                    max_round_retries: config.sync_update.max_round_retries,
+                    witness_retry_count: config.sync_update.witness_retry_count,
+                    witness_retry_interval_secs: config
+                        .sync_update
+                        .witness_retry_interval_secs,
+                }),
             )
             .await
         {
@@ -891,6 +927,7 @@ impl Actor for Node {
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network,
+                        ledger_batch_size: self.ledger_batch_size,
                     },
                 )
                 .await
@@ -964,6 +1001,7 @@ impl Handler<Self> for Node {
                         DistriWorker {
                             our_key: self.our_key.clone(),
                             network,
+                            ledger_batch_size: self.ledger_batch_size,
                         },
                     )
                     .await?;
@@ -1028,13 +1066,13 @@ impl Handler<Self> for Node {
                         subject_id = %subject_id,
                         "Subject not found"
                     );
+                } else {
+                    debug!(
+                        msg_type = "GetSubjectData",
+                        subject_id = %subject_id,
+                        "Subject data retrieved successfully"
+                    );
                 }
-
-                debug!(
-                    msg_type = "GetSubjectData",
-                    subject_id = %subject_id,
-                    "Subject data retrieved successfully"
-                );
 
                 Ok(NodeResponse::SubjectData(data))
             }
@@ -1134,10 +1172,10 @@ impl Handler<Self> for Node {
                     SignTypesNode::ValidationReq(_) => "ValidationReq",
                     SignTypesNode::ValidationRes(_) => "ValidationRes",
                     SignTypesNode::EvaluationReq(_) => "EvaluationReq",
-                    SignTypesNode::EvaluationRes(_) => "EvaluationRes",
+                    SignTypesNode::EvaluationSignature(_) => "EvaluationRes",
                     SignTypesNode::ApprovalReq(_) => "ApprovalReq",
                     SignTypesNode::ApprovalRes(_) => "ApprovalRes",
-                    SignTypesNode::Ledger(_) => "Ledger",
+                    SignTypesNode::LedgerSeal(_) => "LedgerSeal",
                 };
 
                 let sign = match content {
@@ -1151,9 +1189,9 @@ impl Handler<Self> for Node {
                         self.sign(&validation_res)
                     }
                     SignTypesNode::EvaluationReq(evaluation_req) => {
-                        self.sign(&evaluation_req)
+                        self.sign(&*evaluation_req)
                     }
-                    SignTypesNode::EvaluationRes(evaluation_res) => {
+                    SignTypesNode::EvaluationSignature(evaluation_res) => {
                         self.sign(&evaluation_res)
                     }
                     SignTypesNode::ApprovalReq(approval_req) => {
@@ -1162,7 +1200,7 @@ impl Handler<Self> for Node {
                     SignTypesNode::ApprovalRes(approval_res) => {
                         self.sign(&*approval_res)
                     }
-                    SignTypesNode::Ledger(ledger) => self.sign(&ledger),
+                    SignTypesNode::LedgerSeal(ledger) => self.sign(&ledger),
                 }
                 .map_err(|e| {
                     error!(
@@ -1246,6 +1284,7 @@ impl Handler<Self> for Node {
                         error!(
                             msg_type = "AuthData",
                             subject_id = %subject_id,
+                            error = %e,
                             "Auth actor not found"
                         );
                         ctx.system().crash_system();
@@ -1312,6 +1351,8 @@ pub struct InitParamsNode {
     pub public_key: Arc<PublicKey>,
     pub hash: HashAlgorithm,
     pub is_service: bool,
+    pub only_clear_events: bool,
+    pub ledger_batch_size: u64,
 }
 
 #[async_trait]
@@ -1332,6 +1373,8 @@ impl PersistentActor for Node {
             owner: params.key_pair,
             our_key: params.public_key,
             is_service: params.is_service,
+            only_clear_events: params.only_clear_events,
+            ledger_batch_size: params.ledger_batch_size,
             owned_subjects: HashMap::new(),
             known_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),

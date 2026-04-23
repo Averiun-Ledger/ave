@@ -14,16 +14,24 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
         witnesses_register::{
-            WitnessesRegister, WitnessesRegisterMessage,
+            TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,
         },
     },
-    model::common::{check_subject_creation, node::get_subject_data},
-    node::SubjectData,
-    node::subject_manager::{
-        SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+    model::{
+        common::{
+            TrackerVisibilityState, check_subject_creation,
+            node::get_subject_data,
+        },
+        event::Ledger,
     },
-    subject::{Metadata, SignedLedger},
+    node::{
+        SubjectData,
+        subject_manager::{
+            SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+        },
+    },
+    subject::Metadata,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
@@ -56,7 +64,7 @@ pub async fn up_subject<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
-    create_ledger: Option<SignedLedger>,
+    create_ledger: Option<Ledger>,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
@@ -152,7 +160,7 @@ pub async fn acquire_subject<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
-    create_ledger: Option<SignedLedger>,
+    create_ledger: Option<Ledger>,
     active: bool,
 ) -> Result<SubjectLease, ActorError>
 where
@@ -173,7 +181,7 @@ pub async fn with_subject_up<A, F, Fut, T>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
-    create_ledger: Option<SignedLedger>,
+    create_ledger: Option<Ledger>,
     active: bool,
     operation: F,
 ) -> Result<T, ActorError>
@@ -272,7 +280,7 @@ where
 pub async fn get_last_ledger_event<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
-) -> Result<Option<SignedLedger>, ActorError>
+) -> Result<Option<Ledger>, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -317,7 +325,7 @@ where
 pub async fn update_ledger<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
-    events: Vec<SignedLedger>,
+    events: Vec<Ledger>,
 ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>
 where
     A: Actor + Handler<A>,
@@ -363,14 +371,18 @@ where
 
 pub async fn create_subject<A>(
     ctx: &mut ActorContext<A>,
-    ledger: SignedLedger,
+    ledger: Ledger,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
 {
     let mut should_finish = true;
-    if let EventRequest::Create(request) =
-        ledger.content().event_request.content().clone()
+    if ledger.get_event_request_type().is_create_event()
+        && let EventRequest::Create(request) = ledger
+            .get_event_request()
+            .ok_or_else(|| ActorError::Functional {
+                description: "Can not obtain create event request".to_string(),
+            })?
     {
         if request.schema_id.is_gov() {
             should_finish = false;
@@ -378,8 +390,8 @@ where
             check_subject_creation(
                 ctx,
                 &request.governance_id,
-                ledger.signature().signer.clone(),
-                ledger.content().gov_version,
+                ledger.ledger_seal_signature.signer.clone(),
+                ledger.gov_version,
                 request.namespace.to_string(),
                 request.schema_id,
             )
@@ -387,7 +399,7 @@ where
         }
     }
 
-    let subject_id = ledger.content().get_subject_id();
+    let subject_id = ledger.get_subject_id();
     let requester = ctx.path().to_string();
     let lease =
         acquire_subject(ctx, &subject_id, requester, Some(ledger), true)
@@ -423,7 +435,7 @@ where
     }
 }
 
-pub async fn get_tracker_sn_creator<A>(
+pub async fn get_tracker_sn_owner<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
@@ -440,16 +452,120 @@ where
         ctx.system().get_actor(&actor_path).await?;
 
     let response = actor
-        .ask(WitnessesRegisterMessage::GetTrackerSnCreator {
+        .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
             subject_id: subject_id.clone(),
         })
         .await?;
 
     match response {
-        WitnessesRegisterResponse::TrackerCreatorSn { data } => Ok(data),
+        WitnessesRegisterResponse::TrackerOwnerSn { data } => Ok(data),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerSn".to_string(),
+        }),
+    }
+}
+
+pub async fn get_tracker_visibility_state<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<TrackerVisibilityState, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
+            subject_id: subject_id.clone(),
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::TrackerVisibilityState { state } => {
+            Ok(state)
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::TrackerVisibilityState"
+                .to_string(),
+        }),
+    }
+}
+
+pub async fn get_local_subject_sn<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<u64>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let Some(subject_data) = get_subject_data(ctx, subject_id).await? else {
+        return Ok(None);
+    };
+
+    match subject_data {
+        SubjectData::Tracker { governance_id, .. } => {
+            Ok(get_tracker_sn_owner(ctx, &governance_id, subject_id)
+                .await?
+                .map(|(_, sn)| sn))
+        }
+        SubjectData::Governance { .. } => {
+            Ok(Some(get_gov_sn(ctx, subject_id).await?))
+        }
+    }
+}
+
+pub async fn get_tracker_window<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: ave_common::SchemaType,
+    actual_sn: Option<u64>,
+) -> Result<
+    (Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+    ActorError,
+>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerWindow {
+            subject_id: subject_id.clone(),
+            node,
+            namespace,
+            schema_id,
+            actual_sn,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::TrackerWindow {
+            sn,
+            clear_sn,
+            is_all,
+            ranges,
+        } => Ok((sn, clear_sn, is_all, ranges)),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
         }),
     }
 }

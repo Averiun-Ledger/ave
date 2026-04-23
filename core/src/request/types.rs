@@ -3,8 +3,7 @@ use std::{collections::HashSet, fmt::Display};
 use crate::{
     evaluation::request::EvaluationReq,
     governance::model::Quorum,
-    model::event::EvaluationData,
-    subject::SignedLedger,
+    model::event::{EvaluationData, Ledger},
     validation::{request::ValidationReq, worker::CurrentRequestRoles},
 };
 
@@ -14,6 +13,22 @@ use ave_common::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub enum DistributionPlanMode {
+    Clear,
+    Opaque,
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct DistributionPlanEntry {
+    pub node: PublicKey,
+    pub mode: DistributionPlanMode,
+}
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -32,12 +47,15 @@ pub enum RequestManagerState {
         init_state: Option<ValueWrapper>,
         current_request_roles: CurrentRequestRoles,
         signers: HashSet<PublicKey>,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     UpdateSubject {
-        ledger: SignedLedger,
+        ledger: Ledger,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     Distribution {
-        ledger: SignedLedger,
+        ledger: Ledger,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     End,
 }

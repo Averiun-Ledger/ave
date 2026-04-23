@@ -1,34 +1,41 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    error::Error,
     str::FromStr,
     sync::atomic::Ordering,
+    time::Duration,
 };
 
 mod common;
 
 use ave_common::{
-    SchemaType, ValueWrapper,
-    bridge::request::ApprovalStateRes,
+    Namespace, SchemaType, ValueWrapper,
+    bridge::{
+        request::{ApprovalStateRes, SinkEventsQuery},
+        response::{EvalResDB, RequestEventDB},
+    },
     identity::{
-        PublicKey,
+        DigestIdentifier, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
     response::RequestState,
+    sink::{DataToSink, DataToSinkEvent},
 };
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
 use ave_core::governance::model::{
-    PolicyGov, PolicySchema, Quorum, RoleGovIssuer, RolesGov, RolesSchema,
-    RolesTrackerSchemas, Schema,
+    CreatorWitness, PolicyGov, PolicySchema, Quorum, RoleCreator,
+    RoleGovIssuer, RolesGov, RolesSchema, RolesTrackerSchemas, Schema,
 };
 
+use ave_network::{NodeType, RoutingNode};
 use common::{
+    CreateNodeConfig, CreateNodesAndConnectionsConfig,
     create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_approve, emit_confirm, emit_fact, emit_transfer,
-    get_subject,
+    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
+    emit_reject, emit_transfer, get_events, get_subject,
 };
 use futures::future::join_all;
-use network::{NodeType, RoutingNode};
 use serde_json::{Value, from_value, json};
 use test_log::test;
 
@@ -41,40 +48,98 @@ const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07
 const INVALID_EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXp";
 const CHANGED_SCHEMA_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgZGF0YTogU3RyaW5nCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0KZW51bSBTdGF0ZUV2ZW50IHsKICBDaGFuZ2VEYXRhIHsgZGF0YTogU3RyaW5nIH0sCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gbWFpbl9mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMiwgaW5pdF9zdGF0ZV9wdHI6IGkzMiwgZXZlbnRfcHRyOiBpMzIsIGlzX293bmVyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpleGVjdXRlX2NvbnRyYWN0KHN0YXRlX3B0ciwgaW5pdF9zdGF0ZV9wdHIsIGV2ZW50X3B0ciwgaXNfb3duZXIsIGNvbnRyYWN0X2xvZ2ljKQp9CgojW3Vuc2FmZShub19tYW5nbGUpXQpwdWIgdW5zYWZlIGZuIGluaXRfY2hlY2tfZnVuY3Rpb24oc3RhdGVfcHRyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpjaGVja19pbml0X2RhdGEoc3RhdGVfcHRyLCBpbml0X2xvZ2ljKQp9CgpmbiBpbml0X2xvZ2ljKAogIF9zdGF0ZTogJlN0YXRlLAogIGNvbnRyYWN0X3Jlc3VsdDogJm11dCBzZGs6OkNvbnRyYWN0SW5pdENoZWNrLAopIHsKICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0KCmZuIGNvbnRyYWN0X2xvZ2ljKAogIGNvbnRleHQ6ICZzZGs6OkNvbnRleHQ8U3RhdGVFdmVudD4sCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RSZXN1bHQ8U3RhdGU+LAopIHsKICBsZXQgc3RhdGUgPSAmbXV0IGNvbnRyYWN0X3Jlc3VsdC5zdGF0ZTsKICBtYXRjaCBjb250ZXh0LmV2ZW50LmNsb25lKCkgewogICAgICBTdGF0ZUV2ZW50OjpDaGFuZ2VEYXRhIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS5kYXRhID0gZGF0YS5jbG9uZSgpOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
 
+#[track_caller]
 fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
     let actual: GovernanceData = from_value(actual).unwrap();
     assert_eq!(actual, expected);
 }
 
+#[track_caller]
+fn governance_properties(actual: Value) -> GovernanceData {
+    from_value(actual).unwrap()
+}
+
+async fn wait_sink_events(
+    node: &ave_core::Api,
+    subject_id: DigestIdentifier,
+    expected_len: usize,
+) -> Result<Vec<DataToSink>, Box<dyn Error>> {
+    let mut attempts = 0;
+    loop {
+        let page = node
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await?;
+
+        if page.events.len() == expected_len {
+            return Ok(page.events);
+        }
+
+        if attempts > 100 {
+            return Err(format!(
+                "timeout waiting for sink events for subject {} at len {}, actual len {}",
+                subject_id,
+                expected_len,
+                page.events.len()
+            )
+            .into());
+        }
+
+        attempts += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[test(tokio::test)]
-//  Verificar que update protocol actualiza pasivamente la gobernanza.
+//  Verificar que update protocol actualiza pasivamente la gobernanza, a un testigo.
 async fn test_update_protocol() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        true,
-    )
-    .await;
-    let node1 = &nodes[0].api;
-    let node2 = &nodes[1].api;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            is_service: true,
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+    let node2 = nodes[1].api.clone();
+    let node3 = nodes[2].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(node1, vec![node2]).await;
+        create_and_authorize_governance(&node1, vec![&node2]).await;
 
     let json = json!({
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode3"
+                    ]
+                }
+            },
+        },
         "members": {
             "add": [
                 {
                     "name": "AveNode2",
                     "key": node2.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.public_key()
                 }
             ]
         }
     });
 
-    let _request_id = emit_fact(node1, governance_id.clone(), json, true)
+    let _request_id = emit_fact(&node1, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -88,9 +153,26 @@ async fn test_update_protocol() {
 
     node2.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&node2, governance_id.clone(), Some(1))
+    let _state = get_subject(&node2, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
+
+    node3
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    node3.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node3, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
 
     let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
@@ -107,42 +189,44 @@ async fn test_update_protocol() {
         ]
     }});
 
-    emit_fact(node1, governance_id.clone(), json, true)
+    emit_fact(&node1, governance_id.clone(), json, true)
         .await
         .unwrap();
 
-    let _state = get_subject(&node1, governance_id.clone(), Some(2))
+    let _state = get_subject(&node1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&node2, governance_id.clone(), Some(2))
+    let _state = get_subject(&node3, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-        .public_key()
-        .to_string();
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
 
-    // add new fake member to governance
-    let json = json!({
-    "members": {
-        "add": [
-            {
-                "name": "Fake2",
-                "key": fake_node
-            }
-        ]
-    }});
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: node3.peer_id().to_string(),
+        address: vec![nodes[2].listen_address.clone()],
+    }];
 
-    emit_fact(node1, governance_id.clone(), json, true)
-        .await
-        .unwrap();
+    let (node_new_node2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address,
+        peers,
+        always_accept: true,
+        is_service: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(_dirs[2].path().to_path_buf()),
+        ext_db: Some(_dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    let new_node2 = node_new_node2.api.clone();
+    node_running(&new_node2).await.unwrap();
 
-    let _state = get_subject(&node1, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&node2, governance_id.clone(), Some(3))
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(2), false)
         .await
         .unwrap();
 }
@@ -151,14 +235,13 @@ async fn test_update_protocol() {
 //  El owner perdió el ledger, se lo pidió a un testigo que no tenía la última versión
 // la siguiente request se aborta.
 async fn test_approve_invalid_gov_version() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ..Default::default()
+        })
+        .await;
     let node1 = nodes[0].api.clone();
     let node2 = nodes[1].api.clone();
     let node3 = nodes[2].api.clone();
@@ -221,7 +304,7 @@ async fn test_approve_invalid_gov_version() {
 
     node1.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&node1, governance_id.clone(), Some(1))
+    let _state = get_subject(&node1, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -235,7 +318,7 @@ async fn test_approve_invalid_gov_version() {
 
     node3.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&node3, governance_id.clone(), Some(1))
+    let _state = get_subject(&node3, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -278,17 +361,17 @@ async fn test_approve_invalid_gov_version() {
     .await
     .unwrap();
 
-    let _state = get_subject(&node2, governance_id.clone(), Some(2))
+    let _state = get_subject(&node2, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&node1, governance_id.clone(), Some(1))
+    let _state = get_subject(&node1, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
     node3.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&node3, governance_id.clone(), Some(2))
+    let _state = get_subject(&node3, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -302,17 +385,14 @@ async fn test_approve_invalid_gov_version() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_node2, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_node2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_node2 = node_new_node2.api.clone();
     node_running(&new_node2).await.unwrap();
@@ -337,7 +417,7 @@ async fn test_approve_invalid_gov_version() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_node2, governance_id.clone(), Some(1))
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -397,7 +477,7 @@ async fn test_approve_invalid_gov_version() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_node2, governance_id.clone(), Some(2))
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
@@ -440,7 +520,7 @@ async fn test_approve_invalid_gov_version() {
     .await
     .unwrap();
 
-    let _state = get_subject(&new_node2, governance_id.clone(), Some(3))
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
 }
@@ -450,8 +530,12 @@ async fn test_approve_invalid_gov_version() {
 async fn test_invalid_init_state() {
     //  Ephemeral -> Bootstrap ≤- Addressable
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node, vec![]).await;
@@ -476,7 +560,7 @@ async fn test_invalid_init_state() {
         .await
         .unwrap();
 
-    let state = get_subject(node, governance_id.clone(), None)
+    let state = get_subject(node, governance_id.clone(), None, true)
         .await
         .unwrap();
 
@@ -526,8 +610,12 @@ async fn test_invalid_init_state() {
 async fn test_invalid_contract() {
     //  Ephemeral -> Bootstrap ≤- Addressable
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node, vec![]).await;
@@ -553,7 +641,7 @@ async fn test_invalid_contract() {
         .await
         .unwrap();
 
-    let state = get_subject(node, governance_id.clone(), None)
+    let state = get_subject(node, governance_id.clone(), None, true)
         .await
         .unwrap();
 
@@ -602,14 +690,13 @@ async fn test_invalid_contract() {
 //  Verificar que se puede crear una gobernanza, sujeto y emitir un evento además de recibir la copia
 async fn test_governance_and_subject_copy_with_approve() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
     let node2 = &nodes[1].api;
 
@@ -752,7 +839,9 @@ async fn test_governance_and_subject_copy_with_approve() {
 
     assert_eq!(events.len(), 11);
 
-    let state = get_subject(node1, subject_id.clone(), None).await.unwrap();
+    let state = get_subject(node1, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -770,7 +859,9 @@ async fn test_governance_and_subject_copy_with_approve() {
         })
     );
 
-    let state = get_subject(node2, subject_id.clone(), None).await.unwrap();
+    let state = get_subject(node2, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -794,14 +885,15 @@ async fn test_governance_and_subject_copy_with_approve() {
 // 1 addressable(owner de la gobernanza)
 async fn test_basic_use_case_1b_1e_1a() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![vec![0]],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ephemeral: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let bootstrap = &nodes[0].api;
     let addressable = &nodes[1].api;
     let ephimeral = &nodes[2].api;
@@ -839,7 +931,7 @@ async fn test_basic_use_case_1b_1e_1a() {
         .await
         .unwrap();
 
-    let state = get_subject(addressable, governance_id.clone(), None)
+    let state = get_subject(addressable, governance_id.clone(), None, true)
         .await
         .unwrap();
 
@@ -895,7 +987,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     };
     assert_governance_properties_eq(state.properties, expected.clone());
 
-    let state = get_subject(bootstrap, governance_id.clone(), Some(1))
+    let state = get_subject(bootstrap, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -916,7 +1008,7 @@ async fn test_basic_use_case_1b_1e_1a() {
         .await
         .unwrap();
 
-    let state = get_subject(ephimeral, governance_id.clone(), Some(1))
+    let state = get_subject(ephimeral, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -935,8 +1027,12 @@ async fn test_basic_use_case_1b_1e_1a() {
 #[test(tokio::test)]
 async fn test_many_schema_in_one_governance() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner_governance = &nodes[0].api;
 
     let governance_id =
@@ -979,9 +1075,10 @@ async fn test_many_schema_in_one_governance() {
         .await
         .unwrap();
 
-    let state = get_subject(owner_governance, governance_id.clone(), None)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), None, true)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -1022,6 +1119,7 @@ async fn test_many_schema_in_one_governance() {
                     initial_value: ValueWrapper(
                         json!({"one": 0, "two": 0, "three": 0}),
                     ),
+                    viewpoints: BTreeSet::new(),
                 },
             ),
             (
@@ -1031,6 +1129,7 @@ async fn test_many_schema_in_one_governance() {
                     initial_value: ValueWrapper(
                         json!({"one": 0, "two": 0, "three": 0}),
                     ),
+                    viewpoints: BTreeSet::new(),
                 },
             ),
             (
@@ -1040,6 +1139,7 @@ async fn test_many_schema_in_one_governance() {
                     initial_value: ValueWrapper(
                         json!({"one": 0, "two": 0, "three": 0}),
                     ),
+                    viewpoints: BTreeSet::new(),
                 },
             ),
         ]),
@@ -1088,14 +1188,14 @@ async fn test_many_schema_in_one_governance() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza
 async fn test_transfer_event_governance_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -1156,7 +1256,7 @@ async fn test_transfer_event_governance_1() {
         .await
         .unwrap();
 
-    let state = get_subject(future_owner, governance_id.clone(), None)
+    let state = get_subject(future_owner, governance_id.clone(), None, true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1203,9 +1303,10 @@ async fn test_transfer_event_governance_1() {
     };
     assert_governance_properties_eq(state.properties, expected);
 
-    let state = get_subject(owner_governance, governance_id.clone(), None)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), None, true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 0);
@@ -1257,14 +1358,14 @@ async fn test_transfer_event_governance_1() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza, pero el owner se queda como miembro
 async fn test_transfer_event_governance_2() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -1366,7 +1467,7 @@ async fn test_transfer_event_governance_2() {
         .await
         .unwrap();
 
-    let state = get_subject(future_owner, governance_id.clone(), None)
+    let state = get_subject(future_owner, governance_id.clone(), None, true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1420,9 +1521,10 @@ async fn test_transfer_event_governance_2() {
     };
     assert_governance_properties_eq(state.properties, expected.clone());
 
-    let state = get_subject(owner_governance, governance_id.clone(), None)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), None, true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 0);
@@ -1439,14 +1541,12 @@ async fn test_transfer_event_governance_2() {
 #[test(tokio::test)]
 async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -1487,7 +1587,7 @@ async fn test_governance_fail_approve() {
     .await
     .unwrap();
 
-    let state = get_subject(node1, governance_id.clone(), None)
+    let state = get_subject(node1, governance_id.clone(), None, true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1535,14 +1635,13 @@ async fn test_governance_fail_approve() {
 // Varios approvers y todos dicen que sí, se cumple el quorum.
 async fn test_governance_manual_many_approvers() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
@@ -1695,7 +1794,7 @@ async fn test_governance_manual_many_approvers() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner, governance_id.clone(), Some(2))
+    let state = get_subject(owner, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1709,7 +1808,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(approver_1, governance_id.clone(), Some(2))
+    let state = get_subject(approver_1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1723,7 +1822,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(approver_2, governance_id.clone(), Some(2))
+    let state = get_subject(approver_2, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1743,14 +1842,14 @@ async fn test_governance_manual_many_approvers() {
 // Varios approvers y todos dicen que sí, se cumple el quorum. de forma automática.
 async fn test_governance_auto_many_approvers() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
@@ -1873,7 +1972,7 @@ async fn test_governance_auto_many_approvers() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner, governance_id.clone(), Some(2))
+    let state = get_subject(owner, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1887,7 +1986,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(approver_1, governance_id.clone(), Some(2))
+    let state = get_subject(approver_1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1901,7 +2000,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(approver_2, governance_id.clone(), Some(2))
+    let state = get_subject(approver_2, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1921,14 +2020,13 @@ async fn test_governance_auto_many_approvers() {
 // Varios approvers pero uno dice que no y el quorum no se cumple.
 async fn test_governance_not_quorum_many_approvers() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
@@ -2077,7 +2175,7 @@ async fn test_governance_not_quorum_many_approvers() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner, governance_id.clone(), Some(2))
+    let state = get_subject(owner, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -2091,7 +2189,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(approver_1, governance_id.clone(), Some(2))
+    let state = get_subject(approver_1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -2105,7 +2203,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(approver_2, governance_id.clone(), Some(2))
+    let state = get_subject(approver_2, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -2124,14 +2222,14 @@ async fn test_governance_not_quorum_many_approvers() {
 #[test(tokio::test)]
 // Se añade un evaluador, se evalua, se le elimina y se vuelve a evaluar.
 async fn test_change_roles_gov() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let eval_node = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -2226,9 +2324,10 @@ async fn test_change_roles_gov() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner_governance, governance_id.clone(), Some(2))
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 0);
@@ -2240,7 +2339,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(eval_node, governance_id.clone(), Some(2))
+    let state = get_subject(eval_node, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -2309,9 +2408,10 @@ async fn test_change_roles_gov() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner_governance, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 0);
@@ -2323,7 +2423,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(eval_node, governance_id.clone(), Some(3))
+    let state = get_subject(eval_node, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -2400,9 +2500,10 @@ async fn test_change_roles_gov() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner_governance, governance_id.clone(), Some(4))
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(4), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 0);
@@ -2414,7 +2515,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected.clone());
-    let state = get_subject(eval_node, governance_id.clone(), Some(4))
+    let state = get_subject(eval_node, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -2433,8 +2534,12 @@ async fn test_change_roles_gov() {
 #[test(tokio::test)]
 async fn test_delete_schema() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -2517,7 +2622,9 @@ async fn test_delete_schema() {
         .await
         .unwrap();
 
-    let state = get_subject(node1, subject_id.clone(), None).await.unwrap();
+    let state = get_subject(node1, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -2558,7 +2665,9 @@ async fn test_delete_schema() {
     emit_fact(node1, subject_id.clone(), json, true)
         .await
         .unwrap_err();
-    let state = get_subject(node1, subject_id.clone(), None).await.unwrap();
+    let state = get_subject(node1, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -2580,8 +2689,12 @@ async fn test_delete_schema() {
 #[test(tokio::test)]
 async fn test_change_schema() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -2664,7 +2777,7 @@ async fn test_change_schema() {
         .await
         .unwrap();
 
-    let state = get_subject(node1, subject_id.clone(), Some(1))
+    let state = get_subject(node1, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -2709,7 +2822,7 @@ async fn test_change_schema() {
     emit_fact(node1, subject_id.clone(), json, true)
         .await
         .unwrap();
-    let state = get_subject(node1, subject_id.clone(), Some(2))
+    let state = get_subject(node1, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -2736,8 +2849,12 @@ async fn test_change_schema() {
 // uno que esté o que no
 async fn test_gov_no_all_validators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -2843,9 +2960,10 @@ async fn test_gov_no_all_validators() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner_governance, governance_id.clone(), Some(2))
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -2866,8 +2984,12 @@ async fn test_gov_no_all_validators() {
 // uno que esté o que no.
 async fn test_gov_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -2973,9 +3095,10 @@ async fn test_gov_no_all_evaluators() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner_governance, governance_id.clone(), Some(2))
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -2997,8 +3120,12 @@ async fn test_gov_no_all_evaluators() {
 // Algunos eventos fallan, por lo que la versión de la governanza no aumenta
 async fn test_gov_fail_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3115,9 +3242,10 @@ async fn test_gov_fail_no_all_evaluators() {
         policies_schema: BTreeMap::new(),
     };
 
-    let state = get_subject(owner_governance, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -3130,4 +3258,1001 @@ async fn test_gov_fail_no_all_evaluators() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected);
+}
+
+#[test(tokio::test)]
+async fn test_governance_schema_and_creator_viewpoints_state() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+
+    let governance_id = create_and_authorize_governance(owner, vec![]).await;
+
+    let alice = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": alice
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura", "NoViewpoints"]
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 2
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let schema_id = SchemaType::Type("Example".to_owned());
+
+    assert_eq!(governance.version, 2);
+    assert_eq!(
+        governance.schemas.get(&schema_id).unwrap().viewpoints,
+        BTreeSet::from([
+            "NoViewpoints".to_owned(),
+            "agua".to_owned(),
+            "basura".to_owned(),
+        ])
+    );
+
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from([CreatorWitness {
+            name: "Witnesses".to_owned(),
+            viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+        }])
+    );
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    },
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from([
+            CreatorWitness {
+                name: "Alice".to_owned(),
+                viewpoints: BTreeSet::new(),
+            },
+            CreatorWitness {
+                name: "Witnesses".to_owned(),
+                viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+            },
+        ])
+    );
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    },
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["NoViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_viewpoints": ["agua", "basura", "vidrio", "NoViewpoints"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(governance.version, 4);
+    assert_eq!(
+        governance.schemas.get(&schema_id).unwrap().viewpoints,
+        BTreeSet::from([
+            "NoViewpoints".to_owned(),
+            "agua".to_owned(),
+            "basura".to_owned(),
+            "vidrio".to_owned()
+        ])
+    );
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from([
+            CreatorWitness {
+                name: "Alice".to_owned(),
+                viewpoints: BTreeSet::from(["NoViewpoints".to_owned()]),
+            },
+            CreatorWitness {
+                name: "Witnesses".to_owned(),
+                viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+            },
+        ])
+    );
+}
+
+#[test(tokio::test)]
+async fn test_governance_invalid_viewpoints_validation() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+
+    let governance_id = create_and_authorize_governance(owner, vec![]).await;
+
+    let alice = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": alice
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "InvalidDuplicate",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "agua"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "InvalidReserved",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["AllViewpoints"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 2
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["NoViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["vidrio"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["AllViewpoints", "agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(9), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(10), true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let schema_id = SchemaType::Type("Example".to_owned());
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(governance.version, 2);
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from([CreatorWitness {
+            name: "Witnesses".to_owned(),
+            viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+        }])
+    );
+}
+
+#[test(tokio::test)]
+async fn test_sink_replay_and_external_db_battery() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes[0].api.clone();
+    let bob = nodes[1].api.clone();
+    let bob_pk = PublicKey::from_str(&bob.public_key()).unwrap();
+    let charlie_pk =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let invalid_member_pk =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&bob]).await;
+    let governance_id_string = governance_id.to_string();
+
+    let governance_setup_payload = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Bob",
+                    "key": bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": charlie_pk.to_string()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Bob"]
+                }
+            }
+        }
+    });
+
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        governance_setup_payload.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(&bob, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        governance_setup_payload.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(
+        &owner,
+        governance_id.clone(),
+        invalid_member_pk.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_transfer(&owner, governance_id.clone(), bob_pk.clone(), true)
+        .await
+        .unwrap();
+
+    get_subject(&bob, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    emit_confirm(
+        &bob,
+        governance_id.clone(),
+        Some("Charlie".to_owned()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_reject(&bob, governance_id.clone(), true)
+        .await
+        .unwrap();
+
+    owner
+        .auth_subject(governance_id.clone(), AuthWitness::One(bob_pk.clone()))
+        .await
+        .unwrap();
+    owner.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&owner, governance_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    emit_eol(&owner, governance_id.clone(), true).await.unwrap();
+
+    let subject_state =
+        get_subject(&owner, governance_id.clone(), Some(7), true)
+            .await
+            .unwrap();
+    assert!(!subject_state.active);
+
+    let api_events = get_events(&owner, governance_id.clone(), 8, true)
+        .await
+        .unwrap();
+    let sink_events = wait_sink_events(&owner, governance_id.clone(), 8)
+        .await
+        .unwrap();
+
+    assert_eq!(api_events.len(), 8);
+    assert_eq!(sink_events.len(), 8);
+
+    match &api_events[0].event {
+        RequestEventDB::Create {
+            name,
+            description,
+            schema_id,
+            namespace,
+        } => {
+            assert_eq!(name.as_deref(), Some("Governance Tests"));
+            assert_eq!(
+                description.as_deref(),
+                Some("A description for Governance Tests")
+            );
+            assert_eq!(schema_id, "governance");
+            assert_eq!(namespace, "");
+        }
+        other => panic!("unexpected create event: {other:?}"),
+    }
+
+    match &api_events[1].event {
+        RequestEventDB::GovernanceFact {
+            payload,
+            evaluation_response,
+            approval_success,
+        } => {
+            assert_eq!(payload, &governance_setup_payload);
+            match evaluation_response {
+                EvalResDB::Patch(_) => {}
+                other => {
+                    panic!("unexpected governance fact result: {other:?}")
+                }
+            }
+            assert_eq!(*approval_success, Some(true));
+        }
+        other => panic!("unexpected governance fact event: {other:?}"),
+    }
+
+    match &api_events[2].event {
+        RequestEventDB::GovernanceFact {
+            payload,
+            evaluation_response,
+            approval_success,
+        } => {
+            assert_eq!(payload, &governance_setup_payload);
+            match evaluation_response {
+                EvalResDB::Error(error) => {
+                    assert!(!error.is_empty());
+                }
+                other => {
+                    panic!(
+                        "unexpected failed governance fact result: {other:?}"
+                    )
+                }
+            }
+            assert!(approval_success.is_none());
+        }
+        other => panic!("unexpected failed governance fact event: {other:?}"),
+    }
+
+    match &api_events[3].event {
+        RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner,
+        } => {
+            assert_eq!(new_owner, &invalid_member_pk.to_string());
+            assert!(evaluation_error.is_some());
+        }
+        other => panic!("unexpected failed transfer event: {other:?}"),
+    }
+
+    match &api_events[4].event {
+        RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner,
+        } => {
+            assert_eq!(new_owner, &bob.public_key());
+            assert!(evaluation_error.is_none());
+        }
+        other => panic!("unexpected successful transfer event: {other:?}"),
+    }
+
+    match &api_events[5].event {
+        RequestEventDB::GovernanceConfirm {
+            name_old_owner,
+            evaluation_response,
+        } => {
+            assert_eq!(name_old_owner.as_deref(), Some("Charlie"));
+            match evaluation_response {
+                EvalResDB::Error(error) => {
+                    assert!(!error.is_empty());
+                }
+                other => panic!("unexpected failed confirm result: {other:?}"),
+            }
+        }
+        other => panic!("unexpected failed confirm event: {other:?}"),
+    }
+
+    assert!(matches!(api_events[6].event, RequestEventDB::Reject));
+    assert!(matches!(api_events[7].event, RequestEventDB::EOL));
+
+    for event in &sink_events {
+        assert!(event.event_request_timestamp > 0);
+        assert!(event.event_ledger_timestamp > 0);
+        assert!(event.sink_timestamp > 0);
+    }
+
+    match &sink_events[0].payload {
+        DataToSinkEvent::Create {
+            governance_id: event_governance_id,
+            subject_id,
+            owner: event_owner,
+            schema_id,
+            namespace,
+            sn,
+            gov_version,
+            state,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(namespace, "");
+            assert_eq!(*sn, 0);
+            assert_eq!(*gov_version, 0);
+            assert!(state.is_object());
+        }
+        other => panic!("unexpected sink create event: {other:?}"),
+    }
+    assert_eq!(sink_events[0].public_key, owner.public_key());
+
+    match &sink_events[1].payload {
+        DataToSinkEvent::FactFull {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            viewpoints,
+            issuer,
+            owner: event_owner,
+            payload,
+            patch,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert!(viewpoints.is_empty());
+            assert_eq!(issuer, &owner.public_key());
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(payload.as_ref(), Some(&governance_setup_payload));
+            assert!(patch.is_some());
+            assert!(*success);
+            assert!(error.is_none());
+            assert_eq!(*sn, 1);
+            assert_eq!(*gov_version, 0);
+        }
+        other => panic!("unexpected sink successful fact event: {other:?}"),
+    }
+    assert_eq!(sink_events[1].public_key, owner.public_key());
+
+    match &sink_events[2].payload {
+        DataToSinkEvent::FactFull {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            viewpoints,
+            issuer,
+            owner: event_owner,
+            payload,
+            patch,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert!(viewpoints.is_empty());
+            assert_eq!(issuer, &owner.public_key());
+            assert_eq!(event_owner, &owner.public_key());
+            assert!(payload.is_none());
+            assert!(patch.is_none());
+            assert!(!success);
+            assert!(error.is_some());
+            assert_eq!(*sn, 2);
+            assert_eq!(*gov_version, 1);
+        }
+        other => panic!("unexpected sink failed fact event: {other:?}"),
+    }
+    assert_eq!(sink_events[2].public_key, owner.public_key());
+
+    match &sink_events[3].payload {
+        DataToSinkEvent::Transfer {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            owner: event_owner,
+            new_owner,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(new_owner, &invalid_member_pk.to_string());
+            assert!(!success);
+            assert!(error.is_some());
+            assert_eq!(*sn, 3);
+            assert_eq!(*gov_version, 1);
+        }
+        other => panic!("unexpected sink failed transfer event: {other:?}"),
+    }
+    assert_eq!(sink_events[3].public_key, owner.public_key());
+
+    match &sink_events[4].payload {
+        DataToSinkEvent::Transfer {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            owner: event_owner,
+            new_owner,
+            success,
+            error,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(event_owner, &owner.public_key());
+            assert_eq!(new_owner, &bob.public_key());
+            assert!(*success);
+            assert!(error.is_none());
+            assert_eq!(*sn, 4);
+            assert_eq!(*gov_version, 1);
+        }
+        other => panic!("unexpected sink successful transfer event: {other:?}"),
+    }
+    assert_eq!(sink_events[4].public_key, owner.public_key());
+
+    match &sink_events[5].payload {
+        DataToSinkEvent::Confirm {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            sn,
+            patch,
+            success,
+            error,
+            gov_version,
+            name_old_owner,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(*sn, 5);
+            assert!(patch.is_none());
+            assert!(!success);
+            assert!(error.is_some());
+            assert_eq!(*gov_version, 2);
+            assert_eq!(name_old_owner.as_deref(), Some("Charlie"));
+        }
+        other => panic!("unexpected sink failed confirm event: {other:?}"),
+    }
+    assert_eq!(sink_events[5].public_key, owner.public_key());
+
+    match &sink_events[6].payload {
+        DataToSinkEvent::Reject {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(*sn, 6);
+            assert_eq!(*gov_version, 2);
+        }
+        other => panic!("unexpected sink reject event: {other:?}"),
+    }
+    assert_eq!(sink_events[6].public_key, owner.public_key());
+
+    match &sink_events[7].payload {
+        DataToSinkEvent::Eol {
+            governance_id: event_governance_id,
+            subject_id,
+            schema_id,
+            sn,
+            gov_version,
+        } => {
+            assert!(event_governance_id.is_none());
+            assert_eq!(subject_id, &governance_id_string);
+            assert_eq!(schema_id, &SchemaType::Governance);
+            assert_eq!(*sn, 7);
+            assert_eq!(*gov_version, 3);
+        }
+        other => panic!("unexpected sink eol event: {other:?}"),
+    }
+    assert_eq!(sink_events[7].public_key, owner.public_key());
 }

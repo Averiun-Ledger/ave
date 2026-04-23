@@ -11,18 +11,19 @@ use ave_actors::{
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed},
+    request::EventRequest,
 };
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::{emit_fail, node::try_to_update},
+    model::common::emit_fail,
 };
 
-use super::request::EvaluationReq;
+use super::request::{EvalWorkerContext, EvaluationReq};
 
 #[derive(Clone, Debug)]
 pub struct EvaluationSchema {
@@ -31,7 +32,11 @@ pub struct EvaluationSchema {
     pub gov_version: u64,
     pub schema_id: SchemaType,
     pub sn: u64,
+    pub members: BTreeSet<PublicKey>,
     pub creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+    pub issuers: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+    pub issuer_any: bool,
+    pub schema_viewpoints: BTreeSet<String>,
     pub init_state: ValueWrapper,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
@@ -45,7 +50,11 @@ pub enum EvaluationSchemaMessage {
         sender: PublicKey,
     },
     Update {
+        members: BTreeSet<PublicKey>,
         creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        issuers: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        issuer_any: bool,
+        schema_viewpoints: BTreeSet<String>,
         sn: u64,
         gov_version: u64,
         init_state: ValueWrapper,
@@ -55,6 +64,37 @@ pub enum EvaluationSchemaMessage {
 impl Message for EvaluationSchemaMessage {}
 
 impl NotPersistentActor for EvaluationSchema {}
+
+impl EvaluationSchema {
+    fn context_for_request(
+        &self,
+        evaluation_req: &EvaluationReq,
+    ) -> EvalWorkerContext {
+        match evaluation_req.event_request.content() {
+            EventRequest::Fact(_) => EvalWorkerContext::TrackerFact {
+                issuers: self
+                    .issuers
+                    .iter()
+                    .filter(|(_, namespaces)| {
+                        namespaces.iter().any(|issuer_namespace| {
+                            issuer_namespace.is_ancestor_or_equal_of(
+                                &evaluation_req.namespace,
+                            )
+                        })
+                    })
+                    .map(|(issuer, _)| issuer.clone())
+                    .collect(),
+                issuer_any: self.issuer_any,
+                schema_viewpoints: self.schema_viewpoints.clone(),
+            },
+            EventRequest::Transfer(_) => EvalWorkerContext::TrackerTransfer {
+                members: self.members.clone(),
+                creators: self.creators.clone(),
+            },
+            _ => EvalWorkerContext::Empty,
+        }
+    }
+}
 
 #[async_trait]
 impl Actor for EvaluationSchema {
@@ -145,17 +185,17 @@ impl Handler<Self> for EvaluationSchema {
                     return Ok(());
                 }
 
-                if self.gov_version < evaluation_req.content().gov_version
-                    && let Err(e) =
-                        try_to_update(ctx, self.governance_id.clone(), None)
-                            .await
-                {
-                    error!(
+                if self.gov_version < evaluation_req.content().gov_version {
+                    observe("rejected");
+                    warn!(
                         msg_type = "NetworkRequest",
-                        error = %e,
-                        "Failed to update governance"
+                        local_gov_version = self.gov_version,
+                        request_gov_version = evaluation_req.content().gov_version,
+                        governance_id = %self.governance_id,
+                        sender = %sender,
+                        "Ignoring request with newer governance version; service nodes must update governance through resilience protocols"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Ok(());
                 }
 
                 let child = ctx
@@ -168,6 +208,8 @@ impl Handler<Self> for EvaluationSchema {
                             governance_id: self.governance_id.clone(),
                             gov_version: self.gov_version,
                             sn: self.sn,
+                            context: self
+                                .context_for_request(evaluation_req.content()),
                             hash: self.hash,
                             network: self.network.clone(),
                             stop: true,
@@ -220,7 +262,11 @@ impl Handler<Self> for EvaluationSchema {
                 }
             }
             EvaluationSchemaMessage::Update {
+                members,
                 creators,
+                issuers,
+                issuer_any,
+                schema_viewpoints,
                 sn,
                 gov_version,
                 init_state,
@@ -228,7 +274,11 @@ impl Handler<Self> for EvaluationSchema {
                 if let Some(metrics) = try_core_metrics() {
                     metrics.observe_schema_event("evaluation_schema", "update");
                 }
+                self.members = members;
                 self.creators = creators;
+                self.issuers = issuers;
+                self.issuer_any = issuer_any;
+                self.schema_viewpoints = schema_viewpoints;
                 self.gov_version = gov_version;
                 self.sn = sn;
                 self.init_state = init_state;

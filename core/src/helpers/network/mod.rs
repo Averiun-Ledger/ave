@@ -1,13 +1,14 @@
 use ave_actors::Message;
 use ave_common::identity::{DigestIdentifier, Signed};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     governance::witnesses_register::CurrentWitnessSubject,
-    subject::SignedLedger,
+    model::event::Ledger,
+    update::UpdateWitnessOffer,
     validation::{request::ValidationReq, response::ValidationRes},
 };
 
@@ -27,7 +28,7 @@ pub enum ActorMessage {
         req: Box<Signed<EvaluationReq>>,
     },
     EvaluationRes {
-        res: Signed<EvaluationRes>,
+        res: EvaluationRes,
     },
     ApprovalReq {
         req: Signed<ApprovalReq>,
@@ -36,23 +37,26 @@ pub enum ActorMessage {
         res: Box<Signed<ApprovalRes>>,
     },
     DistributionLastEventReq {
-        ledger: Box<SignedLedger>,
+        ledger: Box<Ledger>,
     },
     DistributionLastEventRes,
     DistributionLedgerReq {
         actual_sn: Option<u64>,
+        target_sn: Option<u64>,
         subject_id: DigestIdentifier,
     },
     DistributionLedgerRes {
-        ledger: Vec<SignedLedger>,
+        ledger: Vec<Ledger>,
         is_all: bool,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,
+        actual_sn: Option<u64>,
         receiver_actor: String,
     },
-    AuthLastSn {
-        sn: u64,
+    UpdateNoOffer,
+    UpdateOffer {
+        offer: UpdateWitnessOffer,
     },
     GovernanceVersionReq {
         subject_id: DigestIdentifier,

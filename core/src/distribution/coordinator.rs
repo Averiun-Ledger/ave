@@ -7,14 +7,13 @@ use ave_actors::{
     RetryMessage, Strategy,
 };
 use ave_common::identity::PublicKey;
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage,
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::{common::emit_fail, network::RetryNetwork},
-    subject::SignedLedger,
+    model::{common::emit_fail, event::Ledger, network::RetryNetwork},
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -46,7 +45,7 @@ pub enum DistriCoordinatorMessage {
     // Enviar a un nodo la replicación.
     NetworkDistribution {
         request_id: String,
-        ledger: Box<SignedLedger>,
+        ledger: Box<Ledger>,
     },
     // El nodo al que le enviamos la replica la recivió, parar los reintentos.
     NetworkResponse {
@@ -74,7 +73,7 @@ impl Handler<Self> for DistriCoordinator {
                         "witness_timeout",
                     );
                 }
-                debug!(
+                warn!(
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -116,8 +115,8 @@ impl Handler<Self> for DistriCoordinator {
                 request_id,
                 ledger,
             } => {
-                let subject_id = ledger.content().get_subject_id();
-                let sn = ledger.content().sn;
+                let subject_id = ledger.get_subject_id();
+                let sn = ledger.sn;
 
                 let receiver_actor =
                     format!("/user/node/distributor_{}", subject_id);
@@ -235,6 +234,11 @@ impl Handler<Self> for DistriCoordinator {
                         .get_child::<RetryActor<RetryNetwork>>("retry")
                         .await
                     else {
+                        debug!(
+                            msg_type = "NetworkResponse",
+                            sender = %sender,
+                            "Retry actor not found while closing distribution coordinator"
+                        );
                         break 'retry;
                     };
 

@@ -51,14 +51,14 @@ Default SQLite-based runtime:
 
 ```toml
 [dependencies]
-ave-core = "0.9.0"
+ave-core = "0.10.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-core = { version = "0.9.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
+ave-core = { version = "0.10.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
 ```
 
 ## Bootstrap example
@@ -173,3 +173,7 @@ When enabled, the runtime keeps read/query operations available but blocks
 normal mutating operations. It also exposes maintenance-only subject deletion
 through the top-level API so trackers and governances can be removed in a
 controlled way without joining the network.
+
+Manual update calls can also run in strict mode. In strict mode the updater only
+contacts the witnesses explicitly provided through auth configuration and does
+not expand the candidate set through governance discovery.

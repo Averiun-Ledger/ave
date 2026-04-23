@@ -471,6 +471,16 @@ fn log_effective_configuration(
     info!(target: TARGET, "  service   : {}", config.node.is_service);
     info!(
         target: TARGET,
+        "  only clear: {}",
+        config.node.only_clear_events
+    );
+    info!(
+        target: TARGET,
+        "  ledger batch size           : {}",
+        config.node.sync.ledger_batch_size
+    );
+    info!(
+        target: TARGET,
         "  version sync interval        : {}s",
         config.node.sync.governance.interval_secs
     );
@@ -508,6 +518,46 @@ fn log_effective_configuration(
         target: TARGET,
         "  tracker sync update timeout  : {}s",
         config.node.sync.tracker.update_timeout_secs
+    );
+    info!(
+        target: TARGET,
+        "  update round retry interval  : {}s",
+        config.node.sync.update.round_retry_interval_secs
+    );
+    info!(
+        target: TARGET,
+        "  update max round retries     : {}",
+        config.node.sync.update.max_round_retries
+    );
+    info!(
+        target: TARGET,
+        "  update witness retry count   : {}",
+        config.node.sync.update.witness_retry_count
+    );
+    info!(
+        target: TARGET,
+        "  update witness retry interval: {}s",
+        config.node.sync.update.witness_retry_interval_secs
+    );
+    info!(
+        target: TARGET,
+        "  reboot stability interval    : {}s",
+        config.node.sync.reboot.stability_check_interval_secs
+    );
+    info!(
+        target: TARGET,
+        "  reboot stability retries     : {}",
+        config.node.sync.reboot.stability_check_max_retries
+    );
+    info!(
+        target: TARGET,
+        "  reboot diff schedule         : {:?}",
+        config.node.sync.reboot.diff_retry_schedule_secs
+    );
+    info!(
+        target: TARGET,
+        "  reboot timeout schedule      : {:?}",
+        config.node.sync.reboot.timeout_retry_schedule_secs
     );
 
     info!(target: TARGET, "[auth]");
@@ -735,7 +785,6 @@ pub async fn run() -> Result<(), StartupError> {
     } else {
         config.node.safe_mode
     };
-    config.node.network.safe_mode = config.node.safe_mode;
     auth::request_meta::validate_proxy_config(&config.http.proxy)
         .map_err(StartupError::ProxyConfig)?;
 

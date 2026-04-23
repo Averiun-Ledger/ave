@@ -554,8 +554,8 @@ async fn test_api_key_ttl_uses_system_default_when_absent_or_zero() {
 }
 
 #[test(tokio::test)]
-async fn test_api_key_ttl_capped_by_system_default_and_user_when_no_system() {
-    // System TTL caps user-provided TTL
+async fn test_api_key_ttl_honors_explicit_value_and_uses_system_default_when_absent()
+ {
     let tmp_dir = tempfile::tempdir().unwrap();
     let mut config = AuthConfig::default();
     config.enable = true;
@@ -567,12 +567,18 @@ async fn test_api_key_ttl_capped_by_system_default_and_user_when_no_system() {
         .create_user("testuser", "TestPass123!", None, None, Some(false))
         .unwrap();
 
-    let (_, capped) = db
+    let (_, explicit) = db
         .create_api_key(user.id, Some("capped"), None, Some(100), false)
         .unwrap();
-    assert_eq!(capped.expires_at, Some(capped.created_at + 50));
+    assert_eq!(explicit.expires_at, Some(explicit.created_at + 100));
 
-    // When system TTL is 0, user TTL is honored
+    // When no explicit TTL is provided, system TTL is used as default
+    let (_, defaulted) = db
+        .create_api_key(user.id, Some("defaulted"), None, None, false)
+        .unwrap();
+    assert_eq!(defaulted.expires_at, Some(defaulted.created_at + 50));
+
+    // When system TTL is 0, explicit user TTL is still honored
     let tmp_dir = tempfile::tempdir().unwrap();
     let mut config = AuthConfig::default();
     config.enable = true;
@@ -613,8 +619,7 @@ async fn test_update_system_config_applies_api_key_ttl_immediately() {
 }
 
 #[test(tokio::test)]
-async fn test_update_system_config_applies_legacy_api_key_ttl_backfill_immediately()
- {
+async fn test_update_system_config_does_not_backfill_existing_api_keys() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let mut config = AuthConfig::default();
     config.enable = true;
@@ -636,11 +641,41 @@ async fn test_update_system_config_applies_legacy_api_key_ttl_backfill_immediate
 
     std::thread::sleep(std::time::Duration::from_secs(2));
     let deleted = db.cleanup_expired_api_keys().unwrap();
-    assert!(deleted >= 1);
-    assert!(matches!(
-        db.authenticate_api_key_request(&api_key, None, "/peer-id"),
-        Err(DatabaseError::PermissionDenied(_))
-    ));
+    assert_eq!(deleted, 0);
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
+}
+
+#[test(tokio::test)]
+async fn test_cleanup_does_not_expire_explicit_permanent_api_key() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let mut config = AuthConfig::default();
+    config.enable = true;
+    config.database_path = tmp_dir.path().to_path_buf();
+    config.api_key.default_ttl_seconds = 100;
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
+
+    let user = db
+        .create_user("permanentttl", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let (api_key, key_info) = db
+        .create_api_key(user.id, Some("never-expire"), None, Some(0), false)
+        .unwrap();
+    assert!(key_info.expires_at.is_none());
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let deleted = db.cleanup_expired_api_keys().unwrap();
+    assert_eq!(deleted, 0);
+
+    let info = db.get_api_key_info(&key_info.id).unwrap();
+    assert!(info.expires_at.is_none());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 }
 
 #[test(tokio::test)]
@@ -1028,14 +1063,15 @@ async fn test_apply_ttl_to_legacy_api_keys() {
 
     drop(db);
 
-    // Re-open the same database with a runtime default TTL so cleanup backfills
+    // Re-open the same database with a runtime default TTL; cleanup must not
+    // retroactively assign expirations to existing keys.
     let mut cleanup_config = base_config;
     cleanup_config.api_key.default_ttl_seconds = 100;
     let db = AuthDatabase::new(cleanup_config, "AdminPass123!", None).unwrap();
     let _ = db.cleanup_expired_api_keys().unwrap();
     let info = db.get_api_key_info(&key_info.id).unwrap();
 
-    assert_eq!(info.expires_at, Some(info.created_at + 100));
+    assert!(info.expires_at.is_none());
 }
 
 #[test(tokio::test)]

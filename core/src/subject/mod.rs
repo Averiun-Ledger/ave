@@ -1,7 +1,10 @@
 //! # Subject module.
 //!
 
-use std::{collections::HashSet, ops::Deref};
+use std::{
+    collections::{BTreeSet, HashSet},
+    ops::Deref,
+};
 
 use crate::{
     governance::{
@@ -14,7 +17,7 @@ use crate::{
         common::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
-        event::{Ledger, Protocols, ValidationMetadata},
+        event::{Ledger, LedgerSeal, Protocols, ValidationMetadata},
     },
     node::register::{Register, RegisterMessage},
     tracker::Tracker,
@@ -31,12 +34,16 @@ use ave_actors::{
 };
 use ave_common::{
     DataToSink, DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
-    bridge::request::EventRequestType,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
     request::EventRequest,
-    response::SinkEventsPage,
+    response::{
+        SinkEventsPage, SubjectDB, TrackerEventVisibilityDB,
+        TrackerEventVisibilityRangeDB, TrackerStoredVisibilityDB,
+        TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
+        TrackerVisibilityStateDB,
+    },
 };
 
 use async_trait::async_trait;
@@ -50,20 +57,7 @@ use tracing::{debug, error};
 pub mod error;
 pub mod sinkdata;
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-pub struct SignedLedger(pub Signed<Ledger>);
-
-impl Deref for SignedLedger {
-    type Target = Signed<Ledger>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Event for SignedLedger {}
+impl Event for Ledger {}
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -76,6 +70,16 @@ pub struct RequestSubjectData {
     pub sn: u64,
     pub gov_version: u64,
     pub signer: PublicKey,
+}
+
+pub struct VerifyNewLedgerEvent<'a> {
+    pub new_ledger_event: &'a Ledger,
+    pub subject_metadata: Metadata,
+    pub actual_ledger_event_hash: DigestIdentifier,
+    pub last_data: LastData,
+    pub hash: &'a HashAlgorithm,
+    pub full_view: bool,
+    pub only_clear_events: bool,
 }
 
 /// Subject metadata.
@@ -114,6 +118,53 @@ pub struct Metadata {
     pub active: bool,
     /// The current status of the subject.
     pub properties: ValueWrapper,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+    PartialEq,
+    Eq,
+    Hash,
+)]
+pub struct MetadataWithoutProperties {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub subject_id: DigestIdentifier,
+    pub governance_id: DigestIdentifier,
+    pub genesis_gov_version: u64,
+    pub prev_ledger_event_hash: DigestIdentifier,
+    pub schema_id: SchemaType,
+    pub namespace: Namespace,
+    pub sn: u64,
+    pub creator: PublicKey,
+    pub owner: PublicKey,
+    pub new_owner: Option<PublicKey>,
+    pub active: bool,
+}
+
+impl From<Metadata> for MetadataWithoutProperties {
+    fn from(value: Metadata) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            subject_id: value.subject_id,
+            governance_id: value.governance_id,
+            genesis_gov_version: value.genesis_gov_version,
+            prev_ledger_event_hash: value.prev_ledger_event_hash,
+            schema_id: value.schema_id,
+            namespace: value.namespace,
+            sn: value.sn,
+            creator: value.creator,
+            owner: value.owner,
+            new_owner: value.new_owner,
+            active: value.active,
+        }
+    }
 }
 
 impl From<Governance> for Metadata {
@@ -162,6 +213,127 @@ impl From<Tracker> for Metadata {
     }
 }
 
+impl From<Governance> for SubjectDB {
+    fn from(value: Governance) -> Self {
+        Self {
+            name: value.subject_metadata.name,
+            description: value.subject_metadata.description,
+            subject_id: value.subject_metadata.subject_id.to_string(),
+            governance_id: value.subject_metadata.subject_id.to_string(),
+            genesis_gov_version: 0,
+            prev_ledger_event_hash: if value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .is_empty()
+            {
+                None
+            } else {
+                Some(value.subject_metadata.prev_ledger_event_hash.to_string())
+            },
+            schema_id: value.subject_metadata.schema_id.to_string(),
+            namespace: Namespace::new().to_string(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.to_string(),
+            owner: value.subject_metadata.owner.to_string(),
+            new_owner: value
+                .subject_metadata
+                .new_owner
+                .map(|owner| owner.to_string()),
+            active: value.subject_metadata.active,
+            tracker_visibility: None,
+            properties: value.properties.to_value_wrapper().0,
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerVisibilityMode>
+    for TrackerVisibilityModeDB
+{
+    fn from(value: crate::model::common::TrackerVisibilityMode) -> Self {
+        match value {
+            crate::model::common::TrackerVisibilityMode::Full => Self::Full,
+            crate::model::common::TrackerVisibilityMode::Opaque => Self::Opaque,
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerStoredVisibility>
+    for TrackerStoredVisibilityDB
+{
+    fn from(value: crate::model::common::TrackerStoredVisibility) -> Self {
+        match value {
+            crate::model::common::TrackerStoredVisibility::Full => Self::Full,
+            crate::model::common::TrackerStoredVisibility::Only(viewpoints) => {
+                Self::Only {
+                    viewpoints: viewpoints.into_iter().collect(),
+                }
+            }
+            crate::model::common::TrackerStoredVisibility::None => Self::None,
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerStoredVisibilityRange>
+    for TrackerStoredVisibilityRangeDB
+{
+    fn from(value: crate::model::common::TrackerStoredVisibilityRange) -> Self {
+        Self {
+            from_sn: value.from_sn,
+            to_sn: value.to_sn,
+            visibility: value.visibility.into(),
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerEventVisibility>
+    for TrackerEventVisibilityDB
+{
+    fn from(value: crate::model::common::TrackerEventVisibility) -> Self {
+        match value {
+            crate::model::common::TrackerEventVisibility::NonFact => {
+                Self::NonFact
+            }
+            crate::model::common::TrackerEventVisibility::Fact(viewpoints) => {
+                Self::Fact {
+                    viewpoints: viewpoints.into_iter().collect(),
+                }
+            }
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerEventVisibilityRange>
+    for TrackerEventVisibilityRangeDB
+{
+    fn from(value: crate::model::common::TrackerEventVisibilityRange) -> Self {
+        Self {
+            from_sn: value.from_sn,
+            to_sn: value.to_sn,
+            visibility: value.visibility.into(),
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerVisibilityState>
+    for TrackerVisibilityStateDB
+{
+    fn from(value: crate::model::common::TrackerVisibilityState) -> Self {
+        Self {
+            mode: value.mode.into(),
+            stored_ranges: value
+                .stored_ranges
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            event_ranges: value
+                .event_ranges
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DataForSink {
     pub gov_id: Option<String>,
@@ -205,46 +377,81 @@ impl SinkReplayState {
 
     fn data_for_sink(
         &self,
-        event: &SignedLedger,
+        event: &Ledger,
         event_data_ledger: EventLedgerDataForSink,
     ) -> DataForSink {
+        let (issuer, event_request_timestamp) =
+            event.get_issuer_event_request_timestamp();
+
         DataForSink {
             gov_id: self.governance_id.clone(),
             subject_id: self.subject_id.clone(),
-            sn: event.content().sn,
+            sn: event.sn,
             owner: self.owner.clone(),
             namespace: self.namespace.clone(),
             schema_id: self.schema_id.clone(),
-            issuer: event
-                .content()
-                .event_request
-                .signature()
-                .signer
-                .to_string(),
-            event_request_timestamp: event
-                .content()
-                .event_request
-                .signature()
+            issuer,
+            event_request_timestamp,
+            event_ledger_timestamp: event
+                .ledger_seal_signature
                 .timestamp
                 .as_nanos(),
-            event_ledger_timestamp: event.signature().timestamp.as_nanos(),
-            gov_version: event.content().gov_version,
+            gov_version: event.gov_version,
             event_data_ledger,
         }
     }
 
+    fn build_replay_data_to_sink(
+        &self,
+        ledger: &Ledger,
+        public_key: &str,
+        sink_timestamp: u64,
+    ) -> Result<DataToSink, ActorError> {
+        let replay_parts = SinkReplayEventParts::from_ledger(ledger)?;
+        let data = self.data_for_sink(ledger, replay_parts.event_data_ledger);
+
+        Ok(build_data_to_sink(
+            data,
+            replay_parts.event_request,
+            public_key,
+            sink_timestamp,
+        ))
+    }
+
     fn apply_success(
         &mut self,
-        event: &SignedLedger,
+        protocols: &Protocols,
     ) -> Result<(), ActorError> {
-        match event.content().event_request.content() {
-            EventRequest::Create(..) | EventRequest::Fact(..) => Ok(()),
-            EventRequest::Transfer(transfer_request) => {
+        match protocols {
+            Protocols::Create { .. }
+            | Protocols::TrackerFactFull { .. }
+            | Protocols::TrackerFactOpaque { .. }
+            | Protocols::GovFact { .. }
+            | Protocols::EOL { .. } => Ok(()),
+            Protocols::Transfer { event_request, .. } => {
+                let EventRequest::Transfer(transfer_request) =
+                    event_request.content()
+                else {
+                    error!(
+                        subject_id = %self.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type while replaying transfer event"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "Replay transfer event must carry a Transfer request"
+                                .to_owned(),
+                    });
+                };
                 self.new_owner = Some(transfer_request.new_owner.to_string());
                 Ok(())
             }
-            EventRequest::Confirm(..) => {
+            Protocols::TrackerConfirm { .. } | Protocols::GovConfirm { .. } => {
                 let Some(new_owner) = self.new_owner.take() else {
+                    error!(
+                        subject_id = %self.subject_id,
+                        "Replay confirm event without pending new owner"
+                    );
                     return Err(ActorError::Functional {
                         description:
                             "Replay confirm event without pending new owner"
@@ -254,21 +461,85 @@ impl SinkReplayState {
                 self.owner = new_owner;
                 Ok(())
             }
-            EventRequest::Reject(..) => {
+            Protocols::Reject { .. } => {
                 self.new_owner = None;
                 Ok(())
             }
-            EventRequest::EOL(..) => Ok(()),
+        }
+    }
+}
+
+struct SinkReplayEventParts {
+    event_request: Option<EventRequest>,
+    event_data_ledger: EventLedgerDataForSink,
+}
+
+impl SinkReplayEventParts {
+    fn from_ledger(ledger: &Ledger) -> Result<Self, ActorError> {
+        match &ledger.protocols {
+            Protocols::Create { event_request, .. } => {
+                let metadata = ledger.get_create_metadata().map_err(|e| {
+                    ActorError::Functional {
+                        description: e.to_string(),
+                    }
+                })?;
+
+                Ok(Self {
+                    event_request: Some(event_request.content().clone()),
+                    event_data_ledger: EventLedgerDataForSink::Create {
+                        state: metadata.properties.0,
+                    },
+                })
+            }
+            Protocols::TrackerFactFull { event_request, .. }
+            | Protocols::GovFact { event_request, .. }
+            | Protocols::Transfer { event_request, .. }
+            | Protocols::TrackerConfirm { event_request, .. }
+            | Protocols::GovConfirm { event_request, .. }
+            | Protocols::Reject { event_request, .. }
+            | Protocols::EOL { event_request, .. } => Ok(Self {
+                event_request: Some(event_request.content().clone()),
+                event_data_ledger: EventLedgerDataForSink::build(
+                    &ledger.protocols,
+                    &Value::Null,
+                ),
+            }),
+            Protocols::TrackerFactOpaque { .. } => Ok(Self {
+                event_request: None,
+                event_data_ledger: EventLedgerDataForSink::build(
+                    &ledger.protocols,
+                    &Value::Null,
+                ),
+            }),
         }
     }
 }
 
 #[derive(Clone)]
 pub enum EventLedgerDataForSink {
-    Create { state: Value },
-    Fact { patch: Value },
-    Confirm { patch: Option<Value> },
-    Other,
+    Create {
+        state: Value,
+    },
+    FactFull {
+        patch: Option<Value>,
+        success: bool,
+        error: Option<String>,
+    },
+    FactOpaque {
+        viewpoints: Vec<String>,
+        success: bool,
+    },
+    Transfer {
+        success: bool,
+        error: Option<String>,
+    },
+    Confirm {
+        patch: Option<Value>,
+        success: bool,
+        error: Option<String>,
+    },
+    Reject,
+    Eol,
 }
 
 impl EventLedgerDataForSink {
@@ -277,34 +548,86 @@ impl EventLedgerDataForSink {
             Protocols::Create { .. } => Self::Create {
                 state: state.clone(),
             },
-            Protocols::TrackerFact { evaluation, .. }
-            | Protocols::GovFact { evaluation, .. } => Self::Fact {
-                patch: evaluation
-                    .evaluator_res()
-                    .expect("event is valid")
-                    .patch
-                    .0,
+            Protocols::TrackerFactFull { evaluation, .. }
+            | Protocols::GovFact { evaluation, .. } => {
+                let success = protocols.is_success();
+                let (patch, error) = match &evaluation.response {
+                    crate::model::event::EvaluationResponse::Ok {
+                        result,
+                        ..
+                    } if success => (Some(result.patch.0.clone()), None),
+                    crate::model::event::EvaluationResponse::Ok { .. } => {
+                        (None, None)
+                    }
+                    crate::model::event::EvaluationResponse::Error {
+                        result,
+                        ..
+                    } => (None, Some(result.to_string())),
+                };
+
+                Self::FactFull {
+                    patch,
+                    success,
+                    error,
+                }
+            }
+            Protocols::TrackerFactOpaque { evaluation, .. } => {
+                Self::FactOpaque {
+                    viewpoints: evaluation.viewpoints.iter().cloned().collect(),
+                    success: protocols.is_success(),
+                }
+            }
+            Protocols::Transfer { evaluation, .. } => {
+                let success = protocols.is_success();
+                let error = match &evaluation.response {
+                    crate::model::event::EvaluationResponse::Error {
+                        result,
+                        ..
+                    } => Some(result.to_string()),
+                    crate::model::event::EvaluationResponse::Ok { .. } => None,
+                };
+                Self::Transfer { success, error }
+            }
+            Protocols::Reject { .. } => Self::Reject,
+            Protocols::EOL { .. } => Self::Eol,
+            Protocols::TrackerConfirm { .. } => Self::Confirm {
+                patch: None,
+                success: true,
+                error: None,
             },
-            Protocols::Transfer { .. }
-            | Protocols::Reject { .. }
-            | Protocols::EOL { .. } => Self::Other,
-            Protocols::TrackerConfirm { .. } => Self::Confirm { patch: None },
-            Protocols::GovConfirm { evaluation, .. } => Self::Confirm {
-                patch: Some(
-                    evaluation.evaluator_res().expect("event is valid").patch.0,
-                ),
-            },
+            Protocols::GovConfirm { evaluation, .. } => {
+                let success = protocols.is_success();
+                let (patch, error) = match &evaluation.response {
+                    crate::model::event::EvaluationResponse::Ok {
+                        result,
+                        ..
+                    } if success => (Some(result.patch.0.clone()), None),
+                    crate::model::event::EvaluationResponse::Ok { .. } => {
+                        (None, None)
+                    }
+                    crate::model::event::EvaluationResponse::Error {
+                        result,
+                        ..
+                    } => (None, Some(result.to_string())),
+                };
+
+                Self::Confirm {
+                    patch,
+                    success,
+                    error,
+                }
+            }
         }
     }
 }
 
 fn data_to_sink_event(
     data: DataForSink,
-    event: &EventRequest,
+    event: Option<EventRequest>,
 ) -> DataToSinkEvent {
     match (event, data.event_data_ledger) {
         (
-            EventRequest::Create(..),
+            Some(EventRequest::Create(..)),
             EventLedgerDataForSink::Create { state },
         ) => DataToSinkEvent::Create {
             governance_id: data.gov_id,
@@ -317,22 +640,45 @@ fn data_to_sink_event(
             state,
         },
         (
-            EventRequest::Fact(fact_request),
-            EventLedgerDataForSink::Fact { patch },
-        ) => DataToSinkEvent::Fact {
+            Some(EventRequest::Fact(fact_request)),
+            EventLedgerDataForSink::FactFull {
+                patch,
+                success,
+                error,
+            },
+        ) => DataToSinkEvent::FactFull {
             governance_id: data.gov_id,
             subject_id: data.subject_id,
             issuer: data.issuer.to_string(),
+            viewpoints: fact_request.viewpoints.iter().cloned().collect(),
             owner: data.owner,
-            payload: fact_request.payload.0.clone(),
+            payload: success.then_some(fact_request.payload.0),
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,
             patch,
+            success,
+            error,
         },
         (
-            EventRequest::Transfer(transfer_request),
-            EventLedgerDataForSink::Other,
+            None,
+            EventLedgerDataForSink::FactOpaque {
+                viewpoints,
+                success,
+            },
+        ) => DataToSinkEvent::FactOpaque {
+            governance_id: data.gov_id,
+            subject_id: data.subject_id,
+            viewpoints,
+            owner: data.owner,
+            schema_id: data.schema_id,
+            sn: data.sn,
+            gov_version: data.gov_version,
+            success,
+        },
+        (
+            Some(EventRequest::Transfer(transfer_request)),
+            EventLedgerDataForSink::Transfer { success, error },
         ) => DataToSinkEvent::Transfer {
             governance_id: data.gov_id,
             subject_id: data.subject_id,
@@ -341,10 +687,16 @@ fn data_to_sink_event(
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,
+            success,
+            error,
         },
         (
-            EventRequest::Confirm(confirm_request),
-            EventLedgerDataForSink::Confirm { patch },
+            Some(EventRequest::Confirm(confirm_request)),
+            EventLedgerDataForSink::Confirm {
+                patch,
+                success,
+                error,
+            },
         ) => DataToSinkEvent::Confirm {
             governance_id: data.gov_id,
             subject_id: data.subject_id,
@@ -352,9 +704,11 @@ fn data_to_sink_event(
             sn: data.sn,
             gov_version: data.gov_version,
             patch,
-            name_old_owner: confirm_request.name_old_owner.clone(),
+            success,
+            error,
+            name_old_owner: confirm_request.name_old_owner,
         },
-        (EventRequest::Reject(..), EventLedgerDataForSink::Other) => {
+        (Some(EventRequest::Reject(..)), EventLedgerDataForSink::Reject) => {
             DataToSinkEvent::Reject {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
@@ -363,7 +717,7 @@ fn data_to_sink_event(
                 gov_version: data.gov_version,
             }
         }
-        (EventRequest::EOL(..), EventLedgerDataForSink::Other) => {
+        (Some(EventRequest::EOL(..)), EventLedgerDataForSink::Eol) => {
             DataToSinkEvent::Eol {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
@@ -382,12 +736,12 @@ fn data_to_sink_event(
 
 pub fn build_data_to_sink(
     data: DataForSink,
-    event: &EventRequest,
+    event: Option<EventRequest>,
     public_key: &str,
     sink_timestamp: u64,
 ) -> DataToSink {
     DataToSink {
-        event: data_to_sink_event(data.clone(), event),
+        payload: data_to_sink_event(data.clone(), event),
         public_key: public_key.to_owned(),
         event_request_timestamp: data.event_request_timestamp,
         event_ledger_timestamp: data.event_ledger_timestamp,
@@ -396,7 +750,7 @@ pub fn build_data_to_sink(
 }
 
 pub fn replay_sink_events(
-    ledgers: &[SignedLedger],
+    ledgers: &[Ledger],
     public_key: &str,
     from_sn: u64,
     to_sn: Option<u64>,
@@ -416,12 +770,11 @@ pub fn replay_sink_events(
 
     for ledger in ledgers {
         if replay_state.is_none() {
-            let metadata =
-                ledger.content().get_create_metadata().map_err(|e| {
-                    ActorError::Functional {
-                        description: e.to_string(),
-                    }
-                })?;
+            let metadata = ledger.get_create_metadata().map_err(|e| {
+                ActorError::Functional {
+                    description: e.to_string(),
+                }
+            })?;
             replay_state = Some(SinkReplayState::from_metadata(&metadata));
         }
 
@@ -429,52 +782,27 @@ pub fn replay_sink_events(
             unreachable!("replay state is initialized above");
         };
 
-        let sn = ledger.content().sn;
+        let sn = ledger.sn;
         if sn > upper_bound {
             break;
         }
 
-        let is_success = ledger.content().protocols.is_success();
-        if is_success && sn >= from_sn {
+        let is_success = ledger.protocols.is_success();
+        if sn >= from_sn {
             if events.len() as u64 >= limit {
                 next_sn = Some(sn);
                 break;
             }
 
-            let event_data_ledger =
-                match ledger.content().event_request.content() {
-                    EventRequest::Create(..) => {
-                        let metadata = ledger
-                            .content()
-                            .get_create_metadata()
-                            .map_err(|e| ActorError::Functional {
-                            description: e.to_string(),
-                        })?;
-                        EventLedgerDataForSink::Create {
-                            state: metadata.properties.0,
-                        }
-                    }
-                    EventRequest::Fact(..)
-                    | EventRequest::Transfer(..)
-                    | EventRequest::Confirm(..)
-                    | EventRequest::Reject(..)
-                    | EventRequest::EOL(..) => EventLedgerDataForSink::build(
-                        &ledger.content().protocols,
-                        &Value::Null,
-                    ),
-                };
-
-            let data = state.data_for_sink(ledger, event_data_ledger);
-            events.push(build_data_to_sink(
-                data,
-                ledger.content().event_request.content(),
+            events.push(state.build_replay_data_to_sink(
+                ledger,
                 public_key,
                 sink_timestamp,
-            ));
+            )?);
         }
 
         if is_success {
-            state.apply_success(ledger)?;
+            state.apply_success(&ledger.protocols)?;
         }
     }
 
@@ -543,6 +871,44 @@ where
     <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
     Self: PersistentActor,
 {
+    fn verify_new_ledger_event_args<'a>(
+        new_ledger_event: &'a Ledger,
+        subject_metadata: Metadata,
+        actual_ledger_event_hash: DigestIdentifier,
+        last_data: LastData,
+        hash: &'a HashAlgorithm,
+        full_view: bool,
+        only_clear_events: bool,
+    ) -> VerifyNewLedgerEvent<'a> {
+        VerifyNewLedgerEvent {
+            new_ledger_event,
+            subject_metadata,
+            actual_ledger_event_hash,
+            last_data,
+            hash,
+            full_view,
+            only_clear_events,
+        }
+    }
+
+    fn hash_viewpoints(
+        hash: &HashAlgorithm,
+        viewpoints: &BTreeSet<String>,
+    ) -> Result<DigestIdentifier, SubjectError> {
+        hash_borsh(&*hash.hasher(), viewpoints).map_err(|e| {
+            SubjectError::HashCreationFailed {
+                details: e.to_string(),
+            }
+        })
+    }
+
+    fn request_viewpoints(event_request: &EventRequest) -> BTreeSet<String> {
+        match event_request {
+            EventRequest::Fact(fact_request) => fact_request.viewpoints.clone(),
+            _ => BTreeSet::new(),
+        }
+    }
+
     fn apply_patch_verify(
         subject_properties: &mut ValueWrapper,
         json_patch: ValueWrapper,
@@ -563,24 +929,50 @@ where
 
     async fn verify_new_ledger_event(
         ctx: &mut ActorContext<Self>,
-        new_ledger_event: &SignedLedger,
-        subject_metadata: Metadata,
-        actual_ledger_event_hash: DigestIdentifier,
-        last_data: LastData,
-        hash: &HashAlgorithm,
+        args: VerifyNewLedgerEvent<'_>,
     ) -> Result<bool, SubjectError> {
+        let VerifyNewLedgerEvent {
+            new_ledger_event,
+            subject_metadata,
+            actual_ledger_event_hash,
+            last_data,
+            hash,
+            full_view,
+            only_clear_events,
+        } = args;
+
         if !subject_metadata.active {
             return Err(SubjectError::SubjectInactive);
         }
 
-        if new_ledger_event.content().sn != subject_metadata.sn + 1 {
+        if new_ledger_event.sn != subject_metadata.sn + 1 {
             return Err(SubjectError::InvalidSequenceNumber {
                 expected: subject_metadata.sn + 1,
-                actual: new_ledger_event.content().sn,
+                actual: new_ledger_event.sn,
             });
         }
 
-        if new_ledger_event.verify().is_err() {
+        let protocols_hash = new_ledger_event
+            .protocols
+            .hash_for_ledger(hash)
+            .map_err(|e| SubjectError::HashCreationFailed {
+            details: e.to_string(),
+        })?;
+
+        let ledger_seal = LedgerSeal {
+            gov_version: new_ledger_event.gov_version,
+            sn: new_ledger_event.sn,
+            prev_ledger_event_hash: new_ledger_event
+                .prev_ledger_event_hash
+                .clone(),
+            protocols_hash,
+        };
+
+        if new_ledger_event
+            .ledger_seal_signature
+            .verify(&ledger_seal)
+            .is_err()
+        {
             return Err(SubjectError::SignatureVerificationFailed {
                 context: "new ledger event signature verification failed"
                     .to_string(),
@@ -593,47 +985,53 @@ where
             subject_metadata.owner.clone()
         };
 
-        if new_ledger_event.signature().signer != signer {
+        if new_ledger_event.ledger_seal_signature.signer != signer {
             return Err(SubjectError::IncorrectSigner {
                 expected: signer.to_string(),
-                actual: new_ledger_event.signature().signer.to_string(),
-            });
-        }
-
-        if new_ledger_event.content().event_request.verify().is_err() {
-            return Err(SubjectError::SignatureVerificationFailed {
-                context: "event request signature verification failed"
+                actual: new_ledger_event
+                    .ledger_seal_signature
+                    .signer
                     .to_string(),
             });
         }
 
-        if actual_ledger_event_hash
-            != new_ledger_event.content().prev_ledger_event_hash
-        {
+        if actual_ledger_event_hash != new_ledger_event.prev_ledger_event_hash {
             return Err(SubjectError::PreviousHashMismatch);
         }
 
         let mut modified_subject_metadata = subject_metadata.clone();
         modified_subject_metadata.sn += 1;
 
-        let (validation, new_actual_protocols) = match (
-            new_ledger_event.content().event_request.content(),
-            &new_ledger_event.content().protocols,
+        let (
+            validation,
+            new_actual_protocols,
+            event_request,
+            opaque_event_request_hash,
+            opaque_viewpoints_hash,
+        ) = match (
+            &new_ledger_event.protocols,
             subject_metadata.schema_id.is_gov(),
         ) {
             (
-                EventRequest::Fact(..),
-                Protocols::TrackerFact {
+                Protocols::TrackerFactFull {
+                    event_request,
                     evaluation,
                     validation,
                 },
                 false,
             ) => {
+                if let EventRequest::Fact(..) = event_request.content() {
+                } else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
+
                 if modified_subject_metadata.new_owner.is_some() {
                     return Err(SubjectError::UnexpectedFactEvent);
                 }
 
-                if let Some(eval) = evaluation.evaluator_res() {
+                if full_view
+                    && let Some(eval) = evaluation.evaluator_response_ok()
+                {
                     Self::apply_patch_verify(
                         &mut modified_subject_metadata.properties,
                         eval.patch,
@@ -644,23 +1042,69 @@ where
                     ActualProtocols::Eval {
                         eval_data: evaluation.clone(),
                     },
+                    Some(event_request),
+                    None,
+                    None,
                 )
             }
             (
-                EventRequest::Fact(..),
+                Protocols::TrackerFactOpaque {
+                    data,
+                    event_request_hash,
+                    evaluation,
+                    validation,
+                    ..
+                },
+                false,
+            ) => {
+                if only_clear_events {
+                    return Err(
+                        SubjectError::OnlyClearEventsCannotAcceptTrackerOpaque,
+                    );
+                }
+
+                if data.subject_id != subject_metadata.subject_id {
+                    return Err(SubjectError::SubjectIdMismatch {
+                        expected: subject_metadata.subject_id.to_string(),
+                        actual: data.subject_id.to_string(),
+                    });
+                }
+
+                (
+                    validation,
+                    ActualProtocols::None,
+                    None,
+                    Some(event_request_hash.clone()),
+                    Some(Self::hash_viewpoints(hash, &evaluation.viewpoints)?),
+                )
+            }
+            (
                 Protocols::GovFact {
+                    event_request,
                     evaluation,
                     approval,
                     validation,
                 },
                 true,
             ) => {
+                if let EventRequest::Fact(fact_request) =
+                    event_request.content()
+                {
+                    if !fact_request.viewpoints.is_empty() {
+                        return Err(
+                            SubjectError::GovernanceFactViewpointsNotAllowed,
+                        );
+                    }
+                } else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
+
                 if modified_subject_metadata.new_owner.is_some() {
                     return Err(SubjectError::UnexpectedFactEvent);
                 }
 
                 let actual_protocols =
-                    if let Some(eval) = evaluation.evaluator_res() {
+                    if let Some(eval) = evaluation.evaluator_response_ok() {
                         if let Some(appr) = approval {
                             if appr.approved {
                                 Self::apply_patch_verify(
@@ -688,21 +1132,32 @@ where
                         }
                     };
 
-                (validation, actual_protocols)
+                (
+                    validation,
+                    actual_protocols,
+                    Some(event_request),
+                    None,
+                    None,
+                )
             }
             (
-                EventRequest::Transfer(transfer),
                 Protocols::Transfer {
+                    event_request,
                     evaluation,
                     validation,
                 },
                 ..,
             ) => {
+                let EventRequest::Transfer(transfer) = event_request.content()
+                else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                };
+
                 if modified_subject_metadata.new_owner.is_some() {
                     return Err(SubjectError::UnexpectedTransferEvent);
                 }
 
-                if let Some(eval) = evaluation.evaluator_res() {
+                if let Some(eval) = evaluation.evaluator_response_ok() {
                     Self::apply_patch_verify(
                         &mut modified_subject_metadata.properties,
                         eval.patch,
@@ -716,13 +1171,23 @@ where
                     ActualProtocols::Eval {
                         eval_data: evaluation.clone(),
                     },
+                    Some(event_request),
+                    None,
+                    None,
                 )
             }
             (
-                EventRequest::Confirm(..),
-                Protocols::TrackerConfirm { validation },
+                Protocols::TrackerConfirm {
+                    event_request,
+                    validation,
+                },
                 false,
             ) => {
+                if let EventRequest::Confirm(..) = event_request.content() {
+                } else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
+
                 if let Some(new_owner) =
                     &modified_subject_metadata.new_owner.take()
                 {
@@ -731,17 +1196,28 @@ where
                     return Err(SubjectError::ConfirmWithoutNewOwner);
                 }
 
-                (validation, ActualProtocols::None)
+                (
+                    validation,
+                    ActualProtocols::None,
+                    Some(event_request),
+                    None,
+                    None,
+                )
             }
             (
-                EventRequest::Confirm(..),
                 Protocols::GovConfirm {
+                    event_request,
                     evaluation,
                     validation,
                 },
                 true,
             ) => {
-                if let Some(eval) = evaluation.evaluator_res() {
+                if let EventRequest::Confirm(..) = event_request.content() {
+                } else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
+
+                if let Some(eval) = evaluation.evaluator_response_ok() {
                     Self::apply_patch_verify(
                         &mut modified_subject_metadata.properties,
                         eval.patch,
@@ -761,31 +1237,121 @@ where
                     ActualProtocols::Eval {
                         eval_data: evaluation.clone(),
                     },
+                    Some(event_request),
+                    None,
+                    None,
                 )
             }
             (
-                EventRequest::Reject(..),
-                Protocols::Reject { validation },
+                Protocols::Reject {
+                    event_request,
+                    validation,
+                },
                 ..,
             ) => {
+                if let EventRequest::Reject(..) = event_request.content() {
+                } else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
+
                 if modified_subject_metadata.new_owner.take().is_none() {
                     return Err(SubjectError::RejectWithoutNewOwner);
                 }
 
-                (validation, ActualProtocols::None)
+                (
+                    validation,
+                    ActualProtocols::None,
+                    Some(event_request),
+                    None,
+                    None,
+                )
             }
-            (EventRequest::EOL(..), Protocols::EOL { validation }, ..) => {
+            (
+                Protocols::EOL {
+                    event_request,
+                    validation,
+                },
+                ..,
+            ) => {
+                if let EventRequest::EOL(..) = event_request.content() {
+                } else {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
+
                 if modified_subject_metadata.new_owner.is_some() {
                     return Err(SubjectError::UnexpectedEOLEvent);
                 }
 
                 modified_subject_metadata.active = false;
-                (validation, ActualProtocols::None)
+                (
+                    validation,
+                    ActualProtocols::None,
+                    Some(event_request),
+                    None,
+                    None,
+                )
             }
             _ => {
                 return Err(SubjectError::EventProtocolMismatch);
             }
         };
+
+        if let Some(event_request) = event_request {
+            if event_request.verify().is_err() {
+                return Err(SubjectError::SignatureVerificationFailed {
+                    context: "event request signature verification failed"
+                        .to_string(),
+                });
+            }
+
+            let signer = event_request.signature().signer.clone();
+            if !event_request.content().check_request_signature(
+                &signer,
+                &subject_metadata.owner,
+                &subject_metadata.new_owner,
+            ) {
+                let (event, expected) = match event_request.content() {
+                    EventRequest::Create(..) => {
+                        ("create", subject_metadata.owner.to_string())
+                    }
+                    EventRequest::Transfer(..) => {
+                        ("transfer", subject_metadata.owner.to_string())
+                    }
+                    EventRequest::EOL(..) => {
+                        ("eol", subject_metadata.owner.to_string())
+                    }
+                    EventRequest::Confirm(..) => (
+                        "confirm",
+                        subject_metadata.new_owner.as_ref().map_or_else(
+                            || "new_owner".to_owned(),
+                            ToString::to_string,
+                        ),
+                    ),
+                    EventRequest::Reject(..) => (
+                        "reject",
+                        subject_metadata.new_owner.as_ref().map_or_else(
+                            || "new_owner".to_owned(),
+                            ToString::to_string,
+                        ),
+                    ),
+                    EventRequest::Fact(..) => ("fact", signer.to_string()),
+                };
+
+                return Err(SubjectError::InvalidEventRequestSigner {
+                    event: event.to_owned(),
+                    expected,
+                    actual: signer.to_string(),
+                });
+            }
+
+            let event_subject_id = event_request.content().get_subject_id();
+            if event_subject_id != subject_metadata.subject_id {
+                return Err(SubjectError::SubjectIdMismatch {
+                    expected: subject_metadata.subject_id.to_string(),
+                    actual: event_subject_id.to_string(),
+                });
+            }
+        }
 
         if modified_subject_metadata.schema_id.is_gov()
             && new_actual_protocols.is_success()
@@ -803,49 +1369,179 @@ where
             modified_subject_metadata.properties = gov_data.to_value_wrapper();
         }
 
-        let validation_req = ValidationReq::Event {
-            actual_protocols: Box::new(new_actual_protocols),
-            event_request: new_ledger_event.content().event_request.clone(),
-            ledger_hash: actual_ledger_event_hash.clone(),
-            metadata: Box::new(subject_metadata.clone()),
-            last_data: Box::new(last_data),
-            gov_version: new_ledger_event.content().gov_version,
-            sn: new_ledger_event.content().sn,
+        modified_subject_metadata.prev_ledger_event_hash =
+            actual_ledger_event_hash.clone();
+
+        let meta_wo_props =
+            MetadataWithoutProperties::from(modified_subject_metadata.clone());
+
+        let meta_wo_props_hash = hash_borsh(&*hash.hasher(), &meta_wo_props)
+            .map_err(|e| SubjectError::ModifiedMetadataHashFailed {
+                details: e.to_string(),
+            })?;
+
+        let (event_request_hash, viewpoints_hash) = if let Some(event_request) =
+            event_request
+        {
+            (
+                hash_borsh(&*hash.hasher(), event_request).map_err(|e| {
+                    SubjectError::HashCreationFailed {
+                        details: e.to_string(),
+                    }
+                })?,
+                Self::hash_viewpoints(
+                    hash,
+                    &Self::request_viewpoints(event_request.content()),
+                )?,
+            )
+        } else {
+            (
+                opaque_event_request_hash.ok_or_else(|| {
+                    SubjectError::CannotObtain {
+                        what: "tracker opaque event_request_hash".to_owned(),
+                    }
+                })?,
+                opaque_viewpoints_hash.ok_or_else(|| {
+                    SubjectError::CannotObtain {
+                        what: "tracker opaque viewpoints_hash".to_owned(),
+                    }
+                })?,
+            )
         };
 
-        let signed_validation_req = Signed::from_parts(
-            validation_req,
-            validation.validation_req_signature.clone(),
-        );
+        let propierties_hash = if full_view
+            && let Some(event_request) = event_request
+        {
+            let validation_req = ValidationReq::Event {
+                actual_protocols: Box::new(new_actual_protocols),
+                event_request: event_request.clone(),
+                ledger_hash: actual_ledger_event_hash,
+                metadata: Box::new(subject_metadata.clone()),
+                last_data: Box::new(last_data),
+                gov_version: new_ledger_event.gov_version,
+                sn: new_ledger_event.sn,
+            };
 
-        if signed_validation_req.verify().is_err() {
-            return Err(SubjectError::InvalidValidationRequestSignature);
-        }
+            let signed_validation_req = Signed::from_parts(
+                validation_req,
+                validation.validation_req_signature.clone(),
+            );
 
-        let hash_signed_val_req =
-            hash_borsh(&*hash.hasher(), &signed_validation_req).map_err(
-                |e| SubjectError::ValidationRequestHashFailed {
+            if signed_validation_req.verify().is_err() {
+                return Err(SubjectError::InvalidValidationRequestSignature);
+            }
+
+            let hash_signed_val_req =
+                hash_borsh(&*hash.hasher(), &signed_validation_req).map_err(
+                    |e| SubjectError::ValidationRequestHashFailed {
+                        details: e.to_string(),
+                    },
+                )?;
+
+            if hash_signed_val_req != validation.validation_req_hash {
+                return Err(SubjectError::ValidationRequestHashMismatch);
+            }
+
+            let prop_hash = hash_borsh(
+                &*hash.hasher(),
+                &modified_subject_metadata.properties,
+            )
+            .map_err(|e| {
+                SubjectError::ModifiedMetadataHashFailed {
                     details: e.to_string(),
-                },
-            )?;
+                }
+            })?;
 
-        if hash_signed_val_req != validation.validation_req_hash {
-            return Err(SubjectError::ValidationRequestHashMismatch);
-        }
+            if let ValidationMetadata::ModifiedHash {
+                propierties_hash,
+                modified_metadata_without_propierties_hash,
+                event_request_hash: validation_event_request_hash,
+                viewpoints_hash: validation_viewpoints_hash,
+            } = &validation.validation_metadata
+            {
+                if modified_metadata_without_propierties_hash
+                    != &meta_wo_props_hash
+                {
+                    return Err(
+                        SubjectError::ModifiedMetadataWithoutPropertiesHashMismatch {
+                            expected: meta_wo_props_hash.to_string(),
+                            actual: modified_metadata_without_propierties_hash
+                                .to_string(),
+                        },
+                    );
+                }
 
-        modified_subject_metadata.prev_ledger_event_hash =
-            actual_ledger_event_hash;
+                if &prop_hash != propierties_hash {
+                    return Err(SubjectError::PropertiesHashMismatch {
+                        expected: prop_hash.to_string(),
+                        actual: propierties_hash.to_string(),
+                    });
+                }
 
-        let modified_metadata_hash =
-            hash_borsh(&*hash.hasher(), &modified_subject_metadata).map_err(
-                |e| SubjectError::ModifiedMetadataHashFailed {
-                    details: e.to_string(),
-                },
-            )?;
+                if &event_request_hash != validation_event_request_hash {
+                    return Err(SubjectError::EventRequestHashMismatch {
+                        expected: event_request_hash.to_string(),
+                        actual: validation_event_request_hash.to_string(),
+                    });
+                }
+
+                if &viewpoints_hash != validation_viewpoints_hash {
+                    return Err(SubjectError::ViewpointsHashMismatch {
+                        expected: viewpoints_hash.to_string(),
+                        actual: validation_viewpoints_hash.to_string(),
+                    });
+                }
+            } else {
+                return Err(SubjectError::InvalidNonCreationValidationMetadata);
+            }
+
+            prop_hash
+        } else {
+            if let ValidationMetadata::ModifiedHash {
+                propierties_hash,
+                modified_metadata_without_propierties_hash,
+                event_request_hash: validation_event_request_hash,
+                viewpoints_hash: validation_viewpoints_hash,
+            } = &validation.validation_metadata
+            {
+                if modified_metadata_without_propierties_hash
+                    != &meta_wo_props_hash
+                {
+                    return Err(
+                        SubjectError::ModifiedMetadataWithoutPropertiesHashMismatch {
+                            expected: meta_wo_props_hash.to_string(),
+                            actual: modified_metadata_without_propierties_hash
+                                .to_string(),
+                        },
+                    );
+                }
+
+                if &event_request_hash != validation_event_request_hash {
+                    return Err(SubjectError::EventRequestHashMismatch {
+                        expected: event_request_hash.to_string(),
+                        actual: validation_event_request_hash.to_string(),
+                    });
+                }
+
+                if &viewpoints_hash != validation_viewpoints_hash {
+                    return Err(SubjectError::ViewpointsHashMismatch {
+                        expected: viewpoints_hash.to_string(),
+                        actual: validation_viewpoints_hash.to_string(),
+                    });
+                }
+
+                propierties_hash.clone()
+            } else {
+                return Err(SubjectError::InvalidNonCreationValidationMetadata);
+            }
+        };
 
         let validation_res = ValidationRes::Response {
-            vali_req_hash: hash_signed_val_req,
-            modified_metadata_hash,
+            vali_req_hash: validation.validation_req_hash.clone(),
+            modified_metadata_without_propierties_hash: meta_wo_props_hash,
+            propierties_hash,
+            event_request_hash,
+            viewpoints_hash,
         };
 
         let role_data = get_validation_roles_register(
@@ -855,7 +1551,7 @@ where
                 schema_id: subject_metadata.schema_id,
                 namespace: subject_metadata.namespace,
             },
-            new_ledger_event.content().gov_version,
+            new_ledger_event.gov_version,
         )
         .await
         .map_err(|e| SubjectError::ValidatorsRetrievalFailed {
@@ -883,58 +1579,88 @@ where
             }
         }
 
-        Ok(new_ledger_event.content().protocols.is_success())
+        Ok(new_ledger_event.protocols.is_success())
     }
 
     async fn verify_first_ledger_event(
         ctx: &mut ActorContext<Self>,
-        ledger_event: &SignedLedger,
+        ledger_event: &Ledger,
         hash: &HashAlgorithm,
         subject_metadata: Metadata,
     ) -> Result<(), SubjectError> {
-        if ledger_event.verify().is_err() {
+        if ledger_event.sn != 0 {
+            return Err(SubjectError::InvalidCreationSequenceNumber);
+        }
+
+        let protocols_hash = ledger_event
+            .protocols
+            .hash_for_ledger(hash)
+            .map_err(|e| SubjectError::HashCreationFailed {
+                details: e.to_string(),
+            })?;
+
+        let ledger_seal = LedgerSeal {
+            gov_version: ledger_event.gov_version,
+            sn: ledger_event.sn,
+            prev_ledger_event_hash: ledger_event.prev_ledger_event_hash.clone(),
+            protocols_hash,
+        };
+
+        if ledger_event
+            .ledger_seal_signature
+            .verify(&ledger_seal)
+            .is_err()
+        {
             return Err(SubjectError::SignatureVerificationFailed {
                 context: "first ledger event signature verification failed"
                     .to_string(),
             });
         }
 
-        if ledger_event.signature().signer != subject_metadata.owner {
+        if ledger_event.ledger_seal_signature.signer != subject_metadata.owner {
             return Err(SubjectError::IncorrectSigner {
                 expected: subject_metadata.owner.to_string(),
-                actual: ledger_event.signature().signer.to_string(),
+                actual: ledger_event.ledger_seal_signature.signer.to_string(),
             });
         }
 
-        if ledger_event.content().event_request.verify().is_err() {
-            return Err(SubjectError::SignatureVerificationFailed {
-                context: "event request signature verification failed"
-                    .to_string(),
-            });
-        }
-
-        if ledger_event.content().sn != 0 {
-            return Err(SubjectError::InvalidCreationSequenceNumber);
-        }
-
-        if !ledger_event.content().prev_ledger_event_hash.is_empty() {
-            return Err(SubjectError::NonEmptyPreviousHashInCreation);
-        }
-
-        let event_request_type = EventRequestType::from(
-            ledger_event.content().event_request.content(),
-        );
-
-        let validation =
-            match (event_request_type, &ledger_event.content().protocols) {
-                (
-                    EventRequestType::Create,
-                    Protocols::Create { validation },
-                ) => validation,
-                _ => {
+        let (validation, event_request) = match &ledger_event.protocols {
+            Protocols::Create {
+                validation,
+                event_request,
+            } => {
+                if let EventRequest::Create(..) = event_request.content() {
+                } else {
                     return Err(SubjectError::EventProtocolMismatch);
                 }
-            };
+
+                if event_request.verify().is_err() {
+                    return Err(SubjectError::SignatureVerificationFailed {
+                        context: "event request signature verification failed"
+                            .to_string(),
+                    });
+                }
+
+                let event_request_signer =
+                    event_request.signature().signer.clone();
+                if event_request_signer != subject_metadata.owner {
+                    return Err(SubjectError::InvalidEventRequestSigner {
+                        event: "Create".to_owned(),
+                        expected: subject_metadata.owner.to_string(),
+                        actual: event_request_signer.to_string(),
+                    });
+                }
+
+                (validation, event_request)
+            }
+            _ => {
+                return Err(SubjectError::EventProtocolMismatch);
+            }
+        };
+
+        if !ledger_event.prev_ledger_event_hash.is_empty() {
+            return Err(SubjectError::NonEmptyPreviousHashInCreation);
+        }
 
         let ValidationMetadata::Metadata(metadata) =
             &validation.validation_metadata
@@ -943,8 +1669,8 @@ where
         };
 
         let validation_req = ValidationReq::Create {
-            event_request: ledger_event.content().event_request.clone(),
-            gov_version: ledger_event.content().gov_version,
+            event_request: event_request.clone(),
+            gov_version: ledger_event.gov_version,
             subject_id: subject_metadata.subject_id.clone(),
         };
 
@@ -1000,7 +1726,7 @@ where
                     schema_id: metadata.schema_id.clone(),
                     namespace: metadata.namespace.clone(),
                 },
-                ledger_event.content().gov_version,
+                ledger_event.gov_version,
             )
             .await
             .map_err(|e| {
@@ -1066,7 +1792,7 @@ where
     async fn event_to_sink(
         ctx: &mut ActorContext<Self>,
         data: DataForSink,
-        event: &EventRequest,
+        event: Option<EventRequest>,
     ) -> Result<(), ActorError> {
         let msg = SinkDataMessage::Event {
             event: Box::new(data_to_sink_event(data.clone(), event)),
@@ -1102,16 +1828,14 @@ where
     ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
         if let Some(lo_sn) = lo_sn {
             let actual_sn = lo_sn + 1;
-            if (hi_sn - actual_sn) > 99 {
-                Ok((get_n_events(ctx, actual_sn, 99).await?, false))
+            if hi_sn < actual_sn {
+                Ok((Vec::new(), true))
             } else {
                 Ok((
                     get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?,
                     true,
                 ))
             }
-        } else if hi_sn > 99 {
-            Ok((get_n_events(ctx, 0, 99).await?, false))
         } else {
             Ok((get_n_events(ctx, 0, hi_sn).await?, true))
         }
@@ -1153,11 +1877,11 @@ where
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
     ) -> Result<(), ActorError>;
 
     async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<Option<SignedLedger>, ActorError>;
+    ) -> Result<Option<Ledger>, ActorError>;
 }

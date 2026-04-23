@@ -374,7 +374,10 @@ impl Handler<Self> for Validation {
                             }
                             ValidationRes::Response {
                                 vali_req_hash,
-                                modified_metadata_hash,
+                                modified_metadata_without_propierties_hash,
+                                propierties_hash,
+                                event_request_hash,
+                                viewpoints_hash,
                             } => {
                                 let Some(signature) = signature else {
                                     error!(
@@ -401,9 +404,12 @@ impl Handler<Self> for Validation {
                                 }
 
                                 self.validators_response.push(
-                                    ValidationMetadata::ModifiedHash(
-                                        modified_metadata_hash,
-                                    ),
+                                    ValidationMetadata::ModifiedHash {
+                                        modified_metadata_without_propierties_hash,
+                                        propierties_hash,
+                                        event_request_hash,
+                                        viewpoints_hash,
+                                    },
                                 );
                                 self.validators_signatures.push(signature);
                             }
@@ -479,6 +485,7 @@ impl Handler<Self> for Validation {
                                 }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                return Ok(());
                             }
 
                             let validation_data = self.build_validation_data();
@@ -706,6 +713,8 @@ pub mod tests {
                     public_key: public_key.clone(),
                     hash: HashAlgorithm::Blake3,
                     is_service: true,
+                    only_clear_events: false,
+                    ledger_batch_size: 100,
                 }),
             )
             .await

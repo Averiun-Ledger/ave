@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::slice;
 use tracing::error;
@@ -33,8 +33,10 @@ use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use std::ops::Bound::{Included, Unbounded};
 
 pub mod contract;
+pub mod distribution_plan;
 pub mod node;
 pub mod subject;
+pub mod viewpoints;
 
 pub fn check_quorum_signers(
     signers: &HashSet<PublicKey>,
@@ -342,6 +344,342 @@ impl IntervalSet {
     }
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub enum TrackerVisibilityMode {
+    Full,
+    Opaque,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub enum TrackerStoredVisibility {
+    Full,
+    Only(BTreeSet<String>),
+    None,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct TrackerStoredVisibilityRange {
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub visibility: TrackerStoredVisibility,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrackerStoredVisibilitySpan<'a> {
+    pub interval: Interval,
+    pub visibility: &'a TrackerStoredVisibility,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub enum TrackerEventVisibility {
+    NonFact,
+    Fact(BTreeSet<String>),
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct TrackerEventVisibilityRange {
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub visibility: TrackerEventVisibility,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrackerEventVisibilitySpan<'a> {
+    pub interval: Interval,
+    pub visibility: &'a TrackerEventVisibility,
+}
+
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct TrackerVisibilityState {
+    pub mode: TrackerVisibilityMode,
+    // Invariante:
+    // - ordenado por from_sn
+    // - sin solapes
+    // - como mucho un rango abierto al final (to_sn = None)
+    pub stored_ranges: Vec<TrackerStoredVisibilityRange>,
+    // Invariante:
+    // - ordenado por from_sn
+    // - sin solapes
+    // - como mucho un rango abierto al final (to_sn = None)
+    pub event_ranges: Vec<TrackerEventVisibilityRange>,
+}
+
+pub struct TrackerStoredVisibilityIter<'a> {
+    ranges: &'a [TrackerStoredVisibilityRange],
+    index: usize,
+    from_sn: u64,
+    to_sn: u64,
+}
+
+pub struct TrackerEventVisibilityIter<'a> {
+    ranges: &'a [TrackerEventVisibilityRange],
+    index: usize,
+    from_sn: u64,
+    to_sn: u64,
+}
+
+impl Default for TrackerVisibilityState {
+    fn default() -> Self {
+        Self {
+            mode: TrackerVisibilityMode::Full,
+            stored_ranges: Vec::new(),
+            event_ranges: Vec::new(),
+        }
+    }
+}
+
+impl TrackerVisibilityState {
+    pub const fn is_full(&self) -> bool {
+        matches!(self.mode, TrackerVisibilityMode::Full)
+    }
+
+    pub const fn set_mode(&mut self, mode: TrackerVisibilityMode) {
+        self.mode = mode;
+    }
+
+    pub fn record_event(
+        &mut self,
+        sn: u64,
+        stored_visibility: TrackerStoredVisibility,
+        event_visibility: TrackerEventVisibility,
+    ) {
+        self.push_stored(sn, stored_visibility);
+        self.push_event(sn, event_visibility);
+    }
+
+    fn push_stored(&mut self, sn: u64, visibility: TrackerStoredVisibility) {
+        if let Some(last) = self.stored_ranges.last_mut() {
+            if last.visibility == visibility {
+                return;
+            }
+
+            if last.to_sn.is_none() {
+                last.to_sn = Some(sn.saturating_sub(1));
+            }
+        }
+
+        self.stored_ranges.push(TrackerStoredVisibilityRange {
+            from_sn: sn,
+            to_sn: None,
+            visibility,
+        });
+    }
+
+    fn push_event(&mut self, sn: u64, visibility: TrackerEventVisibility) {
+        if let Some(last) = self.event_ranges.last_mut() {
+            if last.visibility == visibility {
+                return;
+            }
+
+            if last.to_sn.is_none() {
+                last.to_sn = Some(sn.saturating_sub(1));
+            }
+        }
+
+        self.event_ranges.push(TrackerEventVisibilityRange {
+            from_sn: sn,
+            to_sn: None,
+            visibility,
+        });
+    }
+
+    fn first_overlapping_stored_index(&self, from_sn: u64) -> Option<usize> {
+        if self.stored_ranges.is_empty() {
+            return None;
+        }
+
+        match self
+            .stored_ranges
+            .binary_search_by(|range| range.from_sn.cmp(&from_sn))
+        {
+            Ok(index) => Some(index),
+            Err(pos) => {
+                if pos == 0 {
+                    return Some(0);
+                }
+
+                let index = pos - 1;
+                if self.stored_ranges[index].contains(from_sn) {
+                    Some(index)
+                } else if pos < self.stored_ranges.len() {
+                    Some(pos)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn first_overlapping_event_index(&self, from_sn: u64) -> Option<usize> {
+        if self.event_ranges.is_empty() {
+            return None;
+        }
+
+        match self
+            .event_ranges
+            .binary_search_by(|range| range.from_sn.cmp(&from_sn))
+        {
+            Ok(index) => Some(index),
+            Err(pos) => {
+                if pos == 0 {
+                    return Some(0);
+                }
+
+                let index = pos - 1;
+                if self.event_ranges[index].contains(from_sn) {
+                    Some(index)
+                } else if pos < self.event_ranges.len() {
+                    Some(pos)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn iter_stored(
+        &self,
+        from_sn: u64,
+        to_sn: u64,
+    ) -> TrackerStoredVisibilityIter<'_> {
+        let index = self
+            .first_overlapping_stored_index(from_sn)
+            .unwrap_or(self.stored_ranges.len());
+
+        TrackerStoredVisibilityIter {
+            ranges: &self.stored_ranges,
+            index,
+            from_sn,
+            to_sn,
+        }
+    }
+
+    pub fn iter_events(
+        &self,
+        from_sn: u64,
+        to_sn: u64,
+    ) -> TrackerEventVisibilityIter<'_> {
+        let index = self
+            .first_overlapping_event_index(from_sn)
+            .unwrap_or(self.event_ranges.len());
+
+        TrackerEventVisibilityIter {
+            ranges: &self.event_ranges,
+            index,
+            from_sn,
+            to_sn,
+        }
+    }
+}
+
+impl<'a> Iterator for TrackerStoredVisibilityIter<'a> {
+    type Item = TrackerStoredVisibilitySpan<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.ranges.get(self.index)?;
+        if range.from_sn > self.to_sn {
+            return None;
+        }
+
+        self.index += 1;
+
+        let lo = range.from_sn.max(self.from_sn);
+        let hi = range.to_sn.unwrap_or(self.to_sn).min(self.to_sn);
+        if hi < lo {
+            return self.next();
+        }
+
+        Some(TrackerStoredVisibilitySpan {
+            interval: Interval::new(lo, hi),
+            visibility: &range.visibility,
+        })
+    }
+}
+
+impl<'a> Iterator for TrackerEventVisibilityIter<'a> {
+    type Item = TrackerEventVisibilitySpan<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.ranges.get(self.index)?;
+        if range.from_sn > self.to_sn {
+            return None;
+        }
+
+        self.index += 1;
+
+        let lo = range.from_sn.max(self.from_sn);
+        let hi = range.to_sn.unwrap_or(self.to_sn).min(self.to_sn);
+        if hi < lo {
+            return self.next();
+        }
+
+        Some(TrackerEventVisibilitySpan {
+            interval: Interval::new(lo, hi),
+            visibility: &range.visibility,
+        })
+    }
+}
+
+impl TrackerStoredVisibilityRange {
+    fn contains(&self, sn: u64) -> bool {
+        self.from_sn <= sn && self.to_sn.is_none_or(|to_sn| sn <= to_sn)
+    }
+}
+
+impl TrackerEventVisibilityRange {
+    fn contains(&self, sn: u64) -> bool {
+        self.from_sn <= sn && self.to_sn.is_none_or(|to_sn| sn <= to_sn)
+    }
+}
+
 impl<'a> IntoIterator for &'a IntervalSet {
     type Item = &'a Interval;
     type IntoIter = slice::Iter<'a, Interval>;
@@ -398,6 +736,10 @@ where
 
     pub fn insert(&mut self, key: u64, value: T) {
         self.inner.insert(key, value);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&u64, &T)> {
+        self.inner.iter()
     }
 
     pub fn range_with_predecessor(

@@ -385,6 +385,7 @@ pub fn system_config_from_row(
     description: Option<String>,
     updated_at: i64,
     updated_by: Option<i64>,
+    updated_by_username: Option<String>,
 ) -> Result<SystemConfig, DatabaseError> {
     let key_id = SystemConfigKey::parse(key)?;
     let typed_value = key_id.parse_persisted_value(value)?;
@@ -396,6 +397,7 @@ pub fn system_config_from_row(
         description,
         updated_at,
         updated_by,
+        updated_by_username,
     })
 }
 

@@ -12,7 +12,7 @@ use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
 };
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
     governance::role_register::CurrentSchemaRoles,
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::{emit_fail, node::try_to_update},
+    model::common::emit_fail,
     validation::worker::{CurrentWorkerRoles, ValiWorker, ValiWorkerMessage},
 };
 
@@ -189,16 +189,17 @@ impl Handler<Self> for ValidationSchema {
                 }
 
                 if self.gov_version < validation_req.content().get_gov_version()
-                    && let Err(e) =
-                        try_to_update(ctx, self.governance_id.clone(), None)
-                            .await
                 {
-                    error!(
+                    observe("rejected");
+                    warn!(
                         msg_type = "NetworkRequest",
-                        error = %e,
-                        "Failed to update governance"
+                        local_gov_version = self.gov_version,
+                        request_gov_version = validation_req.content().get_gov_version(),
+                        governance_id = %self.governance_id,
+                        sender = %sender,
+                        "Ignoring request with newer governance version; service nodes must update governance through resilience protocols"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Ok(());
                 }
 
                 let child = ctx

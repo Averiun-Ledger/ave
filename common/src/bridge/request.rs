@@ -25,6 +25,17 @@ pub struct SubjectQuery {
     pub schema_id: Option<String>,
 }
 
+/// Query flags for manually updating a subject.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct UpdateSubjectQuery {
+    /// When true, only use explicitly authorized auth nodes for the update.
+    pub strict: Option<bool>,
+}
+
 /// Filters governances by activity.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
@@ -115,6 +126,12 @@ pub enum EventRequestType {
     Confirm,
     Reject,
     Eol,
+}
+
+impl EventRequestType {
+    pub const fn is_create_event(&self) -> bool {
+        matches!(self, Self::Create)
+    }
 }
 
 impl From<&EventRequest> for EventRequestType {
@@ -267,6 +284,9 @@ pub struct BridgeFactRequest {
     pub subject_id: String,
     /// Changes to be applied to the subject
     pub payload: Value,
+    /// Viewpoints targeted by this fact.
+    #[serde(default)]
+    pub viewpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

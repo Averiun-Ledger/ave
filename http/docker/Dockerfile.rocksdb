@@ -1,7 +1,7 @@
 # Dockerfile optimizado con cross-compilation nativa
 # Este Dockerfile usa cross-compilation en lugar de emulación para ARM64
 
-ARG RUST_IMAGE=rust:1.94.0-slim-trixie
+ARG RUST_IMAGE=rust:1.95.0-slim-trixie
 
 # ============================================================================
 # Etapa base común para ambas arquitecturas
@@ -197,8 +197,14 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
+RUN groupadd --system --gid 10001 ave \
+    && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /app --shell /usr/sbin/nologin ave \
+    && mkdir -p /app/db /app/logs /contracts \
+    && chown -R ave:ave /app /contracts
 COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
 COPY --from=builder-amd64 /contracts /contracts
+WORKDIR /app
+USER ave
 CMD ["ave-http"]
 
 FROM --platform=linux/arm64 ${RUST_IMAGE} AS arm64
@@ -209,6 +215,12 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
+RUN groupadd --system --gid 10001 ave \
+    && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /app --shell /usr/sbin/nologin ave \
+    && mkdir -p /app/db /app/logs /contracts \
+    && chown -R ave:ave /app /contracts
 COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
 COPY --from=builder-arm64 /contracts /contracts
+WORKDIR /app
+USER ave
 CMD ["ave-http"]

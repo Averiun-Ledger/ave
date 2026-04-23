@@ -1,11 +1,15 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::{
     evaluation::{
         compiler::{CompilerResponse, error::CompilerError},
-        request::EvaluateData,
+        request::{EvalWorkerContext, EvaluateData},
         response::{
-            EvalRunnerError, EvaluatorError, EvaluatorResponse as EvalRes,
+            EvalRunnerError, EvaluationResult, EvaluatorError,
+            EvaluatorResponse as EvalRes,
         },
         runner::types::EvaluateInfo,
     },
@@ -29,8 +33,8 @@ use ave_common::{
     },
 };
 
+use ave_network::ComunicateInfo;
 use json_patch::diff;
-use network::ComunicateInfo;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
@@ -56,6 +60,7 @@ pub struct EvalWorker {
     pub governance_id: DigestIdentifier,
     pub gov_version: u64,
     pub sn: u64,
+    pub context: EvalWorkerContext,
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
@@ -162,8 +167,8 @@ impl EvalWorker {
         ctx: &mut ActorContext<Self>,
         evaluation_req: &EvaluationReq,
     ) -> Result<RunnerResult, EvaluatorError> {
-        let runner_data =
-            evaluation_req.build_evaluate_info(&self.init_state)?;
+        let runner_data = evaluation_req
+            .build_evaluate_info(&self.init_state, &self.context)?;
 
         // Mirar la parte final de execute contract.
         let response = self
@@ -218,14 +223,12 @@ impl EvalWorker {
         })
     }
 
-    fn build_response(
+    fn build_request_hashes(
         &self,
-        evaluation: RunnerResult,
-        evaluation_req: Signed<EvaluationReq>,
-    ) -> Result<EvaluationRes, EvaluatorError> {
-        let eval_req_hash =
-            hash_borsh(&*self.hash.hasher(), &evaluation_req)
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+        evaluation_req: &Signed<EvaluationReq>,
+    ) -> Result<(DigestIdentifier, DigestIdentifier), EvaluatorError> {
+        let eval_req_hash = hash_borsh(&*self.hash.hasher(), evaluation_req)
+            .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
 
         let EvaluationReq {
             event_request,
@@ -251,6 +254,40 @@ impl EvalWorker {
             },
         )
         .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+
+        Ok((eval_req_hash, req_subject_data_hash))
+    }
+
+    async fn sign_result(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        result: EvaluationResult,
+    ) -> Result<EvaluationRes, EvaluatorError> {
+        let result_hash = hash_borsh(&*self.hash.hasher(), &result)
+            .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+
+        let result_hash_signature = get_sign(
+            ctx,
+            SignTypesNode::EvaluationSignature(result_hash.clone()),
+        )
+        .await
+        .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+
+        Ok(EvaluationRes::Response {
+            result,
+            result_hash,
+            result_hash_signature,
+        })
+    }
+
+    async fn build_response(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        evaluation: RunnerResult,
+        evaluation_req: Signed<EvaluationReq>,
+    ) -> Result<EvaluationRes, EvaluatorError> {
+        let (eval_req_hash, req_subject_data_hash) =
+            self.build_request_hashes(&evaluation_req)?;
 
         let (patch, properties_hash) = match &evaluation_req.content().data {
             EvaluateData::GovFact { state, .. } => {
@@ -316,7 +353,7 @@ impl EvalWorker {
             }
         };
 
-        Ok(EvaluationRes::Response {
+        let result = EvaluationResult::Ok {
             response: EvalRes {
                 patch,
                 properties_hash,
@@ -324,11 +361,14 @@ impl EvalWorker {
             },
             eval_req_hash,
             req_subject_data_hash,
-        })
+        };
+
+        self.sign_result(ctx, result).await
     }
 
-    fn build_response_error(
+    async fn build_response_error(
         &self,
+        ctx: &mut ActorContext<Self>,
         evaluator_error: EvaluatorError,
         evaluation_req: Signed<EvaluationReq>,
     ) -> Result<EvaluationRes, EvaluatorError> {
@@ -343,40 +383,16 @@ impl EvalWorker {
             _ => {}
         };
 
-        let eval_req_hash =
-            hash_borsh(&*self.hash.hasher(), &evaluation_req)
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+        let (eval_req_hash, req_subject_data_hash) =
+            self.build_request_hashes(&evaluation_req)?;
 
-        let EvaluationReq {
-            event_request,
-            governance_id,
-            sn,
-            gov_version,
-            namespace,
-            schema_id,
-            signer,
-            ..
-        } = evaluation_req.content().clone();
-
-        let req_subject_data_hash = hash_borsh(
-            &*self.hash.hasher(),
-            &RequestSubjectData {
-                namespace,
-                schema_id,
-                subject_id: event_request.content().get_subject_id(),
-                governance_id,
-                sn,
-                gov_version,
-                signer,
-            },
-        )
-        .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
-
-        Ok(EvaluationRes::Error {
+        let result = EvaluationResult::Error {
             error: evaluator_error,
             eval_req_hash,
             req_subject_data_hash,
-        })
+        };
+
+        self.sign_result(ctx, result).await
     }
 
     async fn create_res(
@@ -390,16 +406,19 @@ impl EvalWorker {
         } else {
             match self.evaluate(ctx, evaluation_req.content()).await {
                 Ok(evaluation) => {
-                    self.build_response(evaluation, evaluation_req.clone())?
+                    self.build_response(ctx, evaluation, evaluation_req.clone())
+                        .await?
                 }
                 Err(error) => {
                     if let EvaluatorError::InternalError(..) = &error {
                         return Err(error);
                     } else {
                         self.build_response_error(
+                            ctx,
                             error,
                             evaluation_req.clone(),
-                        )?
+                        )
+                        .await?
                     }
                 }
             }
@@ -441,14 +460,51 @@ impl EvalWorker {
             return Err(EvaluatorError::InvalidEventSignature);
         }
 
+        if self.gov_version == evaluation_req.content().gov_version {
+            let signer = evaluation_req
+                .content()
+                .event_request
+                .signature()
+                .signer
+                .clone();
+
+            if evaluation_req
+                .content()
+                .event_request
+                .content()
+                .is_fact_event()
+            {
+                let Some((issuers, issuer_any)) = self.context.issuers() else {
+                    return Err(EvaluatorError::InvalidEventRequest(
+                        "Fact event evaluation context does not include issuers"
+                            .to_owned(),
+                    ));
+                };
+
+                if !issuer_any && !issuers.contains(&signer) {
+                    return Err(EvaluatorError::InvalidEventRequest(
+                        "In fact events, the signer has to be an issuer"
+                            .to_owned(),
+                    ));
+                }
+            } else if signer != self.node_key {
+                return Err(EvaluatorError::InvalidEventRequest(
+                    "In non-fact events, the signer has to be the sender"
+                        .to_owned(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum EvalWorkerMessage {
-    UpdateGovVersion {
+    Update {
         gov_version: u64,
+        issuers: BTreeSet<PublicKey>,
+        issuer_any: bool,
     },
     LocalEvaluation {
         evaluation_req: Signed<EvaluationReq>,
@@ -487,8 +543,16 @@ impl Handler<Self> for EvalWorker {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            EvalWorkerMessage::UpdateGovVersion { gov_version } => {
+            EvalWorkerMessage::Update {
+                gov_version,
+                issuers,
+                issuer_any,
+            } => {
                 self.gov_version = gov_version;
+                self.context = EvalWorkerContext::Governance {
+                    issuers,
+                    issuer_any,
+                };
             }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {
                 let evaluation =
@@ -510,30 +574,12 @@ impl Handler<Self> for EvalWorker {
                         }
                     };
 
-                let signature = match get_sign(
-                    ctx,
-                    SignTypesNode::EvaluationRes(evaluation.clone()),
-                )
-                .await
-                {
-                    Ok(signature) => signature,
-                    Err(e) => {
-                        error!(
-                            msg_type = "LocalEvaluation",
-                            error = %e,
-                            "Failed to sign evaluator response"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
                 match ctx.get_parent::<Evaluation>().await {
                     Ok(evaluation_actor) => {
                         if let Err(e) = evaluation_actor
                             .tell(EvaluationMessage::Response {
                                 evaluation_res: evaluation.clone(),
                                 sender: (*self.our_key).clone(),
-                                signature: Some(signature),
                             })
                             .await
                         {
@@ -584,7 +630,6 @@ impl Handler<Self> for EvalWorker {
                     return Ok(());
                 }
 
-                // TODO MUCHO CUIDADO COn esto
                 let reboot = match self
                     .check_governance(evaluation_req.content().gov_version)
                     .await
@@ -611,7 +656,12 @@ impl Handler<Self> for EvalWorker {
                     self.check_data(&evaluation_req)
                 {
                     match self
-                        .build_response_error(error, evaluation_req.clone())
+                        .build_response_error(
+                            ctx,
+                            error,
+                            evaluation_req.clone(),
+                        )
+                        .await
                     {
                         Ok(eval) => eval,
                         Err(e) => {
@@ -649,23 +699,6 @@ impl Handler<Self> for EvalWorker {
                     }
                 };
 
-                let signature = match get_sign(
-                    ctx,
-                    SignTypesNode::EvaluationRes(evaluation.clone()),
-                )
-                .await
-                {
-                    Ok(signature) => signature,
-                    Err(e) => {
-                        error!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to sign response"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
                 let new_info = ComunicateInfo {
                     receiver: sender.clone(),
                     request_id: info.request_id.clone(),
@@ -681,15 +714,13 @@ impl Handler<Self> for EvalWorker {
                     ),
                 };
 
-                let signed_response: Signed<EvaluationRes> =
-                    Signed::from_parts(evaluation, signature);
                 if let Err(e) = self
                     .network
-                    .send_command(network::CommandHelper::SendMessage {
+                    .send_command(ave_network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
                             message: ActorMessage::EvaluationRes {
-                                res: signed_response,
+                                res: evaluation,
                             },
                         },
                     })

@@ -71,7 +71,7 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
 
     match db.get_audit_stats(7) {
         Ok(stats) => {
-            debug!(target: TARGET, stats = %stats, "audit stats (last 7 days)");
+            debug!(target: TARGET, ?stats, "audit stats (last 7 days)");
         }
         Err(e) => {
             error!(target: TARGET, error = %e, "failed to get audit stats");

@@ -3,13 +3,13 @@ use std::sync::Arc;
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler};
 
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
     auth::{Auth, AuthMessage},
     helpers::network::service::NetworkSender,
-    model::event::Ledger,
+    model::event::LedgerSeal,
     node::SubjectData,
 };
 
@@ -17,7 +17,7 @@ use ave_common::request::EventRequest;
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
-    evaluation::{request::EvaluationReq, response::EvaluationRes},
+    evaluation::request::EvaluationReq,
     validation::{request::ValidationReq, response::ValidationRes},
 };
 
@@ -28,14 +28,14 @@ pub enum SignTypesNode {
     ApprovalReq(ApprovalReq),
     ApprovalRes(Box<ApprovalRes>),
 
-    EvaluationReq(EvaluationReq),
-    EvaluationRes(EvaluationRes),
+    EvaluationReq(Box<EvaluationReq>),
+    EvaluationSignature(DigestIdentifier),
 
     ValidationReq(Box<ValidationReq>),
     ValidationRes(ValidationRes),
 
     EventRequest(EventRequest),
-    Ledger(Ledger),
+    LedgerSeal(LedgerSeal),
 }
 
 pub async fn i_owner_new_owner<A>(
@@ -149,6 +149,7 @@ where
         .tell(AuthMessage::Update {
             subject_id,
             objective,
+            strict: false,
         })
         .await
 }
@@ -167,6 +168,7 @@ pub async fn update_ledger_network(
     let subject_string = data.subject_id.to_string();
     let request = ActorMessage::DistributionLedgerReq {
         actual_sn: Some(data.sn),
+        target_sn: None,
         subject_id: data.subject_id,
     };
 
@@ -178,7 +180,7 @@ pub async fn update_ledger_network(
     };
 
     network
-        .send_command(network::CommandHelper::SendMessage {
+        .send_command(ave_network::CommandHelper::SendMessage {
             message: NetworkMessage {
                 info,
                 message: request,

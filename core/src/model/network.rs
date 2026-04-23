@@ -69,7 +69,9 @@ impl Handler<Self> for RetryNetwork {
     ) -> Result<(), ActorError> {
         if let Err(e) = self
             .network
-            .send_command(network::CommandHelper::SendMessage { message: msg })
+            .send_command(ave_network::CommandHelper::SendMessage {
+                message: msg,
+            })
             .await
         {
             error!(
