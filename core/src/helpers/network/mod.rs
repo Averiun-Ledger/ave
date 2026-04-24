@@ -48,6 +48,7 @@ pub enum ActorMessage {
     DistributionLedgerRes {
         ledger: Vec<Ledger>,
         is_all: bool,
+        transfer_sn: Option<u64>,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,

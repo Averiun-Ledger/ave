@@ -6,10 +6,12 @@ use crate::governance::sn_register::{
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
+use crate::model::event::Ledger;
 use crate::model::common::{
     Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
     TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
 };
+use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
@@ -17,6 +19,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -378,6 +381,7 @@ pub enum WitnessesRegisterResponse {
     },
     TrackerWindow {
         sn: Option<u64>,
+        transfer_sn: Option<u64>,
         clear_sn: Option<u64>,
         is_all: bool,
         ranges: Vec<TrackerDeliveryRange>,
@@ -429,6 +433,17 @@ impl CreatorWitnessGrantHistory {
 }
 
 impl WitnessesRegister {
+    const fn sn_limit_to_access_limit(
+        sn_limit: SnLimit,
+        current_sn: u64,
+    ) -> Option<u64> {
+        match sn_limit {
+            SnLimit::Sn(sn) => Some(sn),
+            SnLimit::LastSn => Some(current_sn),
+            SnLimit::NotSn => None,
+        }
+    }
+
     fn merge_grant(
         actual: Option<CreatorWitnessGrant>,
         next: &CreatorWitnessGrant,
@@ -839,11 +854,17 @@ impl WitnessesRegister {
         schema_id: SchemaType,
         actual_sn: Option<u64>,
     ) -> Result<
-        (Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+        (
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+            bool,
+            Vec<TrackerDeliveryRange>,
+        ),
         ActorError,
     > {
         let Some(data) = self.subjects.get(subject_id) else {
-            return Ok((None, None, true, Vec::new()));
+            return Ok((None, None, None, true, Vec::new()));
         };
 
         let access_limit = match self
@@ -874,12 +895,34 @@ impl WitnessesRegister {
         };
 
         let Some(access_limit) = access_limit else {
-            return Ok((None, None, true, Vec::new()));
+            return Ok((None, None, None, true, Vec::new()));
+        };
+
+        let witness_only_limit = Self::sn_limit_to_access_limit(
+            self.search_witnesses(
+                ctx,
+                node,
+                data,
+                namespace.clone(),
+                schema_id.clone(),
+                subject_id.clone(),
+            )
+            .await?,
+            data.sn,
+        );
+
+        let transfer_sn = if witness_only_limit
+            .is_some_and(|witness_only_limit| witness_only_limit >= access_limit)
+        {
+            None
+        } else {
+            self.find_last_transfer_sn(ctx, subject_id, node, access_limit)
+                .await?
         };
 
         let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
-            return Ok((None, None, true, Vec::new()));
+            return Ok((None, transfer_sn, None, true, Vec::new()));
         }
 
         let namespace = Namespace::from(namespace);
@@ -933,7 +976,10 @@ impl WitnessesRegister {
             }
         }
 
-        Ok((Some(access_limit), clear_sn, true, ranges))
+        let transfer_sn = transfer_sn
+            .filter(|transfer_sn| actual_sn.is_none_or(|sn| *transfer_sn > sn));
+
+        Ok((Some(access_limit), transfer_sn, clear_sn, true, ranges))
     }
 
     async fn access_limit_for_node(
@@ -1119,6 +1165,45 @@ impl WitnessesRegister {
                 expected: "SnRegisterResponse::Sn".to_owned(),
             }),
         }
+    }
+
+    async fn find_last_transfer_sn(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        hi_sn: u64,
+    ) -> Result<Option<u64>, ActorError> {
+        let path =
+            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
+        let response = tracker
+            .ask(TrackerMessage::GetLedger {
+                lo_sn: None,
+                hi_sn,
+            })
+            .await?;
+
+        let TrackerResponse::Ledger { ledger, .. } = response else {
+            return Err(ActorError::UnexpectedResponse {
+                path,
+                expected: "TrackerResponse::Ledger".to_owned(),
+            });
+        };
+
+        Ok(ledger.into_iter().rev().find_map(|event: Ledger| {
+            let Some(EventRequest::Transfer(transfer_request)) =
+                event.get_event_request()
+            else {
+                return None;
+            };
+
+            if transfer_request.new_owner == *node {
+                Some(event.sn)
+            } else {
+                None
+            }
+        }))
     }
 
     fn search_in_schema(
@@ -2106,7 +2191,7 @@ impl Handler<Self> for WitnessesRegister {
                 schema_id,
                 actual_sn,
             } => {
-                let (sn, clear_sn, is_all, ranges) = self
+                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
                     .build_tracker_window(
                         ctx,
                         &subject_id,
@@ -2119,6 +2204,7 @@ impl Handler<Self> for WitnessesRegister {
 
                 return Ok(WitnessesRegisterResponse::TrackerWindow {
                     sn,
+                    transfer_sn,
                     clear_sn,
                     is_all,
                     ranges,

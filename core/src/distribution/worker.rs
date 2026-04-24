@@ -7,8 +7,8 @@ use ave_actors::{
 };
 use ave_common::{
     SchemaType,
+    bridge::request::EventRequestType,
     identity::{DigestIdentifier, PublicKey},
-    request::EventRequestType,
 };
 use ave_network::ComunicateInfo;
 
@@ -459,7 +459,10 @@ impl DistriWorker {
         subject_id: &DigestIdentifier,
         sender: PublicKey,
         actual_sn: Option<u64>,
-    ) -> Result<(u64, Option<u64>, bool, Vec<TrackerDeliveryRange>), ActorError>
+    ) -> Result<
+        (u64, Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+        ActorError,
+    >
     {
         let data = get_subject_data(ctx, subject_id).await?;
 
@@ -473,7 +476,7 @@ impl DistriWorker {
             return Err(DistributorError::SubjectNotFound.into());
         };
 
-        let (sn, clear_sn, is_all, ranges) = resolve_tracker_window(
+        let (sn, transfer_sn, clear_sn, is_all, ranges) = resolve_tracker_window(
             ctx,
             &governance_id,
             subject_id,
@@ -509,7 +512,7 @@ impl DistriWorker {
             };
         };
 
-        Ok((sn, clear_sn, is_all, ranges))
+        Ok((sn, transfer_sn, clear_sn, is_all, ranges))
     }
 
     fn tracker_delivery_mode(
@@ -619,7 +622,7 @@ impl DistriWorker {
 
         match data {
             SubjectData::Tracker { .. } => {
-                let (sn, clear_sn, _, ranges) = self
+                let (sn, _, clear_sn, _, ranges) = self
                     .get_tracker_window(
                         ctx,
                         subject_id,
@@ -654,7 +657,7 @@ impl DistriWorker {
         sender: PublicKey,
         actual_sn: Option<u64>,
         target_sn: Option<u64>,
-    ) -> Result<(Vec<Ledger>, bool, u64), ActorError> {
+    ) -> Result<(Vec<Ledger>, bool, u64, Option<u64>), ActorError> {
         let data = get_subject_data(ctx, subject_id).await?;
         let Some(data) = data else {
             return Err(DistributorError::SubjectNotFound.into());
@@ -662,7 +665,7 @@ impl DistriWorker {
 
         match data {
             SubjectData::Tracker { .. } => {
-                let (window_sn, clear_sn, _, ranges) = self
+                let (window_sn, transfer_sn, clear_sn, _, ranges) = self
                     .get_tracker_window(ctx, subject_id, sender, actual_sn)
                     .await?;
 
@@ -703,7 +706,7 @@ impl DistriWorker {
 
                 let ledger = Self::project_tracker_ledger(ledger, &ranges)?;
                 let is_all = raw_is_all && hi_sn == window_sn;
-                Ok((ledger, is_all, hi_sn))
+                Ok((ledger, is_all, hi_sn, transfer_sn))
             }
             SubjectData::Governance { .. } => {
                 let (witness_hi_sn, ..) =
@@ -732,7 +735,7 @@ impl DistriWorker {
                     .await?;
 
                 let is_all = raw_is_all && batch_hi_sn == witness_hi_sn;
-                Ok((ledger, is_all, batch_hi_sn))
+                Ok((ledger, is_all, batch_hi_sn, None))
             }
         }
     }
@@ -826,7 +829,7 @@ impl DistriWorker {
         subject_id: DigestIdentifier,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
-        let (ledger, is_all, hi_sn) = self
+        let (ledger, is_all, hi_sn, transfer_sn) = self
             .build_distribution_batch(
                 ctx,
                 &subject_id,
@@ -847,6 +850,7 @@ impl DistriWorker {
             ActorMessage::DistributionLedgerRes {
                 ledger: ledger.clone(),
                 is_all,
+                transfer_sn,
             },
         )
         .await?;
@@ -912,6 +916,7 @@ pub enum DistriWorkerMessage {
     LedgerDistribution {
         ledger: Vec<Ledger>,
         is_all: bool,
+        transfer_sn: Option<u64>,
         info: ComunicateInfo,
         sender: PublicKey,
     },
@@ -1277,6 +1282,7 @@ impl Handler<Self> for DistriWorker {
             DistriWorkerMessage::LedgerDistribution {
                 mut ledger,
                 is_all,
+                transfer_sn: _transfer_sn,
                 info,
                 sender,
             } => {

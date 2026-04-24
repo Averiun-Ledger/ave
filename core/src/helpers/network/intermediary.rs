@@ -633,7 +633,11 @@ impl Intermediary {
                                 }
                             })?;
                     }
-                    ActorMessage::DistributionLedgerRes { ledger, is_all } => {
+                    ActorMessage::DistributionLedgerRes {
+                        ledger,
+                        is_all,
+                        transfer_sn,
+                    } => {
                         let actor = match system
                             .get_actor::<DistriWorker>(&path)
                             .await
@@ -663,6 +667,7 @@ impl Intermediary {
                                 ledger,
                                 info: message.info,
                                 is_all,
+                                transfer_sn,
                                 sender: sender.clone(),
                             })
                             .await

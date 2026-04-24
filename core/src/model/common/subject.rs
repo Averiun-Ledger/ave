@@ -532,7 +532,13 @@ pub async fn get_tracker_window<A>(
     schema_id: ave_common::SchemaType,
     actual_sn: Option<u64>,
 ) -> Result<
-    (Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+    (
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        bool,
+        Vec<TrackerDeliveryRange>,
+    ),
     ActorError,
 >
 where
@@ -559,10 +565,11 @@ where
     match response {
         WitnessesRegisterResponse::TrackerWindow {
             sn,
+            transfer_sn,
             clear_sn,
             is_all,
             ranges,
-        } => Ok((sn, clear_sn, is_all, ranges)),
+        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
