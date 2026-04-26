@@ -48,14 +48,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-bridge = "0.11.0"
+ave-bridge = "0.12.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-bridge = { version = "0.11.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-bridge = { version = "0.12.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Bootstrap example

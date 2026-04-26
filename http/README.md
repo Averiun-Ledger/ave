@@ -42,14 +42,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-http = "0.11.0"
+ave-http = "0.12.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-http = { version = "0.11.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-http = { version = "0.12.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Running the server

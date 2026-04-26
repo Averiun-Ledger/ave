@@ -63,12 +63,21 @@ fn auth_safe_mode_response() -> Response {
         .into_response()
 }
 
+fn is_server_auth_mutation_path(path: &str) -> bool {
+    path.starts_with("/admin")
+        || path == "/me/api-keys"
+        || path.starts_with("/me/api-keys/")
+}
+
 async fn protected_auth_safe_mode_layer(
     State(auth_safe_mode): State<AuthSafeMode>,
     req: Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    if auth_safe_mode.0 && req.method() != Method::GET {
+    if auth_safe_mode.0
+        && req.method() != Method::GET
+        && is_server_auth_mutation_path(req.uri().path())
+    {
         return auth_safe_mode_response();
     }
 
