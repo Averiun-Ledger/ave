@@ -9,6 +9,7 @@ use ave_common::{
     SchemaType,
     bridge::request::EventRequestType,
     identity::{DigestIdentifier, PublicKey},
+    request::EventRequest,
 };
 use ave_network::ComunicateInfo;
 
@@ -27,6 +28,7 @@ use crate::{
             node::get_subject_data,
             subject::{
                 acquire_subject, create_subject, get_gov, get_gov_sn,
+                get_local_subject_sn,
                 get_tracker_window as resolve_tracker_window, update_ledger,
             },
         },
@@ -372,6 +374,63 @@ impl DistriWorker {
             is_gov,
             is_register: subject_data.is_some(),
             safe_hi_sn,
+        })
+    }
+
+    fn get_transfer_new_owner(ledger: &Ledger) -> Option<PublicKey> {
+        match ledger.get_event_request() {
+            Some(EventRequest::Transfer(transfer_request)) => {
+                Some(transfer_request.new_owner)
+            }
+            _ => None,
+        }
+    }
+
+    async fn check_last_event_transfer_new_owner_auth(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        ledger: &Ledger,
+    ) -> Result<DistributionAuth, ActorError> {
+        let Some(new_owner) = Self::get_transfer_new_owner(ledger) else {
+            return Err(DistributorError::ReceiverNoAccess.into());
+        };
+
+        if new_owner != *self.our_key {
+            return Err(DistributorError::ReceiverNoAccess.into());
+        }
+
+        let subject_id = ledger.get_subject_id();
+        let (_auth, subject_data) =
+            self.authorized_subj(ctx, &subject_id).await?;
+
+        let Some(SubjectData::Tracker {
+            governance_id,
+            schema_id: _,
+            namespace: _,
+            ..
+        }) = subject_data
+        else {
+            return Err(DistributorError::ReceiverNoAccess.into());
+        };
+
+        let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+            DistributorError::GetGovernanceFailed {
+                details: e.to_string(),
+            }
+        })?;
+
+        if gov.version < ledger.gov_version {
+            return Err(DistributorError::GovernanceVersionMismatch {
+                our_version: gov.version,
+                their_version: ledger.gov_version,
+            }
+            .into());
+        }
+
+        Ok(DistributionAuth {
+            is_gov: false,
+            is_register: true,
+            safe_hi_sn: ledger.sn,
         })
     }
 
@@ -764,6 +823,70 @@ impl DistriWorker {
         .await
     }
 
+    async fn ensure_next_sn_or_request_update(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        received_first_sn: u64,
+        info: &ComunicateInfo,
+        sender: PublicKey,
+    ) -> Result<bool, ActorError> {
+        let subject_data = get_subject_data(ctx, subject_id).await?;
+
+        match subject_data {
+            Some(_) => {
+                let Some(local_sn) =
+                    get_local_subject_sn(ctx, subject_id).await?
+                else {
+                    self.request_ledger_from_sender(
+                        subject_id, sender, info, None,
+                    )
+                    .await?;
+                    return Ok(false);
+                };
+                let expected_sn = local_sn.saturating_add(1);
+
+                if received_first_sn != expected_sn {
+                    debug!(
+                        subject_id = %subject_id,
+                        local_last_sn = local_sn,
+                        expected_sn = expected_sn,
+                        received_first_sn = received_first_sn,
+                        "SN mismatch detected before authorization, requesting update"
+                    );
+
+                    self.request_ledger_from_sender(
+                        subject_id,
+                        sender,
+                        info,
+                        Some(local_sn),
+                    )
+                    .await?;
+
+                    return Ok(false);
+                }
+            }
+            None => {
+                if received_first_sn != 0 {
+                    debug!(
+                        subject_id = %subject_id,
+                        received_first_sn = received_first_sn,
+                        "Subject not present locally and first SN is not 0, requesting update"
+                    );
+
+                    self.request_ledger_from_sender(
+                        subject_id, sender, info, None,
+                    )
+                    .await?;
+
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     async fn handle_get_last_sn(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1067,13 +1190,71 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger.get_subject_id();
                 let sn = ledger.sn;
 
+                if !self
+                    .ensure_next_sn_or_request_update(
+                        ctx,
+                        &subject_id,
+                        sn,
+                        &info,
+                        sender.clone(),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+
                 let auth = match self
                     .check_auth(ctx, sender.clone(), &info, &ledger, sn)
                     .await
                 {
                     Ok(auth) => auth,
                     Err(e) => {
-                        if let ActorError::Functional { .. } = e {
+                        if matches!(
+                            ledger.get_event_request_type(),
+                            EventRequestType::Transfer
+                        ) {
+                            match self
+                                .check_last_event_transfer_new_owner_auth(
+                                    ctx,
+                                    &ledger,
+                                )
+                                .await
+                            {
+                                Ok(auth) => {
+                                    debug!(
+                                        msg_type = "LastEventDistribution",
+                                        subject_id = %subject_id,
+                                        sn = sn,
+                                        sender = %sender,
+                                        "Accepted transfer event for receiver as announced new owner"
+                                    );
+                                    auth
+                                }
+                                Err(_) => {
+                                    if let ActorError::Functional { .. } = e {
+                                        warn!(
+                                            msg_type = "LastEventDistribution",
+                                            subject_id = %subject_id,
+                                            sn = sn,
+                                            sender = %sender,
+                                            error = %e,
+                                            "Authorization check failed"
+                                        );
+                                        return Err(e);
+                                    } else {
+                                        error!(
+                                            msg_type = "LastEventDistribution",
+                                            subject_id = %subject_id,
+                                            sn = sn,
+                                            sender = %sender,
+                                            error = %e,
+                                            "Authorization check failed"
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    }
+                                }
+                            }
+                        } else if let ActorError::Functional { .. } = e {
                             warn!(
                                 msg_type = "LastEventDistribution",
                                 subject_id = %subject_id,
@@ -1304,6 +1485,20 @@ impl Handler<Self> for DistriWorker {
                     .last()
                     .map(|event| event.sn)
                     .unwrap_or(first_sn);
+
+                if !self
+                    .ensure_next_sn_or_request_update(
+                        ctx,
+                        &subject_id,
+                        first_sn,
+                        &info,
+                        sender.clone(),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+
                 let auth = match self
                     .check_auth(
                         ctx,
