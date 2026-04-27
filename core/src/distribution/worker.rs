@@ -18,6 +18,9 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         model::{HashThisRole, RoleTypes},
+        transfer_hint_register::{
+            TransferHintRegister, TransferHintRegisterMessage,
+        },
         witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
     },
     helpers::network::service::NetworkSender,
@@ -432,6 +435,71 @@ impl DistriWorker {
             is_register: true,
             safe_hi_sn: ledger.sn,
         })
+    }
+
+    fn is_transfer_hint_auth_error(error: &ActorError) -> bool {
+        let ActorError::Functional { description } = error else {
+            return false;
+        };
+
+        *description == DistributorError::SenderNoAccess.to_string()
+            || *description == DistributorError::ReceiverNoAccess.to_string()
+            || *description == DistributorError::NotWitness.to_string()
+    }
+
+    async fn register_transfer_hint_fallback(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        ledger: &Ledger,
+        sender: PublicKey,
+        transfer_sn: Option<u64>,
+        _offered_hi_sn: u64,
+    ) -> Result<Option<DistributionAuth>, ActorError> {
+        let Some(transfer_sn) = transfer_sn else {
+            return Ok(None);
+        };
+
+        let subject_data = get_subject_data(ctx, subject_id).await?;
+        let (governance_id, is_register) = match subject_data {
+            Some(SubjectData::Tracker { governance_id, .. }) => {
+                (governance_id, true)
+            }
+            Some(SubjectData::Governance { .. }) => return Ok(None),
+            None => {
+                let Some(create) = ledger.get_create_event() else {
+                    return Ok(None);
+                };
+                if create.schema_id.is_gov() || create.governance_id.is_empty()
+                {
+                    return Ok(None);
+                }
+
+                (create.governance_id.clone(), false)
+            }
+        };
+
+        let transfer_hint_register = ctx
+            .system()
+            .get_actor::<TransferHintRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/transfer_hint_register",
+                governance_id
+            )))
+            .await?;
+
+        transfer_hint_register
+            .tell(TransferHintRegisterMessage::RegisterHint {
+                subject_id: subject_id.clone(),
+                sender,
+                transfer_sn,
+            })
+            .await?;
+
+        Ok(Some(DistributionAuth {
+            is_gov: false,
+            is_register,
+            safe_hi_sn: transfer_sn,
+        }))
     }
 
     fn order_and_filter_ledger_to_safe_hi(
@@ -1463,7 +1531,7 @@ impl Handler<Self> for DistriWorker {
             DistriWorkerMessage::LedgerDistribution {
                 mut ledger,
                 is_all,
-                transfer_sn: _transfer_sn,
+                transfer_sn,
                 info,
                 sender,
             } => {
@@ -1511,7 +1579,64 @@ impl Handler<Self> for DistriWorker {
                 {
                     Ok(auth) => auth,
                     Err(e) => {
-                        if let ActorError::Functional { .. } = e {
+                        let fallback_auth =
+                            if Self::is_transfer_hint_auth_error(&e) {
+                                match self
+                                    .register_transfer_hint_fallback(
+                                        ctx,
+                                        &subject_id,
+                                        &ledger[0],
+                                        sender.clone(),
+                                        transfer_sn,
+                                        offered_hi_sn,
+                                    )
+                                    .await
+                                {
+                                    Ok(auth) => auth,
+                                    Err(register_error) => {
+                                        if let ActorError::Functional { .. } =
+                                            register_error
+                                        {
+                                            warn!(
+                                                msg_type = "LedgerDistribution",
+                                                subject_id = %subject_id,
+                                                sender = %sender,
+                                                ledger_count = ledger_count,
+                                                error = %register_error,
+                                                "Failed to register transfer hint fallback"
+                                            );
+                                            return Err(register_error);
+                                        } else {
+                                            error!(
+                                                msg_type = "LedgerDistribution",
+                                                subject_id = %subject_id,
+                                                sender = %sender,
+                                                ledger_count = ledger_count,
+                                                error = %register_error,
+                                                "Failed to register transfer hint fallback"
+                                            );
+                                            return Err(
+                                                emit_fail(ctx, register_error)
+                                                    .await,
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                        if let Some(auth) = fallback_auth {
+                            debug!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                ledger_count = ledger_count,
+                                transfer_sn = transfer_sn,
+                                "Accepted ledger batch under pending transfer hint"
+                            );
+                            auth
+                        } else if let ActorError::Functional { .. } = e {
                             warn!(
                                 msg_type = "LedgerDistribution",
                                 subject_id = %subject_id,

@@ -33,6 +33,10 @@ use crate::{
             RoleRegisterResponse,
         },
         sn_register::{SnRegister, SnRegisterMessage, SnRegisterResponse},
+        transfer_hint_register::{
+            TransferHintRegister, TransferHintRegisterMessage,
+            TransferHintRegisterResponse,
+        },
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
@@ -99,6 +103,7 @@ pub mod events;
 pub mod model;
 pub mod role_register;
 pub mod sn_register;
+pub mod transfer_hint_register;
 pub mod subject_register;
 pub mod tracker_sync;
 pub mod version_sync;
@@ -2654,6 +2659,56 @@ impl Governance {
             }
         }
 
+        let transfer_hint_register = match ctx
+            .create_child(
+                "transfer_hint_register",
+                TransferHintRegister::initial((*self.our_key).clone()),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<TransferHintRegister>(
+                        "transfer_hint_register",
+                    )
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "transfer_hint_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors
+                    .push(format!("transfer_hint_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(transfer_hint_register) = transfer_hint_register {
+            match transfer_hint_register
+                .ask(TransferHintRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(TransferHintRegisterResponse::Ok) => {}
+                Err(error) => cleanup_errors
+                    .push(format!("transfer_hint_register: {error}")),
+            }
+
+            if let Err(error) = transfer_hint_register.ask_stop().await {
+                cleanup_errors.push(format!(
+                    "transfer_hint_register stop: {error}"
+                ));
+            }
+        }
+
         if cleanup_errors.is_empty() {
             Ok(())
         } else {
@@ -2956,6 +3011,54 @@ impl Governance {
             }
         }
 
+        let transfer_hint_register = match ctx
+            .create_child(
+                "transfer_hint_register",
+                TransferHintRegister::initial((*self.our_key).clone()),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<TransferHintRegister>(
+                        "transfer_hint_register",
+                    )
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "transfer_hint_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors
+                    .push(format!("transfer_hint_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(transfer_hint_register) = transfer_hint_register {
+            match transfer_hint_register
+                .ask(TransferHintRegisterMessage::PurgeStorage)
+                .await
+            {
+                Ok(TransferHintRegisterResponse::Ok) => {}
+                Err(error) => cleanup_errors
+                    .push(format!("transfer_hint_register: {error}")),
+            }
+
+            if let Err(error) = transfer_hint_register.ask_stop().await {
+                cleanup_errors.push(format!(
+                    "transfer_hint_register stop: {error}"
+                ));
+            }
+        }
+
         if let Err(error) = purge_storage(ctx).await {
             cleanup_errors.push(format!("governance: {error}"));
         }
@@ -3147,6 +3250,20 @@ impl Actor for Governance {
             error!(
                 error = %e,
                 "Failed to create witnesses_register child"
+            );
+            return Err(e);
+        }
+
+        if let Err(e) = ctx
+            .create_child(
+                "transfer_hint_register",
+                TransferHintRegister::initial((*self.our_key).clone()),
+            )
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to create transfer_hint_register child"
             );
             return Err(e);
         }

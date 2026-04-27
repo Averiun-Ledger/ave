@@ -5,6 +5,9 @@ use crate::{
     governance::{
         sn_register::{SnRegister, SnRegisterMessage},
         subject_register::{SubjectRegister, SubjectRegisterMessage},
+        transfer_hint_register::{
+            TransferHintRegister, TransferHintRegisterMessage,
+        },
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,
@@ -155,6 +158,20 @@ impl Subject for Tracker {
             .await?;
         witnesses_register
             .tell(WitnessesRegisterMessage::UpdateSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn,
+            })
+            .await?;
+
+        let transfer_hint_register = ctx
+            .system()
+            .get_actor::<TransferHintRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/transfer_hint_register",
+                self.governance_id
+            )))
+            .await?;
+        transfer_hint_register
+            .tell(TransferHintRegisterMessage::VerifySubjectSn {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 sn: self.subject_metadata.sn,
             })
