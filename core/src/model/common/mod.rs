@@ -24,7 +24,8 @@ use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
 };
 use crate::governance::witnesses_register::{
-    WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
+    HiSnLimit, WitnessesRegister, WitnessesRegisterMessage,
+    WitnessesRegisterResponse,
 };
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
@@ -207,6 +208,44 @@ where
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::Access { sn }".to_string(),
+        }),
+    }
+}
+
+pub async fn check_witness_hi_sn_limit<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+) -> Result<HiSnLimit, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::HiSnLimit {
+            subject_id: subject_id.to_owned(),
+            node,
+            namespace,
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::HiSnLimit { limit } => Ok(limit),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::HiSnLimit { limit }"
+                .to_string(),
         }),
     }
 }

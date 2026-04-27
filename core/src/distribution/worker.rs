@@ -21,13 +21,15 @@ use crate::{
         transfer_hint_register::{
             TransferHintRegister, TransferHintRegisterMessage,
         },
-        witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
+        witnesses_register::{
+            HiSnLimit, TrackerDeliveryMode, TrackerDeliveryRange,
+        },
     },
     helpers::network::service::NetworkSender,
     model::{
         common::{
             check_create_witness_access, check_subject_creation,
-            check_witness_access, emit_fail,
+            check_witness_access, check_witness_hi_sn_limit, emit_fail,
             node::get_subject_data,
             subject::{
                 acquire_subject, create_subject, get_gov, get_gov_sn,
@@ -59,6 +61,25 @@ pub struct DistriWorker {
 }
 
 impl DistriWorker {
+    async fn send_last_event_ack(
+        &self,
+        sender: PublicKey,
+        info: &ComunicateInfo,
+    ) -> Result<(), ActorError> {
+        let new_info = self.build_response_info(
+            sender,
+            info,
+            format!(
+                "/user/{}/{}",
+                info.request_id,
+                info.receiver.clone()
+            ),
+        );
+
+        self.send_network_message(new_info, ActorMessage::DistributionLastEventRes)
+            .await
+    }
+
     fn requester_id(
         kind: &str,
         subject_id: &DigestIdentifier,
@@ -317,7 +338,7 @@ impl DistriWorker {
         }
 
         let safe_hi_sn = if subject_data.is_some() {
-            let sender_limit = check_witness_access(
+            let sender_limit = check_witness_hi_sn_limit(
                 ctx,
                 &governance_id,
                 &subject_id,
@@ -325,10 +346,9 @@ impl DistriWorker {
                 namespace.clone(),
                 schema_id.clone(),
             )
-            .await?
-            .ok_or(DistributorError::SenderNoAccess)?;
+            .await?;
 
-            let receiver_limit = check_witness_access(
+            let receiver_limit = check_witness_hi_sn_limit(
                 ctx,
                 &governance_id,
                 &subject_id,
@@ -336,10 +356,24 @@ impl DistriWorker {
                 namespace,
                 schema_id,
             )
-            .await?
-            .ok_or(DistributorError::ReceiverNoAccess)?;
+            .await?;
 
-            sender_limit.min(receiver_limit).min(offered_hi_sn)
+            match (sender_limit, receiver_limit) {
+                (HiSnLimit::None, _) => {
+                    return Err(DistributorError::SenderNoAccess.into())
+                }
+                (_, HiSnLimit::None) => {
+                    return Err(DistributorError::ReceiverNoAccess.into())
+                }
+                (HiSnLimit::Infinity, HiSnLimit::Infinity) => offered_hi_sn,
+                (HiSnLimit::Infinity, HiSnLimit::Sn(limit))
+                | (HiSnLimit::Sn(limit), HiSnLimit::Infinity) => {
+                    limit.min(offered_hi_sn)
+                }
+                (HiSnLimit::Sn(sender_limit), HiSnLimit::Sn(receiver_limit)) => {
+                    sender_limit.min(receiver_limit).min(offered_hi_sn)
+                }
+            }
         } else {
             let owner = ledger.ledger_seal_signature.signer.clone();
             let sender_allowed = check_create_witness_access(
@@ -914,6 +948,10 @@ impl DistriWorker {
                 };
                 let expected_sn = local_sn.saturating_add(1);
 
+                if received_first_sn <= local_sn {
+                    return Ok(false);
+                }
+
                 if received_first_sn != expected_sn {
                     debug!(
                         subject_id = %subject_id,
@@ -1268,6 +1306,13 @@ impl Handler<Self> for DistriWorker {
                     )
                     .await?
                 {
+                    if let Some(local_sn) =
+                        get_local_subject_sn(ctx, &subject_id).await?
+                        && local_sn >= sn
+                    {
+                        self.send_last_event_ack(sender.clone(), &info)
+                            .await?;
+                    }
                     return Ok(());
                 }
 
@@ -1488,22 +1533,8 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let new_info = self.build_response_info(
-                    sender.clone(),
-                    &info,
-                    format!(
-                        "/user/{}/{}",
-                        info.request_id,
-                        info.receiver.clone()
-                    ),
-                );
-
-                if let Err(e) = self
-                    .send_network_message(
-                        new_info,
-                        ActorMessage::DistributionLastEventRes,
-                    )
-                    .await
+                if let Err(e) =
+                    self.send_last_event_ack(sender.clone(), &info).await
                 {
                     error!(
                         msg_type = "LastEventDistribution",

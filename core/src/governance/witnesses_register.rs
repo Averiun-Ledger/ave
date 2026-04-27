@@ -255,6 +255,12 @@ pub enum WitnessesRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
+    HiSnLimit {
+        subject_id: DigestIdentifier,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+    },
     CreateAccess {
         owner: PublicKey,
         node: PublicKey,
@@ -362,6 +368,9 @@ pub enum WitnessesRegisterResponse {
     Access {
         sn: Option<u64>,
     },
+    HiSnLimit {
+        limit: HiSnLimit,
+    },
     CreateAccess {
         allowed: bool,
     },
@@ -390,6 +399,13 @@ pub enum WitnessesRegisterResponse {
 }
 
 impl Response for WitnessesRegisterResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HiSnLimit {
+    None,
+    Sn(u64),
+    Infinity,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrentWitnessSubject {
@@ -1014,9 +1030,7 @@ impl WitnessesRegister {
 
             let sn = match sn_limit {
                 SnLimit::Sn(sn) => sn.max(old_data.sn),
-                SnLimit::LastSn => unreachable!(
-                    "search_witnesses can not return SnLimit::LastSn"
-                ),
+                SnLimit::LastSn => data.sn.max(old_data.sn),
                 SnLimit::NotSn => old_data.sn,
             };
 
@@ -1035,14 +1049,60 @@ impl WitnessesRegister {
 
             match sn_limit {
                 SnLimit::Sn(sn) => Some(sn),
-                SnLimit::LastSn => unreachable!(
-                    "search_witnesses can not return SnLimit::LastSn"
-                ),
+                SnLimit::LastSn => Some(data.sn),
                 SnLimit::NotSn => None,
             }
         };
 
         Ok(sn)
+    }
+
+    async fn hi_sn_limit_for_node(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        namespace: &str,
+        schema_id: &SchemaType,
+    ) -> Result<HiSnLimit, ActorError> {
+        let Some(data) = self.subjects.get(subject_id) else {
+            return Ok(HiSnLimit::None);
+        };
+
+        if data.actual_owner == *node
+            || data
+                .actual_new_owner_data
+                .as_ref()
+                .is_some_and(|(new_owner, _)| new_owner == node)
+        {
+            return Ok(HiSnLimit::Infinity);
+        }
+
+        let sn_limit = self
+            .search_witnesses(
+                ctx,
+                node,
+                data,
+                namespace.to_owned(),
+                schema_id.clone(),
+                subject_id.clone(),
+            )
+            .await?;
+
+        let old_owner_limit = data.old_owners.get(node).map(|old| old.sn);
+
+        let limit = match sn_limit {
+            SnLimit::LastSn => HiSnLimit::Infinity,
+            SnLimit::Sn(sn) => {
+                HiSnLimit::Sn(old_owner_limit.map_or(sn, |old| sn.max(old)))
+            }
+            SnLimit::NotSn => match old_owner_limit {
+                Some(sn) => HiSnLimit::Sn(sn),
+                None => HiSnLimit::None,
+            },
+        };
+
+        Ok(limit)
     }
 
     fn close_creator_registration(
@@ -1231,14 +1291,14 @@ impl WitnessesRegister {
         witness_data: &HashMap<Namespace, (IntervalSet, Option<u64>)>,
         parse_namespace: &Namespace,
         gov_version: u64,
-        sn: u64,
+        _sn: u64,
         mut better_gov_version: Option<u64>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
             if namespace.is_ancestor_or_equal_of(parse_namespace) {
                 // Actualmente soy testigo del owner
                 if actual_lo.is_some() {
-                    return ActualSearch::End(SnLimit::Sn(sn));
+                    return ActualSearch::End(SnLimit::LastSn);
                 }
 
                 if let Some(range) = interval.iter().last()
@@ -1364,7 +1424,7 @@ impl WitnessesRegister {
         {
             // Actualmente soy testigo del owner
             if actual_lo.is_some() {
-                return ActualSearch::End(SnLimit::Sn(sn));
+                return ActualSearch::End(SnLimit::LastSn);
             }
             // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
             // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
@@ -2140,6 +2200,24 @@ impl Handler<Self> for WitnessesRegister {
                 );
 
                 return Ok(WitnessesRegisterResponse::Access { sn });
+            }
+            WitnessesRegisterMessage::HiSnLimit {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+            } => {
+                let limit = self
+                    .hi_sn_limit_for_node(
+                        ctx,
+                        &subject_id,
+                        &node,
+                        &namespace,
+                        &schema_id,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::HiSnLimit { limit });
             }
             WitnessesRegisterMessage::CreateAccess {
                 owner,
