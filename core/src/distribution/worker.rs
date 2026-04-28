@@ -376,12 +376,57 @@ impl DistriWorker {
                 ) => sender_limit.min(receiver_limit).min(offered_hi_sn),
             }
         } else {
+            let sender_limit = check_witness_hi_sn_limit(
+                ctx,
+                &governance_id,
+                &subject_id,
+                sender.clone(),
+                namespace.clone(),
+                schema_id.clone(),
+            )
+            .await?;
+            let receiver_limit = check_witness_hi_sn_limit(
+                ctx,
+                &governance_id,
+                &subject_id,
+                (*self.our_key).clone(),
+                namespace.clone(),
+                schema_id.clone(),
+            )
+            .await?;
+            match (&sender_limit, &receiver_limit) {
+                (HiSnLimit::Infinity, HiSnLimit::Infinity) => {
+                    return Ok(DistributionAuth {
+                        is_gov,
+                        is_register: false,
+                        safe_hi_sn: offered_hi_sn,
+                    });
+                }
+                (HiSnLimit::Infinity, HiSnLimit::Sn(limit))
+                | (HiSnLimit::Sn(limit), HiSnLimit::Infinity) => {
+                    return Ok(DistributionAuth {
+                        is_gov,
+                        is_register: false,
+                        safe_hi_sn: (*limit).min(offered_hi_sn),
+                    });
+                }
+                (HiSnLimit::Sn(sender_limit), HiSnLimit::Sn(receiver_limit)) => {
+                    return Ok(DistributionAuth {
+                        is_gov,
+                        is_register: false,
+                        safe_hi_sn: (*sender_limit)
+                            .min(*receiver_limit)
+                            .min(offered_hi_sn),
+                    });
+                }
+                _ => {}
+            }
             let owner = ledger.ledger_seal_signature.signer.clone();
             let sender_allowed = check_create_witness_access(
                 ctx,
                 &governance_id,
                 owner.clone(),
-                sender,
+                sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
                 gov.version,
@@ -404,7 +449,6 @@ impl DistriWorker {
             if !receiver_allowed {
                 return Err(DistributorError::ReceiverNoAccess.into());
             }
-
             offered_hi_sn
         };
 
@@ -489,7 +533,7 @@ impl DistriWorker {
         ledger: &Ledger,
         sender: PublicKey,
         transfer_sn: Option<u64>,
-        _offered_hi_sn: u64,
+        offered_hi_sn: u64,
     ) -> Result<Option<DistributionAuth>, ActorError> {
         let Some(transfer_sn) = transfer_sn else {
             return Ok(None);
@@ -533,7 +577,7 @@ impl DistriWorker {
         Ok(Some(DistributionAuth {
             is_gov: false,
             is_register,
-            safe_hi_sn: transfer_sn,
+            safe_hi_sn: transfer_sn.min(offered_hi_sn),
         }))
     }
 
@@ -544,80 +588,6 @@ impl DistriWorker {
         let original_len = ledger.len();
         ledger.retain(|event| event.sn <= safe_hi_sn);
         ledger.len() < original_len
-    }
-
-    async fn resolve_unknown_create_safe_hi(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        sender: PublicKey,
-        ledger: &[Ledger],
-    ) -> Result<Option<u64>, ActorError> {
-        let Some(first) = ledger.first() else {
-            return Ok(None);
-        };
-
-        let Some(create) = first.get_create_event() else {
-            return Ok(None);
-        };
-
-        if create.schema_id.is_gov() {
-            return Ok(ledger.last().map(|event| event.sn));
-        }
-
-        let governance_id = create.governance_id.clone();
-        let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
-            DistributorError::GetGovernanceFailed {
-                details: e.to_string(),
-            }
-        })?;
-        let owner = first.ledger_seal_signature.signer.clone();
-        let namespace = create.namespace.to_string();
-        let schema_id = create.schema_id;
-        let receiver = (*self.our_key).clone();
-        let mut safe_hi_sn = None;
-
-        for event in ledger {
-            match event.get_event_request_type() {
-                EventRequestType::Transfer
-                | EventRequestType::Confirm
-                | EventRequestType::Reject => break,
-                EventRequestType::Create
-                | EventRequestType::Fact
-                | EventRequestType::Eol => {}
-            }
-
-            let sender_allowed = check_create_witness_access(
-                ctx,
-                &governance_id,
-                owner.clone(),
-                sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                gov.version,
-            )
-            .await?;
-            if !sender_allowed {
-                break;
-            }
-
-            let receiver_allowed = check_create_witness_access(
-                ctx,
-                &governance_id,
-                owner.clone(),
-                receiver.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                gov.version,
-            )
-            .await?;
-            if !receiver_allowed {
-                break;
-            }
-
-            safe_hi_sn = Some(event.sn);
-        }
-
-        Ok(safe_hi_sn)
     }
 
     async fn get_tracker_window(
@@ -654,6 +624,7 @@ impl DistriWorker {
                 &governance_id,
                 subject_id,
                 sender.clone(),
+                (*self.our_key).clone(),
                 namespace.clone(),
                 schema_id.clone(),
                 actual_sn,
@@ -665,7 +636,7 @@ impl DistriWorker {
                 ctx,
                 &governance_id,
                 subject_id,
-                sender,
+                sender.clone(),
                 namespace,
                 schema_id,
             )
@@ -1714,18 +1685,7 @@ impl Handler<Self> for DistriWorker {
                 };
                 let is_gov = auth.is_gov;
                 let is_register = auth.is_register;
-                let safe_hi_sn =
-                    if !is_gov && !is_register && ledger[0].is_create_event() {
-                        self.resolve_unknown_create_safe_hi(
-                            ctx,
-                            sender.clone(),
-                            &ledger,
-                        )
-                        .await?
-                        .unwrap_or(auth.safe_hi_sn)
-                    } else {
-                        auth.safe_hi_sn
-                    };
+                let safe_hi_sn = auth.safe_hi_sn;
 
                 let was_truncated = Self::order_and_filter_ledger_to_safe_hi(
                     &mut ledger,

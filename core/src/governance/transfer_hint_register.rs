@@ -92,6 +92,7 @@ impl TransferHintRegister {
             &governance_id,
             subject_id,
             self.our_key.clone(),
+            hint.sender.clone(),
             namespace.clone(),
             schema_id.clone(),
             None,

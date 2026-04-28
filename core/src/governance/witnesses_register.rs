@@ -271,6 +271,7 @@ pub enum WitnessesRegisterMessage {
     GetTrackerWindow {
         subject_id: DigestIdentifier,
         node: PublicKey,
+        sender: PublicKey,
         namespace: String,
         schema_id: SchemaType,
         actual_sn: Option<u64>,
@@ -446,17 +447,6 @@ impl CreatorWitnessGrantHistory {
 }
 
 impl WitnessesRegister {
-    const fn sn_limit_to_access_limit(
-        sn_limit: SnLimit,
-        current_sn: u64,
-    ) -> Option<u64> {
-        match sn_limit {
-            SnLimit::Sn(sn) => Some(sn),
-            SnLimit::LastSn => Some(current_sn),
-            SnLimit::NotSn => None,
-        }
-    }
-
     fn merge_grant(
         actual: Option<CreatorWitnessGrant>,
         next: &CreatorWitnessGrant,
@@ -863,6 +853,7 @@ impl WitnessesRegister {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         node: &PublicKey,
+        sender: &PublicKey,
         namespace: String,
         schema_id: SchemaType,
         actual_sn: Option<u64>,
@@ -911,32 +902,32 @@ impl WitnessesRegister {
             return Ok((None, None, None, true, Vec::new()));
         };
 
-        let witness_only_limit = Self::sn_limit_to_access_limit(
-            self.search_witnesses(
-                ctx,
-                node,
-                data,
-                namespace.clone(),
-                schema_id.clone(),
-                subject_id.clone(),
-            )
-            .await?,
-            data.sn,
-        );
-
-        let transfer_sn = if witness_only_limit
-            .is_some_and(|witness_only_limit| witness_only_limit >= access_limit)
+        let sender_transfer_sn = if data
+            .actual_new_owner_data
+            .as_ref()
+            .is_some_and(|(new_owner, _)| new_owner == sender)
         {
-            None
-        } else if data
+            Some(data.sn)
+        } else {
+            data.old_owners
+                .get(sender)
+                .map(|old_owner| old_owner.sn.saturating_sub(1))
+        };
+        let receiver_transfer_sn = if data
             .actual_new_owner_data
             .as_ref()
             .is_some_and(|(new_owner, _)| new_owner == node)
         {
             Some(data.sn)
         } else {
-            None
+            data.old_owners
+                .get(node)
+                .map(|old_owner| old_owner.sn.saturating_sub(1))
         };
+
+        let transfer_sn = sender_transfer_sn
+            .or(receiver_transfer_sn)
+            .filter(|transfer_sn| actual_sn.is_none_or(|sn| sn < *transfer_sn));
 
         let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
@@ -1059,18 +1050,15 @@ impl WitnessesRegister {
         Ok(sn)
     }
 
-    async fn hi_sn_limit_for_node(
+    async fn hi_sn_limit_for_transfer_data(
         &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         node: &PublicKey,
         namespace: &str,
         schema_id: &SchemaType,
+        data: &TransferData,
     ) -> Result<HiSnLimit, ActorError> {
-        let Some(data) = self.subjects.get(subject_id) else {
-            return Ok(HiSnLimit::None);
-        };
-
         if data.actual_owner == *node
             || data
                 .actual_new_owner_data
@@ -1103,6 +1091,36 @@ impl WitnessesRegister {
                 None => HiSnLimit::None,
             },
         };
+
+        Ok(limit)
+    }
+
+    async fn hi_sn_limit_for_node(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        namespace: &str,
+        schema_id: &SchemaType,
+    ) -> Result<HiSnLimit, ActorError> {
+        let Some(data) = self.subjects.get(subject_id) else {
+            return Ok(HiSnLimit::None);
+        };
+
+        if data.actual_owner == *node
+            || data
+                .actual_new_owner_data
+                .as_ref()
+                .is_some_and(|(new_owner, _)| new_owner == node)
+        {
+            return Ok(HiSnLimit::Infinity);
+        }
+
+        let limit = self
+            .hi_sn_limit_for_transfer_data(
+                ctx, subject_id, node, namespace, schema_id, data,
+            )
+            .await?;
 
         Ok(limit)
     }
@@ -2227,6 +2245,7 @@ impl Handler<Self> for WitnessesRegister {
             WitnessesRegisterMessage::GetTrackerWindow {
                 subject_id,
                 node,
+                sender,
                 namespace,
                 schema_id,
                 actual_sn,
@@ -2236,6 +2255,7 @@ impl Handler<Self> for WitnessesRegister {
                         ctx,
                         &subject_id,
                         &node,
+                        &sender,
                         namespace,
                         schema_id,
                         actual_sn,

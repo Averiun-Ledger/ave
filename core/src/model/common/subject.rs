@@ -528,6 +528,7 @@ pub async fn get_tracker_window<A>(
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
     node: PublicKey,
+    sender: PublicKey,
     namespace: String,
     schema_id: ave_common::SchemaType,
     actual_sn: Option<u64>,
@@ -556,6 +557,7 @@ where
         .ask(WitnessesRegisterMessage::GetTrackerWindow {
             subject_id: subject_id.clone(),
             node,
+            sender,
             namespace,
             schema_id,
             actual_sn,
