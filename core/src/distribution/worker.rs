@@ -69,15 +69,14 @@ impl DistriWorker {
         let new_info = self.build_response_info(
             sender,
             info,
-            format!(
-                "/user/{}/{}",
-                info.request_id,
-                info.receiver.clone()
-            ),
+            format!("/user/{}/{}", info.request_id, info.receiver.clone()),
         );
 
-        self.send_network_message(new_info, ActorMessage::DistributionLastEventRes)
-            .await
+        self.send_network_message(
+            new_info,
+            ActorMessage::DistributionLastEventRes,
+        )
+        .await
     }
 
     fn requester_id(
@@ -252,8 +251,9 @@ impl DistriWorker {
         let (auth, subject_data) =
             self.authorized_subj(ctx, &subject_id).await?;
 
-        let (schema_id, governance_id, namespace) =
-            if let Some(ref data) = subject_data {
+        let (schema_id, governance_id, namespace) = if let Some(ref data) =
+            subject_data
+        {
             match data {
                 SubjectData::Tracker {
                     governance_id,
@@ -360,19 +360,20 @@ impl DistriWorker {
 
             match (sender_limit, receiver_limit) {
                 (HiSnLimit::None, _) => {
-                    return Err(DistributorError::SenderNoAccess.into())
+                    return Err(DistributorError::SenderNoAccess.into());
                 }
                 (_, HiSnLimit::None) => {
-                    return Err(DistributorError::ReceiverNoAccess.into())
+                    return Err(DistributorError::ReceiverNoAccess.into());
                 }
                 (HiSnLimit::Infinity, HiSnLimit::Infinity) => offered_hi_sn,
                 (HiSnLimit::Infinity, HiSnLimit::Sn(limit))
                 | (HiSnLimit::Sn(limit), HiSnLimit::Infinity) => {
                     limit.min(offered_hi_sn)
                 }
-                (HiSnLimit::Sn(sender_limit), HiSnLimit::Sn(receiver_limit)) => {
-                    sender_limit.min(receiver_limit).min(offered_hi_sn)
-                }
+                (
+                    HiSnLimit::Sn(sender_limit),
+                    HiSnLimit::Sn(receiver_limit),
+                ) => sender_limit.min(receiver_limit).min(offered_hi_sn),
             }
         } else {
             let owner = ledger.ledger_seal_signature.signer.clone();
@@ -383,7 +384,7 @@ impl DistriWorker {
                 sender,
                 namespace.clone(),
                 schema_id.clone(),
-                ledger.gov_version,
+                gov.version,
             )
             .await?;
             if !sender_allowed {
@@ -397,7 +398,7 @@ impl DistriWorker {
                 (*self.our_key).clone(),
                 namespace,
                 schema_id,
-                ledger.gov_version,
+                gov.version,
             )
             .await?;
             if !receiver_allowed {
@@ -564,6 +565,11 @@ impl DistriWorker {
         }
 
         let governance_id = create.governance_id.clone();
+        let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+            DistributorError::GetGovernanceFailed {
+                details: e.to_string(),
+            }
+        })?;
         let owner = first.ledger_seal_signature.signer.clone();
         let namespace = create.namespace.to_string();
         let schema_id = create.schema_id;
@@ -587,7 +593,7 @@ impl DistriWorker {
                 sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
-                event.gov_version,
+                gov.version,
             )
             .await?;
             if !sender_allowed {
@@ -601,7 +607,7 @@ impl DistriWorker {
                 receiver.clone(),
                 namespace.clone(),
                 schema_id.clone(),
-                event.gov_version,
+                gov.version,
             )
             .await?;
             if !receiver_allowed {
@@ -621,10 +627,15 @@ impl DistriWorker {
         sender: PublicKey,
         actual_sn: Option<u64>,
     ) -> Result<
-        (u64, Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+        (
+            u64,
+            Option<u64>,
+            Option<u64>,
+            bool,
+            Vec<TrackerDeliveryRange>,
+        ),
         ActorError,
-    >
-    {
+    > {
         let data = get_subject_data(ctx, subject_id).await?;
 
         let Some(SubjectData::Tracker {
@@ -637,16 +648,17 @@ impl DistriWorker {
             return Err(DistributorError::SubjectNotFound.into());
         };
 
-        let (sn, transfer_sn, clear_sn, is_all, ranges) = resolve_tracker_window(
-            ctx,
-            &governance_id,
-            subject_id,
-            sender.clone(),
-            namespace.clone(),
-            schema_id.clone(),
-            actual_sn,
-        )
-        .await?;
+        let (sn, transfer_sn, clear_sn, is_all, ranges) =
+            resolve_tracker_window(
+                ctx,
+                &governance_id,
+                subject_id,
+                sender.clone(),
+                namespace.clone(),
+                schema_id.clone(),
+                actual_sn,
+            )
+            .await?;
 
         let Some(sn) = sn else {
             let witness_sn = check_witness_access(
@@ -1183,7 +1195,16 @@ impl Handler<Self> for DistriWorker {
             {
                 Ok(()) => {}
                 Err(e) => {
-                    if let ActorError::Functional { .. } = e {
+                    if let ActorError::FunctionalCritical { .. } = e {
+                        error!(
+                            msg_type = "GetLastSn",
+                            subject_id = %subject_id,
+                            sender = %sender,
+                            error = %e,
+                            "Witness check failed"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    } else {
                         warn!(
                             msg_type = "GetLastSn",
                             subject_id = %subject_id,
@@ -1198,15 +1219,6 @@ impl Handler<Self> for DistriWorker {
                         )
                         .await?;
                         return Ok(());
-                    } else {
-                        error!(
-                            msg_type = "GetLastSn",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Witness check failed"
-                        );
-                        return Err(emit_fail(ctx, e).await);
                     }
                 }
             },
@@ -1227,16 +1239,7 @@ impl Handler<Self> for DistriWorker {
             {
                 Ok(()) => {}
                 Err(e) => {
-                    if let ActorError::Functional { .. } = e {
-                        warn!(
-                            msg_type = "GetGovernanceVersion",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Subject is not a governance"
-                        );
-                        return Err(e);
-                    } else {
+                    if let ActorError::FunctionalCritical { .. } = e {
                         error!(
                             msg_type = "GetGovernanceVersion",
                             subject_id = %subject_id,
@@ -1245,6 +1248,15 @@ impl Handler<Self> for DistriWorker {
                             "Failed to send governance version response to network"
                         );
                         return Err(emit_fail(ctx, e).await);
+                    } else {
+                        warn!(
+                            msg_type = "GetGovernanceVersion",
+                            subject_id = %subject_id,
+                            sender = %sender,
+                            error = %e,
+                            "Subject is not a governance"
+                        );
+                        return Err(e);
                     }
                 }
             },
@@ -1267,16 +1279,7 @@ impl Handler<Self> for DistriWorker {
             {
                 Ok(()) => {}
                 Err(e) => {
-                    if let ActorError::Functional { .. } = e {
-                        warn!(
-                            msg_type = "SendDistribution",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Witness check failed"
-                        );
-                        return Err(e);
-                    } else {
+                    if let ActorError::FunctionalCritical { .. } = e {
                         error!(
                             msg_type = "SendDistribution",
                             subject_id = %subject_id,
@@ -1285,6 +1288,15 @@ impl Handler<Self> for DistriWorker {
                             "Failed to send ledger response to network"
                         );
                         return Err(emit_fail(ctx, e).await);
+                    } else {
+                        warn!(
+                            msg_type = "SendDistribution",
+                            subject_id = %subject_id,
+                            sender = %sender,
+                            error = %e,
+                            "Witness check failed"
+                        );
+                        return Err(e);
                     }
                 }
             },
@@ -1310,8 +1322,7 @@ impl Handler<Self> for DistriWorker {
                         get_local_subject_sn(ctx, &subject_id).await?
                         && local_sn >= sn
                     {
-                        self.send_last_event_ack(sender.clone(), &info)
-                            .await?;
+                        self.send_last_event_ack(sender.clone(), &info).await?;
                     }
                     return Ok(());
                 }
@@ -1328,8 +1339,7 @@ impl Handler<Self> for DistriWorker {
                         ) {
                             match self
                                 .check_last_event_transfer_new_owner_auth(
-                                    ctx,
-                                    &ledger,
+                                    ctx, &ledger,
                                 )
                                 .await
                             {
@@ -1344,17 +1354,10 @@ impl Handler<Self> for DistriWorker {
                                     auth
                                 }
                                 Err(_) => {
-                                    if let ActorError::Functional { .. } = e {
-                                        warn!(
-                                            msg_type = "LastEventDistribution",
-                                            subject_id = %subject_id,
-                                            sn = sn,
-                                            sender = %sender,
-                                            error = %e,
-                                            "Authorization check failed"
-                                        );
-                                        return Err(e);
-                                    } else {
+                                    if let ActorError::FunctionalCritical {
+                                        ..
+                                    } = e
+                                    {
                                         error!(
                                             msg_type = "LastEventDistribution",
                                             subject_id = %subject_id,
@@ -1364,20 +1367,23 @@ impl Handler<Self> for DistriWorker {
                                             "Authorization check failed"
                                         );
                                         return Err(emit_fail(ctx, e).await);
+                                    } else {
+                                        warn!(
+                                            msg_type = "LastEventDistribution",
+                                            subject_id = %subject_id,
+                                            sn = sn,
+                                            sender = %sender,
+                                            error = %e,
+                                            "Authorization check failed"
+                                        );
+                                        return Err(e);
                                     }
                                 }
                             }
-                        } else if let ActorError::Functional { .. } = e {
-                            warn!(
-                                msg_type = "LastEventDistribution",
-                                subject_id = %subject_id,
-                                sn = sn,
-                                sender = %sender,
-                                error = %e,
-                                "Authorization check failed"
-                            );
-                            return Err(e);
-                        } else {
+                        } else if let ActorError::FunctionalCritical {
+                            ..
+                        } = e
+                        {
                             error!(
                                 msg_type = "LastEventDistribution",
                                 subject_id = %subject_id,
@@ -1387,6 +1393,16 @@ impl Handler<Self> for DistriWorker {
                                 "Authorization check failed"
                             );
                             return Err(emit_fail(ctx, e).await);
+                        } else {
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                sender = %sender,
+                                error = %e,
+                                "Authorization check failed"
+                            );
+                            return Err(e);
                         }
                     }
                 };
@@ -1406,16 +1422,7 @@ impl Handler<Self> for DistriWorker {
 
                 let lease = if ledger.is_create_event() {
                     if let Err(e) = create_subject(ctx, *ledger.clone()).await {
-                        if let ActorError::Functional { .. } = e {
-                            warn!(
-                                msg_type = "LastEventDistribution",
-                                subject_id = %subject_id,
-                                sn = sn,
-                                error = %e,
-                                "Failed to create subject from create event"
-                            );
-                            return Err(e);
-                        } else {
+                        if let ActorError::FunctionalCritical { .. } = e {
                             error!(
                                 msg_type = "LastEventDistribution",
                                 subject_id = %subject_id,
@@ -1424,6 +1431,15 @@ impl Handler<Self> for DistriWorker {
                                 "Failed to create subject from create event"
                             );
                             return Err(emit_fail(ctx, e).await);
+                        } else {
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                error = %e,
+                                "Failed to create subject from create event"
+                            );
+                            return Err(e);
                         }
                     };
 
@@ -1510,16 +1526,9 @@ impl Handler<Self> for DistriWorker {
                         }
                         Ok((..)) => lease,
                         Err(e) => {
-                            if let ActorError::Functional { .. } = e.clone() {
-                                warn!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    error = %e,
-                                    "Failed to update subject ledger"
-                                );
-                                return Err(e);
-                            } else {
+                            if let ActorError::FunctionalCritical { .. } =
+                                e.clone()
+                            {
                                 error!(
                                     msg_type = "LastEventDistribution",
                                     subject_id = %subject_id,
@@ -1528,6 +1537,15 @@ impl Handler<Self> for DistriWorker {
                                     "Failed to update subject ledger"
                                 );
                                 return Err(emit_fail(ctx, e).await);
+                            } else {
+                                warn!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    error = %e,
+                                    "Failed to update subject ledger"
+                                );
+                                return Err(e);
                             }
                         }
                     }
@@ -1580,10 +1598,8 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger[0].get_subject_id();
                 let ledger_count = ledger.len();
                 let first_sn = ledger[0].sn;
-                let offered_hi_sn = ledger
-                    .last()
-                    .map(|event| event.sn)
-                    .unwrap_or(first_sn);
+                let offered_hi_sn =
+                    ledger.last().map(|event| event.sn).unwrap_or(first_sn);
 
                 if !self
                     .ensure_next_sn_or_request_update(
@@ -1610,52 +1626,55 @@ impl Handler<Self> for DistriWorker {
                 {
                     Ok(auth) => auth,
                     Err(e) => {
-                        let fallback_auth =
-                            if Self::is_transfer_hint_auth_error(&e) {
-                                match self
-                                    .register_transfer_hint_fallback(
-                                        ctx,
-                                        &subject_id,
-                                        &ledger[0],
-                                        sender.clone(),
-                                        transfer_sn,
-                                        offered_hi_sn,
-                                    )
-                                    .await
-                                {
-                                    Ok(auth) => auth,
-                                    Err(register_error) => {
-                                        if let ActorError::Functional { .. } =
-                                            register_error
-                                        {
-                                            warn!(
-                                                msg_type = "LedgerDistribution",
-                                                subject_id = %subject_id,
-                                                sender = %sender,
-                                                ledger_count = ledger_count,
-                                                error = %register_error,
-                                                "Failed to register transfer hint fallback"
-                                            );
-                                            return Err(register_error);
-                                        } else {
-                                            error!(
-                                                msg_type = "LedgerDistribution",
-                                                subject_id = %subject_id,
-                                                sender = %sender,
-                                                ledger_count = ledger_count,
-                                                error = %register_error,
-                                                "Failed to register transfer hint fallback"
-                                            );
-                                            return Err(
-                                                emit_fail(ctx, register_error)
-                                                    .await,
-                                            );
-                                        }
+                        let fallback_auth = if Self::is_transfer_hint_auth_error(
+                            &e,
+                        ) {
+                            match self
+                                .register_transfer_hint_fallback(
+                                    ctx,
+                                    &subject_id,
+                                    &ledger[0],
+                                    sender.clone(),
+                                    transfer_sn,
+                                    offered_hi_sn,
+                                )
+                                .await
+                            {
+                                Ok(auth) => auth,
+                                Err(register_error) => {
+                                    if let ActorError::FunctionalCritical {
+                                        ..
+                                    } = register_error
+                                    {
+                                        error!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            sender = %sender,
+                                            ledger_count = ledger_count,
+                                            error = %register_error,
+                                            "Failed to register transfer hint fallback"
+                                        );
+                                        return Err(emit_fail(
+                                            ctx,
+                                            register_error,
+                                        )
+                                        .await);
+                                    } else {
+                                        warn!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            sender = %sender,
+                                            ledger_count = ledger_count,
+                                            error = %register_error,
+                                            "Failed to register transfer hint fallback"
+                                        );
+                                        return Err(register_error);
                                     }
                                 }
-                            } else {
-                                None
-                            };
+                            }
+                        } else {
+                            None
+                        };
 
                         if let Some(auth) = fallback_auth {
                             debug!(
@@ -1667,17 +1686,10 @@ impl Handler<Self> for DistriWorker {
                                 "Accepted ledger batch under pending transfer hint"
                             );
                             auth
-                        } else if let ActorError::Functional { .. } = e {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                sender = %sender,
-                                ledger_count = ledger_count,
-                                error = %e,
-                                "Authorization check failed"
-                            );
-                            return Err(e);
-                        } else {
+                        } else if let ActorError::FunctionalCritical {
+                            ..
+                        } = e
+                        {
                             error!(
                                 msg_type = "LedgerDistribution",
                                 subject_id = %subject_id,
@@ -1687,6 +1699,16 @@ impl Handler<Self> for DistriWorker {
                                 "Authorization check failed"
                             );
                             return Err(emit_fail(ctx, e).await);
+                        } else {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                ledger_count = ledger_count,
+                                error = %e,
+                                "Authorization check failed"
+                            );
+                            return Err(e);
                         }
                     }
                 };
@@ -1705,11 +1727,10 @@ impl Handler<Self> for DistriWorker {
                         auth.safe_hi_sn
                     };
 
-                let was_truncated =
-                    Self::order_and_filter_ledger_to_safe_hi(
-                        &mut ledger,
-                        safe_hi_sn,
-                    );
+                let was_truncated = Self::order_and_filter_ledger_to_safe_hi(
+                    &mut ledger,
+                    safe_hi_sn,
+                );
                 if ledger.is_empty() {
                     warn!(
                         msg_type = "LedgerDistribution",
@@ -1735,15 +1756,7 @@ impl Handler<Self> for DistriWorker {
                         if let Err(e) =
                             create_subject(ctx, create_ledger.clone()).await
                         {
-                            if let ActorError::Functional { .. } = e {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to create subject from ledger"
-                                );
-                                return Err(e);
-                            } else {
+                            if let ActorError::FunctionalCritical { .. } = e {
                                 error!(
                                     msg_type = "LedgerDistribution",
                                     subject_id = %subject_id,
@@ -1751,6 +1764,14 @@ impl Handler<Self> for DistriWorker {
                                     "Failed to create subject from ledger"
                                 );
                                 return Err(emit_fail(ctx, e).await);
+                            } else {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to create subject from ledger"
+                                );
+                                return Err(e);
                             }
                         };
                         None
@@ -1778,15 +1799,7 @@ impl Handler<Self> for DistriWorker {
                         )
                         .await
                         {
-                            if let ActorError::Functional { .. } = e {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to validate subject creation from ledger"
-                                );
-                                return Err(e);
-                            } else {
+                            if let ActorError::FunctionalCritical { .. } = e {
                                 error!(
                                     msg_type = "LedgerDistribution",
                                     subject_id = %subject_id,
@@ -1794,6 +1807,14 @@ impl Handler<Self> for DistriWorker {
                                     "Failed to validate subject creation from ledger"
                                 );
                                 return Err(emit_fail(ctx, e).await);
+                            } else {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to validate subject creation from ledger"
+                                );
+                                return Err(e);
                             }
                         }
 
@@ -1808,15 +1829,10 @@ impl Handler<Self> for DistriWorker {
                         {
                             Ok(lease) => Some(lease),
                             Err(e) => {
-                                if let ActorError::Functional { .. } = e {
-                                    warn!(
-                                        msg_type = "LedgerDistribution",
-                                        subject_id = %subject_id,
-                                        error = %e,
-                                        "Failed to create subject from ledger"
-                                    );
-                                    return Err(e);
-                                } else {
+                                if let ActorError::FunctionalCritical {
+                                    ..
+                                } = e
+                                {
                                     error!(
                                         msg_type = "LedgerDistribution",
                                         subject_id = %subject_id,
@@ -1824,6 +1840,14 @@ impl Handler<Self> for DistriWorker {
                                         "Failed to create subject from ledger"
                                     );
                                     return Err(emit_fail(ctx, e).await);
+                                } else {
+                                    warn!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to create subject from ledger"
+                                    );
+                                    return Err(e);
                                 }
                             }
                         }
@@ -1914,17 +1938,9 @@ impl Handler<Self> for DistriWorker {
                             lease
                         }
                         Err(e) => {
-                            if let ActorError::Functional { .. } = e.clone() {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    first_sn = first_sn,
-                                    ledger_count = ledger_count,
-                                    error = %e,
-                                    "Failed to update subject ledger"
-                                );
-                                return Err(e);
-                            } else {
+                            if let ActorError::FunctionalCritical { .. } =
+                                e.clone()
+                            {
                                 error!(
                                     msg_type = "LedgerDistribution",
                                     subject_id = %subject_id,
@@ -1934,6 +1950,16 @@ impl Handler<Self> for DistriWorker {
                                     "Failed to update subject ledger"
                                 );
                                 return Err(emit_fail(ctx, e).await);
+                            } else {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    first_sn = first_sn,
+                                    ledger_count = ledger_count,
+                                    error = %e,
+                                    "Failed to update subject ledger"
+                                );
+                                return Err(e);
                             }
                         }
                     }
