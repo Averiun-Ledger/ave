@@ -17,10 +17,10 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::{
     db::Storable,
     model::common::{
-        check_witness_access, emit_fail, node::get_subject_data, purge_storage,
+        check_witness_access, emit_fail, node::get_subject_data,
+        subject::get_tracker_window, purge_storage,
     },
     node::SubjectData,
-    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 #[derive(
@@ -87,42 +87,16 @@ impl TransferHintRegister {
             return Ok(false);
         };
 
-        let tracker = ctx
-            .system()
-            .get_actor::<Tracker>(&ActorPath::from(format!(
-                "/user/node/subject_manager/{}",
-                subject_id
-            )))
-            .await?;
-        let response = tracker
-            .ask(TrackerMessage::GetLedger {
-                lo_sn: Some(hint.transfer_sn.saturating_sub(1)),
-                hi_sn: hint.transfer_sn,
-            })
-            .await?;
-
-        let TrackerResponse::Ledger { ledger, .. } = response else {
-            return Err(ActorError::UnexpectedResponse {
-                path: ActorPath::from(format!(
-                    "/user/node/subject_manager/{}",
-                    subject_id
-                )),
-                expected: "TrackerResponse::Ledger".to_owned(),
-            });
-        };
-
-        let Some(transfer_ledger) =
-            ledger.into_iter().find(|ledger| ledger.sn == hint.transfer_sn)
-        else {
-            return Ok(false);
-        };
-
-        if !matches!(
-            transfer_ledger.get_event_request_type(),
-            ave_common::bridge::request::EventRequestType::Transfer
-        ) {
-            return Ok(false);
-        }
+        let (_, transfer_sn, ..) = get_tracker_window(
+            ctx,
+            &governance_id,
+            subject_id,
+            self.our_key.clone(),
+            namespace.clone(),
+            schema_id.clone(),
+            None,
+        )
+        .await?;
 
         let sender_limit = check_witness_access(
             ctx,
@@ -148,8 +122,9 @@ impl TransferHintRegister {
             sender_limit.is_some_and(|limit| limit >= hint.transfer_sn);
         let receiver_ok =
             receiver_limit.is_some_and(|limit| limit >= hint.transfer_sn);
+        let transfer_ok = transfer_sn == Some(hint.transfer_sn);
 
-        Ok(sender_ok && receiver_ok)
+        Ok(sender_ok && receiver_ok && transfer_ok)
     }
 
     fn is_marked_malicious(

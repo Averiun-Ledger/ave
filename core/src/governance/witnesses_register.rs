@@ -6,12 +6,10 @@ use crate::governance::sn_register::{
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
-use crate::model::event::Ledger;
 use crate::model::common::{
     Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
     TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
 };
-use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
@@ -19,7 +17,6 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -931,9 +928,14 @@ impl WitnessesRegister {
             .is_some_and(|witness_only_limit| witness_only_limit >= access_limit)
         {
             None
+        } else if data
+            .actual_new_owner_data
+            .as_ref()
+            .is_some_and(|(new_owner, _)| new_owner == node)
+        {
+            Some(data.sn)
         } else {
-            self.find_last_transfer_sn(ctx, subject_id, node, access_limit)
-                .await?
+            None
         };
 
         let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
@@ -1226,46 +1228,6 @@ impl WitnessesRegister {
             }),
         }
     }
-
-    async fn find_last_transfer_sn(
-        &self,
-        ctx: &ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-        node: &PublicKey,
-        hi_sn: u64,
-    ) -> Result<Option<u64>, ActorError> {
-        let path =
-            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
-        let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
-        let response = tracker
-            .ask(TrackerMessage::GetLedger {
-                lo_sn: None,
-                hi_sn,
-            })
-            .await?;
-
-        let TrackerResponse::Ledger { ledger, .. } = response else {
-            return Err(ActorError::UnexpectedResponse {
-                path,
-                expected: "TrackerResponse::Ledger".to_owned(),
-            });
-        };
-
-        Ok(ledger.into_iter().rev().find_map(|event: Ledger| {
-            let Some(EventRequest::Transfer(transfer_request)) =
-                event.get_event_request()
-            else {
-                return None;
-            };
-
-            if transfer_request.new_owner == *node {
-                Some(event.sn)
-            } else {
-                None
-            }
-        }))
-    }
-
     fn search_in_schema(
         witness_data: &HashMap<Namespace, (IntervalSet, Option<u64>)>,
         parse_namespace: &Namespace,

@@ -27,9 +27,8 @@ use crate::helpers::network::{
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::node::get_subject_data;
-use crate::model::common::subject::acquire_subject;
+use crate::model::common::subject::get_tracker_sn_owner;
 use crate::node::SubjectData;
-use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 
 #[derive(Debug, Clone)]
 pub enum TrackerSyncMessage {
@@ -348,25 +347,11 @@ impl TrackerSync {
             return Ok(None);
         }
 
-        let requester = format!("tracker_sync_local:{}", subject_id);
-        let lease =
-            acquire_subject(ctx, subject_id, requester, None, true).await?;
-        let path = ActorPath::from(format!(
-            "/user/node/subject_manager/{}",
-            subject_id
-        ));
-        let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
-        let response = tracker.ask(TrackerMessage::GetMetadata).await;
-        lease.finish(ctx).await?;
-        let response = response?;
-
-        match response {
-            TrackerResponse::Metadata(metadata) => Ok(Some(metadata.sn)),
-            _ => Err(ActorError::UnexpectedResponse {
-                path,
-                expected: "TrackerResponse::Metadata".to_owned(),
-            }),
-        }
+        Ok(
+            get_tracker_sn_owner(ctx, &self.governance_id, subject_id)
+                .await?
+                .map(|(_, sn)| sn),
+        )
     }
 
     async fn request_tracker_update(

@@ -16,10 +16,19 @@ use crate::{
     auth::{Auth, AuthInitParams, AuthMessage, AuthResponse},
     db::Storable,
     distribution::worker::DistriWorker,
-    governance::{Governance, GovernanceMessage, GovernanceResponse},
+    governance::{
+        Governance, GovernanceMessage, GovernanceResponse,
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
+    },
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
-    model::{common::node::SignTypesNode, event::Ledger},
+    model::{
+        common::node::SignTypesNode,
+        event::Ledger,
+    },
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
@@ -609,7 +618,7 @@ impl Node {
                     sink_timestamp,
                 )
             }
-            SubjectData::Tracker { .. } => {
+            SubjectData::Tracker { governance_id, .. } => {
                 let subject_manager =
                     ctx.get_child::<SubjectManager>("subject_manager").await?;
                 let requester = format!(
@@ -625,23 +634,41 @@ impl Node {
                     .await?;
 
                 let result = async {
-                    let path = ActorPath::from(format!(
-                        "/user/node/subject_manager/{}",
-                        subject_id
+                    let actor_path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/witnesses_register",
+                        governance_id
                     ));
-                    let tracker =
-                        ctx.system().get_actor::<Tracker>(&path).await?;
-                    let response =
-                        tracker.ask(TrackerMessage::GetMetadata).await?;
-                    let TrackerResponse::Metadata(metadata) = response else {
+                    let actor = ctx
+                        .system()
+                        .get_actor::<WitnessesRegister>(&actor_path)
+                        .await?;
+                    let response = actor
+                        .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await?;
+                    let WitnessesRegisterResponse::TrackerOwnerSn {
+                        data,
+                    } = response
+                    else {
                         return Err(ActorError::UnexpectedResponse {
-                            path,
-                            expected: "TrackerResponse::Metadata".to_owned(),
+                            path: actor_path,
+                            expected:
+                                "WitnessesRegisterResponse::TrackerOwnerSn"
+                                    .to_owned(),
                         });
                     };
+                    let sn = data
+                        .map(|(_, sn)| sn)
+                        .ok_or_else(|| ActorError::Functional {
+                            description: format!(
+                                "local tracker sn not found for subject {}",
+                                subject_id
+                            ),
+                        })?;
                     let hi_sn = to_sn
-                        .map(|to_sn| to_sn.min(metadata.sn))
-                        .unwrap_or(metadata.sn);
+                        .map(|to_sn| to_sn.min(sn))
+                        .unwrap_or(sn);
                     let ledger = self
                         .collect_tracker_ledger(ctx, &subject_id, hi_sn)
                         .await?;
