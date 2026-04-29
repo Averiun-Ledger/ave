@@ -930,16 +930,20 @@ impl WitnessesRegister {
                 .get(sender)
                 .map(|old_owner| old_owner.sn.saturating_sub(1))
         };
-        let receiver_transfer_sn = if data
+        let receiver_transfer_sn = if data.actual_owner == *node {
+            data.old_owners
+                .values()
+                .map(|old_owner| old_owner.sn)
+                .max()
+                .map(|sn| sn.saturating_sub(1))
+        } else if data
             .actual_new_owner_data
             .as_ref()
             .is_some_and(|(new_owner, _)| new_owner == node)
         {
             Some(data.sn)
         } else {
-            data.old_owners
-                .get(node)
-                .map(|old_owner| old_owner.sn.saturating_sub(1))
+            data.old_owners.get(node).map(|old_owner| old_owner.sn)
         };
 
         let transfer_sn = sender_transfer_sn

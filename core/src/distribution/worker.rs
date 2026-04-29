@@ -636,13 +636,12 @@ impl DistriWorker {
         }))
     }
 
-    fn order_and_filter_ledger_to_safe_hi(
+    fn split_off_after_safe_hi(
         ledger: &mut Vec<Ledger>,
         safe_hi_sn: u64,
-    ) -> bool {
-        let original_len = ledger.len();
-        ledger.retain(|event| event.sn <= safe_hi_sn);
-        ledger.len() < original_len
+    ) -> Vec<Ledger> {
+        let split_index = ledger.partition_point(|event| event.sn <= safe_hi_sn);
+        ledger.split_off(split_index)
     }
 
     async fn get_tracker_window(
@@ -1630,8 +1629,6 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger[0].get_subject_id();
                 let ledger_count = ledger.len();
                 let first_sn = ledger[0].sn;
-                let offered_hi_sn =
-                    ledger.last().map(|event| event.sn).unwrap_or(first_sn);
 
                 if !self
                     .ensure_next_sn_or_request_update(
@@ -1646,350 +1643,419 @@ impl Handler<Self> for DistriWorker {
                     return Ok(());
                 }
 
-                let auth = match self
-                    .check_auth(
-                        ctx,
-                        sender.clone(),
-                        &info,
-                        &ledger,
-                        offered_hi_sn,
-                    )
-                    .await
-                {
-                    Ok(auth) => auth,
-                    Err(e) => {
-                        let fallback_auth = if Self::is_transfer_hint_auth_error(
-                            &e,
-                        ) {
-                            match self
-                                .register_transfer_hint_fallback(
-                                    ctx,
-                                    &subject_id,
-                                    &ledger[0],
-                                    sender.clone(),
-                                    transfer_sn,
-                                    offered_hi_sn,
-                                )
-                                .await
+                let mut pending_ledger = ledger;
+                let sender_is_all = is_all;
+
+                loop {
+                    let chunk_first_sn = pending_ledger[0].sn;
+                    let chunk_offered_hi_sn = pending_ledger
+                        .last()
+                        .map(|event| event.sn)
+                        .unwrap_or(chunk_first_sn);
+
+                    let auth = match self
+                        .check_auth(
+                            ctx,
+                            sender.clone(),
+                            &info,
+                            &pending_ledger,
+                            chunk_offered_hi_sn,
+                        )
+                        .await
+                    {
+                        Ok(auth) => auth,
+                        Err(e) => {
+                            let fallback_auth =
+                                if Self::is_transfer_hint_auth_error(&e) {
+                                    match self
+                                        .register_transfer_hint_fallback(
+                                            ctx,
+                                            &subject_id,
+                                            &pending_ledger[0],
+                                            sender.clone(),
+                                            transfer_sn,
+                                            chunk_offered_hi_sn,
+                                        )
+                                        .await
+                                    {
+                                        Ok(auth) => auth,
+                                        Err(register_error) => {
+                                            if let ActorError::FunctionalCritical { .. } =
+                                                register_error
+                                            {
+                                                error!(
+                                                    msg_type = "LedgerDistribution",
+                                                    subject_id = %subject_id,
+                                                    sender = %sender,
+                                                    ledger_count = ledger_count,
+                                                    error = %register_error,
+                                                    "Failed to register transfer hint fallback"
+                                                );
+                                                return Err(
+                                                    emit_fail(ctx, register_error)
+                                                        .await,
+                                                );
+                                            } else {
+                                                warn!(
+                                                    msg_type = "LedgerDistribution",
+                                                    subject_id = %subject_id,
+                                                    sender = %sender,
+                                                    ledger_count = ledger_count,
+                                                    error = %register_error,
+                                                    "Failed to register transfer hint fallback"
+                                                );
+                                                return Err(register_error);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                            if let Some(auth) = fallback_auth {
+                                debug!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    sender = %sender,
+                                    ledger_count = ledger_count,
+                                    transfer_sn = transfer_sn,
+                                    "Accepted ledger batch under pending transfer hint"
+                                );
+                                auth
+                            } else if let ActorError::FunctionalCritical { .. } = e
                             {
-                                Ok(auth) => auth,
-                                Err(register_error) => {
-                                    if let ActorError::FunctionalCritical {
-                                        ..
-                                    } = register_error
+                                error!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    sender = %sender,
+                                    ledger_count = ledger_count,
+                                    error = %e,
+                                    "Authorization check failed"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            } else {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    sender = %sender,
+                                    ledger_count = ledger_count,
+                                    error = %e,
+                                    "Authorization check failed"
+                                );
+                                return Err(e);
+                            }
+                        }
+                    };
+                    let is_gov = auth.is_gov;
+                    let is_register = auth.is_register;
+                    let safe_hi_sn = auth.safe_hi_sn;
+
+                    let remaining_ledger = Self::split_off_after_safe_hi(
+                        &mut pending_ledger,
+                        safe_hi_sn,
+                    );
+                    if pending_ledger.is_empty() {
+                        warn!(
+                            msg_type = "LedgerDistribution",
+                            subject_id = %subject_id,
+                            sender = %sender,
+                            safe_hi_sn = safe_hi_sn,
+                            "Discarding ledger batch above current receiver access limit"
+                        );
+                        return Err(DistributorError::ReceiverNoAccess.into());
+                    }
+
+                    let chunk_is_all =
+                        remaining_ledger.is_empty() && sender_is_all;
+
+                    let lease =
+                        if pending_ledger[0].is_create_event() && !is_register {
+                            let create_ledger = pending_ledger[0].clone();
+                            let requester = Self::requester_id(
+                                "ledger_distribution_create",
+                                &subject_id,
+                                &info,
+                                &sender,
+                            );
+
+                            let lease = if is_gov {
+                                if let Err(e) =
+                                    create_subject(ctx, create_ledger.clone())
+                                        .await
+                                {
+                                    if let ActorError::FunctionalCritical { .. } =
+                                        e
                                     {
                                         error!(
                                             msg_type = "LedgerDistribution",
                                             subject_id = %subject_id,
-                                            sender = %sender,
-                                            ledger_count = ledger_count,
-                                            error = %register_error,
-                                            "Failed to register transfer hint fallback"
+                                            error = %e,
+                                            "Failed to create subject from ledger"
                                         );
-                                        return Err(emit_fail(
-                                            ctx,
-                                            register_error,
-                                        )
-                                        .await);
+                                        return Err(emit_fail(ctx, e).await);
                                     } else {
                                         warn!(
                                             msg_type = "LedgerDistribution",
                                             subject_id = %subject_id,
-                                            sender = %sender,
-                                            ledger_count = ledger_count,
-                                            error = %register_error,
-                                            "Failed to register transfer hint fallback"
+                                            error = %e,
+                                            "Failed to create subject from ledger"
                                         );
-                                        return Err(register_error);
+                                        return Err(e);
+                                    }
+                                };
+                                None
+                            } else {
+                                let request = create_ledger
+                                    .get_create_event()
+                                    .ok_or_else(|| {
+                                        error!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            "Create ledger is missing create event payload"
+                                        );
+                                        DistributorError::MissingCreateEventInCreateLedger {
+                                            subject_id: subject_id.clone(),
+                                        }
+                                    })?;
+
+                                if let Err(e) = check_subject_creation(
+                                    ctx,
+                                    &request.governance_id,
+                                    create_ledger
+                                        .ledger_seal_signature
+                                        .signer
+                                        .clone(),
+                                    create_ledger.gov_version,
+                                    request.namespace.to_string(),
+                                    request.schema_id,
+                                )
+                                .await
+                                {
+                                    if let ActorError::FunctionalCritical {
+                                        ..
+                                    } = e
+                                    {
+                                        error!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            error = %e,
+                                            "Failed to validate subject creation from ledger"
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    } else {
+                                        warn!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            error = %e,
+                                            "Failed to validate subject creation from ledger"
+                                        );
+                                        return Err(e);
                                     }
                                 }
-                            }
-                        } else {
-                            None
-                        };
 
-                        if let Some(auth) = fallback_auth {
-                            debug!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                sender = %sender,
-                                ledger_count = ledger_count,
-                                transfer_sn = transfer_sn,
-                                "Accepted ledger batch under pending transfer hint"
-                            );
-                            auth
-                        } else if let ActorError::FunctionalCritical {
-                            ..
-                        } = e
-                        {
-                            error!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                sender = %sender,
-                                ledger_count = ledger_count,
-                                error = %e,
-                                "Authorization check failed"
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        } else {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                sender = %sender,
-                                ledger_count = ledger_count,
-                                error = %e,
-                                "Authorization check failed"
-                            );
-                            return Err(e);
-                        }
-                    }
-                };
-                let is_gov = auth.is_gov;
-                let is_register = auth.is_register;
-                let safe_hi_sn = auth.safe_hi_sn;
-
-                let was_truncated = Self::order_and_filter_ledger_to_safe_hi(
-                    &mut ledger,
-                    safe_hi_sn,
-                );
-                if ledger.is_empty() {
-                    warn!(
-                        msg_type = "LedgerDistribution",
-                        subject_id = %subject_id,
-                        sender = %sender,
-                        safe_hi_sn = safe_hi_sn,
-                        "Discarding ledger batch above current receiver access limit"
-                    );
-                    return Err(DistributorError::ReceiverNoAccess.into());
-                }
-                let is_all = is_all || was_truncated;
-
-                let lease = if ledger[0].is_create_event() && !is_register {
-                    let create_ledger = ledger[0].clone();
-                    let requester = Self::requester_id(
-                        "ledger_distribution_create",
-                        &subject_id,
-                        &info,
-                        &sender,
-                    );
-
-                    let lease = if is_gov {
-                        if let Err(e) =
-                            create_subject(ctx, create_ledger.clone()).await
-                        {
-                            if let ActorError::FunctionalCritical { .. } = e {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to create subject from ledger"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            } else {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to create subject from ledger"
-                                );
-                                return Err(e);
-                            }
-                        };
-                        None
-                    } else {
-                        let request = create_ledger
-                            .get_create_event()
-                            .ok_or_else(|| {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    "Create ledger is missing create event payload"
-                                );
-                                DistributorError::MissingCreateEventInCreateLedger {
-                                    subject_id: subject_id.clone(),
+                                match acquire_subject(
+                                    ctx,
+                                    &subject_id,
+                                    requester,
+                                    Some(create_ledger),
+                                    true,
+                                )
+                                .await
+                                {
+                                    Ok(lease) => Some(lease),
+                                    Err(e) => {
+                                        if let ActorError::FunctionalCritical {
+                                            ..
+                                        } = e
+                                        {
+                                            error!(
+                                                msg_type = "LedgerDistribution",
+                                                subject_id = %subject_id,
+                                                error = %e,
+                                                "Failed to create subject from ledger"
+                                            );
+                                            return Err(emit_fail(ctx, e).await);
+                                        } else {
+                                            warn!(
+                                                msg_type = "LedgerDistribution",
+                                                subject_id = %subject_id,
+                                                error = %e,
+                                                "Failed to create subject from ledger"
+                                            );
+                                            return Err(e);
+                                        }
+                                    }
                                 }
-                            })?;
+                            };
 
-                        if let Err(e) = check_subject_creation(
-                            ctx,
-                            &request.governance_id,
-                            create_ledger.ledger_seal_signature.signer.clone(),
-                            create_ledger.gov_version,
-                            request.namespace.to_string(),
-                            request.schema_id,
-                        )
-                        .await
-                        {
-                            if let ActorError::FunctionalCritical { .. } = e {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to validate subject creation from ledger"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            } else {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to validate subject creation from ledger"
-                                );
-                                return Err(e);
+                            let _event = pending_ledger.remove(0);
+                            lease
+                        } else {
+                            if pending_ledger[0].is_create_event() && is_register
+                            {
+                                let _event = pending_ledger.remove(0);
                             }
+
+                            let requester = Self::requester_id(
+                                "ledger_distribution",
+                                &subject_id,
+                                &info,
+                                &sender,
+                            );
+                            if !pending_ledger.is_empty() && !is_gov {
+                                match acquire_subject(
+                                    ctx,
+                                    &subject_id,
+                                    requester.clone(),
+                                    None,
+                                    true,
+                                )
+                                .await
+                                {
+                                    Ok(lease) => Some(lease),
+                                    Err(e) => {
+                                        error!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            error = %e,
+                                            "Failed to bring up tracker for subject update"
+                                        );
+                                        let error =
+                                            DistributorError::UpTrackerFailed {
+                                                details: e.to_string(),
+                                            };
+                                        return Err(
+                                            emit_fail(ctx, error.into()).await,
+                                        );
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        };
+
+                    let applied_hi_sn = pending_ledger
+                        .last()
+                        .map(|event| event.sn)
+                        .unwrap_or(safe_hi_sn);
+
+                    if !pending_ledger.is_empty() {
+                        let update_result =
+                            update_ledger(ctx, &subject_id, pending_ledger).await;
+
+                        if let Some(lease) = lease.clone()
+                            && update_result.is_err()
+                        {
+                            lease.finish(ctx).await?;
                         }
 
-                        match acquire_subject(
-                            ctx,
-                            &subject_id,
-                            requester,
-                            Some(create_ledger),
-                            true,
-                        )
-                        .await
-                        {
-                            Ok(lease) => Some(lease),
+                        match update_result {
+                            Ok((last_sn, _, _)) => {
+                                if let Some(lease) = lease.clone() {
+                                    lease.finish(ctx).await?;
+                                }
+
+                                if !remaining_ledger.is_empty() {
+                                    pending_ledger = remaining_ledger;
+                                    continue;
+                                }
+
+                                if !chunk_is_all {
+                                    debug!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        last_sn = last_sn,
+                                        "Partial ledger received, requesting more"
+                                    );
+
+                                    if let Err(e) = self
+                                        .request_ledger_from_sender(
+                                            &subject_id,
+                                            sender.clone(),
+                                            &info,
+                                            Some(last_sn),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            msg_type = "LedgerDistribution",
+                                            subject_id = %subject_id,
+                                            last_sn = last_sn,
+                                            error = %e,
+                                            "Failed to request more ledger entries"
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    };
+                                }
+
+                            }
                             Err(e) => {
-                                if let ActorError::FunctionalCritical {
-                                    ..
-                                } = e
+                                if let ActorError::FunctionalCritical { .. } =
+                                    e.clone()
                                 {
                                     error!(
                                         msg_type = "LedgerDistribution",
                                         subject_id = %subject_id,
+                                        first_sn = chunk_first_sn,
+                                        ledger_count = ledger_count,
                                         error = %e,
-                                        "Failed to create subject from ledger"
+                                        "Failed to update subject ledger"
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 } else {
                                     warn!(
                                         msg_type = "LedgerDistribution",
                                         subject_id = %subject_id,
+                                        first_sn = chunk_first_sn,
+                                        ledger_count = ledger_count,
                                         error = %e,
-                                        "Failed to create subject from ledger"
+                                        "Failed to update subject ledger"
                                     );
                                     return Err(e);
                                 }
                             }
                         }
-                    };
-
-                    let _event = ledger.remove(0);
-                    lease
-                } else {
-                    if ledger[0].is_create_event() && is_register {
-                        let _event = ledger.remove(0);
-                    }
-
-                    let requester = Self::requester_id(
-                        "ledger_distribution",
-                        &subject_id,
-                        &info,
-                        &sender,
-                    );
-                    if !ledger.is_empty() && !is_gov {
-                        match acquire_subject(
-                            ctx,
-                            &subject_id,
-                            requester.clone(),
-                            None,
-                            true,
-                        )
-                        .await
-                        {
-                            Ok(lease) => Some(lease),
-                            Err(e) => {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to bring up tracker for subject update"
-                                );
-                                let error = DistributorError::UpTrackerFailed {
-                                    details: e.to_string(),
-                                };
-                                return Err(emit_fail(ctx, error.into()).await);
-                            }
-                        }
                     } else {
-                        None
-                    }
-                };
-
-                let lease = if !ledger.is_empty() {
-                    let update_result =
-                        update_ledger(ctx, &subject_id, ledger).await;
-
-                    if let Some(lease) = lease.clone()
-                        && update_result.is_err()
-                    {
-                        lease.finish(ctx).await?;
-                    }
-
-                    match update_result {
-                        Ok((last_sn, _, _)) => {
-                            if !is_all {
-                                debug!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    last_sn = last_sn,
-                                    "Partial ledger received, requesting more"
-                                );
-
-                                if let Err(e) = self
-                                    .request_ledger_from_sender(
-                                        &subject_id,
-                                        sender.clone(),
-                                        &info,
-                                        Some(last_sn),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        msg_type = "LedgerDistribution",
-                                        subject_id = %subject_id,
-                                        last_sn = last_sn,
-                                        error = %e,
-                                        "Failed to request more ledger entries"
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                };
-                            }
-
-                            lease
+                        if let Some(lease) = lease.clone() {
+                            lease.finish(ctx).await?;
                         }
-                        Err(e) => {
-                            if let ActorError::FunctionalCritical { .. } =
-                                e.clone()
+
+                        if !remaining_ledger.is_empty() {
+                            pending_ledger = remaining_ledger;
+                            continue;
+                        }
+
+                        if !chunk_is_all {
+                            debug!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                last_sn = applied_hi_sn,
+                                "Partial ledger received, requesting more"
+                            );
+
+                            if let Err(e) = self
+                                .request_ledger_from_sender(
+                                    &subject_id,
+                                    sender.clone(),
+                                    &info,
+                                    Some(applied_hi_sn),
+                                )
+                                .await
                             {
                                 error!(
                                     msg_type = "LedgerDistribution",
                                     subject_id = %subject_id,
-                                    first_sn = first_sn,
-                                    ledger_count = ledger_count,
+                                    last_sn = applied_hi_sn,
                                     error = %e,
-                                    "Failed to update subject ledger"
+                                    "Failed to request more ledger entries"
                                 );
                                 return Err(emit_fail(ctx, e).await);
-                            } else {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    first_sn = first_sn,
-                                    ledger_count = ledger_count,
-                                    error = %e,
-                                    "Failed to update subject ledger"
-                                );
-                                return Err(e);
-                            }
+                            };
                         }
-                    }
-                } else {
-                    lease
-                };
 
-                if let Some(lease) = lease {
-                    lease.finish(ctx).await?;
+                    }
+
+                    break;
                 }
 
                 debug!(
@@ -1998,7 +2064,6 @@ impl Handler<Self> for DistriWorker {
                     sender = %sender,
                     ledger_count = ledger_count,
                     is_all = is_all,
-                    is_gov = is_gov,
                     "Ledger distribution processed successfully"
                 );
             }
