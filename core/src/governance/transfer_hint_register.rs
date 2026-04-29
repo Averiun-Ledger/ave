@@ -17,8 +17,8 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::{
     db::Storable,
     model::common::{
-        check_witness_access, emit_fail, node::get_subject_data,
-        subject::get_tracker_window, purge_storage,
+        check_witness_access, emit_fail, node::get_subject_data, purge_storage,
+        subject::get_tracker_window,
     },
     node::SubjectData,
 };
@@ -434,10 +434,7 @@ impl PersistentActor for TransferHintRegister {
                     }
                 }
             }
-            TransferHintRegisterEvent::MarkMalicious {
-                subject_id,
-                hint,
-            } => {
+            TransferHintRegisterEvent::MarkMalicious { subject_id, hint } => {
                 if let Some(by_sn) = self.pending.get_mut(&subject_id) {
                     let mut remove_subject = false;
                     if let Some(senders) = by_sn.get_mut(&hint.transfer_sn) {

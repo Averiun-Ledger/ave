@@ -35,7 +35,9 @@ use crate::{
             subject::{
                 acquire_subject, create_subject, get_gov, get_gov_sn,
                 get_local_subject_sn,
-                get_tracker_window as resolve_tracker_window, update_ledger,
+                get_tracker_window as resolve_tracker_window,
+                get_tracker_window_from_ledger as resolve_tracker_window_from_ledger,
+                update_ledger,
             },
         },
         event::Ledger,
@@ -62,6 +64,33 @@ pub struct DistriWorker {
 }
 
 impl DistriWorker {
+    fn concrete_hi_sn_limit(
+        limit: HiSnLimit,
+        offered_hi_sn: u64,
+    ) -> Option<u64> {
+        match limit {
+            HiSnLimit::None => None,
+            HiSnLimit::Infinity => Some(offered_hi_sn),
+            HiSnLimit::Sn(limit) => Some(limit.min(offered_hi_sn)),
+        }
+    }
+
+    fn concrete_gov_version_limit(
+        ledger: &[Ledger],
+        limit: GovVersionLimit,
+        offered_hi_sn: u64,
+    ) -> Option<u64> {
+        match limit {
+            GovVersionLimit::None => None,
+            GovVersionLimit::Infinity => Some(offered_hi_sn),
+            GovVersionLimit::Version(limit) => ledger
+                .iter()
+                .take_while(|event| event.gov_version <= limit)
+                .last()
+                .map(|event| event.sn.min(offered_hi_sn)),
+        }
+    }
+
     async fn send_last_event_ack(
         &self,
         sender: PublicKey,
@@ -248,7 +277,8 @@ impl DistriWorker {
         ledger: &[Ledger],
         offered_hi_sn: u64,
     ) -> Result<DistributionAuth, ActorError> {
-        let first_ledger = ledger.first().ok_or(DistributorError::EmptyEvents)?;
+        let first_ledger =
+            ledger.first().ok_or(DistributorError::EmptyEvents)?;
         let subject_id = first_ledger.get_subject_id();
         let (auth, subject_data) =
             self.authorized_subj(ctx, &subject_id).await?;
@@ -378,133 +408,111 @@ impl DistriWorker {
                 ) => sender_limit.min(receiver_limit).min(offered_hi_sn),
             }
         } else {
-            let sender_limit = check_witness_hi_sn_limit(
-                ctx,
-                &governance_id,
-                &subject_id,
-                sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-            )
-            .await?;
-            let receiver_limit = check_witness_hi_sn_limit(
-                ctx,
-                &governance_id,
-                &subject_id,
-                (*self.our_key).clone(),
-                namespace.clone(),
-                schema_id.clone(),
-            )
-            .await?;
-            match (&sender_limit, &receiver_limit) {
-                (HiSnLimit::Infinity, HiSnLimit::Infinity) => {
-                    return Ok(DistributionAuth {
-                        is_gov,
-                        is_register: false,
-                        safe_hi_sn: offered_hi_sn,
-                    });
-                }
-                (HiSnLimit::Infinity, HiSnLimit::Sn(limit))
-                | (HiSnLimit::Sn(limit), HiSnLimit::Infinity) => {
-                    return Ok(DistributionAuth {
-                        is_gov,
-                        is_register: false,
-                        safe_hi_sn: (*limit).min(offered_hi_sn),
-                    });
-                }
-                (HiSnLimit::Sn(sender_limit), HiSnLimit::Sn(receiver_limit)) => {
-                    return Ok(DistributionAuth {
-                        is_gov,
-                        is_register: false,
-                        safe_hi_sn: (*sender_limit)
-                            .min(*receiver_limit)
-                            .min(offered_hi_sn),
-                    });
-                }
-                _ => {}
-            }
+            let sender_hi_limit = Self::concrete_hi_sn_limit(
+                check_witness_hi_sn_limit(
+                    ctx,
+                    &governance_id,
+                    &subject_id,
+                    sender.clone(),
+                    namespace.clone(),
+                    schema_id.clone(),
+                )
+                .await?,
+                offered_hi_sn,
+            );
+            let receiver_hi_limit = Self::concrete_hi_sn_limit(
+                check_witness_hi_sn_limit(
+                    ctx,
+                    &governance_id,
+                    &subject_id,
+                    (*self.our_key).clone(),
+                    namespace.clone(),
+                    schema_id.clone(),
+                )
+                .await?,
+                offered_hi_sn,
+            );
+
             let owner = first_ledger.ledger_seal_signature.signer.clone();
-            let sender_limit = check_create_gov_version_limit(
+            let sender_create_gov_limit = Self::concrete_gov_version_limit(
+                ledger,
+                check_create_gov_version_limit(
+                    ctx,
+                    &governance_id,
+                    owner.clone(),
+                    sender.clone(),
+                    namespace.clone(),
+                    schema_id.clone(),
+                    first_ledger.gov_version,
+                )
+                .await?,
+                offered_hi_sn,
+            );
+            let receiver_create_gov_limit = Self::concrete_gov_version_limit(
+                ledger,
+                check_create_gov_version_limit(
+                    ctx,
+                    &governance_id,
+                    owner,
+                    (*self.our_key).clone(),
+                    namespace.clone(),
+                    schema_id.clone(),
+                    first_ledger.gov_version,
+                )
+                .await?,
+                offered_hi_sn,
+            );
+
+            let (sender_window_sn, ..) = resolve_tracker_window_from_ledger(
                 ctx,
                 &governance_id,
-                owner.clone(),
+                &subject_id,
+                ledger.to_vec(),
                 sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                first_ledger.gov_version,
-            )
-            .await?;
-            let receiver_limit = check_create_gov_version_limit(
-                ctx,
-                &governance_id,
-                owner,
                 (*self.our_key).clone(),
                 namespace.clone(),
                 schema_id.clone(),
-                first_ledger.gov_version,
+                None,
+            )
+            .await?;
+            let (receiver_window_sn, ..) = resolve_tracker_window_from_ledger(
+                ctx,
+                &governance_id,
+                &subject_id,
+                ledger.to_vec(),
+                (*self.our_key).clone(),
+                sender.clone(),
+                namespace.clone(),
+                schema_id.clone(),
+                None,
             )
             .await?;
 
-            match (&sender_limit, &receiver_limit) {
-                (GovVersionLimit::None, _) => {
-                    return Err(DistributorError::SenderNoAccess.into());
-                }
-                (_, GovVersionLimit::None) => {
-                    return Err(DistributorError::ReceiverNoAccess.into());
-                }
-                (GovVersionLimit::Infinity, GovVersionLimit::Infinity) => {
-                    offered_hi_sn
-                }
-                _ => {
-                    let mut safe_hi_sn = None;
+            let raw_sender_limit =
+                [sender_hi_limit, sender_create_gov_limit, sender_window_sn]
+                    .into_iter()
+                    .flatten()
+                    .max();
 
-                    for event in ledger {
-                        let sender_allowed = match sender_limit {
-                            GovVersionLimit::Infinity => true,
-                            GovVersionLimit::Version(limit) => {
-                                event.gov_version <= limit
-                            }
-                            GovVersionLimit::None => false,
-                        };
-                        if !sender_allowed {
-                            return match safe_hi_sn {
-                                Some(sn) => Ok(DistributionAuth {
-                                    is_gov,
-                                    is_register: false,
-                                    safe_hi_sn: sn,
-                                }),
-                                None => Err(
-                                    DistributorError::SenderNoAccess.into(),
-                                ),
-                            };
-                        }
+            let raw_receiver_limit = [
+                receiver_hi_limit,
+                receiver_create_gov_limit,
+                receiver_window_sn,
+            ]
+            .into_iter()
+            .flatten()
+            .max();
 
-                        let receiver_allowed = match receiver_limit {
-                            GovVersionLimit::Infinity => true,
-                            GovVersionLimit::Version(limit) => {
-                                event.gov_version <= limit
-                            }
-                            GovVersionLimit::None => false,
-                        };
-                        if !receiver_allowed {
-                            return match safe_hi_sn {
-                                Some(sn) => Ok(DistributionAuth {
-                                    is_gov,
-                                    is_register: false,
-                                    safe_hi_sn: sn,
-                                }),
-                                None => Err(
-                                    DistributorError::ReceiverNoAccess.into(),
-                                ),
-                            };
-                        }
+            let sender_limit = raw_sender_limit
+                .or_else(|| auth.then_some(raw_receiver_limit).flatten());
+            let receiver_limit = raw_receiver_limit
+                .or_else(|| auth.then_some(raw_sender_limit).flatten());
+            let sender_limit =
+                sender_limit.ok_or(DistributorError::SenderNoAccess)?;
+            let receiver_limit =
+                receiver_limit.ok_or(DistributorError::ReceiverNoAccess)?;
 
-                        safe_hi_sn = Some(event.sn);
-                    }
-
-                    safe_hi_sn.unwrap_or(offered_hi_sn)
-                }
-            }
+            sender_limit.min(receiver_limit).min(offered_hi_sn)
         };
 
         Ok(DistributionAuth {
@@ -640,7 +648,8 @@ impl DistriWorker {
         ledger: &mut Vec<Ledger>,
         safe_hi_sn: u64,
     ) -> Vec<Ledger> {
-        let split_index = ledger.partition_point(|event| event.sn <= safe_hi_sn);
+        let split_index =
+            ledger.partition_point(|event| event.sn <= safe_hi_sn);
         ledger.split_off(split_index)
     }
 
@@ -1352,7 +1361,7 @@ impl Handler<Self> for DistriWorker {
                     return Ok(());
                 }
 
-                let auth = match self
+                let mut auth = match self
                     .check_auth(
                         ctx,
                         sender.clone(),
@@ -1437,6 +1446,55 @@ impl Handler<Self> for DistriWorker {
                         }
                     }
                 };
+                if !auth.is_gov && auth.safe_hi_sn < sn {
+                    if matches!(
+                        ledger.get_event_request_type(),
+                        EventRequestType::Transfer
+                    ) {
+                        match self
+                            .check_last_event_transfer_new_owner_auth(
+                                ctx, &ledger,
+                            )
+                            .await
+                        {
+                            Ok(transfer_auth) => {
+                                debug!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    safe_hi_sn = auth.safe_hi_sn,
+                                    sender = %sender,
+                                    "Accepted transfer event above current access limit for announced new owner"
+                                );
+                                auth = transfer_auth;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    safe_hi_sn = auth.safe_hi_sn,
+                                    sender = %sender,
+                                    "Discarding event above current receiver access limit"
+                                );
+                                return Err(
+                                    DistributorError::ReceiverNoAccess.into()
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            safe_hi_sn = auth.safe_hi_sn,
+                            sender = %sender,
+                            "Discarding event above current receiver access limit"
+                        );
+                        return Err(DistributorError::ReceiverNoAccess.into());
+                    }
+                }
+
                 let is_gov = auth.is_gov;
 
                 if !is_gov && auth.safe_hi_sn < sn {
@@ -1722,7 +1780,9 @@ impl Handler<Self> for DistriWorker {
                                     "Accepted ledger batch under pending transfer hint"
                                 );
                                 auth
-                            } else if let ActorError::FunctionalCritical { .. } = e
+                            } else if let ActorError::FunctionalCritical {
+                                ..
+                            } = e
                             {
                                 error!(
                                     msg_type = "LedgerDistribution",
@@ -1768,44 +1828,45 @@ impl Handler<Self> for DistriWorker {
                     let chunk_is_all =
                         remaining_ledger.is_empty() && sender_is_all;
 
-                    let lease =
-                        if pending_ledger[0].is_create_event() && !is_register {
-                            let create_ledger = pending_ledger[0].clone();
-                            let requester = Self::requester_id(
-                                "ledger_distribution_create",
-                                &subject_id,
-                                &info,
-                                &sender,
-                            );
+                    let lease = if pending_ledger[0].is_create_event()
+                        && !is_register
+                    {
+                        let create_ledger = pending_ledger[0].clone();
+                        let requester = Self::requester_id(
+                            "ledger_distribution_create",
+                            &subject_id,
+                            &info,
+                            &sender,
+                        );
 
-                            let lease = if is_gov {
-                                if let Err(e) =
-                                    create_subject(ctx, create_ledger.clone())
-                                        .await
+                        let lease = if is_gov {
+                            if let Err(e) =
+                                create_subject(ctx, create_ledger.clone()).await
+                            {
+                                if let ActorError::FunctionalCritical {
+                                    ..
+                                } = e
                                 {
-                                    if let ActorError::FunctionalCritical { .. } =
-                                        e
-                                    {
-                                        error!(
-                                            msg_type = "LedgerDistribution",
-                                            subject_id = %subject_id,
-                                            error = %e,
-                                            "Failed to create subject from ledger"
-                                        );
-                                        return Err(emit_fail(ctx, e).await);
-                                    } else {
-                                        warn!(
-                                            msg_type = "LedgerDistribution",
-                                            subject_id = %subject_id,
-                                            error = %e,
-                                            "Failed to create subject from ledger"
-                                        );
-                                        return Err(e);
-                                    }
-                                };
-                                None
-                            } else {
-                                let request = create_ledger
+                                    error!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to create subject from ledger"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                } else {
+                                    warn!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to create subject from ledger"
+                                    );
+                                    return Err(e);
+                                }
+                            };
+                            None
+                        } else {
+                            let request = create_ledger
                                     .get_create_event()
                                     .ok_or_else(|| {
                                         error!(
@@ -1818,19 +1879,52 @@ impl Handler<Self> for DistriWorker {
                                         }
                                     })?;
 
-                                if let Err(e) = check_subject_creation(
-                                    ctx,
-                                    &request.governance_id,
-                                    create_ledger
-                                        .ledger_seal_signature
-                                        .signer
-                                        .clone(),
-                                    create_ledger.gov_version,
-                                    request.namespace.to_string(),
-                                    request.schema_id,
-                                )
-                                .await
+                            if let Err(e) = check_subject_creation(
+                                ctx,
+                                &request.governance_id,
+                                create_ledger
+                                    .ledger_seal_signature
+                                    .signer
+                                    .clone(),
+                                create_ledger.gov_version,
+                                request.namespace.to_string(),
+                                request.schema_id,
+                            )
+                            .await
+                            {
+                                if let ActorError::FunctionalCritical {
+                                    ..
+                                } = e
                                 {
+                                    error!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to validate subject creation from ledger"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                } else {
+                                    warn!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to validate subject creation from ledger"
+                                    );
+                                    return Err(e);
+                                }
+                            }
+
+                            match acquire_subject(
+                                ctx,
+                                &subject_id,
+                                requester,
+                                Some(create_ledger),
+                                true,
+                            )
+                            .await
+                            {
+                                Ok(lease) => Some(lease),
+                                Err(e) => {
                                     if let ActorError::FunctionalCritical {
                                         ..
                                     } = e
@@ -1839,7 +1933,7 @@ impl Handler<Self> for DistriWorker {
                                             msg_type = "LedgerDistribution",
                                             subject_id = %subject_id,
                                             error = %e,
-                                            "Failed to validate subject creation from ledger"
+                                            "Failed to create subject from ledger"
                                         );
                                         return Err(emit_fail(ctx, e).await);
                                     } else {
@@ -1847,92 +1941,58 @@ impl Handler<Self> for DistriWorker {
                                             msg_type = "LedgerDistribution",
                                             subject_id = %subject_id,
                                             error = %e,
-                                            "Failed to validate subject creation from ledger"
+                                            "Failed to create subject from ledger"
                                         );
                                         return Err(e);
                                     }
                                 }
-
-                                match acquire_subject(
-                                    ctx,
-                                    &subject_id,
-                                    requester,
-                                    Some(create_ledger),
-                                    true,
-                                )
-                                .await
-                                {
-                                    Ok(lease) => Some(lease),
-                                    Err(e) => {
-                                        if let ActorError::FunctionalCritical {
-                                            ..
-                                        } = e
-                                        {
-                                            error!(
-                                                msg_type = "LedgerDistribution",
-                                                subject_id = %subject_id,
-                                                error = %e,
-                                                "Failed to create subject from ledger"
-                                            );
-                                            return Err(emit_fail(ctx, e).await);
-                                        } else {
-                                            warn!(
-                                                msg_type = "LedgerDistribution",
-                                                subject_id = %subject_id,
-                                                error = %e,
-                                                "Failed to create subject from ledger"
-                                            );
-                                            return Err(e);
-                                        }
-                                    }
-                                }
-                            };
-
-                            let _event = pending_ledger.remove(0);
-                            lease
-                        } else {
-                            if pending_ledger[0].is_create_event() && is_register
-                            {
-                                let _event = pending_ledger.remove(0);
-                            }
-
-                            let requester = Self::requester_id(
-                                "ledger_distribution",
-                                &subject_id,
-                                &info,
-                                &sender,
-                            );
-                            if !pending_ledger.is_empty() && !is_gov {
-                                match acquire_subject(
-                                    ctx,
-                                    &subject_id,
-                                    requester.clone(),
-                                    None,
-                                    true,
-                                )
-                                .await
-                                {
-                                    Ok(lease) => Some(lease),
-                                    Err(e) => {
-                                        error!(
-                                            msg_type = "LedgerDistribution",
-                                            subject_id = %subject_id,
-                                            error = %e,
-                                            "Failed to bring up tracker for subject update"
-                                        );
-                                        let error =
-                                            DistributorError::UpTrackerFailed {
-                                                details: e.to_string(),
-                                            };
-                                        return Err(
-                                            emit_fail(ctx, error.into()).await,
-                                        );
-                                    }
-                                }
-                            } else {
-                                None
                             }
                         };
+
+                        let _event = pending_ledger.remove(0);
+                        lease
+                    } else {
+                        if pending_ledger[0].is_create_event() && is_register {
+                            let _event = pending_ledger.remove(0);
+                        }
+
+                        let requester = Self::requester_id(
+                            "ledger_distribution",
+                            &subject_id,
+                            &info,
+                            &sender,
+                        );
+                        if !pending_ledger.is_empty() && !is_gov {
+                            match acquire_subject(
+                                ctx,
+                                &subject_id,
+                                requester.clone(),
+                                None,
+                                true,
+                            )
+                            .await
+                            {
+                                Ok(lease) => Some(lease),
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to bring up tracker for subject update"
+                                    );
+                                    let error =
+                                        DistributorError::UpTrackerFailed {
+                                            details: e.to_string(),
+                                        };
+                                    return Err(
+                                        emit_fail(ctx, error.into()).await
+                                    );
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    };
 
                     let applied_hi_sn = pending_ledger
                         .last()
@@ -1941,7 +2001,8 @@ impl Handler<Self> for DistriWorker {
 
                     if !pending_ledger.is_empty() {
                         let update_result =
-                            update_ledger(ctx, &subject_id, pending_ledger).await;
+                            update_ledger(ctx, &subject_id, pending_ledger)
+                                .await;
 
                         if let Some(lease) = lease.clone()
                             && update_result.is_err()
@@ -1987,11 +2048,11 @@ impl Handler<Self> for DistriWorker {
                                         return Err(emit_fail(ctx, e).await);
                                     };
                                 }
-
                             }
                             Err(e) => {
-                                if let ActorError::FunctionalCritical { .. } =
-                                    e.clone()
+                                if let ActorError::FunctionalCritical {
+                                    ..
+                                } = e.clone()
                                 {
                                     error!(
                                         msg_type = "LedgerDistribution",
@@ -2052,7 +2113,6 @@ impl Handler<Self> for DistriWorker {
                                 return Err(emit_fail(ctx, e).await);
                             };
                         }
-
                     }
 
                     break;

@@ -10,6 +10,7 @@ use crate::model::common::{
     Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
     TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
 };
+use crate::model::event::Ledger;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
@@ -17,6 +18,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -277,6 +279,15 @@ pub enum WitnessesRegisterMessage {
     },
     GetTrackerWindow {
         subject_id: DigestIdentifier,
+        node: PublicKey,
+        sender: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
+    },
+    GetTrackerWindowFromLedger {
+        subject_id: DigestIdentifier,
+        ledger: Vec<Ledger>,
         node: PublicKey,
         sender: PublicKey,
         namespace: String,
@@ -865,10 +876,11 @@ impl WitnessesRegister {
         }
     }
 
-    async fn build_tracker_window(
+    async fn build_tracker_window_from_data(
         &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
+        data: &TransferData,
         node: &PublicKey,
         sender: &PublicKey,
         namespace: String,
@@ -884,10 +896,6 @@ impl WitnessesRegister {
         ),
         ActorError,
     > {
-        let Some(data) = self.subjects.get(subject_id) else {
-            return Ok((None, None, None, true, Vec::new()));
-        };
-
         let access_limit = match self
             .search_witnesses(
                 ctx,
@@ -925,6 +933,8 @@ impl WitnessesRegister {
             .is_some_and(|(new_owner, _)| new_owner == sender)
         {
             Some(data.sn)
+        } else if data.actual_owner == *sender {
+            data.old_owners.values().map(|old_owner| old_owner.sn).max()
         } else {
             data.old_owners
                 .get(sender)
@@ -1010,6 +1020,106 @@ impl WitnessesRegister {
             .filter(|transfer_sn| actual_sn.is_none_or(|sn| *transfer_sn > sn));
 
         Ok((Some(access_limit), transfer_sn, clear_sn, true, ranges))
+    }
+
+    async fn build_tracker_window(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        sender: &PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
+    ) -> Result<
+        (
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+            bool,
+            Vec<TrackerDeliveryRange>,
+        ),
+        ActorError,
+    > {
+        let Some(data) = self.subjects.get(subject_id) else {
+            return Ok((None, None, None, true, Vec::new()));
+        };
+
+        self.build_tracker_window_from_data(
+            ctx, subject_id, data, node, sender, namespace, schema_id,
+            actual_sn,
+        )
+        .await
+    }
+
+    fn transfer_data_from_ledger(
+        subject_id: &DigestIdentifier,
+        ledger: &[Ledger],
+    ) -> Result<TransferData, ActorError> {
+        let Some(first_ledger) = ledger.first() else {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Missing first ledger while reconstructing tracker window for {subject_id}"
+                ),
+            });
+        };
+
+        if !first_ledger.is_create_event() {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Missing create event while reconstructing tracker window for {subject_id}"
+                ),
+            });
+        }
+
+        let mut data = TransferData {
+            actual_owner: first_ledger.ledger_seal_signature.signer.clone(),
+            actual_new_owner_data: None,
+            sn: first_ledger.sn,
+            gov_version: first_ledger.gov_version,
+            old_owners: HashMap::new(),
+            visibility_state: TrackerVisibilityState::default(),
+        };
+        data.visibility_state.record_event(
+            0,
+            TrackerStoredVisibility::Full,
+            TrackerEventVisibility::NonFact,
+        );
+
+        for event in ledger {
+            data.sn = event.sn;
+
+            match event.get_event_request() {
+                Some(EventRequest::Transfer(transfer_request)) => {
+                    data.actual_new_owner_data =
+                        Some((transfer_request.new_owner, event.gov_version));
+                }
+                Some(EventRequest::Confirm(..)) => {
+                    if let Some((new_owner, new_owner_gov_version)) =
+                        data.actual_new_owner_data.take()
+                    {
+                        let entry = data
+                            .old_owners
+                            .entry(data.actual_owner.clone())
+                            .or_default();
+                        entry.sn = event.sn;
+                        entry.interval_gov_version.insert(Interval {
+                            lo: data.gov_version,
+                            hi: event.gov_version,
+                        });
+
+                        data.actual_owner = new_owner;
+                        data.gov_version = new_owner_gov_version;
+                    }
+                }
+                Some(EventRequest::Reject(..)) => {
+                    let _ = data.actual_new_owner_data.take();
+                }
+                _ => {}
+            }
+        }
+
+        Ok(data)
     }
 
     async fn access_limit_for_node(
@@ -1308,9 +1418,9 @@ impl WitnessesRegister {
                     // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
                     better_gov_version = better_gov_version.max(Some(range.hi));
                 }
+            } else {
             }
         }
-
         ActualSearch::Continue {
             gov_version: better_gov_version,
         }
@@ -1362,7 +1472,6 @@ impl WitnessesRegister {
             )
             .await;
         }
-
         ActualSearch::Continue {
             gov_version: better_gov_version,
         }
@@ -1437,10 +1546,9 @@ impl WitnessesRegister {
             }
         }
 
-        // Solo delegar a los testigos de schema si el rol Witnesses estaba activo
-        // cuando el owner empezó a serlo (actual_lo activo, o intervalo cerrado que llega
-        // hasta owner_gov_version). Si el intervalo cerró antes de que el owner empezase,
-        // contains_key sería true pero no debe triggear search_schemas_actual.
+        // Si el rol Witnesses está activo actualmente, los testigos de schema pueden
+        // pedir el tracker actual. Para intervalos cerrados sí hay que comprobar que
+        // cubrieran el momento en que este owner pasó a ser owner.
         if let Some((interval, actual_lo)) =
             witnesses_creator.get(&WitnessesType::Witnesses)
         {
@@ -1499,11 +1607,14 @@ impl WitnessesRegister {
                 )
                 .await
             {
-                ActualSearch::End(sn_limit) => return Ok(sn_limit),
+                ActualSearch::End(sn_limit) => {
+                    return Ok(sn_limit);
+                }
                 ActualSearch::Continue { gov_version } => {
                     better_gov_version = gov_version;
                 }
             }
+        } else {
         }
 
         if let Some((new_owner, new_owner_gov_version)) =
@@ -1525,7 +1636,9 @@ impl WitnessesRegister {
                 )
                 .await
             {
-                ActualSearch::End(sn_limit) => return Ok(sn_limit),
+                ActualSearch::End(sn_limit) => {
+                    return Ok(sn_limit);
+                }
                 ActualSearch::Continue { gov_version } => {
                     better_gov_version = gov_version;
                 }
@@ -1541,23 +1654,28 @@ impl WitnessesRegister {
             )) {
                 if let Some((interval, actual_lo)) =
                     witnesses_creator.get(&WitnessesType::User(node.clone()))
-                    && let Some(gov_version) =
-                        Self::max_covered_old_owner_gov_version(
-                            *actual_lo, interval, old_data,
-                        )
                 {
-                    match self
-                        .get_sn(ctx, subject_id.clone(), gov_version)
-                        .await?
+                    let covered_old_owner = Self::covered_old_owner_intervals(
+                        *actual_lo, interval, old_data,
+                    );
+
+                    if let Some(gov_version) =
+                        covered_old_owner.iter().last().map(|range| range.hi)
                     {
-                        SnLimit::Sn(sn) => {
-                            better_sn =
-                                better_sn.max(Some(sn.min(old_data.sn)));
+                        match self
+                            .get_sn(ctx, subject_id.clone(), gov_version)
+                            .await?
+                        {
+                            SnLimit::Sn(sn) => {
+                                better_sn =
+                                    better_sn.max(Some(sn.min(old_data.sn)));
+                            }
+                            SnLimit::LastSn => {
+                                better_sn = better_sn.max(Some(old_data.sn));
+                            }
+                            SnLimit::NotSn => {}
                         }
-                        SnLimit::LastSn => {
-                            better_sn = better_sn.max(Some(old_data.sn));
-                        }
-                        SnLimit::NotSn => {}
+                    } else {
                     }
                 }
 
@@ -1596,9 +1714,12 @@ impl WitnessesRegister {
                                 }
                                 SnLimit::NotSn => {}
                             }
+                        } else {
                         }
+                    } else {
                     }
                 }
+            } else {
             }
         }
 
@@ -1767,10 +1888,11 @@ impl WitnessesRegister {
         }
 
         let namespace = Namespace::from(namespace.to_owned());
-        let Some(creator_witnesses) = self
-            .witnesses_creator
-            .get(&(owner.clone(), namespace.to_string(), schema_id.clone()))
-        else {
+        let Some(creator_witnesses) = self.witnesses_creator.get(&(
+            owner.clone(),
+            namespace.to_string(),
+            schema_id.clone(),
+        )) else {
             return GovVersionLimit::None;
         };
 
@@ -2287,9 +2409,7 @@ impl Handler<Self> for WitnessesRegister {
                     "Checked create access status"
                 );
 
-                return Ok(WitnessesRegisterResponse::CreateAccess {
-                    allowed,
-                });
+                return Ok(WitnessesRegisterResponse::CreateAccess { allowed });
             }
             WitnessesRegisterMessage::CreateGovVersionLimit {
                 owner,
@@ -2308,11 +2428,9 @@ impl Handler<Self> for WitnessesRegister {
                     )
                     .await;
 
-                return Ok(
-                    WitnessesRegisterResponse::CreateGovVersionLimit {
-                        limit,
-                    },
-                );
+                return Ok(WitnessesRegisterResponse::CreateGovVersionLimit {
+                    limit,
+                });
             }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
                 subject_id,
@@ -2339,6 +2457,38 @@ impl Handler<Self> for WitnessesRegister {
                     .build_tracker_window(
                         ctx,
                         &subject_id,
+                        &node,
+                        &sender,
+                        namespace,
+                        schema_id,
+                        actual_sn,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::TrackerWindow {
+                    sn,
+                    transfer_sn,
+                    clear_sn,
+                    is_all,
+                    ranges,
+                });
+            }
+            WitnessesRegisterMessage::GetTrackerWindowFromLedger {
+                subject_id,
+                ledger,
+                node,
+                sender,
+                namespace,
+                schema_id,
+                actual_sn,
+            } => {
+                let data =
+                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
+                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
+                    .build_tracker_window_from_data(
+                        ctx,
+                        &subject_id,
+                        &data,
                         &node,
                         &sender,
                         namespace,

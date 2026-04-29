@@ -579,6 +579,64 @@ where
     }
 }
 
+pub async fn get_tracker_window_from_ledger<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    ledger: Vec<Ledger>,
+    node: PublicKey,
+    sender: PublicKey,
+    namespace: String,
+    schema_id: ave_common::SchemaType,
+    actual_sn: Option<u64>,
+) -> Result<
+    (
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        bool,
+        Vec<TrackerDeliveryRange>,
+    ),
+    ActorError,
+>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerWindowFromLedger {
+            subject_id: subject_id.clone(),
+            ledger,
+            node,
+            sender,
+            namespace,
+            schema_id,
+            actual_sn,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::TrackerWindow {
+            sn,
+            transfer_sn,
+            clear_sn,
+            is_all,
+            ranges,
+        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
+        }),
+    }
+}
+
 pub async fn make_obsolete<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,

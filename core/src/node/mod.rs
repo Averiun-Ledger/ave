@@ -25,10 +25,7 @@ use crate::{
     },
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
-    model::{
-        common::node::SignTypesNode,
-        event::Ledger,
-    },
+    model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
@@ -647,9 +644,8 @@ impl Node {
                             subject_id: subject_id.clone(),
                         })
                         .await?;
-                    let WitnessesRegisterResponse::TrackerOwnerSn {
-                        data,
-                    } = response
+                    let WitnessesRegisterResponse::TrackerOwnerSn { data } =
+                        response
                     else {
                         return Err(ActorError::UnexpectedResponse {
                             path: actor_path,
@@ -658,17 +654,15 @@ impl Node {
                                     .to_owned(),
                         });
                     };
-                    let sn = data
-                        .map(|(_, sn)| sn)
-                        .ok_or_else(|| ActorError::Functional {
+                    let sn = data.map(|(_, sn)| sn).ok_or_else(|| {
+                        ActorError::Functional {
                             description: format!(
                                 "local tracker sn not found for subject {}",
                                 subject_id
                             ),
-                        })?;
-                    let hi_sn = to_sn
-                        .map(|to_sn| to_sn.min(sn))
-                        .unwrap_or(sn);
+                        }
+                    })?;
+                    let hi_sn = to_sn.map(|to_sn| to_sn.min(sn)).unwrap_or(sn);
                     let ledger = self
                         .collect_tracker_ledger(ctx, &subject_id, hi_sn)
                         .await?;

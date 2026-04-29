@@ -24,8 +24,7 @@ use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
 };
 use crate::governance::witnesses_register::{
-    GovVersionLimit, HiSnLimit, WitnessesRegister,
-    WitnessesRegisterMessage,
+    GovVersionLimit, HiSnLimit, WitnessesRegister, WitnessesRegisterMessage,
     WitnessesRegisterResponse,
 };
 use crate::request::manager::{
@@ -322,9 +321,7 @@ where
         .await?;
 
     match response {
-        WitnessesRegisterResponse::CreateGovVersionLimit { limit } => {
-            Ok(limit)
-        }
+        WitnessesRegisterResponse::CreateGovVersionLimit { limit } => Ok(limit),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected:

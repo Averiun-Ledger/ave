@@ -33,14 +33,14 @@ use crate::{
             RoleRegisterResponse,
         },
         sn_register::{SnRegister, SnRegisterMessage, SnRegisterResponse},
-        transfer_hint_register::{
-            TransferHintRegister, TransferHintRegisterMessage,
-            TransferHintRegisterResponse,
-        },
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
         tracker_sync::{TrackerSync, TrackerSyncConfig},
+        transfer_hint_register::{
+            TransferHintRegister, TransferHintRegisterMessage,
+            TransferHintRegisterResponse,
+        },
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
@@ -103,9 +103,9 @@ pub mod events;
 pub mod model;
 pub mod role_register;
 pub mod sn_register;
-pub mod transfer_hint_register;
 pub mod subject_register;
 pub mod tracker_sync;
+pub mod transfer_hint_register;
 pub mod version_sync;
 pub mod witnesses_register;
 
@@ -2669,9 +2669,7 @@ impl Governance {
             Ok(actor) => Some(actor),
             Err(ActorError::Exists { .. }) => {
                 match ctx
-                    .get_child::<TransferHintRegister>(
-                        "transfer_hint_register",
-                    )
+                    .get_child::<TransferHintRegister>("transfer_hint_register")
                     .await
                 {
                     Ok(actor) => Some(actor),
@@ -2684,8 +2682,7 @@ impl Governance {
                 }
             }
             Err(error) => {
-                cleanup_errors
-                    .push(format!("transfer_hint_register: {error}"));
+                cleanup_errors.push(format!("transfer_hint_register: {error}"));
                 None
             }
         };
@@ -2703,9 +2700,8 @@ impl Governance {
             }
 
             if let Err(error) = transfer_hint_register.ask_stop().await {
-                cleanup_errors.push(format!(
-                    "transfer_hint_register stop: {error}"
-                ));
+                cleanup_errors
+                    .push(format!("transfer_hint_register stop: {error}"));
             }
         }
 
@@ -3021,9 +3017,7 @@ impl Governance {
             Ok(actor) => Some(actor),
             Err(ActorError::Exists { .. }) => {
                 match ctx
-                    .get_child::<TransferHintRegister>(
-                        "transfer_hint_register",
-                    )
+                    .get_child::<TransferHintRegister>("transfer_hint_register")
                     .await
                 {
                     Ok(actor) => Some(actor),
@@ -3036,8 +3030,7 @@ impl Governance {
                 }
             }
             Err(error) => {
-                cleanup_errors
-                    .push(format!("transfer_hint_register: {error}"));
+                cleanup_errors.push(format!("transfer_hint_register: {error}"));
                 None
             }
         };
@@ -3053,9 +3046,8 @@ impl Governance {
             }
 
             if let Err(error) = transfer_hint_register.ask_stop().await {
-                cleanup_errors.push(format!(
-                    "transfer_hint_register stop: {error}"
-                ));
+                cleanup_errors
+                    .push(format!("transfer_hint_register stop: {error}"));
             }
         }
 

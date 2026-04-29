@@ -347,11 +347,9 @@ impl TrackerSync {
             return Ok(None);
         }
 
-        Ok(
-            get_tracker_sn_owner(ctx, &self.governance_id, subject_id)
-                .await?
-                .map(|(_, sn)| sn),
-        )
+        Ok(get_tracker_sn_owner(ctx, &self.governance_id, subject_id)
+            .await?
+            .map(|(_, sn)| sn))
     }
 
     async fn request_tracker_update(
