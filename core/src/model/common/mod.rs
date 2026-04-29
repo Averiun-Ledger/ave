@@ -24,7 +24,8 @@ use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
 };
 use crate::governance::witnesses_register::{
-    HiSnLimit, WitnessesRegister, WitnessesRegisterMessage,
+    GovVersionLimit, HiSnLimit, WitnessesRegister,
+    WitnessesRegisterMessage,
     WitnessesRegisterResponse,
 };
 use crate::request::manager::{
@@ -286,6 +287,49 @@ where
             path: actor_path,
             expected: "WitnessesRegisterResponse::CreateAccess { allowed }"
                 .to_string(),
+        }),
+    }
+}
+
+pub async fn check_create_gov_version_limit<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    owner: PublicKey,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+    owner_gov_version: u64,
+) -> Result<GovVersionLimit, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::CreateGovVersionLimit {
+            owner,
+            node,
+            namespace,
+            schema_id,
+            owner_gov_version,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::CreateGovVersionLimit { limit } => {
+            Ok(limit)
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected:
+                "WitnessesRegisterResponse::CreateGovVersionLimit { limit }"
+                    .to_string(),
         }),
     }
 }

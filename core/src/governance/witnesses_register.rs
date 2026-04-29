@@ -265,6 +265,13 @@ pub enum WitnessesRegisterMessage {
         schema_id: SchemaType,
         gov_version: u64,
     },
+    CreateGovVersionLimit {
+        owner: PublicKey,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        owner_gov_version: u64,
+    },
     GetTrackerVisibilityState {
         subject_id: DigestIdentifier,
     },
@@ -372,6 +379,9 @@ pub enum WitnessesRegisterResponse {
     CreateAccess {
         allowed: bool,
     },
+    CreateGovVersionLimit {
+        limit: GovVersionLimit,
+    },
     GovSn {
         sn: u64,
     },
@@ -402,6 +412,13 @@ impl Response for WitnessesRegisterResponse {}
 pub enum HiSnLimit {
     None,
     Sn(u64),
+    Infinity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GovVersionLimit {
+    None,
+    Version(u64),
     Infinity,
 }
 
@@ -1733,6 +1750,47 @@ impl WitnessesRegister {
             })
     }
 
+    async fn create_gov_version_limit_for_node(
+        &self,
+        node: &PublicKey,
+        owner: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &str,
+        owner_gov_version: u64,
+    ) -> GovVersionLimit {
+        if node == owner {
+            return GovVersionLimit::Infinity;
+        }
+
+        let namespace = Namespace::from(namespace.to_owned());
+        let Some(creator_witnesses) = self
+            .witnesses_creator
+            .get(&(owner.clone(), namespace.to_string(), schema_id.clone()))
+        else {
+            return GovVersionLimit::None;
+        };
+
+        match self
+            .check_current_owner(
+                creator_witnesses,
+                node,
+                schema_id,
+                &namespace,
+                0,
+                (owner_gov_version, None),
+            )
+            .await
+        {
+            ActualSearch::End(_) => GovVersionLimit::Infinity,
+            ActualSearch::Continue {
+                gov_version: Some(version),
+            } => GovVersionLimit::Version(version),
+            ActualSearch::Continue { gov_version: None } => {
+                GovVersionLimit::None
+            }
+        }
+    }
+
     async fn get_subjects_for_owner_schema(
         &self,
         ctx: &ActorContext<Self>,
@@ -2228,6 +2286,29 @@ impl Handler<Self> for WitnessesRegister {
                 return Ok(WitnessesRegisterResponse::CreateAccess {
                     allowed,
                 });
+            }
+            WitnessesRegisterMessage::CreateGovVersionLimit {
+                owner,
+                node,
+                namespace,
+                schema_id,
+                owner_gov_version,
+            } => {
+                let limit = self
+                    .create_gov_version_limit_for_node(
+                        &node,
+                        &owner,
+                        &schema_id,
+                        &namespace,
+                        owner_gov_version,
+                    )
+                    .await;
+
+                return Ok(
+                    WitnessesRegisterResponse::CreateGovVersionLimit {
+                        limit,
+                    },
+                );
             }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
                 subject_id,

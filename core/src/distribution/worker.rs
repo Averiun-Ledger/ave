@@ -22,13 +22,14 @@ use crate::{
             TransferHintRegister, TransferHintRegisterMessage,
         },
         witnesses_register::{
-            HiSnLimit, TrackerDeliveryMode, TrackerDeliveryRange,
+            GovVersionLimit, HiSnLimit, TrackerDeliveryMode,
+            TrackerDeliveryRange,
         },
     },
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_create_witness_access, check_subject_creation,
+            check_create_gov_version_limit, check_subject_creation,
             check_witness_access, check_witness_hi_sn_limit, emit_fail,
             node::get_subject_data,
             subject::{
@@ -244,10 +245,11 @@ impl DistriWorker {
         ctx: &mut ActorContext<Self>,
         sender: PublicKey,
         info: &ComunicateInfo,
-        ledger: &Ledger,
+        ledger: &[Ledger],
         offered_hi_sn: u64,
     ) -> Result<DistributionAuth, ActorError> {
-        let subject_id = ledger.get_subject_id();
+        let first_ledger = ledger.first().ok_or(DistributorError::EmptyEvents)?;
+        let subject_id = first_ledger.get_subject_id();
         let (auth, subject_data) =
             self.authorized_subj(ctx, &subject_id).await?;
 
@@ -270,7 +272,7 @@ impl DistriWorker {
                 }
             }
         } else {
-            if let Some(create) = ledger.get_create_event() {
+            if let Some(create) = first_ledger.get_create_event() {
                 if !create.schema_id.is_gov() && create.governance_id.is_empty()
                 {
                     return Err(
@@ -329,10 +331,10 @@ impl DistriWorker {
             }
         })?;
 
-        if gov.version < ledger.gov_version {
+        if gov.version < first_ledger.gov_version {
             return Err(DistributorError::GovernanceVersionMismatch {
                 our_version: gov.version,
-                their_version: ledger.gov_version,
+                their_version: first_ledger.gov_version,
             }
             .into());
         }
@@ -421,35 +423,88 @@ impl DistriWorker {
                 }
                 _ => {}
             }
-            let owner = ledger.ledger_seal_signature.signer.clone();
-            let sender_allowed = check_create_witness_access(
+            let owner = first_ledger.ledger_seal_signature.signer.clone();
+            let sender_limit = check_create_gov_version_limit(
                 ctx,
                 &governance_id,
                 owner.clone(),
                 sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
-                gov.version,
+                first_ledger.gov_version,
             )
             .await?;
-            if !sender_allowed {
-                return Err(DistributorError::SenderNoAccess.into());
-            }
-
-            let receiver_allowed = check_create_witness_access(
+            let receiver_limit = check_create_gov_version_limit(
                 ctx,
                 &governance_id,
                 owner,
                 (*self.our_key).clone(),
-                namespace,
-                schema_id,
-                gov.version,
+                namespace.clone(),
+                schema_id.clone(),
+                first_ledger.gov_version,
             )
             .await?;
-            if !receiver_allowed {
-                return Err(DistributorError::ReceiverNoAccess.into());
+
+            match (&sender_limit, &receiver_limit) {
+                (GovVersionLimit::None, _) => {
+                    return Err(DistributorError::SenderNoAccess.into());
+                }
+                (_, GovVersionLimit::None) => {
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
+                (GovVersionLimit::Infinity, GovVersionLimit::Infinity) => {
+                    offered_hi_sn
+                }
+                _ => {
+                    let mut safe_hi_sn = None;
+
+                    for event in ledger {
+                        let sender_allowed = match sender_limit {
+                            GovVersionLimit::Infinity => true,
+                            GovVersionLimit::Version(limit) => {
+                                event.gov_version <= limit
+                            }
+                            GovVersionLimit::None => false,
+                        };
+                        if !sender_allowed {
+                            return match safe_hi_sn {
+                                Some(sn) => Ok(DistributionAuth {
+                                    is_gov,
+                                    is_register: false,
+                                    safe_hi_sn: sn,
+                                }),
+                                None => Err(
+                                    DistributorError::SenderNoAccess.into(),
+                                ),
+                            };
+                        }
+
+                        let receiver_allowed = match receiver_limit {
+                            GovVersionLimit::Infinity => true,
+                            GovVersionLimit::Version(limit) => {
+                                event.gov_version <= limit
+                            }
+                            GovVersionLimit::None => false,
+                        };
+                        if !receiver_allowed {
+                            return match safe_hi_sn {
+                                Some(sn) => Ok(DistributionAuth {
+                                    is_gov,
+                                    is_register: false,
+                                    safe_hi_sn: sn,
+                                }),
+                                None => Err(
+                                    DistributorError::ReceiverNoAccess.into(),
+                                ),
+                            };
+                        }
+
+                        safe_hi_sn = Some(event.sn);
+                    }
+
+                    safe_hi_sn.unwrap_or(offered_hi_sn)
+                }
             }
-            offered_hi_sn
         };
 
         Ok(DistributionAuth {
@@ -1299,7 +1354,13 @@ impl Handler<Self> for DistriWorker {
                 }
 
                 let auth = match self
-                    .check_auth(ctx, sender.clone(), &info, &ledger, sn)
+                    .check_auth(
+                        ctx,
+                        sender.clone(),
+                        &info,
+                        std::slice::from_ref(&*ledger),
+                        sn,
+                    )
                     .await
                 {
                     Ok(auth) => auth,
@@ -1590,7 +1651,7 @@ impl Handler<Self> for DistriWorker {
                         ctx,
                         sender.clone(),
                         &info,
-                        &ledger[0],
+                        &ledger,
                         offered_hi_sn,
                     )
                     .await
