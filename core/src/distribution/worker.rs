@@ -390,7 +390,7 @@ impl DistriWorker {
             )
             .await?;
 
-            match (sender_limit, receiver_limit) {
+            let mut safe_hi_sn = match (sender_limit, receiver_limit) {
                 (HiSnLimit::None, _) => {
                     return Err(DistributorError::SenderNoAccess.into());
                 }
@@ -398,15 +398,30 @@ impl DistriWorker {
                     return Err(DistributorError::ReceiverNoAccess.into());
                 }
                 (HiSnLimit::Infinity, HiSnLimit::Infinity) => offered_hi_sn,
-                (HiSnLimit::Infinity, HiSnLimit::Sn(limit))
-                | (HiSnLimit::Sn(limit), HiSnLimit::Infinity) => {
+                (HiSnLimit::Infinity, HiSnLimit::Sn(limit)) => {
                     limit.min(offered_hi_sn)
                 }
+                (HiSnLimit::Sn(_), HiSnLimit::Infinity) => offered_hi_sn,
                 (
                     HiSnLimit::Sn(sender_limit),
                     HiSnLimit::Sn(receiver_limit),
                 ) => sender_limit.min(receiver_limit).min(offered_hi_sn),
+            };
+
+            // Si el batch contiene un Confirm o Reject de transferencia, no podemos
+            // cruzarlo sin recalcular el TransferData del WitnessesRegister.
+            // Cortamos en ese evento y el loop volverá a iterar con el estado actualizado.
+            if let Some(boundary) = ledger.iter().find_map(|event| {
+                matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Confirm | EventRequestType::Reject
+                )
+                .then_some(event.sn)
+            }) {
+                safe_hi_sn = safe_hi_sn.min(boundary);
             }
+
+            safe_hi_sn
         } else {
             let sender_hi_limit = Self::concrete_hi_sn_limit(
                 check_witness_hi_sn_limit(
