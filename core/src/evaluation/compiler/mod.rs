@@ -171,6 +171,17 @@ impl CompilerSupport {
         contract_path.join(".cargo").join("config.toml")
     }
 
+    fn shared_target_dir_for_contract() -> PathBuf {
+        PathBuf::from(".")
+            .join("..")
+            .join("..")
+            .join(Self::SHARED_TARGET_DIR)
+    }
+
+    fn vendor_dir_for_contract() -> PathBuf {
+        PathBuf::from(".").join("..").join("..").join(Self::VENDOR_DIR)
+    }
+
     fn build_output_wasm_path(contracts_root: &Path) -> PathBuf {
         contracts_root
             .join(Self::SHARED_TARGET_DIR)
@@ -287,8 +298,11 @@ impl CompilerSupport {
 
         let vendor_dir = contracts_root.join(Self::VENDOR_DIR);
         let cargo_config = Self::cargo_config(
-            &contracts_root.join(Self::SHARED_TARGET_DIR),
-            vendor_dir.exists().then_some(vendor_dir.as_path()),
+            &Self::shared_target_dir_for_contract(),
+            vendor_dir
+                .exists()
+                .then(|| Self::vendor_dir_for_contract())
+                .as_deref(),
         );
         let cargo_config_path = Self::cargo_config_path(contract_path);
         fs::write(&cargo_config_path, cargo_config)

@@ -21,7 +21,12 @@ use crate::{
         TrackerDeliveryMode, TrackerDeliveryRange,
     },
     helpers::network::{ActorMessage, service::NetworkSender},
-    model::common::{emit_fail, subject::get_local_subject_sn},
+    model::common::{
+        emit_fail, get_verified_transfer_sn,
+        node::get_subject_data,
+        subject::get_local_subject_sn,
+    },
+    node::SubjectData,
     request::manager::{RequestManager, RequestManagerMessage},
 };
 
@@ -235,10 +240,29 @@ impl Update {
         Ok(())
     }
 
+    async fn already_verified_transfer_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Option<u64> {
+        let data = get_subject_data(ctx, &self.subject_id)
+            .await
+            .ok()
+            .flatten()?;
+        let governance_id = match data {
+            SubjectData::Tracker { governance_id, .. } => governance_id,
+            SubjectData::Governance { .. } => self.subject_id.clone(),
+        };
+        get_verified_transfer_sn(ctx, &governance_id, &self.subject_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn request_distribution(
         &self,
         witness: PublicKey,
         target_sn: Option<u64>,
+        already_verified_transfer_sn: Option<u64>,
     ) -> Result<(), ActorError> {
         let info = ComunicateInfo {
             receiver: witness,
@@ -258,6 +282,7 @@ impl Update {
                         actual_sn: self.our_sn,
                         target_sn,
                         subject_id: self.subject_id.clone(),
+                        already_verified_transfer_sn,
                     },
                 },
             })
@@ -273,7 +298,10 @@ impl Update {
                 return Ok(UpdateStartMode::Direct);
             };
 
-            self.request_distribution(witness.clone(), None).await?;
+            let verified_sn =
+                self.already_verified_transfer_sn(ctx).await;
+            self.request_distribution(witness.clone(), None, verified_sn)
+                .await?;
             return Ok(UpdateStartMode::Direct);
         }
 
@@ -539,10 +567,14 @@ impl Handler<Self> for Update {
                                 .max()
                                 .unwrap_or(target_sn);
 
+                            let verified_sn = self
+                                .already_verified_transfer_sn(ctx)
+                                .await;
                             if let Err(e) = self
                                 .request_distribution(
                                     better_node.clone(),
                                     Some(target_sn),
+                                    verified_sn,
                                 )
                                 .await
                             {

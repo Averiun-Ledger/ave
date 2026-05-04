@@ -170,6 +170,7 @@ pub async fn update_ledger_network(
         actual_sn: Some(data.sn),
         target_sn: None,
         subject_id: data.subject_id,
+        already_verified_transfer_sn: None,
     };
 
     let info = ComunicateInfo {

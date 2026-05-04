@@ -26,8 +26,11 @@ use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
 };
 use crate::metrics::try_core_metrics;
-use crate::model::common::node::get_subject_data;
-use crate::model::common::subject::get_tracker_sn_owner;
+use crate::model::common::{
+    get_verified_transfer_sn,
+    node::get_subject_data,
+    subject::get_tracker_sn_owner,
+};
 use crate::node::SubjectData;
 
 #[derive(Debug, Clone)]
@@ -354,10 +357,17 @@ impl TrackerSync {
 
     async fn request_tracker_update(
         &self,
+        ctx: &mut ActorContext<Self>,
         peer: &PublicKey,
         subject_id: &DigestIdentifier,
         actual_sn: Option<u64>,
     ) -> Result<(), ActorError> {
+        let already_verified_transfer_sn =
+            get_verified_transfer_sn(ctx, &self.governance_id, subject_id)
+                .await
+                .ok()
+                .flatten();
+
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
@@ -374,6 +384,7 @@ impl TrackerSync {
                         actual_sn,
                         target_sn: None,
                         subject_id: subject_id.clone(),
+                        already_verified_transfer_sn,
                     },
                 },
             })
@@ -505,8 +516,13 @@ impl TrackerSync {
             };
             let last_seen_sn =
                 self.get_local_tracker_sn(ctx, &item.subject_id).await?;
-            self.request_tracker_update(&peer, &item.subject_id, last_seen_sn)
-                .await?;
+            self.request_tracker_update(
+                ctx,
+                &peer,
+                &item.subject_id,
+                last_seen_sn,
+            )
+            .await?;
             Self::observe_update("launched");
             active_batch.push(ActiveUpdate {
                 item,

@@ -14,8 +14,8 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
         witnesses_register::{
-            TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterMessage,
-            WitnessesRegisterResponse,
+            HiSnLimit, TrackerDeliveryRange, WitnessesRegister,
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
         },
     },
     model::{
@@ -633,6 +633,47 @@ where
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
+        }),
+    }
+}
+
+pub async fn check_simulated_transfer_hi_sn_limit<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    ledger: Vec<Ledger>,
+    transfer_event: Ledger,
+    node: PublicKey,
+    namespace: String,
+    schema_id: ave_common::SchemaType,
+) -> Result<HiSnLimit, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::SimulateTransferHiSnLimit {
+            subject_id: subject_id.clone(),
+            ledger,
+            transfer_event,
+            node,
+            namespace,
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::HiSnLimit { limit } => Ok(limit),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::HiSnLimit { limit }".to_string(),
         }),
     }
 }

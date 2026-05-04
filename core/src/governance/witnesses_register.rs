@@ -294,6 +294,14 @@ pub enum WitnessesRegisterMessage {
         schema_id: SchemaType,
         actual_sn: Option<u64>,
     },
+    SimulateTransferHiSnLimit {
+        subject_id: DigestIdentifier,
+        ledger: Vec<Ledger>,
+        transfer_event: Ledger,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+    },
 }
 
 impl Message for WitnessesRegisterMessage {
@@ -934,7 +942,11 @@ impl WitnessesRegister {
         {
             Some(data.sn)
         } else if data.actual_owner == *sender {
-            data.old_owners.values().map(|old_owner| old_owner.sn).max()
+            data.old_owners
+                .values()
+                .map(|old_owner| old_owner.sn)
+                .max()
+                .map(|sn| sn.saturating_sub(1))
         } else {
             data.old_owners
                 .get(sender)
@@ -953,12 +965,18 @@ impl WitnessesRegister {
         {
             Some(data.sn)
         } else {
-            data.old_owners.get(node).map(|old_owner| old_owner.sn)
+            data.old_owners
+                .get(node)
+                .map(|old_owner| old_owner.sn.saturating_sub(1))
         };
 
-        let transfer_sn = sender_transfer_sn
-            .or(receiver_transfer_sn)
-            .filter(|transfer_sn| actual_sn.is_none_or(|sn| sn < *transfer_sn));
+        let transfer_sn = match (sender_transfer_sn, receiver_transfer_sn) {
+            (Some(sender), Some(receiver)) => Some(sender.max(receiver)),
+            (Some(sender), None) => Some(sender),
+            (None, Some(receiver)) => Some(receiver),
+            (None, None) => None,
+        }
+        .filter(|transfer_sn| actual_sn.is_none_or(|sn| sn < *transfer_sn));
 
         let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
@@ -1120,6 +1138,15 @@ impl WitnessesRegister {
         }
 
         Ok(data)
+    }
+
+    /// Aplica un evento Transfer sobre `TransferData` en memoria (sin mutar estado persistente).
+    fn simulate_transfer_on_data(
+        data: &mut TransferData,
+        new_owner: PublicKey,
+        gov_version: u64,
+    ) {
+        data.actual_new_owner_data = Some((new_owner, gov_version));
     }
 
     async fn access_limit_for_node(
@@ -2504,6 +2531,50 @@ impl Handler<Self> for WitnessesRegister {
                     is_all,
                     ranges,
                 });
+            }
+            WitnessesRegisterMessage::SimulateTransferHiSnLimit {
+                subject_id,
+                ledger,
+                transfer_event,
+                node,
+                namespace,
+                schema_id,
+            } => {
+                let mut data =
+                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
+
+                let (new_owner, gov_version) =
+                    match transfer_event.get_event_request() {
+                        Some(EventRequest::Transfer(req)) => {
+                            (req.new_owner, transfer_event.gov_version)
+                        }
+                        _ => {
+                            return Err(ActorError::Functional {
+                                description:
+                                    "SimulateTransferHiSnLimit called with non-Transfer event"
+                                        .to_string(),
+                            });
+                        }
+                    };
+
+                Self::simulate_transfer_on_data(
+                    &mut data,
+                    new_owner,
+                    gov_version,
+                );
+
+                let limit = self
+                    .hi_sn_limit_for_transfer_data(
+                        ctx,
+                        &subject_id,
+                        &node,
+                        &namespace,
+                        &schema_id,
+                        &data,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::HiSnLimit { limit });
             }
         };
 

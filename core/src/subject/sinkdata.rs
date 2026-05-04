@@ -94,7 +94,11 @@ pub enum SinkDataMessage {
     },
 }
 
-impl Message for SinkDataMessage {}
+impl Message for SinkDataMessage {
+    fn is_critical(&self) -> bool {
+        true
+    }
+}
 
 impl NotPersistentActor for SinkData {}
 

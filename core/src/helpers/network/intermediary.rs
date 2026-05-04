@@ -541,6 +541,7 @@ impl Intermediary {
                         actual_sn,
                         target_sn,
                         subject_id,
+                        already_verified_transfer_sn,
                     } => {
                         let actor = system
                             .get_actor::<DistriWorker>(&path)
@@ -556,6 +557,7 @@ impl Intermediary {
                                 subject_id,
                                 info: message.info,
                                 sender: sender.clone(),
+                                already_verified_transfer_sn,
                             })
                             .await
                             .map_err(|e| {
@@ -636,7 +638,7 @@ impl Intermediary {
                     ActorMessage::DistributionLedgerRes {
                         ledger,
                         is_all,
-                        transfer_sn,
+                        transfer_event,
                     } => {
                         let actor = match system
                             .get_actor::<DistriWorker>(&path)
@@ -667,7 +669,7 @@ impl Intermediary {
                                 ledger,
                                 info: message.info,
                                 is_all,
-                                transfer_sn,
+                                transfer_event,
                                 sender: sender.clone(),
                             })
                             .await

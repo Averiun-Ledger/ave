@@ -23,6 +23,10 @@ use crate::governance::role_register::{
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
 };
+use crate::governance::transfer_verification_register::{
+    TransferVerificationRegister, TransferVerificationRegisterMessage,
+    TransferVerificationRegisterResponse,
+};
 use crate::governance::witnesses_register::{
     GovVersionLimit, HiSnLimit, WitnessesRegister, WitnessesRegisterMessage,
     WitnessesRegisterResponse,
@@ -246,6 +250,102 @@ where
             path: actor_path,
             expected: "WitnessesRegisterResponse::HiSnLimit { limit }"
                 .to_string(),
+        }),
+    }
+}
+
+pub async fn get_verified_transfer_sn<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<u64>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(TransferVerificationRegisterMessage::GetVerifiedTransferSn {
+            subject_id: subject_id.to_owned(),
+        })
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::VerifiedTransferSn(sn) => Ok(sn),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "TransferVerificationRegisterResponse::VerifiedTransferSn"
+                .to_string(),
+        }),
+    }
+}
+
+pub async fn record_verified_transfer<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    transfer_sn: u64,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(TransferVerificationRegisterMessage::RecordVerifiedTransfer {
+            subject_id: subject_id.to_owned(),
+            transfer_sn,
+        })
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::Ok => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "TransferVerificationRegisterResponse::Ok".to_string(),
+        }),
+    }
+}
+
+pub async fn remove_verified_transfer<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(TransferVerificationRegisterMessage::Remove {
+            subject_id: subject_id.to_owned(),
+        })
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::Ok => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "TransferVerificationRegisterResponse::Ok".to_string(),
         }),
     }
 }

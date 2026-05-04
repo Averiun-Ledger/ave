@@ -1464,6 +1464,7 @@ impl RequestManager {
                             actual_sn: Some(gov_sn),
                             target_sn: None,
                             subject_id: governance_id.clone(),
+                            already_verified_transfer_sn: None,
                         },
                     },
                 })

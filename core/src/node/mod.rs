@@ -212,6 +212,12 @@ impl BorshDeserialize for Node {
 }
 
 impl Node {
+    fn hash(&self) -> Result<HashAlgorithm, ActorError> {
+        self.hash.clone().ok_or_else(|| ActorError::FunctionalCritical {
+            description: "Hash is None".to_string(),
+        })
+    }
+
     fn get_subject_data(
         &self,
         subject_id: &DigestIdentifier,
@@ -361,6 +367,8 @@ impl Node {
         ctx: &mut ActorContext<Self>,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
+        let hash = self.hash()?;
+
         for subject in self.owned_subjects.keys() {
             let distributor_name = format!("distributor_{}", subject);
             if ctx
@@ -374,6 +382,7 @@ impl Node {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         ledger_batch_size: self.ledger_batch_size,
+                        hash,
                     },
                 )
                 .await?;
@@ -393,6 +402,7 @@ impl Node {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         ledger_batch_size: self.ledger_batch_size,
+                        hash,
                     },
                 )
                 .await?;
@@ -635,33 +645,59 @@ impl Node {
                         "/user/node/subject_manager/{}/witnesses_register",
                         governance_id
                     ));
-                    let actor = ctx
+
+                    let sn = if let Ok(actor) = ctx
                         .system()
                         .get_actor::<WitnessesRegister>(&actor_path)
-                        .await?;
-                    let response = actor
-                        .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
-                            subject_id: subject_id.clone(),
-                        })
-                        .await?;
-                    let WitnessesRegisterResponse::TrackerOwnerSn { data } =
-                        response
-                    else {
-                        return Err(ActorError::UnexpectedResponse {
-                            path: actor_path,
-                            expected:
-                                "WitnessesRegisterResponse::TrackerOwnerSn"
-                                    .to_owned(),
-                        });
+                        .await
+                    {
+                        let response = actor
+                            .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
+                                subject_id: subject_id.clone(),
+                            })
+                            .await?;
+                        let WitnessesRegisterResponse::TrackerOwnerSn {
+                            data,
+                        } = response
+                        else {
+                            return Err(ActorError::UnexpectedResponse {
+                                path: actor_path,
+                                expected:
+                                    "WitnessesRegisterResponse::TrackerOwnerSn"
+                                        .to_owned(),
+                            });
+                        };
+                        data.map(|(_, sn)| sn).ok_or_else(|| {
+                            ActorError::Functional {
+                                description: format!(
+                                    "local tracker sn not found for subject {}",
+                                    subject_id
+                                ),
+                            }
+                        })?
+                    } else {
+                        // Safe mode fallback: witnesses_register doesn't exist,
+                        // get SN directly from tracker
+                        let tracker_path = ActorPath::from(format!(
+                            "/user/node/subject_manager/{}",
+                            subject_id
+                        ));
+                        let tracker = ctx
+                            .system()
+                            .get_actor::<Tracker>(&tracker_path)
+                            .await?;
+                        let response = tracker
+                            .ask(TrackerMessage::GetMetadata)
+                            .await?;
+                        let TrackerResponse::Metadata(metadata) = response else {
+                            return Err(ActorError::UnexpectedResponse {
+                                path: tracker_path,
+                                expected: "TrackerResponse::Metadata".to_owned(),
+                            });
+                        };
+                        metadata.sn
                     };
-                    let sn = data.map(|(_, sn)| sn).ok_or_else(|| {
-                        ActorError::Functional {
-                            description: format!(
-                                "local tracker sn not found for subject {}",
-                                subject_id
-                            ),
-                        }
-                    })?;
+
                     let hi_sn = to_sn.map(|to_sn| to_sn.min(sn)).unwrap_or(sn);
                     let ledger = self
                         .collect_tracker_ledger(ctx, &subject_id, hi_sn)
@@ -941,6 +977,8 @@ impl Actor for Node {
             return Err(e);
         }
 
+        let hash = self.hash()?;
+
         if !safe_mode
             && let Err(e) = ctx
                 .create_child(
@@ -949,6 +987,7 @@ impl Actor for Node {
                         our_key: self.our_key.clone(),
                         network,
                         ledger_batch_size: self.ledger_batch_size,
+                        hash,
                     },
                 )
                 .await
@@ -1011,6 +1050,7 @@ impl Handler<Self> for Node {
                 )
                 .await;
 
+                let hash = self.hash()?;
                 let distributor_name = format!("distributor_{}", subject_id);
                 if ctx
                     .get_child::<DistriWorker>(&distributor_name)
@@ -1023,6 +1063,7 @@ impl Handler<Self> for Node {
                             our_key: self.our_key.clone(),
                             network,
                             ledger_batch_size: self.ledger_batch_size,
+                            hash,
                         },
                     )
                     .await?;

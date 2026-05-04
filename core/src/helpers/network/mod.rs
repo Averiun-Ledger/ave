@@ -44,11 +44,12 @@ pub enum ActorMessage {
         actual_sn: Option<u64>,
         target_sn: Option<u64>,
         subject_id: DigestIdentifier,
+        already_verified_transfer_sn: Option<u64>,
     },
     DistributionLedgerRes {
         ledger: Vec<Ledger>,
         is_all: bool,
-        transfer_sn: Option<u64>,
+        transfer_event: Option<Ledger>,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,

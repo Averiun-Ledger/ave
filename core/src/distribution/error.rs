@@ -66,6 +66,9 @@ pub enum DistributorError {
 
     #[error("failed to update subject ledger: {details}")]
     UpdateLedgerFailed { details: String },
+
+    #[error("transfer event verification failed: {details}")]
+    TransferEventInvalid { details: String },
 }
 
 impl From<DistributorError> for ActorError {
@@ -83,7 +86,8 @@ impl From<DistributorError> for ActorError {
             | DistributorError::EmptyEvents
             | DistributorError::MissingCreateEventInCreateLedger { .. }
             | DistributorError::GetGovernanceFailed { .. }
-            | DistributorError::GovernanceVersionMismatch { .. } => {
+            | DistributorError::GovernanceVersionMismatch { .. }
+            | DistributorError::TransferEventInvalid { .. } => {
                 Self::Functional {
                     description: error.to_string(),
                 }

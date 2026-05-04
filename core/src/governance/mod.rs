@@ -37,11 +37,12 @@ use crate::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
         tracker_sync::{TrackerSync, TrackerSyncConfig},
-        transfer_hint_register::{
-            TransferHintRegister, TransferHintRegisterMessage,
-            TransferHintRegisterResponse,
-        },
+
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
+        transfer_verification_register::{
+            TransferVerificationRegister, TransferVerificationRegisterMessage,
+            TransferVerificationRegisterResponse,
+        },
         witnesses_register::{
             CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
@@ -105,7 +106,8 @@ pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
 pub mod tracker_sync;
-pub mod transfer_hint_register;
+pub mod transfer_verification_register;
+
 pub mod version_sync;
 pub mod witnesses_register;
 
@@ -2659,49 +2661,65 @@ impl Governance {
             }
         }
 
-        let transfer_hint_register = match ctx
+        let transfer_verification_register = match ctx
             .create_child(
-                "transfer_hint_register",
-                TransferHintRegister::initial((*self.our_key).clone()),
+                "transfer_verification_register",
+                TransferVerificationRegister::initial(()),
             )
             .await
         {
             Ok(actor) => Some(actor),
             Err(ActorError::Exists { .. }) => {
                 match ctx
-                    .get_child::<TransferHintRegister>("transfer_hint_register")
+                    .get_child::<TransferVerificationRegister>(
+                        "transfer_verification_register",
+                    )
                     .await
                 {
                     Ok(actor) => Some(actor),
                     Err(error) => {
                         cleanup_errors.push(format!(
-                            "transfer_hint_register lookup: {error}"
+                            "transfer_verification_register lookup: {error}"
                         ));
                         None
                     }
                 }
             }
             Err(error) => {
-                cleanup_errors.push(format!("transfer_hint_register: {error}"));
+                cleanup_errors.push(format!(
+                    "transfer_verification_register: {error}"
+                ));
                 None
             }
         };
 
-        if let Some(transfer_hint_register) = transfer_hint_register {
-            match transfer_hint_register
-                .ask(TransferHintRegisterMessage::DeleteSubject {
-                    subject_id: subject_id.clone(),
-                })
+        if let Some(transfer_verification_register) =
+            transfer_verification_register
+        {
+            match transfer_verification_register
+                .ask(
+                    TransferVerificationRegisterMessage::Remove {
+                        subject_id: subject_id.clone(),
+                    },
+                )
                 .await
             {
-                Ok(TransferHintRegisterResponse::Ok) => {}
-                Err(error) => cleanup_errors
-                    .push(format!("transfer_hint_register: {error}")),
+                Ok(TransferVerificationRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "transfer_verification_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!(
+                        "transfer_verification_register: {error}"
+                    ))
+                }
             }
 
-            if let Err(error) = transfer_hint_register.ask_stop().await {
-                cleanup_errors
-                    .push(format!("transfer_hint_register stop: {error}"));
+            if let Err(error) = transfer_verification_register.ask_stop().await
+            {
+                cleanup_errors.push(format!(
+                    "transfer_verification_register stop: {error}"
+                ));
             }
         }
 
@@ -3007,47 +3025,61 @@ impl Governance {
             }
         }
 
-        let transfer_hint_register = match ctx
+        let transfer_verification_register = match ctx
             .create_child(
-                "transfer_hint_register",
-                TransferHintRegister::initial((*self.our_key).clone()),
+                "transfer_verification_register",
+                TransferVerificationRegister::initial(()),
             )
             .await
         {
             Ok(actor) => Some(actor),
             Err(ActorError::Exists { .. }) => {
                 match ctx
-                    .get_child::<TransferHintRegister>("transfer_hint_register")
+                    .get_child::<TransferVerificationRegister>(
+                        "transfer_verification_register",
+                    )
                     .await
                 {
                     Ok(actor) => Some(actor),
                     Err(error) => {
                         cleanup_errors.push(format!(
-                            "transfer_hint_register lookup: {error}"
+                            "transfer_verification_register lookup: {error}"
                         ));
                         None
                     }
                 }
             }
             Err(error) => {
-                cleanup_errors.push(format!("transfer_hint_register: {error}"));
+                cleanup_errors.push(format!(
+                    "transfer_verification_register: {error}"
+                ));
                 None
             }
         };
 
-        if let Some(transfer_hint_register) = transfer_hint_register {
-            match transfer_hint_register
-                .ask(TransferHintRegisterMessage::PurgeStorage)
+        if let Some(transfer_verification_register) =
+            transfer_verification_register
+        {
+            match transfer_verification_register
+                .ask(TransferVerificationRegisterMessage::PurgeStorage)
                 .await
             {
-                Ok(TransferHintRegisterResponse::Ok) => {}
-                Err(error) => cleanup_errors
-                    .push(format!("transfer_hint_register: {error}")),
+                Ok(TransferVerificationRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "transfer_verification_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!(
+                        "transfer_verification_register: {error}"
+                    ))
+                }
             }
 
-            if let Err(error) = transfer_hint_register.ask_stop().await {
-                cleanup_errors
-                    .push(format!("transfer_hint_register stop: {error}"));
+            if let Err(error) = transfer_verification_register.ask_stop().await
+            {
+                cleanup_errors.push(format!(
+                    "transfer_verification_register stop: {error}"
+                ));
             }
         }
 
@@ -3248,14 +3280,14 @@ impl Actor for Governance {
 
         if let Err(e) = ctx
             .create_child(
-                "transfer_hint_register",
-                TransferHintRegister::initial((*self.our_key).clone()),
+                "transfer_verification_register",
+                TransferVerificationRegister::initial(()),
             )
             .await
         {
             error!(
                 error = %e,
-                "Failed to create transfer_hint_register child"
+                "Failed to create transfer_verification_register child"
             );
             return Err(e);
         }
