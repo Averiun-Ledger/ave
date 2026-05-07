@@ -16,7 +16,7 @@ use crate::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
             TrackerVisibilityMode, TrackerVisibilityState, emit_fail,
-            get_last_event, purge_storage,
+            get_last_event, purge_storage, remove_verified_transfer,
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
@@ -787,6 +787,12 @@ impl Tracker {
                                 ctx,
                                 transfer_request.new_owner.clone(),
                                 event.gov_version,
+                            )
+                            .await?;
+                            remove_verified_transfer(
+                                ctx,
+                                &self.governance_id,
+                                &self.subject_metadata.subject_id,
                             )
                             .await?;
                         }

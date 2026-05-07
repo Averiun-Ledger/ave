@@ -258,7 +258,7 @@ pub async fn get_verified_transfer_sn<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
-) -> Result<Option<u64>, ActorError>
+) -> Result<Option<(u64, PublicKey)>, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -277,7 +277,7 @@ where
         .await?;
 
     match response {
-        TransferVerificationRegisterResponse::VerifiedTransferSn(sn) => Ok(sn),
+        TransferVerificationRegisterResponse::VerifiedTransferSn(result) => Ok(result),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "TransferVerificationRegisterResponse::VerifiedTransferSn"
@@ -291,6 +291,7 @@ pub async fn record_verified_transfer<A>(
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
     transfer_sn: u64,
+    sender: PublicKey,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
@@ -307,6 +308,7 @@ where
         .ask(TransferVerificationRegisterMessage::RecordVerifiedTransfer {
             subject_id: subject_id.to_owned(),
             transfer_sn,
+            sender,
         })
         .await?;
 
@@ -426,6 +428,45 @@ where
             path: actor_path,
             expected:
                 "WitnessesRegisterResponse::CreateGovVersionLimit { limit }"
+                    .to_string(),
+        }),
+    }
+}
+
+pub async fn check_gov_version_limit<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+) -> Result<GovVersionLimit, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GovVersionLimit {
+            subject_id: subject_id.clone(),
+            node,
+            namespace,
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::GovVersionLimit { limit } => Ok(limit),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected:
+                "WitnessesRegisterResponse::GovVersionLimit { limit }"
                     .to_string(),
         }),
     }

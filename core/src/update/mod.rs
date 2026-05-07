@@ -256,6 +256,7 @@ impl Update {
             .await
             .ok()
             .flatten()
+            .map(|(sn, _)| sn)
     }
 
     async fn request_distribution(

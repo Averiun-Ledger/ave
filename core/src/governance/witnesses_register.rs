@@ -260,6 +260,12 @@ pub enum WitnessesRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
+    GovVersionLimit {
+        subject_id: DigestIdentifier,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+    },
     CreateAccess {
         owner: PublicKey,
         node: PublicKey,
@@ -296,7 +302,6 @@ pub enum WitnessesRegisterMessage {
     },
     SimulateTransferHiSnLimit {
         subject_id: DigestIdentifier,
-        ledger: Vec<Ledger>,
         transfer_event: Ledger,
         node: PublicKey,
         namespace: String,
@@ -394,6 +399,9 @@ pub enum WitnessesRegisterResponse {
     },
     HiSnLimit {
         limit: HiSnLimit,
+    },
+    GovVersionLimit {
+        limit: GovVersionLimit,
     },
     CreateAccess {
         allowed: bool,
@@ -890,7 +898,7 @@ impl WitnessesRegister {
         subject_id: &DigestIdentifier,
         data: &TransferData,
         node: &PublicKey,
-        sender: &PublicKey,
+        _sender: &PublicKey,
         namespace: String,
         schema_id: SchemaType,
         actual_sn: Option<u64>,
@@ -904,8 +912,8 @@ impl WitnessesRegister {
         ),
         ActorError,
     > {
-        let access_limit = match self
-            .search_witnesses(
+        let (sn_limit, mut effective_owner) = self
+            .search_witnesses_with_owner(
                 ctx,
                 node,
                 data,
@@ -913,73 +921,86 @@ impl WitnessesRegister {
                 schema_id.clone(),
                 subject_id.clone(),
             )
-            .await?
-        {
+            .await?;
+
+        println!("[build_tracker_window_from_data] subject={} node={} actual_owner={} old_owners={:?} actual_new_owner={:?} data.sn={} sn_limit={:?} effective_owner={:?}",
+            subject_id, node, data.actual_owner, data.old_owners.keys().collect::<Vec<_>>(), data.actual_new_owner_data.as_ref().map(|(o,_)| o.clone()), data.sn, sn_limit, effective_owner);
+
+        let access_limit = match sn_limit {
             SnLimit::Sn(sn) => Some(sn),
             SnLimit::LastSn => Some(data.sn),
             SnLimit::NotSn => {
-                if data.actual_owner == *node
-                    || data
-                        .actual_new_owner_data
-                        .as_ref()
-                        .is_some_and(|(new_owner, _)| new_owner == node)
+                if data.actual_owner == *node {
+                    effective_owner = Some(data.actual_owner.clone());
+                    Some(data.sn)
+                } else if let Some((new_owner, _)) = &data.actual_new_owner_data
+                    && new_owner == node
                 {
+                    effective_owner = Some(new_owner.clone());
                     Some(data.sn)
                 } else {
-                    data.old_owners.get(node).map(|old_owner| old_owner.sn)
+                    data.old_owners.get(node).map(|old_owner| {
+                        effective_owner = Some(node.clone());
+                        old_owner.sn
+                    })
                 }
             }
         };
+
+        println!("[build_tracker_window_from_data] subject={} node={} access_limit={:?}", subject_id, node, access_limit);
 
         let Some(access_limit) = access_limit else {
             return Ok((None, None, None, true, Vec::new()));
         };
 
-        let sender_transfer_sn = if data
-            .actual_new_owner_data
-            .as_ref()
-            .is_some_and(|(new_owner, _)| new_owner == sender)
-        {
-            Some(data.sn)
-        } else if data.actual_owner == *sender {
-            data.old_owners
-                .values()
-                .map(|old_owner| old_owner.sn)
-                .max()
-                .map(|sn| sn.saturating_sub(1))
-        } else {
-            data.old_owners
-                .get(sender)
-                .map(|old_owner| old_owner.sn.saturating_sub(1))
-        };
-        let receiver_transfer_sn = if data.actual_owner == *node {
-            data.old_owners
-                .values()
-                .map(|old_owner| old_owner.sn)
-                .max()
-                .map(|sn| sn.saturating_sub(1))
-        } else if data
-            .actual_new_owner_data
-            .as_ref()
-            .is_some_and(|(new_owner, _)| new_owner == node)
-        {
-            Some(data.sn)
-        } else {
-            data.old_owners
-                .get(node)
-                .map(|old_owner| old_owner.sn.saturating_sub(1))
-        };
+        let mut sorted_old_owners: Vec<(PublicKey, u64)> = data
+            .old_owners
+            .iter()
+            .map(|(k, v)| (k.clone(), v.sn))
+            .collect();
+        sorted_old_owners.sort_by_key(|(_, sn)| *sn);
 
-        let transfer_sn = match (sender_transfer_sn, receiver_transfer_sn) {
-            (Some(sender), Some(receiver)) => Some(sender.max(receiver)),
-            (Some(sender), None) => Some(sender),
-            (None, Some(receiver)) => Some(receiver),
-            (None, None) => None,
+        let transfer_sn = if let Some(owner) = effective_owner {
+            if data.actual_new_owner_data.as_ref().is_some_and(|(new_owner, _)| new_owner == &owner)
+            {
+                // Es el new_owner pendiente: necesita ver la transferencia actual
+                Some(data.sn)
+            } else if data.actual_owner == owner {
+                // Es el owner actual: su incoming transfer es el outgoing del
+                // último old_owner. Solo lo necesita si su acceso cruza ese transfer.
+                sorted_old_owners
+                    .last()
+                    .map(|(_, sn)| sn.saturating_sub(1))
+                    .filter(|transfer_sn| access_limit >= *transfer_sn)
+            } else if let Some(idx) = sorted_old_owners.iter().position(|(o, _)| o == &owner) {
+                // Es un old_owner: su incoming transfer es el outgoing del owner
+                // anterior. Para idx==0, el owner anterior es el creador original
+                // (que no está en old_owners); su outgoing transfer está justo
+                // antes del Confirm del primer old_owner.
+                let candidate = if idx == 0 {
+                    sorted_old_owners[0].1.saturating_sub(1)
+                } else {
+                    sorted_old_owners[idx - 1].1.saturating_sub(1)
+                };
+                // Solo necesita el transfer_event si su access_limit lo cruza
+                if access_limit >= candidate {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
         }
         .filter(|transfer_sn| actual_sn.is_none_or(|sn| sn < *transfer_sn));
 
+
+
         let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
+
             return Ok((None, transfer_sn, None, true, Vec::new()));
         }
 
@@ -1037,6 +1058,9 @@ impl WitnessesRegister {
         let transfer_sn = transfer_sn
             .filter(|transfer_sn| actual_sn.is_none_or(|sn| *transfer_sn > sn));
 
+        println!("[build_tracker_window_from_data] subject={} node={} access_limit={:?} transfer_sn={:?} clear_sn={:?} actual_sn={:?}",
+            subject_id, node, access_limit, transfer_sn, clear_sn, actual_sn);
+
         Ok((Some(access_limit), transfer_sn, clear_sn, true, ranges))
     }
 
@@ -1075,7 +1099,7 @@ impl WitnessesRegister {
         ledger: &[Ledger],
     ) -> Result<TransferData, ActorError> {
         let Some(first_ledger) = ledger.first() else {
-            return Err(ActorError::FunctionalCritical {
+            return Err(ActorError::Functional {
                 description: format!(
                     "Missing first ledger while reconstructing tracker window for {subject_id}"
                 ),
@@ -1083,7 +1107,7 @@ impl WitnessesRegister {
         };
 
         if !first_ledger.is_create_event() {
-            return Err(ActorError::FunctionalCritical {
+            return Err(ActorError::Functional {
                 description: format!(
                     "Missing create event while reconstructing tracker window for {subject_id}"
                 ),
@@ -1106,6 +1130,9 @@ impl WitnessesRegister {
 
         for event in ledger {
             data.sn = event.sn;
+
+            println!("[transfer_data_from_ledger] subject={} event.sn={} event_type={:?} actual_owner={} actual_new_owner={:?}",
+                subject_id, event.sn, event.get_event_request_type(), data.actual_owner, data.actual_new_owner_data.as_ref().map(|(o,_)| o.clone()));
 
             match event.get_event_request() {
                 Some(EventRequest::Transfer(transfer_request)) => {
@@ -1138,15 +1165,6 @@ impl WitnessesRegister {
         }
 
         Ok(data)
-    }
-
-    /// Aplica un evento Transfer sobre `TransferData` en memoria (sin mutar estado persistente).
-    fn simulate_transfer_on_data(
-        data: &mut TransferData,
-        new_owner: PublicKey,
-        gov_version: u64,
-    ) {
-        data.actual_new_owner_data = Some((new_owner, gov_version));
     }
 
     async fn access_limit_for_node(
@@ -1217,12 +1235,15 @@ impl WitnessesRegister {
         schema_id: &SchemaType,
         data: &TransferData,
     ) -> Result<HiSnLimit, ActorError> {
+
+
         if data.actual_owner == *node
             || data
                 .actual_new_owner_data
                 .as_ref()
                 .is_some_and(|(new_owner, _)| new_owner == node)
         {
+
             return Ok(HiSnLimit::Infinity);
         }
 
@@ -1249,7 +1270,6 @@ impl WitnessesRegister {
                 None => HiSnLimit::None,
             },
         };
-
         Ok(limit)
     }
 
@@ -1281,6 +1301,158 @@ impl WitnessesRegister {
             .await?;
 
         Ok(limit)
+    }
+
+    async fn gov_version_limit_for_node(
+        &self,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        namespace: &str,
+        schema_id: &SchemaType,
+    ) -> Result<GovVersionLimit, ActorError> {
+        let Some(data) = self.subjects.get(subject_id) else {
+            return Ok(GovVersionLimit::None);
+        };
+
+        if data.actual_owner == *node
+            || data
+                .actual_new_owner_data
+                .as_ref()
+                .is_some_and(|(new_owner, _)| new_owner == node)
+        {
+            return Ok(GovVersionLimit::Infinity);
+        }
+
+        let limit = self
+            .gov_version_limit_for_transfer_data(
+                node, namespace, schema_id, data,
+            )
+            .await;
+
+        Ok(limit)
+    }
+
+    async fn gov_version_limit_for_transfer_data(
+        &self,
+        node: &PublicKey,
+        namespace: &str,
+        schema_id: &SchemaType,
+        data: &TransferData,
+    ) -> GovVersionLimit {
+        let parse_namespace = Namespace::from(namespace.to_owned());
+        let mut better_gov_version: Option<u64> = None;
+
+        // Obtengo los testigos del owner actual
+        if let Some(witnesses_creator) = self.witnesses_creator.get(&(
+            data.actual_owner.to_owned(),
+            namespace.to_owned(),
+            schema_id.clone(),
+        )) {
+            match self
+                .check_current_owner(
+                    witnesses_creator,
+                    node,
+                    schema_id,
+                    &parse_namespace,
+                    data.sn,
+                    (data.gov_version, better_gov_version),
+                )
+                .await
+            {
+                ActualSearch::End(SnLimit::LastSn) => {
+                    return GovVersionLimit::Infinity;
+                }
+                ActualSearch::End(_) => {}
+                ActualSearch::Continue { gov_version } => {
+                    better_gov_version = gov_version;
+                }
+            }
+        }
+
+        // Obtengo los testigos del new_owner (si hay transferencia pendiente)
+        if let Some((new_owner, new_owner_gov_version)) =
+            &data.actual_new_owner_data
+            && let Some(witnesses_creator) = self.witnesses_creator.get(&(
+                new_owner.to_owned(),
+                namespace.to_owned(),
+                schema_id.clone(),
+            ))
+        {
+            match self
+                .check_current_owner(
+                    witnesses_creator,
+                    node,
+                    schema_id,
+                    &parse_namespace,
+                    data.sn,
+                    (*new_owner_gov_version, better_gov_version),
+                )
+                .await
+            {
+                ActualSearch::End(SnLimit::LastSn) => {
+                    return GovVersionLimit::Infinity;
+                }
+                ActualSearch::End(_) => {}
+                ActualSearch::Continue { gov_version } => {
+                    better_gov_version = gov_version;
+                }
+            }
+        }
+
+        // Not_owners
+        for (creator, old_data) in data.old_owners.iter() {
+            if let Some(witnesses_creator) = self.witnesses_creator.get(&(
+                creator.to_owned(),
+                namespace.to_owned(),
+                schema_id.clone(),
+            )) {
+                if let Some((interval, actual_lo)) =
+                    witnesses_creator.get(&WitnessesType::User(node.clone()))
+                {
+                    let covered_old_owner = Self::covered_old_owner_intervals(
+                        *actual_lo, interval, old_data,
+                    );
+
+                    if let Some(gov_version) =
+                        covered_old_owner.iter().last().map(|range| range.hi)
+                    {
+                        better_gov_version =
+                            better_gov_version.max(Some(gov_version));
+                    }
+                }
+
+                if let Some((interval, actual_lo)) =
+                    witnesses_creator.get(&WitnessesType::Witnesses)
+                {
+                    let covered_old_owner = Self::covered_old_owner_intervals(
+                        *actual_lo, interval, old_data,
+                    );
+
+                    if covered_old_owner.iter().next().is_some() {
+                        let capped_old_owner = OldOwnerData {
+                            sn: old_data.sn,
+                            interval_gov_version: covered_old_owner,
+                        };
+
+                        if let Some(gov_version) = self.search_schemas_old(
+                            node,
+                            schema_id,
+                            &parse_namespace,
+                            &capped_old_owner,
+                            better_gov_version,
+                        ) {
+                            better_gov_version =
+                                better_gov_version.max(Some(gov_version));
+                        }
+                    }
+                }
+            }
+        }
+
+        match better_gov_version {
+            Some(version) => GovVersionLimit::Version(version),
+            None => GovVersionLimit::None,
+        }
     }
 
     fn close_creator_registration(
@@ -1604,7 +1776,7 @@ impl WitnessesRegister {
         }
     }
 
-    async fn search_witnesses(
+    async fn search_witnesses_with_owner(
         &self,
         ctx: &ActorContext<Self>,
         node: &PublicKey,
@@ -1612,9 +1784,10 @@ impl WitnessesRegister {
         namespace: String,
         schema_id: SchemaType,
         subject_id: DigestIdentifier,
-    ) -> Result<SnLimit, ActorError> {
+    ) -> Result<(SnLimit, Option<PublicKey>), ActorError> {
         let mut better_gov_version: Option<u64> = None;
         let mut better_sn: Option<u64> = None;
+        let mut effective_owner: Option<PublicKey> = None;
         let parse_namespace = Namespace::from(namespace.clone());
 
         // Obtengo los testigos del owner
@@ -1635,7 +1808,7 @@ impl WitnessesRegister {
                 .await
             {
                 ActualSearch::End(sn_limit) => {
-                    return Ok(sn_limit);
+                    return Ok((sn_limit, Some(data.actual_owner.clone())));
                 }
                 ActualSearch::Continue { gov_version } => {
                     better_gov_version = gov_version;
@@ -1664,7 +1837,7 @@ impl WitnessesRegister {
                 .await
             {
                 ActualSearch::End(sn_limit) => {
-                    return Ok(sn_limit);
+                    return Ok((sn_limit, Some(new_owner.clone())));
                 }
                 ActualSearch::Continue { gov_version } => {
                     better_gov_version = gov_version;
@@ -1672,8 +1845,9 @@ impl WitnessesRegister {
             }
         }
 
-        // Not_owners
+        // Not_owners: rastreamos qué old_owner da el mejor resultado
         for (creator, old_data) in data.old_owners.iter() {
+            let mut matched = false;
             if let Some(witnesses_creator) = self.witnesses_creator.get(&(
                 creator.to_owned(),
                 namespace.clone(),
@@ -1694,15 +1868,21 @@ impl WitnessesRegister {
                             .await?
                         {
                             SnLimit::Sn(sn) => {
-                                better_sn =
-                                    better_sn.max(Some(sn.min(old_data.sn)));
+                                let candidate = sn.min(old_data.sn);
+                                if better_sn.map_or(true, |bs| candidate > bs) {
+                                    better_sn = Some(candidate);
+                                    effective_owner = Some(creator.clone());
+                                }
                             }
                             SnLimit::LastSn => {
-                                better_sn = better_sn.max(Some(old_data.sn));
+                                if better_sn.map_or(true, |bs| old_data.sn > bs) {
+                                    better_sn = Some(old_data.sn);
+                                    effective_owner = Some(creator.clone());
+                                }
                             }
                             SnLimit::NotSn => {}
                         }
-                    } else {
+                        matched = true;
                     }
                 }
 
@@ -1732,21 +1912,32 @@ impl WitnessesRegister {
                                 .await?
                             {
                                 SnLimit::Sn(sn) => {
-                                    better_sn = better_sn
-                                        .max(Some(sn.min(old_data.sn)));
+                                    let candidate = sn.min(old_data.sn);
+                                    if better_sn.map_or(true, |bs| candidate > bs) {
+                                        better_sn = Some(candidate);
+                                        effective_owner = Some(creator.clone());
+                                    }
                                 }
                                 SnLimit::LastSn => {
-                                    better_sn =
-                                        better_sn.max(Some(old_data.sn));
+                                    if better_sn.map_or(true, |bs| old_data.sn > bs) {
+                                        better_sn = Some(old_data.sn);
+                                        effective_owner = Some(creator.clone());
+                                    }
                                 }
                                 SnLimit::NotSn => {}
                             }
-                        } else {
+                            matched = true;
                         }
-                    } else {
                     }
                 }
-            } else {
+            }
+            // Si no hubo witnesses_creator para este creator pero el nodo ES el creator,
+            // lo tratamos como old_owner directo
+            if !matched && *creator == *node {
+                if better_sn.map_or(true, |bs| old_data.sn > bs) {
+                    better_sn = Some(old_data.sn);
+                    effective_owner = Some(creator.clone());
+                }
             }
         }
 
@@ -1765,6 +1956,23 @@ impl WitnessesRegister {
             SnLimit::NotSn
         };
 
+        Ok((sn_limit, effective_owner))
+    }
+
+    async fn search_witnesses(
+        &self,
+        ctx: &ActorContext<Self>,
+        node: &PublicKey,
+        data: &TransferData,
+        namespace: String,
+        schema_id: SchemaType,
+        subject_id: DigestIdentifier,
+    ) -> Result<SnLimit, ActorError> {
+        let (sn_limit, _) = self
+            .search_witnesses_with_owner(
+                ctx, node, data, namespace, schema_id, subject_id,
+            )
+            .await?;
         Ok(sn_limit)
     }
 
@@ -1934,7 +2142,8 @@ impl WitnessesRegister {
             )
             .await
         {
-            ActualSearch::End(_) => GovVersionLimit::Infinity,
+            ActualSearch::End(SnLimit::LastSn) => GovVersionLimit::Infinity,
+            ActualSearch::End(_) => GovVersionLimit::None,
             ActualSearch::Continue {
                 gov_version: Some(version),
             } => GovVersionLimit::Version(version),
@@ -2410,6 +2619,23 @@ impl Handler<Self> for WitnessesRegister {
 
                 return Ok(WitnessesRegisterResponse::HiSnLimit { limit });
             }
+            WitnessesRegisterMessage::GovVersionLimit {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+            } => {
+                let limit = self
+                    .gov_version_limit_for_node(
+                        &subject_id,
+                        &node,
+                        &namespace,
+                        &schema_id,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::GovVersionLimit { limit });
+            }
             WitnessesRegisterMessage::CreateAccess {
                 owner,
                 node,
@@ -2534,15 +2760,11 @@ impl Handler<Self> for WitnessesRegister {
             }
             WitnessesRegisterMessage::SimulateTransferHiSnLimit {
                 subject_id,
-                ledger,
                 transfer_event,
                 node,
                 namespace,
                 schema_id,
             } => {
-                let mut data =
-                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
-
                 let (new_owner, gov_version) =
                     match transfer_event.get_event_request() {
                         Some(EventRequest::Transfer(req)) => {
@@ -2557,10 +2779,31 @@ impl Handler<Self> for WitnessesRegister {
                         }
                     };
 
-                Self::simulate_transfer_on_data(
-                    &mut data,
-                    new_owner,
-                    gov_version,
+                // Si ya tenemos TransferData para este subject (por gobernanza o
+                // batches anteriores), lo usamos como base y solo actualizamos el
+                // estado actual con el evento de transferencia. Así conservamos
+                // el historial de old_owners que la simulación necesita.
+                let mut data = if let Some(existing) = self.subjects.get(&subject_id) {
+                    let mut data = existing.clone();
+                    data.actual_owner = transfer_event.ledger_seal_signature.signer.clone();
+                    data.actual_new_owner_data = Some((new_owner, gov_version));
+                    data.sn = transfer_event.sn;
+                    data.gov_version = gov_version;
+                    data
+                } else {
+                    TransferData {
+                        actual_owner: transfer_event.ledger_seal_signature.signer.clone(),
+                        actual_new_owner_data: Some((new_owner, gov_version)),
+                        sn: transfer_event.sn,
+                        gov_version,
+                        old_owners: HashMap::new(),
+                        visibility_state: TrackerVisibilityState::default(),
+                    }
+                };
+                data.visibility_state.record_event(
+                    0,
+                    TrackerStoredVisibility::Full,
+                    TrackerEventVisibility::NonFact,
                 );
 
                 let limit = self

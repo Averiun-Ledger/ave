@@ -6,7 +6,7 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::identity::DigestIdentifier;
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -26,7 +26,7 @@ use crate::{
     BorshSerialize,
 )]
 pub struct TransferVerificationRegister {
-    register: HashMap<DigestIdentifier, u64>,
+    register: HashMap<DigestIdentifier, (u64, PublicKey)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +38,7 @@ pub enum TransferVerificationRegisterMessage {
     RecordVerifiedTransfer {
         subject_id: DigestIdentifier,
         transfer_sn: u64,
+        sender: PublicKey,
     },
     GetVerifiedTransferSn {
         subject_id: DigestIdentifier,
@@ -58,7 +59,7 @@ impl Message for TransferVerificationRegisterMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TransferVerificationRegisterResponse {
     Ok,
-    VerifiedTransferSn(Option<u64>),
+    VerifiedTransferSn(Option<(u64, PublicKey)>),
 }
 
 impl Response for TransferVerificationRegisterResponse {}
@@ -73,6 +74,7 @@ pub enum TransferVerificationRegisterEvent {
     RecordVerifiedTransfer {
         subject_id: DigestIdentifier,
         transfer_sn: u64,
+        sender: PublicKey,
     },
 }
 
@@ -158,11 +160,13 @@ impl Handler<Self> for TransferVerificationRegister {
             TransferVerificationRegisterMessage::RecordVerifiedTransfer {
                 subject_id,
                 transfer_sn,
+                sender,
             } => {
                 self.on_event(
                     TransferVerificationRegisterEvent::RecordVerifiedTransfer {
                         subject_id: subject_id.clone(),
                         transfer_sn,
+                        sender: sender.clone(),
                     },
                     ctx,
                 )
@@ -172,6 +176,7 @@ impl Handler<Self> for TransferVerificationRegister {
                     msg_type = "RecordVerifiedTransfer",
                     subject_id = %subject_id,
                     transfer_sn = transfer_sn,
+                    sender = %sender,
                     "Transfer verification recorded"
                 );
 
@@ -180,18 +185,18 @@ impl Handler<Self> for TransferVerificationRegister {
             TransferVerificationRegisterMessage::GetVerifiedTransferSn {
                 subject_id,
             } => {
-                let sn = self.register.get(&subject_id).copied();
+                let result = self.register.get(&subject_id).cloned();
 
                 debug!(
                     msg_type = "GetVerifiedTransferSn",
                     subject_id = %subject_id,
-                    verified_sn = ?sn,
+                    verified = ?result,
                     "Transfer verification lookup completed"
                 );
 
                 Ok(
                     TransferVerificationRegisterResponse::VerifiedTransferSn(
-                        sn,
+                        result,
                     ),
                 )
             }
@@ -242,20 +247,23 @@ impl PersistentActor for TransferVerificationRegister {
             TransferVerificationRegisterEvent::RecordVerifiedTransfer {
                 subject_id,
                 transfer_sn,
+                sender,
             } => {
                 self.register
                     .entry(subject_id.to_owned())
-                    .and_modify(|existing| {
-                        if *transfer_sn > *existing {
-                            *existing = *transfer_sn;
+                    .and_modify(|(existing_sn, existing_sender)| {
+                        if *transfer_sn > *existing_sn {
+                            *existing_sn = *transfer_sn;
+                            *existing_sender = sender.clone();
                         }
                     })
-                    .or_insert(*transfer_sn);
+                    .or_insert((*transfer_sn, sender.clone()));
 
                 debug!(
                     event_type = "RecordVerifiedTransfer",
                     subject_id = %subject_id,
                     transfer_sn = transfer_sn,
+                    sender = %sender,
                     "Transfer verification register state updated"
                 );
             }

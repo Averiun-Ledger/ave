@@ -31,6 +31,7 @@ async fn test_witeness_not_gov() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -168,6 +169,7 @@ async fn test_not_access() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -364,6 +366,7 @@ async fn test_basic_access() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -533,6 +536,7 @@ async fn test_basic_access() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[1].keys.clone()),
         ..Default::default()
     })
@@ -660,6 +664,7 @@ async fn test_basic_transfers() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -1158,6 +1163,7 @@ async fn test_basic_transfers() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[2].keys.clone()),
         ..Default::default()
     })
@@ -1232,6 +1238,7 @@ async fn test_basic_transfers() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[1].keys.clone()),
         ..Default::default()
     })
@@ -1254,6 +1261,7 @@ async fn test_basic_transfers() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[3].keys.clone()),
         ..Default::default()
     })
@@ -1380,6 +1388,7 @@ async fn test_basic_explicit_witness() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -1614,6 +1623,7 @@ async fn test_basic_explicit_witness() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[2].keys.clone()),
         ..Default::default()
     })
@@ -1740,6 +1750,7 @@ async fn test_basic_implicit_witness() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -2016,6 +2027,7 @@ async fn test_basic_implicit_witness() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[2].keys.clone()),
         ..Default::default()
     })
@@ -2152,6 +2164,7 @@ async fn test_explicit_witness() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -2504,6 +2517,7 @@ async fn test_explicit_witness() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[1].keys.clone()),
         ..Default::default()
     })
@@ -2706,6 +2720,7 @@ async fn test_explicit_witness() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(node_new_alice.keys.clone()),
         ..Default::default()
     })
@@ -2771,6 +2786,7 @@ async fn test_explicit_witness_2() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -3268,6 +3284,7 @@ async fn test_explicit_witness_2() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[3].keys.clone()),
         ..Default::default()
     })
@@ -3331,6 +3348,7 @@ async fn test_explicit_witness_2_1() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -3848,6 +3866,7 @@ async fn test_explicit_witness_2_1() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[3].keys.clone()),
         ..Default::default()
     })
@@ -3915,6 +3934,7 @@ async fn test_range() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -4214,6 +4234,7 @@ async fn test_range() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[2].keys.clone()),
         ..Default::default()
     })
@@ -4307,6 +4328,7 @@ async fn test_ns_schema() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -4675,6 +4697,7 @@ async fn test_multi_source() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -4910,6 +4933,7 @@ async fn test_multi_source() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[1].keys.clone()),
         ..Default::default()
     })
@@ -5094,6 +5118,7 @@ async fn test_multi_source() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[3].keys.clone()),
         ..Default::default()
     })
@@ -5228,6 +5253,7 @@ async fn test_multi_source() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(node_new_charlie.keys.clone()),
         ..Default::default()
     })
@@ -5294,6 +5320,7 @@ async fn test_more_cases() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -5565,6 +5592,7 @@ async fn test_more_cases() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[4].keys.clone()),
         ..Default::default()
     })
@@ -5737,6 +5765,7 @@ async fn test_more_cases() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(node_new_dali.keys.clone()),
         ..Default::default()
     })
@@ -5796,6 +5825,7 @@ async fn test_more_cases_1_1() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -6068,6 +6098,7 @@ async fn test_more_cases_1_1() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[1].keys.clone()),
         ..Default::default()
     })
@@ -6133,6 +6164,7 @@ async fn test_more_cases_2() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -6384,6 +6416,7 @@ async fn test_more_cases_2() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[3].keys.clone()),
         ..Default::default()
     })
@@ -6447,6 +6480,7 @@ async fn test_more_cases_2_1() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -6763,6 +6797,7 @@ async fn test_more_cases_3() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -7003,6 +7038,7 @@ async fn test_chained_old_owners_witness_range_cut() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0], vec![0]],
             always_accept: true,
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -7302,6 +7338,7 @@ async fn test_chained_old_owners_witness_range_cut() {
         listen_address,
         peers,
         always_accept: true,
+        ledger_batch_size: Some(1),
         keys: Some(nodes[4].keys.clone()),
         ..Default::default()
     })
@@ -7367,6 +7404,7 @@ async fn test_old_owner_cut_ranges_battery() {
                 bootstrap: vec![vec![]],
                 addressable: vec![vec![0], vec![0], vec![0]],
                 always_accept: true,
+                ledger_batch_size: Some(1),
                 ..Default::default()
             })
             .await;
@@ -7626,6 +7664,10 @@ async fn test_old_owner_cut_ranges_battery() {
             get_subject(&witness_dali, subject_id.clone(), Some(3), true)
                 .await
                 .unwrap();
+        let _state =
+            get_subject(&owner, subject_id.clone(), Some(5), true)
+                .await
+                .unwrap();
 
         nodes[3].token.cancel();
         join_all(nodes[3].handler.iter_mut()).await;
@@ -7643,6 +7685,7 @@ async fn test_old_owner_cut_ranges_battery() {
             peers,
             always_accept: true,
             keys: Some(nodes[3].keys.clone()),
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -7717,6 +7760,7 @@ async fn test_old_owner_cut_ranges_battery() {
                 bootstrap: vec![vec![]],
                 addressable: vec![vec![0], vec![0], vec![0]],
                 always_accept: true,
+                ledger_batch_size: Some(1),
                 ..Default::default()
             })
             .await;
@@ -8007,6 +8051,7 @@ async fn test_old_owner_cut_ranges_battery() {
             peers,
             always_accept: true,
             keys: Some(nodes[3].keys.clone()),
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -8079,6 +8124,7 @@ async fn test_old_owner_cut_ranges_battery() {
                 bootstrap: vec![vec![]],
                 addressable: vec![vec![0], vec![0], vec![0]],
                 always_accept: true,
+                ledger_batch_size: Some(1),
                 ..Default::default()
             })
             .await;
@@ -8390,6 +8436,7 @@ async fn test_old_owner_cut_ranges_battery() {
             peers,
             always_accept: true,
             keys: Some(nodes[3].keys.clone()),
+            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;

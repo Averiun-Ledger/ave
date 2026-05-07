@@ -1299,14 +1299,10 @@ impl RequestManager {
                 .collect();
         }
 
-        if distribution_plan.is_empty() {
-            return Ok(false);
-        }
-
         distribution_plan.retain(|entry| entry.node != *self.our_key);
 
         if distribution_plan.is_empty() {
-            warn!(
+            debug!(
                 request_id = %self.id,
                 "No witnesses available for distribution"
             );

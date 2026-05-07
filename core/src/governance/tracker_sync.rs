@@ -366,7 +366,8 @@ impl TrackerSync {
             get_verified_transfer_sn(ctx, &self.governance_id, subject_id)
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .map(|(sn, _)| sn);
 
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {

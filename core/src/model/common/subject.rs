@@ -641,7 +641,6 @@ pub async fn check_simulated_transfer_hi_sn_limit<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
-    ledger: Vec<Ledger>,
     transfer_event: Ledger,
     node: PublicKey,
     namespace: String,
@@ -661,7 +660,6 @@ where
     let response = actor
         .ask(WitnessesRegisterMessage::SimulateTransferHiSnLimit {
             subject_id: subject_id.clone(),
-            ledger,
             transfer_event,
             node,
             namespace,

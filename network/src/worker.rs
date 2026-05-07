@@ -1358,7 +1358,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     fn clear_pending_messages(&mut self, peer_id: &PeerId) {
-        warn!(target: TARGET, peer_id = %peer_id, "max dial attempts reached; dropping pending messages");
+        debug!(target: TARGET, peer_id = %peer_id, "max dial attempts reached; dropping pending messages");
 
         let dropped = self.drop_pending_outbound_messages(peer_id);
         if let Some(metrics) = self.metric_handle() {
