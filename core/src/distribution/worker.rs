@@ -434,7 +434,7 @@ impl DistriWorker {
 
         // 1. Batch actual trae un transfer_event nuevo y la simulación dice Witness
         if let (Some(transfer_event), Some(TransferSimulationResult::Witness)) = (transfer_event, transfer_simulation) {
-            let chunk_first_sn = ledger.first().map(|e| e.sn).unwrap_or(0);
+            let chunk_first_sn = ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
             println!("[check_auth_batch] camino1_check chunk_first={} transfer_event.sn={} cond={}", chunk_first_sn, transfer_event.sn, chunk_first_sn <= transfer_event.sn);
             if chunk_first_sn <= transfer_event.sn {
                 return Ok(DistributionAuth {
@@ -447,7 +447,7 @@ impl DistriWorker {
 
         // 2. Tenemos un transfer verificado anteriormente y el chunk está dentro
         //    de su rango de free passage. Vía libre hasta verified_transfer_sn.
-        let chunk_first_sn = ledger.first().map(|e| e.sn).unwrap_or(0);
+        let chunk_first_sn = ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
         if let Some(verified_sn) = verified_transfer_sn {
             println!("[check_auth_batch] camino2_check chunk_first={} verified_sn={} cond={}", chunk_first_sn, verified_sn, chunk_first_sn <= verified_sn);
             if chunk_first_sn <= verified_sn {
@@ -544,6 +544,20 @@ impl DistriWorker {
             };
 
             receiver_limit.min(offered_hi_sn)
+        };
+
+        // Seguridad: capar en Confirm/Reject para evitar distribución más allá de
+        // cambios de ownership.
+        let safe_hi_sn = if let Some(boundary) = ledger.iter().find_map(|event| {
+            matches!(
+                event.get_event_request_type(),
+                EventRequestType::Confirm | EventRequestType::Reject
+            )
+            .then_some(event.sn)
+        }) {
+            safe_hi_sn.min(boundary)
+        } else {
+            safe_hi_sn
         };
 
         Ok(DistributionAuth {
@@ -700,6 +714,19 @@ impl DistriWorker {
             };
 
             receiver_limit.min(offered_hi_sn)
+        };
+
+        // Seguridad: capar en Confirm/Reject para coherencia con check_auth_batch.
+        let safe_hi_sn = if let Some(boundary) = ledger.iter().find_map(|event| {
+            matches!(
+                event.get_event_request_type(),
+                EventRequestType::Confirm | EventRequestType::Reject
+            )
+            .then_some(event.sn)
+        }) {
+            safe_hi_sn.min(boundary)
+        } else {
+            safe_hi_sn
         };
 
         Ok(DistributionAuth {
@@ -1796,18 +1823,6 @@ impl Handler<Self> for DistriWorker {
                     return Err(DistributorError::ReceiverNoAccess.into());
                 }
 
-                if !is_gov && auth.safe_hi_sn < sn {
-                    warn!(
-                        msg_type = "LastEventDistribution",
-                        subject_id = %subject_id,
-                        sn = sn,
-                        safe_hi_sn = auth.safe_hi_sn,
-                        sender = %sender,
-                        "Discarding event above current receiver access limit"
-                    );
-                    return Err(DistributorError::ReceiverNoAccess.into());
-                }
-
                 let lease = if ledger.is_create_event() {
                     if let Err(e) = create_subject(ctx, *ledger.clone()).await {
                         if let ActorError::FunctionalCritical { .. } = e {
@@ -2025,7 +2040,7 @@ impl Handler<Self> for DistriWorker {
                     None
                 };
 
-                let verified_transfer_sn = if !common.is_gov {
+                let mut verified_transfer_sn = if !common.is_gov {
                     get_verified_transfer_sn(ctx, &common.governance_id, &subject_id).await.ok().flatten()
                         .filter(|(_, verified_sender)| *verified_sender == sender)
                         .map(|(sn, _)| sn)
@@ -2074,6 +2089,9 @@ impl Handler<Self> for DistriWorker {
                                 sender.clone(),
                             ).await?;
                             transfer_recorded = true;
+                            // Refrescar verified_transfer_sn para que la siguiente
+                            // iteración del loop pueda usar Path C (free passage).
+                            verified_transfer_sn = Some(transfer_event.sn);
                         }
                     }
 

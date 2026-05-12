@@ -1158,7 +1158,16 @@ impl WitnessesRegister {
                     }
                 }
                 Some(EventRequest::Reject(..)) => {
-                    let _ = data.actual_new_owner_data.take();
+                    if let Some((new_owner, new_owner_gov_version)) =
+                        data.actual_new_owner_data.take()
+                    {
+                        let entry = data.old_owners.entry(new_owner).or_default();
+                        entry.sn = event.sn;
+                        entry.interval_gov_version.insert(Interval {
+                            lo: new_owner_gov_version,
+                            hi: event.gov_version,
+                        });
+                    }
                 }
                 _ => {}
             }

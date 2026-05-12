@@ -4256,3 +4256,182 @@ async fn test_sink_replay_and_external_db_battery() {
     }
     assert_eq!(sink_events[7].public_key, owner.public_key());
 }
+
+
+#[test(tokio::test)]
+// test_build_batch_gov: Emisor construye batch de governance
+//
+// Qué se prueba:
+//   `build_distribution_batch` para una governance. Verifica que el emisor
+//   construye correctamente un batch de eventos de gobernanza (is_gov=true),
+//   sin transfer_event, con los límites de gov_version aplicados.
+//
+// Setup:
+//   1. Owner crea gobernanza con batch_size=2 (ledger_batch_size pequeño).
+//   2. Owner emite 1 fact de config + 3 facts (SN llega a 4:
+//      create SN=0 + config SN=1 + 3 facts SN=2..4).
+//   3. Witness W1 se autoriza con owner y hace update_subject.
+//   4. Verificar que W1 recibe TODOS los eventos (el batch se divide en
+//      múltiples chunks porque batch_size=2 < total_events).
+//   5. Verificar que W1 tiene el mismo SN que owner.
+//
+// Prioridad: MEDIA.
+async fn test_build_batch_gov() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(2),
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let witness = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![witness]).await;
+
+    // Configurar gobernanza: añadir witness como witness y member
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": witness.public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Emitir más facts para crear múltiples SN
+    for i in 1..=3 {
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": format!("Fake{}", i),
+                        "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                            .public_key()
+                            .to_string()
+                    }
+                ]
+            }
+        });
+        emit_fact(owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    // Witness se autoriza con owner como fuente
+    witness
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    // Witness pide update → debe recibir todos los chunks
+    witness.update_subject(governance_id.clone()).await.unwrap();
+
+    // Verificar que witness tiene el mismo SN que owner (SN=5)
+    get_subject(owner, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    
+    get_subject(witness, governance_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+}
+
+#[test(tokio::test)]
+// test_update_offer_gov: Receptor responde a GetLastSn con governance
+//
+// Qué se prueba:
+//   `build_last_sn_offer` para una governance. Cuando un receptor solicita
+//   el último SN de una governance, el emisor debe responder correctamente
+//   con el SN, is_all, y los metadatos de gobernanza.
+//
+// Setup:
+//   1. Owner crea gobernanza (SN=0).
+//   2. Owner emite fact → SN=1.
+//   3. Witness W1 se autoriza y hace update_subject → obtiene SN=1.
+//   4. Owner emite más facts → SN avanza a 3.
+//   5. W1 hace update_subject de nuevo → debe obtener SN=3.
+//   6. Verificar que W1 siempre recibe el SN más alto ofrecido por owner.
+//
+// Prioridad: MEDIA.
+async fn test_update_offer_gov() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let witness = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![witness]).await;
+
+    // Configurar gobernanza: añadir witness como witness y member
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": witness.public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Witness se autoriza y obtiene SN=1
+    witness
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    witness.update_subject(governance_id.clone()).await.unwrap();
+
+    get_subject(witness, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Owner emite más facts → SN=2 y SN=3
+    for i in 1..=2 {
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": format!("Fake{}", i),
+                        "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                            .public_key()
+                            .to_string()
+                    }
+                ]
+            }
+        });
+        emit_fact(owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    // Witness pide update de nuevo → debe llegar a SN=3
+    witness.update_subject(governance_id.clone()).await.unwrap();
+    
+    get_subject(witness, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+}
