@@ -28,16 +28,14 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_create_gov_version_limit, check_subject_creation,
-            check_quorum_signers, check_witness_access, check_witness_hi_sn_limit,
-            check_witness_status,
+            check_subject_creation,
+            check_quorum_signers, check_witness_status,
             get_verified_transfer_sn, record_verified_transfer,
             emit_fail, get_validation_roles_register, node::get_subject_data,
             subject::{
                 acquire_subject, create_subject, get_gov, get_gov_sn,
                 get_local_subject_sn,
                 get_tracker_window as resolve_tracker_window,
-                get_tracker_window_from_ledger as resolve_tracker_window_from_ledger,
                 check_simulated_transfer_hi_sn_limit,
                 check_witness_status_and_window,
                 update_ledger,
@@ -1022,17 +1020,19 @@ impl DistriWorker {
             .await?;
 
         let Some(sn) = sn else {
-            let witness_sn = check_witness_access(
+            let witness_status = check_witness_status(
                 ctx,
                 &governance_id,
-                subject_id,
                 sender.clone(),
                 namespace,
                 schema_id,
+                Some(subject_id.clone()),
+                None,
+                None,
             )
             .await?;
 
-            return match (actual_sn, witness_sn) {
+            return match (actual_sn, witness_status.access_sn) {
                 (Some(actual_sn), Some(witness_sn))
                     if actual_sn >= witness_sn =>
                 {
@@ -1105,16 +1105,19 @@ impl DistriWorker {
                 namespace,
                 ..
             } => {
-                let Some(sn) = check_witness_access(
+                let witness_status = check_witness_status(
                     ctx,
                     &governance_id,
-                    subject_id,
                     sender.clone(),
                     namespace,
                     schema_id,
+                    Some(subject_id.clone()),
+                    None,
+                    None,
                 )
-                .await?
-                else {
+                .await?;
+
+                let Some(sn) = witness_status.access_sn else {
                     return Err(DistributorError::SenderNoAccess.into());
                 };
 

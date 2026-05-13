@@ -43,12 +43,12 @@ impl WitnessesRegister {
         creator: &PublicKey,
         version: u64,
     ) {
-        if let Some(witnesses) = self.witnesses_creator.get_mut(&(
+        if let Some(entry) = self.creator_witnesses.get_mut(&(
             creator.clone(),
             namespace.to_owned(),
             schema_id.clone(),
         )) {
-            for (.., (interval, last)) in witnesses.iter_mut() {
+            for (.., (interval, last)) in entry.intervals.iter_mut() {
                 if let Some(last) = last.take() {
                     interval.insert(Interval {
                         lo: last,
@@ -56,14 +56,8 @@ impl WitnessesRegister {
                     });
                 }
             }
-        }
 
-        if let Some(grants) = self.witnesses_creator_grants.get_mut(&(
-            creator.clone(),
-            namespace.to_owned(),
-            schema_id.clone(),
-        )) {
-            for history in grants.values_mut() {
+            for history in entry.grants.values_mut() {
                 history.apply_version(version, None);
             }
         }
@@ -77,14 +71,14 @@ impl WitnessesRegister {
         registration: &CreatorWitnessRegistration,
         version: u64,
     ) {
-        let creator_entry = self
-            .witnesses_creator
+        let entry = self
+            .creator_witnesses
             .entry((creator.clone(), namespace.to_owned(), schema_id.clone()))
             .or_default();
 
         let witnesses: HashSet<_> =
             registration.witnesses.iter().cloned().collect();
-        for (witness_type, (interval, last)) in creator_entry.iter_mut() {
+        for (witness_type, (interval, last)) in entry.intervals.iter_mut() {
             if !witnesses.contains(witness_type)
                 && let Some(lo) = last.take()
             {
@@ -96,33 +90,28 @@ impl WitnessesRegister {
         }
 
         for witness in &registration.witnesses {
-            if let Some((.., last)) = creator_entry.get_mut(witness) {
+            if let Some((.., last)) = entry.intervals.get_mut(witness) {
                 if last.is_none() {
                     *last = Some(version);
                 }
             } else {
-                creator_entry.insert(
+                entry.intervals.insert(
                     witness.clone(),
                     (IntervalSet::new(), Some(version)),
                 );
             }
         }
 
-        let creator_grants = self
-            .witnesses_creator_grants
-            .entry((creator.clone(), namespace.to_owned(), schema_id.clone()))
-            .or_default();
-
         let grant_map: HashMap<_, _> =
             registration.grants.iter().cloned().collect();
 
-        for (witness_type, history) in creator_grants.iter_mut() {
+        for (witness_type, history) in entry.grants.iter_mut() {
             history
                 .apply_version(version, grant_map.get(witness_type).cloned());
         }
 
         for (witness_type, grant) in grant_map {
-            creator_grants
+            entry.grants
                 .entry(witness_type)
                 .or_default()
                 .apply_version(version, Some(grant));
@@ -155,10 +144,10 @@ impl WitnessesRegister {
 
     pub(crate) fn rebuild_node_creator_index(&mut self) {
         self.node_creator_index.clear();
-        for ((creator, namespace, schema_id), creator_witnesses) in
-            &self.witnesses_creator
+        for ((creator, namespace, schema_id), entry) in
+            &self.creator_witnesses
         {
-            for (witness_type, (_, current_lo)) in creator_witnesses {
+            for (witness_type, (_, current_lo)) in &entry.intervals {
                 if let WitnessesType::User(node) = witness_type {
                     if current_lo.is_some() {
                         self.node_creator_index
@@ -242,10 +231,10 @@ impl WitnessesRegister {
 
         let namespace = Namespace::from(namespace.to_owned());
 
-        self.witnesses_creator
+        self.creator_witnesses
             .get(&(owner.clone(), namespace.to_string(), schema_id.clone()))
-            .is_some_and(|creator_witnesses| {
-                creator_witnesses
+            .is_some_and(|entry| {
+                entry.intervals
                     .get(&WitnessesType::User(node.clone()))
                     .is_some_and(|(intervals, current_from)| {
                         Self::interval_active_at_version(
@@ -254,7 +243,7 @@ impl WitnessesRegister {
                             gov_version,
                         )
                     })
-                    || creator_witnesses
+                    || entry.intervals
                         .get(&WitnessesType::Witnesses)
                         .is_some_and(|(intervals, current_from)| {
                             Self::interval_active_at_version(
@@ -285,7 +274,7 @@ impl WitnessesRegister {
         }
 
         let namespace = Namespace::from(namespace.to_owned());
-        let Some(creator_witnesses) = self.witnesses_creator.get(&(
+        let Some(entry) = self.creator_witnesses.get(&(
             owner.clone(),
             namespace.to_string(),
             schema_id.clone(),
@@ -295,7 +284,7 @@ impl WitnessesRegister {
 
         match self
             .check_current_owner(
-                creator_witnesses,
+                &entry.intervals,
                 node,
                 schema_id,
                 &namespace,

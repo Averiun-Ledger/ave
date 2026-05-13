@@ -531,14 +531,14 @@ impl WitnessesRegister {
         let mut better_gov_version: Option<u64> = None;
 
         // Obtengo los testigos del owner actual
-        if let Some(witnesses_creator) = self.witnesses_creator.get(&(
+        if let Some(entry) = self.creator_witnesses.get(&(
             data.actual_owner.to_owned(),
             namespace.to_owned(),
             schema_id.clone(),
         )) {
             match self
                 .check_current_owner(
-                    witnesses_creator,
+                    &entry.intervals,
                     node,
                     schema_id,
                     &parse_namespace,
@@ -560,7 +560,7 @@ impl WitnessesRegister {
         // Obtengo los testigos del new_owner (si hay transferencia pendiente)
         if let Some((new_owner, new_owner_gov_version)) =
             &data.actual_new_owner_data
-            && let Some(witnesses_creator) = self.witnesses_creator.get(&(
+            && let Some(entry) = self.creator_witnesses.get(&(
                 new_owner.to_owned(),
                 namespace.to_owned(),
                 schema_id.clone(),
@@ -568,7 +568,7 @@ impl WitnessesRegister {
         {
             match self
                 .check_current_owner(
-                    witnesses_creator,
+                    &entry.intervals,
                     node,
                     schema_id,
                     &parse_namespace,
@@ -589,13 +589,13 @@ impl WitnessesRegister {
 
         // Not_owners
         for (creator, old_data) in data.old_owners.iter() {
-            if let Some(witnesses_creator) = self.witnesses_creator.get(&(
+            if let Some(entry) = self.creator_witnesses.get(&(
                 creator.to_owned(),
                 namespace.to_owned(),
                 schema_id.clone(),
             )) {
                 if let Some((interval, actual_lo)) =
-                    witnesses_creator.get(&WitnessesType::User(node.clone()))
+                    entry.intervals.get(&WitnessesType::User(node.clone()))
                 {
                     let covered_old_owner = Self::covered_old_owner_intervals(
                         *actual_lo, interval, old_data,
@@ -610,7 +610,7 @@ impl WitnessesRegister {
                 }
 
                 if let Some((interval, actual_lo)) =
-                    witnesses_creator.get(&WitnessesType::Witnesses)
+                    entry.intervals.get(&WitnessesType::Witnesses)
                 {
                     let covered_old_owner = Self::covered_old_owner_intervals(
                         *actual_lo, interval, old_data,
@@ -658,14 +658,14 @@ impl WitnessesRegister {
         let parse_namespace = Namespace::from(namespace.clone());
 
         // Obtengo los testigos del owner
-        if let Some(witnesses_creator) = self.witnesses_creator.get(&(
+        if let Some(entry) = self.creator_witnesses.get(&(
             data.actual_owner.to_owned(),
             namespace.clone(),
             schema_id.clone(),
         )) {
             match self
                 .check_current_owner(
-                    witnesses_creator,
+                    &entry.intervals,
                     node,
                     &schema_id,
                     &parse_namespace,
@@ -685,7 +685,7 @@ impl WitnessesRegister {
 
         if let Some((new_owner, new_owner_gov_version)) =
             &data.actual_new_owner_data
-            && let Some(witnesses_creator) = self.witnesses_creator.get(&(
+            && let Some(entry) = self.creator_witnesses.get(&(
                 new_owner.to_owned(),
                 namespace.clone(),
                 schema_id.clone(),
@@ -693,7 +693,7 @@ impl WitnessesRegister {
         {
             match self
                 .check_current_owner(
-                    witnesses_creator,
+                    &entry.intervals,
                     node,
                     &schema_id,
                     &parse_namespace,
@@ -726,13 +726,13 @@ impl WitnessesRegister {
             let mut schema_gv = None;
             let mut matched = false;
 
-            if let Some(witnesses_creator) = self.witnesses_creator.get(&(
+            if let Some(entry) = self.creator_witnesses.get(&(
                 creator.to_owned(),
                 namespace.clone(),
                 schema_id.clone(),
             )) {
                 if let Some((interval, actual_lo)) =
-                    witnesses_creator.get(&WitnessesType::User(node.clone()))
+                    entry.intervals.get(&WitnessesType::User(node.clone()))
                 {
                     let covered_old_owner = Self::covered_old_owner_intervals(
                         *actual_lo, interval, old_data,
@@ -748,7 +748,7 @@ impl WitnessesRegister {
                 }
 
                 if let Some((interval, actual_lo)) =
-                    witnesses_creator.get(&WitnessesType::Witnesses)
+                    entry.intervals.get(&WitnessesType::Witnesses)
                 {
                     let covered_old_owner = Self::covered_old_owner_intervals(
                         *actual_lo, interval, old_data,

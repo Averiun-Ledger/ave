@@ -220,58 +220,6 @@ where
     }
 }
 
-pub async fn check_witness_access<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier,
-    node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
-) -> Result<Option<u64>, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let status = check_witness_status(
-        ctx,
-        governance_id,
-        node,
-        namespace,
-        schema_id,
-        Some(subject_id.to_owned()),
-        None,
-        None,
-    )
-    .await?;
-
-    Ok(status.access_sn)
-}
-
-pub async fn check_witness_hi_sn_limit<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier,
-    node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
-) -> Result<HiSnLimit, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let status = check_witness_status(
-        ctx,
-        governance_id,
-        node,
-        namespace,
-        schema_id,
-        Some(subject_id.to_owned()),
-        None,
-        None,
-    )
-    .await?;
-
-    Ok(status.hi_sn_limit)
-}
-
 pub async fn get_verified_transfer_sn<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
@@ -395,33 +343,6 @@ where
     .await?;
 
     Ok(status.create_access)
-}
-
-pub async fn check_create_gov_version_limit<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    owner: PublicKey,
-    node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
-    owner_gov_version: u64,
-) -> Result<GovVersionLimit, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let status = check_witness_status(
-        ctx,
-        governance_id,
-        node,
-        namespace,
-        schema_id,
-        None,
-        Some(owner),
-        Some(owner_gov_version),
-    )
-    .await?;
-
-    Ok(status.create_gov_version_limit)
 }
 
 #[derive(

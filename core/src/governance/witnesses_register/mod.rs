@@ -43,13 +43,9 @@ pub struct WitnessesRegister {
     pub(crate) subjects: HashMap<DigestIdentifier, TransferData>,
     pub(crate) witnesses:
         HashMap<(PublicKey, SchemaType), HashMap<Namespace, IntervalData>>,
-    pub(crate) witnesses_creator: HashMap<
+    pub(crate) creator_witnesses: HashMap<
         (PublicKey, String, SchemaType),
-        HashMap<WitnessesType, IntervalData>,
-    >,
-    pub(crate) witnesses_creator_grants: HashMap<
-        (PublicKey, String, SchemaType),
-        HashMap<WitnessesType, CreatorWitnessGrantHistory>,
+        CreatorWitnessEntry,
     >,
     /// Índice invertido: nodo → creators donde es witness explícito.
     /// No incluye witnesses de schema (WitnessesType::Witnesses) porque
@@ -184,6 +180,20 @@ pub struct TransferData {
 pub struct OldOwnerData {
     pub(crate) sn: u64,
     pub(crate) interval_gov_version: IntervalSet,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct CreatorWitnessEntry {
+    pub intervals: HashMap<WitnessesType, IntervalData>,
+    pub grants: HashMap<WitnessesType, CreatorWitnessGrantHistory>,
 }
 
 #[derive(Debug, Clone)]
@@ -633,16 +643,13 @@ impl WitnessesRegister {
         owner_lo: u64,
         owner_hi: u64,
     ) -> Option<CreatorWitnessGrant> {
-        let grants = self.witnesses_creator_grants.get(&(
+        let entry = self.creator_witnesses.get(&(
             creator.clone(),
             namespace.to_string(),
             schema_id.clone(),
         ))?;
-        let intervals = self.witnesses_creator.get(&(
-            creator.clone(),
-            namespace.to_string(),
-            schema_id.clone(),
-        ))?;
+        let grants = &entry.grants;
+        let intervals = &entry.intervals;
 
         let mut out = None;
 
