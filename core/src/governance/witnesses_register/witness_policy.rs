@@ -32,7 +32,7 @@ use super::{
     HiSnLimit, IntervalData, OldOwnerData, TransferData, TrackerDeliveryMode,
     TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterEvent,
     WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
-    ActualSearch,
+    ActualSearch, WitnessStatus,
 };
 
 impl WitnessesRegister {
@@ -295,6 +295,56 @@ impl WitnessesRegister {
                 GovVersionLimit::None
             }
         }
+    }
+
+    pub(crate) async fn query_witness_status(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: Option<DigestIdentifier>,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        owner: Option<PublicKey>,
+        owner_gov_version: Option<u64>,
+    ) -> Result<WitnessStatus, ActorError> {
+        let mut access_sn = None;
+        let mut hi_sn_limit = HiSnLimit::None;
+        let mut gov_version_limit = GovVersionLimit::None;
+        let mut create_access = false;
+        let mut create_gov_version_limit = GovVersionLimit::None;
+
+        if let Some(subject_id) = subject_id {
+            access_sn = self
+                .access_limit_for_node(ctx, &subject_id, &node, &namespace, &schema_id)
+                .await?;
+            hi_sn_limit = self
+                .hi_sn_limit_for_node(ctx, &subject_id, &node, &namespace, &schema_id)
+                .await?;
+            gov_version_limit = self
+                .gov_version_limit_for_node(&subject_id, &node, &namespace, &schema_id)
+                .await?;
+        }
+
+        if let Some(owner) = owner {
+            if let Some(gov_version) = owner_gov_version {
+                create_access = self.has_create_access_for_node_at_version(
+                    &node, &owner, &schema_id, &namespace, gov_version,
+                );
+                create_gov_version_limit = self
+                    .create_gov_version_limit_for_node(
+                        &node, &owner, &schema_id, &namespace, gov_version,
+                    )
+                    .await;
+            }
+        }
+
+        Ok(WitnessStatus {
+            access_sn,
+            hi_sn_limit,
+            gov_version_limit,
+            create_access,
+            create_gov_version_limit,
+        })
     }
 
 }

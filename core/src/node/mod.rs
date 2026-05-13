@@ -253,8 +253,6 @@ impl Node {
     }
 
     pub fn confirm_transfer(&mut self, subject_id: DigestIdentifier) {
-        self.our_key.to_string();
-
         if let Some(data) = self.transfer_subjects.remove(&subject_id) {
             if data.actual_owner == *self.our_key {
                 if let Some(data) = self.owned_subjects.remove(&subject_id) {

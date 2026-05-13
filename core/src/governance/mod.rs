@@ -3316,7 +3316,7 @@ impl Actor for Governance {
                 .create_child(
                     "sink_data",
                     SinkData {
-                        public_key: self.our_key.to_string(),
+                        public_key: self.our_key.clone(),
                     },
                 )
                 .await

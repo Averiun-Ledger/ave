@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -6,7 +6,7 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    DataToSink, DataToSinkEvent, identity::TimeStamp, response::SubjectDB,
+    DataToSink, DataToSinkEvent, identity::{PublicKey, TimeStamp}, response::SubjectDB,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -15,7 +15,7 @@ use crate::model::common::emit_fail;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SinkData {
-    pub public_key: String,
+    pub public_key: Arc<PublicKey>,
 }
 
 #[derive(
@@ -163,7 +163,7 @@ impl Handler<Self> for SinkData {
                 event_ledger_timestamp,
             } => SinkDataEvent::Event(Box::new(DataToSink {
                 payload: *event,
-                public_key: self.public_key.clone(),
+                public_key: self.public_key.to_string(),
                 event_request_timestamp,
                 event_ledger_timestamp,
                 sink_timestamp: TimeStamp::now().as_nanos(),

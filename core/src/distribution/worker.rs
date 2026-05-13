@@ -30,6 +30,7 @@ use crate::{
         common::{
             check_create_gov_version_limit, check_gov_version_limit, check_subject_creation,
             check_quorum_signers, check_witness_access, check_witness_hi_sn_limit,
+            check_witness_status,
             get_verified_transfer_sn, record_verified_transfer,
             emit_fail, get_validation_roles_register, node::get_subject_data,
             subject::{
@@ -487,32 +488,29 @@ impl DistriWorker {
 
             receiver_limit.min(offered_hi_sn)
         } else {
+            let owner = ledger.first().ok_or(DistributorError::EmptyEvents)?.ledger_seal_signature.signer.clone();
+            let gov_version = ledger.first().ok_or(DistributorError::EmptyEvents)?.gov_version;
+
+            let witness_status = check_witness_status(
+                ctx,
+                &governance_id,
+                (*self.our_key).clone(),
+                namespace.clone(),
+                schema_id.clone(),
+                Some(subject_id.clone()),
+                Some(owner.clone()),
+                Some(gov_version),
+            )
+            .await?;
+
             let receiver_hi_limit = Self::concrete_hi_sn_limit(
-                check_witness_hi_sn_limit(
-                    ctx,
-                    &governance_id,
-                    &subject_id,
-                    (*self.our_key).clone(),
-                    namespace.clone(),
-                    schema_id.clone(),
-                )
-                .await?,
+                witness_status.hi_sn_limit,
                 offered_hi_sn,
             );
 
-            let owner = ledger.first().ok_or(DistributorError::EmptyEvents)?.ledger_seal_signature.signer.clone();
             let receiver_create_gov_limit = Self::concrete_gov_version_limit(
                 ledger,
-                check_create_gov_version_limit(
-                    ctx,
-                    &governance_id,
-                    owner,
-                    (*self.our_key).clone(),
-                    namespace.clone(),
-                    schema_id.clone(),
-                    ledger.first().ok_or(DistributorError::EmptyEvents)?.gov_version,
-                )
-                .await?,
+                witness_status.create_gov_version_limit,
                 offered_hi_sn,
             );
 
@@ -657,32 +655,28 @@ impl DistriWorker {
 
             safe_hi_sn
         } else {
+            let owner = first_ledger.ledger_seal_signature.signer.clone();
+
+            let witness_status = check_witness_status(
+                ctx,
+                &governance_id,
+                (*self.our_key).clone(),
+                namespace.clone(),
+                schema_id.clone(),
+                Some(subject_id.clone()),
+                Some(owner.clone()),
+                Some(first_ledger.gov_version),
+            )
+            .await?;
+
             let receiver_hi_limit = Self::concrete_hi_sn_limit(
-                check_witness_hi_sn_limit(
-                    ctx,
-                    &governance_id,
-                    &subject_id,
-                    (*self.our_key).clone(),
-                    namespace.clone(),
-                    schema_id.clone(),
-                )
-                .await?,
+                witness_status.hi_sn_limit,
                 offered_hi_sn,
             );
 
-            let owner = first_ledger.ledger_seal_signature.signer.clone();
             let receiver_create_gov_limit = Self::concrete_gov_version_limit(
                 ledger,
-                check_create_gov_version_limit(
-                    ctx,
-                    &governance_id,
-                    owner,
-                    (*self.our_key).clone(),
-                    namespace.clone(),
-                    schema_id.clone(),
-                    first_ledger.gov_version,
-                )
-                .await?,
+                witness_status.create_gov_version_limit,
                 offered_hi_sn,
             );
 

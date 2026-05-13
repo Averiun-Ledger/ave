@@ -251,38 +251,6 @@ pub enum WitnessesRegisterMessage {
         sn: u64,
         gov_version: u64,
     },
-    Access {
-        subject_id: DigestIdentifier,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-    },
-    HiSnLimit {
-        subject_id: DigestIdentifier,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-    },
-    GovVersionLimit {
-        subject_id: DigestIdentifier,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-    },
-    CreateAccess {
-        owner: PublicKey,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        gov_version: u64,
-    },
-    CreateGovVersionLimit {
-        owner: PublicKey,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        owner_gov_version: u64,
-    },
     GetTrackerVisibilityState {
         subject_id: DigestIdentifier,
     },
@@ -309,6 +277,14 @@ pub enum WitnessesRegisterMessage {
         node: PublicKey,
         namespace: String,
         schema_id: SchemaType,
+    },
+    QueryWitnessStatus {
+        subject_id: Option<DigestIdentifier>,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        owner: Option<PublicKey>,
+        owner_gov_version: Option<u64>,
     },
 }
 
@@ -397,21 +373,6 @@ pub enum WitnessesRegisterEvent {
 impl Event for WitnessesRegisterEvent {}
 
 pub enum WitnessesRegisterResponse {
-    Access {
-        sn: Option<u64>,
-    },
-    HiSnLimit {
-        limit: HiSnLimit,
-    },
-    GovVersionLimit {
-        limit: GovVersionLimit,
-    },
-    CreateAccess {
-        allowed: bool,
-    },
-    CreateGovVersionLimit {
-        limit: GovVersionLimit,
-    },
     GovSn {
         sn: u64,
     },
@@ -433,7 +394,17 @@ pub enum WitnessesRegisterResponse {
         is_all: bool,
         ranges: Vec<TrackerDeliveryRange>,
     },
+    WitnessStatus(WitnessStatus),
     Ok,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WitnessStatus {
+    pub access_sn: Option<u64>,
+    pub hi_sn_limit: HiSnLimit,
+    pub gov_version_limit: GovVersionLimit,
+    pub create_access: bool,
+    pub create_gov_version_limit: GovVersionLimit,
 }
 
 impl Response for WitnessesRegisterResponse {}
@@ -1326,118 +1297,6 @@ impl Handler<Self> for WitnessesRegister {
                     "Witness subject entry deleted"
                 );
             }
-            WitnessesRegisterMessage::Access {
-                subject_id,
-                node,
-                namespace,
-                schema_id,
-            } => {
-                let sn = self
-                    .access_limit_for_node(
-                        ctx,
-                        &subject_id,
-                        &node,
-                        &namespace,
-                        &schema_id,
-                    )
-                    .await?;
-
-                debug!(
-                    msg_type = "Access",
-                    subject_id = %subject_id,
-                    node = %node,
-                    namespace = %namespace,
-                    schema_id = %schema_id,
-                    sn = sn,
-                    "Checked access status"
-                );
-
-                return Ok(WitnessesRegisterResponse::Access { sn });
-            }
-            WitnessesRegisterMessage::HiSnLimit {
-                subject_id,
-                node,
-                namespace,
-                schema_id,
-            } => {
-                let limit = self
-                    .hi_sn_limit_for_node(
-                        ctx,
-                        &subject_id,
-                        &node,
-                        &namespace,
-                        &schema_id,
-                    )
-                    .await?;
-
-                return Ok(WitnessesRegisterResponse::HiSnLimit { limit });
-            }
-            WitnessesRegisterMessage::GovVersionLimit {
-                subject_id,
-                node,
-                namespace,
-                schema_id,
-            } => {
-                let limit = self
-                    .gov_version_limit_for_node(
-                        &subject_id,
-                        &node,
-                        &namespace,
-                        &schema_id,
-                    )
-                    .await?;
-
-                return Ok(WitnessesRegisterResponse::GovVersionLimit { limit });
-            }
-            WitnessesRegisterMessage::CreateAccess {
-                owner,
-                node,
-                namespace,
-                schema_id,
-                gov_version,
-            } => {
-                let allowed = self.has_create_access_for_node_at_version(
-                    &node,
-                    &owner,
-                    &schema_id,
-                    &namespace,
-                    gov_version,
-                );
-
-                debug!(
-                    msg_type = "CreateAccess",
-                    owner = %owner,
-                    node = %node,
-                    namespace = %namespace,
-                    schema_id = %schema_id,
-                    gov_version = gov_version,
-                    allowed = allowed,
-                    "Checked create access status"
-                );
-
-                return Ok(WitnessesRegisterResponse::CreateAccess { allowed });
-            }
-            WitnessesRegisterMessage::CreateGovVersionLimit {
-                owner,
-                node,
-                namespace,
-                schema_id,
-                owner_gov_version,
-            } => {
-                let limit = self
-                    .create_gov_version_limit_for_node(
-                        &node,
-                        &owner,
-                        &schema_id,
-                        &namespace,
-                        owner_gov_version,
-                    )
-                    .await;
-
-                return Ok(WitnessesRegisterResponse::CreateGovVersionLimit {
-                    limit,
-                });
-            }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
                 subject_id,
             } => {
@@ -1570,7 +1429,35 @@ impl Handler<Self> for WitnessesRegister {
                     )
                     .await?;
 
-                return Ok(WitnessesRegisterResponse::HiSnLimit { limit });
+                return Ok(WitnessesRegisterResponse::WitnessStatus(WitnessStatus {
+                    access_sn: None,
+                    hi_sn_limit: limit,
+                    gov_version_limit: GovVersionLimit::None,
+                    create_access: false,
+                    create_gov_version_limit: GovVersionLimit::None,
+                }));
+            }
+            WitnessesRegisterMessage::QueryWitnessStatus {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+                owner,
+                owner_gov_version,
+            } => {
+                let status = self
+                    .query_witness_status(
+                        ctx,
+                        subject_id,
+                        node,
+                        namespace,
+                        schema_id,
+                        owner,
+                        owner_gov_version,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::WitnessStatus(status));
             }
         };
 

@@ -28,8 +28,8 @@ use crate::governance::transfer_verification_register::{
     TransferVerificationRegisterResponse,
 };
 use crate::governance::witnesses_register::{
-    GovVersionLimit, HiSnLimit, WitnessesRegister, WitnessesRegisterMessage,
-    WitnessesRegisterResponse,
+    GovVersionLimit, HiSnLimit, WitnessStatus, WitnessesRegister,
+    WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
@@ -179,14 +179,16 @@ where
     Ok(())
 }
 
-pub async fn check_witness_access<A>(
+pub async fn check_witness_status<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier,
     node: PublicKey,
     namespace: String,
     schema_id: SchemaType,
-) -> Result<Option<u64>, ActorError>
+    subject_id: Option<DigestIdentifier>,
+    owner: Option<PublicKey>,
+    owner_gov_version: Option<u64>,
+) -> Result<WitnessStatus, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -199,21 +201,49 @@ where
         ctx.system().get_actor(&actor_path).await?;
 
     let response = actor
-        .ask(WitnessesRegisterMessage::Access {
-            subject_id: subject_id.to_owned(),
+        .ask(WitnessesRegisterMessage::QueryWitnessStatus {
+            subject_id,
             node,
             namespace,
             schema_id,
+            owner,
+            owner_gov_version,
         })
         .await?;
 
     match response {
-        WitnessesRegisterResponse::Access { sn } => Ok(sn),
+        WitnessesRegisterResponse::WitnessStatus(status) => Ok(status),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
-            expected: "WitnessesRegisterResponse::Access { sn }".to_string(),
+            expected: "WitnessesRegisterResponse::WitnessStatus".to_string(),
         }),
     }
+}
+
+pub async fn check_witness_access<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+) -> Result<Option<u64>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let status = check_witness_status(
+        ctx,
+        governance_id,
+        node,
+        namespace,
+        schema_id,
+        Some(subject_id.to_owned()),
+        None,
+        None,
+    )
+    .await?;
+
+    Ok(status.access_sn)
 }
 
 pub async fn check_witness_hi_sn_limit<A>(
@@ -227,31 +257,19 @@ pub async fn check_witness_hi_sn_limit<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/witnesses_register",
-        governance_id
-    ));
+    let status = check_witness_status(
+        ctx,
+        governance_id,
+        node,
+        namespace,
+        schema_id,
+        Some(subject_id.to_owned()),
+        None,
+        None,
+    )
+    .await?;
 
-    let actor: ActorRef<WitnessesRegister> =
-        ctx.system().get_actor(&actor_path).await?;
-
-    let response = actor
-        .ask(WitnessesRegisterMessage::HiSnLimit {
-            subject_id: subject_id.to_owned(),
-            node,
-            namespace,
-            schema_id,
-        })
-        .await?;
-
-    match response {
-        WitnessesRegisterResponse::HiSnLimit { limit } => Ok(limit),
-        _ => Err(ActorError::UnexpectedResponse {
-            path: actor_path,
-            expected: "WitnessesRegisterResponse::HiSnLimit { limit }"
-                .to_string(),
-        }),
-    }
+    Ok(status.hi_sn_limit)
 }
 
 pub async fn get_verified_transfer_sn<A>(
@@ -364,32 +382,19 @@ pub async fn check_create_witness_access<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/witnesses_register",
-        governance_id
-    ));
+    let status = check_witness_status(
+        ctx,
+        governance_id,
+        node,
+        namespace,
+        schema_id,
+        None,
+        Some(owner),
+        Some(gov_version),
+    )
+    .await?;
 
-    let actor: ActorRef<WitnessesRegister> =
-        ctx.system().get_actor(&actor_path).await?;
-
-    let response = actor
-        .ask(WitnessesRegisterMessage::CreateAccess {
-            owner,
-            node,
-            namespace,
-            schema_id,
-            gov_version,
-        })
-        .await?;
-
-    match response {
-        WitnessesRegisterResponse::CreateAccess { allowed } => Ok(allowed),
-        _ => Err(ActorError::UnexpectedResponse {
-            path: actor_path,
-            expected: "WitnessesRegisterResponse::CreateAccess { allowed }"
-                .to_string(),
-        }),
-    }
+    Ok(status.create_access)
 }
 
 pub async fn check_create_gov_version_limit<A>(
@@ -404,33 +409,19 @@ pub async fn check_create_gov_version_limit<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/witnesses_register",
-        governance_id
-    ));
+    let status = check_witness_status(
+        ctx,
+        governance_id,
+        node,
+        namespace,
+        schema_id,
+        None,
+        Some(owner),
+        Some(owner_gov_version),
+    )
+    .await?;
 
-    let actor: ActorRef<WitnessesRegister> =
-        ctx.system().get_actor(&actor_path).await?;
-
-    let response = actor
-        .ask(WitnessesRegisterMessage::CreateGovVersionLimit {
-            owner,
-            node,
-            namespace,
-            schema_id,
-            owner_gov_version,
-        })
-        .await?;
-
-    match response {
-        WitnessesRegisterResponse::CreateGovVersionLimit { limit } => Ok(limit),
-        _ => Err(ActorError::UnexpectedResponse {
-            path: actor_path,
-            expected:
-                "WitnessesRegisterResponse::CreateGovVersionLimit { limit }"
-                    .to_string(),
-        }),
-    }
+    Ok(status.create_gov_version_limit)
 }
 
 pub async fn check_gov_version_limit<A>(
@@ -444,32 +435,19 @@ pub async fn check_gov_version_limit<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/witnesses_register",
-        governance_id
-    ));
+    let status = check_witness_status(
+        ctx,
+        governance_id,
+        node,
+        namespace,
+        schema_id,
+        Some(subject_id.clone()),
+        None,
+        None,
+    )
+    .await?;
 
-    let actor: ActorRef<WitnessesRegister> =
-        ctx.system().get_actor(&actor_path).await?;
-
-    let response = actor
-        .ask(WitnessesRegisterMessage::GovVersionLimit {
-            subject_id: subject_id.clone(),
-            node,
-            namespace,
-            schema_id,
-        })
-        .await?;
-
-    match response {
-        WitnessesRegisterResponse::GovVersionLimit { limit } => Ok(limit),
-        _ => Err(ActorError::UnexpectedResponse {
-            path: actor_path,
-            expected:
-                "WitnessesRegisterResponse::GovVersionLimit { limit }"
-                    .to_string(),
-        }),
-    }
+    Ok(status.gov_version_limit)
 }
 
 #[derive(

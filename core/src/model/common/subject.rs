@@ -14,7 +14,7 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
         witnesses_register::{
-            HiSnLimit, TrackerDeliveryRange, WitnessesRegister,
+            HiSnLimit, TrackerDeliveryRange, WitnessStatus, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse,
         },
     },
@@ -668,10 +668,10 @@ where
         .await?;
 
     match response {
-        WitnessesRegisterResponse::HiSnLimit { limit } => Ok(limit),
+        WitnessesRegisterResponse::WitnessStatus(status) => Ok(status.hi_sn_limit),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
-            expected: "WitnessesRegisterResponse::HiSnLimit { limit }".to_string(),
+            expected: "WitnessesRegisterResponse::WitnessStatus".to_string(),
         }),
     }
 }
