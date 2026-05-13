@@ -13,7 +13,7 @@ use tracing::{Span, debug, error, info_span};
 
 use crate::model::common::emit_fail;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct SinkData {
     pub public_key: Arc<PublicKey>,
 }

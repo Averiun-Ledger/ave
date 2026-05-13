@@ -28,7 +28,7 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_create_gov_version_limit, check_gov_version_limit, check_subject_creation,
+            check_create_gov_version_limit, check_subject_creation,
             check_quorum_signers, check_witness_access, check_witness_hi_sn_limit,
             check_witness_status,
             get_verified_transfer_sn, record_verified_transfer,
@@ -39,6 +39,7 @@ use crate::{
                 get_tracker_window as resolve_tracker_window,
                 get_tracker_window_from_ledger as resolve_tracker_window_from_ledger,
                 check_simulated_transfer_hi_sn_limit,
+                check_witness_status_and_window,
                 update_ledger,
             },
         },
@@ -425,8 +426,9 @@ impl DistriWorker {
 
         let CheckAuthCommon { subject_id, schema_id, governance_id, namespace, .. } = common;
 
-        // Optimización: solo consultar subject_data fresco si era None.
-        // Si ya era Some, lo único que puede cambiar es active, pero sigue siendo Some.
+        // subject_data puede haber cambiado entre iteraciones del loop de
+        // LedgerDistribution (ej. subject creado en chunk anterior). Si
+        // check_auth_common no lo encontró, refrescamos desde Node.
         let is_register = if common.subject_data.is_none() {
             get_subject_data(ctx, &subject_id).await?.is_some()
         } else {
@@ -462,20 +464,22 @@ impl DistriWorker {
 
         // 3. Witness limits normales
         let safe_hi_sn = if is_register {
-            let receiver_gov_limit = check_gov_version_limit(
+            let receiver_status = check_witness_status(
                 ctx,
                 &governance_id,
-                &subject_id,
                 (*self.our_key).clone(),
                 namespace.clone(),
                 schema_id.clone(),
+                Some(subject_id.clone()),
+                None,
+                None,
             )
             .await?;
 
-            let receiver_gov_limit_clone = receiver_gov_limit.clone();
+            let receiver_gov_limit_clone = receiver_status.gov_version_limit.clone();
             let receiver_limit = Self::concrete_gov_version_limit(
                 ledger,
-                receiver_gov_limit,
+                receiver_status.gov_version_limit,
                 offered_hi_sn,
             );
 
@@ -491,13 +495,16 @@ impl DistriWorker {
             let owner = ledger.first().ok_or(DistributorError::EmptyEvents)?.ledger_seal_signature.signer.clone();
             let gov_version = ledger.first().ok_or(DistributorError::EmptyEvents)?.gov_version;
 
-            let witness_status = check_witness_status(
+            let (witness_status, receiver_window_sn, ..) = check_witness_status_and_window(
                 ctx,
                 &governance_id,
+                &subject_id,
+                ledger.to_vec(),
                 (*self.our_key).clone(),
+                sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
-                Some(subject_id.clone()),
+                None,
                 Some(owner.clone()),
                 Some(gov_version),
             )
@@ -513,19 +520,6 @@ impl DistriWorker {
                 witness_status.create_gov_version_limit,
                 offered_hi_sn,
             );
-
-            let (receiver_window_sn, ..) = resolve_tracker_window_from_ledger(
-                ctx,
-                &governance_id,
-                &subject_id,
-                ledger.to_vec(),
-                (*self.our_key).clone(),
-                sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                None,
-            )
-            .await?;
 
             println!("[check_auth_batch subject_data=None] subject={} sender={} receiver_hi={:?} create_gov={:?} window={:?}", subject_id, sender, receiver_hi_limit, receiver_create_gov_limit, receiver_window_sn);
             let raw_receiver_limit = [
@@ -621,19 +615,21 @@ impl DistriWorker {
         }
 
         let safe_hi_sn = if subject_data.is_some() {
-            let receiver_gov_limit = check_gov_version_limit(
+            let receiver_status = check_witness_status(
                 ctx,
                 &governance_id,
-                &subject_id,
                 (*self.our_key).clone(),
                 namespace.clone(),
                 schema_id.clone(),
+                Some(subject_id.clone()),
+                None,
+                None,
             )
             .await?;
 
             let receiver_limit = Self::concrete_gov_version_limit(
                 ledger,
-                receiver_gov_limit,
+                receiver_status.gov_version_limit,
                 offered_hi_sn,
             );
 
@@ -657,13 +653,16 @@ impl DistriWorker {
         } else {
             let owner = first_ledger.ledger_seal_signature.signer.clone();
 
-            let witness_status = check_witness_status(
+            let (witness_status, receiver_window_sn, ..) = check_witness_status_and_window(
                 ctx,
                 &governance_id,
+                &subject_id,
+                ledger.to_vec(),
                 (*self.our_key).clone(),
+                sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
-                Some(subject_id.clone()),
+                None,
                 Some(owner.clone()),
                 Some(first_ledger.gov_version),
             )
@@ -680,20 +679,7 @@ impl DistriWorker {
                 offered_hi_sn,
             );
 
-            let (receiver_window_sn, ..) = resolve_tracker_window_from_ledger(
-                ctx,
-                &governance_id,
-                &subject_id,
-                ledger.to_vec(),
-                (*self.our_key).clone(),
-                sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                None,
-            )
-            .await?;
-
-            println!("[check_auth_batch subject_data=None] subject={} sender={} receiver_hi={:?} create_gov={:?} window={:?}", subject_id, sender, receiver_hi_limit, receiver_create_gov_limit, receiver_window_sn);
+            println!("[check_auth_single subject_data=None] subject={} sender={} receiver_hi={:?} create_gov={:?} window={:?}", subject_id, sender, receiver_hi_limit, receiver_create_gov_limit, receiver_window_sn);
             let raw_receiver_limit = [
                 receiver_hi_limit,
                 receiver_create_gov_limit,

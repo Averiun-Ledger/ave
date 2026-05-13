@@ -283,6 +283,17 @@ pub enum WitnessesRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
+    QueryWitnessStatusAndWindow {
+        subject_id: DigestIdentifier,
+        ledger: Vec<Ledger>,
+        node: PublicKey,
+        sender: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
+        owner: Option<PublicKey>,
+        owner_gov_version: Option<u64>,
+    },
     QueryWitnessStatus {
         subject_id: Option<DigestIdentifier>,
         node: PublicKey,
@@ -393,6 +404,14 @@ pub enum WitnessesRegisterResponse {
         state: TrackerVisibilityState,
     },
     TrackerWindow {
+        sn: Option<u64>,
+        transfer_sn: Option<u64>,
+        clear_sn: Option<u64>,
+        is_all: bool,
+        ranges: Vec<TrackerDeliveryRange>,
+    },
+    WitnessStatusAndWindow {
+        status: WitnessStatus,
         sn: Option<u64>,
         transfer_sn: Option<u64>,
         clear_sn: Option<u64>,
@@ -1438,6 +1457,52 @@ impl Handler<Self> for WitnessesRegister {
                     create_access: false,
                     create_gov_version_limit: GovVersionLimit::None,
                 }));
+            }
+            WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
+                subject_id,
+                ledger,
+                node,
+                sender,
+                namespace,
+                schema_id,
+                actual_sn,
+                owner,
+                owner_gov_version,
+            } => {
+                let data =
+                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
+                let status = self
+                    .query_witness_status(
+                        ctx,
+                        Some(subject_id.clone()),
+                        node.clone(),
+                        namespace.clone(),
+                        schema_id.clone(),
+                        owner,
+                        owner_gov_version,
+                    )
+                    .await?;
+                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
+                    .build_tracker_window_from_data(
+                        ctx,
+                        &subject_id,
+                        &data,
+                        &node,
+                        &sender,
+                        namespace,
+                        schema_id,
+                        actual_sn,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::WitnessStatusAndWindow {
+                    status,
+                    sn,
+                    transfer_sn,
+                    clear_sn,
+                    is_all,
+                    ranges,
+                });
             }
             WitnessesRegisterMessage::QueryWitnessStatus {
                 subject_id,

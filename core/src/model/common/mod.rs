@@ -424,32 +424,6 @@ where
     Ok(status.create_gov_version_limit)
 }
 
-pub async fn check_gov_version_limit<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier,
-    node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
-) -> Result<GovVersionLimit, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let status = check_witness_status(
-        ctx,
-        governance_id,
-        node,
-        namespace,
-        schema_id,
-        Some(subject_id.clone()),
-        None,
-        None,
-    )
-    .await?;
-
-    Ok(status.gov_version_limit)
-}
-
 #[derive(
     Clone,
     Copy,
