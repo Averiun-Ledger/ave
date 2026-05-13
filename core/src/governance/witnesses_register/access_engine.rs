@@ -681,7 +681,6 @@ impl WitnessesRegister {
                     better_gov_version = gov_version;
                 }
             }
-        } else {
         }
 
         if let Some((new_owner, new_owner_gov_version)) =
@@ -712,9 +711,21 @@ impl WitnessesRegister {
             }
         }
 
-        // Not_owners: rastreamos qué old_owner da el mejor resultado
+        // === FASE 1: Recolección de gov_versions candidatas ===
+        let mut gov_versions_to_fetch: Vec<u64> = Vec::new();
+        let mut old_owner_candidates: Vec<(
+            PublicKey,
+            OldOwnerData,
+            Option<u64>,
+            Option<u64>,
+            bool,
+        )> = Vec::new();
+
         for (creator, old_data) in data.old_owners.iter() {
+            let mut user_gv = None;
+            let mut schema_gv = None;
             let mut matched = false;
+
             if let Some(witnesses_creator) = self.witnesses_creator.get(&(
                 creator.to_owned(),
                 namespace.clone(),
@@ -730,30 +741,12 @@ impl WitnessesRegister {
                     if let Some(gov_version) =
                         covered_old_owner.iter().last().map(|range| range.hi)
                     {
-                        match self
-                            .get_sn(ctx, subject_id.clone(), gov_version)
-                            .await?
-                        {
-                            SnLimit::Sn(sn) => {
-                                let candidate = sn.min(old_data.sn);
-                                if better_sn.map_or(true, |bs| candidate > bs) {
-                                    better_sn = Some(candidate);
-                                    effective_owner = Some(creator.clone());
-                                }
-                            }
-                            SnLimit::LastSn => {
-                                if better_sn.map_or(true, |bs| old_data.sn > bs) {
-                                    better_sn = Some(old_data.sn);
-                                    effective_owner = Some(creator.clone());
-                                }
-                            }
-                            SnLimit::NotSn => {}
-                        }
+                        user_gv = Some(gov_version);
+                        gov_versions_to_fetch.push(gov_version);
                         matched = true;
                     }
                 }
 
-                // Witness de schema.
                 if let Some((interval, actual_lo)) =
                     witnesses_creator.get(&WitnessesType::Witnesses)
                 {
@@ -774,33 +767,69 @@ impl WitnessesRegister {
                             &capped_old_owner,
                             better_gov_version,
                         ) {
-                            match self
-                                .get_sn(ctx, subject_id.clone(), gov_version)
-                                .await?
-                            {
-                                SnLimit::Sn(sn) => {
-                                    let candidate = sn.min(old_data.sn);
-                                    if better_sn.map_or(true, |bs| candidate > bs) {
-                                        better_sn = Some(candidate);
-                                        effective_owner = Some(creator.clone());
-                                    }
-                                }
-                                SnLimit::LastSn => {
-                                    if better_sn.map_or(true, |bs| old_data.sn > bs) {
-                                        better_sn = Some(old_data.sn);
-                                        effective_owner = Some(creator.clone());
-                                    }
-                                }
-                                SnLimit::NotSn => {}
-                            }
+                            schema_gv = Some(gov_version);
+                            gov_versions_to_fetch.push(gov_version);
                             matched = true;
                         }
                     }
                 }
             }
-            // Si no hubo witnesses_creator para este creator pero el nodo ES el creator,
-            // lo tratamos como old_owner directo
-            if !matched && *creator == *node {
+
+            let is_direct = !matched && *creator == *node;
+            old_owner_candidates.push((
+                creator.clone(),
+                old_data.clone(),
+                user_gv,
+                schema_gv,
+                is_direct,
+            ));
+        }
+
+        // Añadir better_gov_version para el cálculo final
+        if let Some(gov_version) = better_gov_version {
+            gov_versions_to_fetch.push(gov_version);
+        }
+
+        // === FASE 2: Batch fetch de SNs ===
+        let sn_cache: HashMap<u64, SnLimit> = if gov_versions_to_fetch.is_empty()
+        {
+            HashMap::new()
+        } else {
+            let unique: std::collections::HashSet<u64> =
+                gov_versions_to_fetch.into_iter().collect();
+            let unique_vec: Vec<u64> = unique.into_iter().collect();
+            let sns = self
+                .get_sns(ctx, subject_id.clone(), unique_vec.clone())
+                .await?;
+            unique_vec.into_iter().zip(sns.into_iter()).collect()
+        };
+
+        // === FASE 3: Evaluación con cache ===
+        for (creator, old_data, user_gv, schema_gv, is_direct) in
+            old_owner_candidates
+        {
+            for gv in [user_gv, schema_gv].into_iter().flatten() {
+                if let Some(sn_limit) = sn_cache.get(&gv) {
+                    match sn_limit {
+                        SnLimit::Sn(sn) => {
+                            let candidate = *sn.min(&old_data.sn);
+                            if better_sn.map_or(true, |bs| candidate > bs) {
+                                better_sn = Some(candidate);
+                                effective_owner = Some(creator.clone());
+                            }
+                        }
+                        SnLimit::LastSn => {
+                            if better_sn.map_or(true, |bs| old_data.sn > bs) {
+                                better_sn = Some(old_data.sn);
+                                effective_owner = Some(creator.clone());
+                            }
+                        }
+                        SnLimit::NotSn => {}
+                    }
+                }
+            }
+
+            if is_direct {
                 if better_sn.map_or(true, |bs| old_data.sn > bs) {
                     better_sn = Some(old_data.sn);
                     effective_owner = Some(creator.clone());
@@ -809,7 +838,7 @@ impl WitnessesRegister {
         }
 
         let sn_limit = if let Some(gov_version) = better_gov_version {
-            match self.get_sn(ctx, subject_id.clone(), gov_version).await? {
+            match sn_cache.get(&gov_version).cloned().unwrap_or(SnLimit::NotSn) {
                 SnLimit::Sn(sn) => better_sn
                     .map_or(SnLimit::Sn(sn), |better_sn| {
                         SnLimit::Sn(sn.max(better_sn))

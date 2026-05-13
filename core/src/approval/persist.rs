@@ -183,12 +183,11 @@ impl ApprPersist {
 
         let subject_id = request.content().subject_id.clone();
         if self.node_key == *self.our_key {
-            let subject_id = ctx.path().parent().key();
             let approval_actor = ctx
                 .system()
                 .get_actor::<Approval>(&ActorPath::from(&format!(
                     "/user/request/{}/approval",
-                    subject_id
+                    ctx.path().parent().key()
                 )))
                 .await;
             if let Ok(approval_actor) = approval_actor {
@@ -354,9 +353,8 @@ impl Actor for ApprPersist {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("approver", Some(prefix.clone()), false, ctx)
+            .init_store("approver", Some(ctx.path().parent().key().to_owned()), false, ctx)
             .await
         {
             error!(

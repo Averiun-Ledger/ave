@@ -102,8 +102,7 @@ impl Actor for ContractRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
-        self.init_store("contract_register", Some(prefix), false, ctx)
+        self.init_store("contract_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
             .await
     }
 }

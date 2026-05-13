@@ -250,9 +250,8 @@ impl Actor for RoleRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("role_register", Some(prefix), true, ctx)
+            .init_store("role_register", Some(ctx.path().parent().key().to_owned()), true, ctx)
             .await
         {
             error!(

@@ -111,6 +111,9 @@ pub enum SubjectRegisterMessage {
         schema_id: SchemaType,
         namespace: String,
     },
+    GetSubjectsByOwnerSchemaBatch {
+        queries: Vec<(PublicKey, SchemaType, String)>,
+    },
     RegisterData {
         gov_version: u64,
         data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)>,
@@ -143,7 +146,9 @@ impl Message for SubjectRegisterMessage {
             | Self::CreateSubject { .. }
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
-            Self::Check { .. } | Self::GetSubjectsByOwnerSchema { .. } => false,
+            Self::Check { .. }
+            | Self::GetSubjectsByOwnerSchema { .. }
+            | Self::GetSubjectsByOwnerSchemaBatch { .. } => false,
         }
     }
 }
@@ -152,6 +157,7 @@ impl Message for SubjectRegisterMessage {
 pub enum SubjectRegisterResponse {
     Ok,
     Subjects(Vec<DigestIdentifier>),
+    SubjectsBatch(Vec<Vec<DigestIdentifier>>),
 }
 
 impl Response for SubjectRegisterResponse {}
@@ -201,9 +207,8 @@ impl Actor for SubjectRegister {
         &mut self,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("subject_register", Some(prefix), false, ctx)
+            .init_store("subject_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
             .await
         {
             error!(
@@ -252,6 +257,24 @@ impl Handler<Self> for SubjectRegister {
                     .unwrap_or_default();
 
                 return Ok(SubjectRegisterResponse::Subjects(subjects));
+            }
+            SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch { queries } => {
+                let results: Vec<Vec<DigestIdentifier>> = queries
+                    .into_iter()
+                    .map(|(owner, schema_id, namespace)| {
+                        self.register
+                            .get(&(owner, schema_id, namespace))
+                            .map(|(_, subjects)| {
+                                let mut subjects =
+                                    subjects.iter().cloned().collect::<Vec<_>>();
+                                subjects.sort();
+                                subjects
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+
+                return Ok(SubjectRegisterResponse::SubjectsBatch(results));
             }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
                 let data_count = data.len();

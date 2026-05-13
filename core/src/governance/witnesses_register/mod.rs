@@ -51,6 +51,11 @@ pub struct WitnessesRegister {
         (PublicKey, String, SchemaType),
         HashMap<WitnessesType, CreatorWitnessGrantHistory>,
     >,
+    /// Índice invertido: nodo → creators donde es witness explícito.
+    /// No incluye witnesses de schema (WitnessesType::Witnesses) porque
+    /// dependen del nodo que pregunta y se evalúan dinámicamente.
+    #[serde(skip)]
+    pub(crate) node_creator_index: HashMap<PublicKey, HashSet<(PublicKey, String, SchemaType)>>,
     #[serde(skip)]
     pub(crate) ledger_batch_size: usize,
 }
@@ -704,10 +709,9 @@ impl WitnessesRegister {
         from_sn: u64,
         to_sn: u64,
     ) -> Result<Vec<(Interval, u64)>, ActorError> {
-        let governance_id = ctx.path().parent().key();
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/sn_register",
-            governance_id
+            ctx.path().parent().key()
         ));
         let sn_register = ctx.system().get_actor::<SnRegister>(&path).await?;
         let response = sn_register
@@ -745,31 +749,29 @@ impl WitnessesRegister {
             .map(|(_, gov_version)| *gov_version)
     }
 
-    async fn get_sn(
+    async fn get_sns(
         &self,
         ctx: &ActorContext<Self>,
         subject_id: DigestIdentifier,
-        gov_version: u64,
-    ) -> Result<SnLimit, ActorError> {
-        let governance_id = ctx.path().parent().key();
-
+        gov_versions: Vec<u64>,
+    ) -> Result<Vec<SnLimit>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/sn_register",
-            governance_id
+            ctx.path().parent().key()
         ));
         let sn_register = ctx.system().get_actor::<SnRegister>(&path).await?;
         let response = sn_register
-            .ask(SnRegisterMessage::GetSn {
+            .ask(SnRegisterMessage::GetSns {
                 subject_id,
-                gov_version,
+                gov_versions,
             })
             .await?;
 
         match response {
-            SnRegisterResponse::Sn(sn_limit) => Ok(sn_limit),
+            SnRegisterResponse::Sns(results) => Ok(results),
             _ => Err(ActorError::UnexpectedResponse {
                 path,
-                expected: "SnRegisterResponse::Sn".to_owned(),
+                expected: "SnRegisterResponse::Sns".to_owned(),
             }),
         }
     }
@@ -1000,9 +1002,8 @@ impl Actor for WitnessesRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("witnesses_register", Some(prefix), false, ctx)
+            .init_store("witnesses_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
             .await
         {
             error!(
@@ -1011,6 +1012,7 @@ impl Actor for WitnessesRegister {
             );
             return Err(e);
         }
+        self.rebuild_node_creator_index();
         Ok(())
     }
 }
@@ -1533,6 +1535,8 @@ impl PersistentActor for WitnessesRegister {
                     }
                 }
 
+                self.rebuild_node_creator_index();
+
                 debug!(
                     event_type = "UpdateCreatorsWitnessesConfirm",
                     version = version,
@@ -1608,6 +1612,8 @@ impl PersistentActor for WitnessesRegister {
                         }
                     }
                 }
+
+                self.rebuild_node_creator_index();
 
                 debug!(
                     event_type = "UpdateCreatorsWitnessesFact",

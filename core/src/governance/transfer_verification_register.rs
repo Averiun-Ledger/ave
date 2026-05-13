@@ -99,11 +99,10 @@ impl Actor for TransferVerificationRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
             .init_store(
                 "transfer_verification_register",
-                Some(prefix),
+                Some(ctx.path().parent().key().to_owned()),
                 false,
                 ctx,
             )

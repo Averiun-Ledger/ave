@@ -153,6 +153,24 @@ impl WitnessesRegister {
                 .is_some_and(has_match)
     }
 
+    pub(crate) fn rebuild_node_creator_index(&mut self) {
+        self.node_creator_index.clear();
+        for ((creator, namespace, schema_id), creator_witnesses) in
+            &self.witnesses_creator
+        {
+            for (witness_type, (_, current_lo)) in creator_witnesses {
+                if let WitnessesType::User(node) = witness_type {
+                    if current_lo.is_some() {
+                        self.node_creator_index
+                            .entry(node.clone())
+                            .or_default()
+                            .insert((creator.clone(), namespace.clone(), schema_id.clone()));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn is_current_witness_for_entry(
         &self,
         node: &PublicKey,

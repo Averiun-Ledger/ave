@@ -1,67 +1,37 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use crate::governance::sn_register::{
-    SnLimit, SnRegister, SnRegisterMessage, SnRegisterResponse,
-};
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
-use crate::model::common::{
-    Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
-};
-use crate::model::event::Ledger;
 use async_trait::async_trait;
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response,
-};
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath};
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
-use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span, warn};
 
-use crate::db::Storable;
-
-use super::{
-    CreatorWitnessGrant, CreatorWitnessGrantHistory, CreatorWitnessGrantRange,
-    CreatorWitnessRegistration, CurrentWitnessSubject, GovVersionLimit,
-    HiSnLimit, IntervalData, OldOwnerData, TransferData, TrackerDeliveryMode,
-    TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterEvent,
-    WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
-    ActualSearch,
-};
+use super::{CurrentWitnessSubject, WitnessesRegister};
 
 impl WitnessesRegister {
-    pub(crate) async fn get_subjects_for_owner_schema(
+    pub(crate) async fn get_subjects_for_owner_schema_batch(
         &self,
         ctx: &ActorContext<Self>,
-        owner: &PublicKey,
-        schema_id: &SchemaType,
-        namespace: &str,
-    ) -> Result<Vec<DigestIdentifier>, ActorError> {
-        let governance_id = ctx.path().parent().key();
+        queries: Vec<(PublicKey, SchemaType, String)>,
+    ) -> Result<Vec<Vec<DigestIdentifier>>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/subject_register",
-            governance_id
+            ctx.path().parent().key()
         ));
         let actor = ctx.system().get_actor::<SubjectRegister>(&path).await?;
         let response = actor
-            .ask(SubjectRegisterMessage::GetSubjectsByOwnerSchema {
-                owner: owner.clone(),
-                schema_id: schema_id.clone(),
-                namespace: namespace.to_owned(),
+            .ask(SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch {
+                queries,
             })
             .await?;
 
         match response {
-            SubjectRegisterResponse::Subjects(subjects) => Ok(subjects),
+            SubjectRegisterResponse::SubjectsBatch(results) => Ok(results),
             _ => Err(ActorError::UnexpectedResponse {
                 path,
-                expected: "SubjectRegisterResponse::Subjects".to_owned(),
+                expected: "SubjectRegisterResponse::SubjectsBatch".to_owned(),
             }),
         }
     }
@@ -77,29 +47,56 @@ impl WitnessesRegister {
         (Vec<CurrentWitnessSubject>, Option<DigestIdentifier>),
         ActorError,
     > {
-        let mut subjects = BTreeMap::new();
+        let mut relevant_creators: HashSet<(PublicKey, String, SchemaType)> =
+            HashSet::new();
 
+        // Witnesses explícitos: O(1) lookup via índice invertido.
+        if let Some(explicit_creators) = self.node_creator_index.get(node) {
+            relevant_creators.extend(explicit_creators.iter().cloned());
+        }
+
+        // Witnesses de schema: iterar solo sobre creators con Witnesses activo.
         for ((creator, namespace, schema_id), creator_witnesses) in
             &self.witnesses_creator
         {
-            if !self.is_current_witness_for_entry(
-                node,
-                schema_id,
-                namespace,
-                creator_witnesses,
-            ) {
+            let key =
+                (creator.clone(), namespace.clone(), schema_id.clone());
+            if relevant_creators.contains(&key) {
                 continue;
             }
-
-            let current_subjects = self
-                .get_subjects_for_owner_schema(
-                    ctx, creator, schema_id, namespace,
+            if creator_witnesses
+                .get(&super::WitnessesType::Witnesses)
+                .is_some_and(|(_, current_lo)| current_lo.is_some())
+                && self.has_active_schema_witness(
+                    node,
+                    schema_id,
+                    &Namespace::from(namespace.clone()),
                 )
+            {
+                relevant_creators.insert(key);
+            }
+        }
+
+        // Batch ask a SubjectRegister para todos los creators relevantes.
+        let queries: Vec<(PublicKey, SchemaType, String)> = relevant_creators
+            .into_iter()
+            .map(|(creator, namespace, schema_id)| {
+                (creator, schema_id, namespace)
+            })
+            .collect();
+
+        let mut subjects = BTreeMap::new();
+
+        if !queries.is_empty() {
+            let batch_results = self
+                .get_subjects_for_owner_schema_batch(ctx, queries)
                 .await?;
 
-            for subject_id in current_subjects {
-                if let Some(data) = self.subjects.get(&subject_id) {
-                    subjects.insert(subject_id, data.sn);
+            for subject_ids in batch_results {
+                for subject_id in subject_ids {
+                    if let Some(data) = self.subjects.get(&subject_id) {
+                        subjects.insert(subject_id, data.sn);
+                    }
                 }
             }
         }
@@ -131,8 +128,7 @@ impl WitnessesRegister {
         }
 
         let next_cursor = if items.len() > limit {
-            let extra = items.pop();
-            let _ = extra;
+            items.pop();
             items.last().map(|item| item.subject_id.clone())
         } else {
             None

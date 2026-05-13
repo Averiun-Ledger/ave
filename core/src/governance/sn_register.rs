@@ -50,6 +50,26 @@ pub struct SnRegister {
     register: HashMap<DigestIdentifier, CeilingMap<u64>>,
 }
 
+impl SnRegister {
+    fn lookup_sn(&self, subject_id: &DigestIdentifier, gov_version: u64) -> SnLimit {
+        if let Some(gov_version_register) = self.register.get(subject_id)
+            && let Some(last) = gov_version_register.last()
+        {
+            if gov_version > *last.0 {
+                SnLimit::LastSn
+            } else if let Some(sn) =
+                gov_version_register.get_prev_or_equal(gov_version)
+            {
+                SnLimit::Sn(sn)
+            } else {
+                SnLimit::NotSn
+            }
+        } else {
+            SnLimit::NotSn
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterMessage {
     PurgeStorage,
@@ -64,6 +84,10 @@ pub enum SnRegisterMessage {
     GetSn {
         subject_id: DigestIdentifier,
         gov_version: u64,
+    },
+    GetSns {
+        subject_id: DigestIdentifier,
+        gov_versions: Vec<u64>,
     },
     GetGovVersionWindow {
         subject_id: DigestIdentifier,
@@ -94,6 +118,7 @@ pub enum SnLimit {
 pub enum SnRegisterResponse {
     Ok,
     Sn(SnLimit),
+    Sns(Vec<SnLimit>),
     GovVersionWindow(Vec<SnGovVersionRange>),
 }
 
@@ -139,9 +164,8 @@ impl Actor for SnRegister {
         &mut self,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("sn_register", Some(prefix), false, ctx)
+            .init_store("sn_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
             .await
         {
             error!(
@@ -191,22 +215,8 @@ impl Handler<Self> for SnRegister {
                 subject_id,
                 gov_version,
             } => {
-                let response = if let Some(gov_version_register) =
-                    self.register.get(&subject_id)
-                    && let Some(last) = gov_version_register.last()
-                {
-                    if gov_version > *last.0 {
-                        SnRegisterResponse::Sn(SnLimit::LastSn)
-                    } else if let Some(sn) =
-                        gov_version_register.get_prev_or_equal(gov_version)
-                    {
-                        SnRegisterResponse::Sn(SnLimit::Sn(sn))
-                    } else {
-                        SnRegisterResponse::Sn(SnLimit::NotSn)
-                    }
-                } else {
-                    SnRegisterResponse::Sn(SnLimit::NotSn)
-                };
+                let response =
+                    SnRegisterResponse::Sn(self.lookup_sn(&subject_id, gov_version));
 
                 debug!(
                     msg_type = "GetSn",
@@ -216,6 +226,24 @@ impl Handler<Self> for SnRegister {
                 );
 
                 Ok(response)
+            }
+            SnRegisterMessage::GetSns {
+                subject_id,
+                gov_versions,
+            } => {
+                let results: Vec<SnLimit> = gov_versions
+                    .into_iter()
+                    .map(|gov_version| self.lookup_sn(&subject_id, gov_version))
+                    .collect();
+
+                debug!(
+                    msg_type = "GetSns",
+                    subject_id = %subject_id,
+                    count = results.len(),
+                    "Batch Sn lookup completed"
+                );
+
+                Ok(SnRegisterResponse::Sns(results))
             }
             SnRegisterMessage::RegisterSn {
                 subject_id,
