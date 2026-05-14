@@ -19,6 +19,8 @@ use crate::{
 
 pub mod coordinator;
 pub mod error;
+pub mod processor;
+pub mod transfer_verifier;
 pub mod worker;
 
 #[derive(Debug, Clone)]

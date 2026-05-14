@@ -380,6 +380,7 @@ impl Node {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         ledger_batch_size: self.ledger_batch_size,
+                        transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
                     },
                 )
@@ -400,6 +401,7 @@ impl Node {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         ledger_batch_size: self.ledger_batch_size,
+                        transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
                     },
                 )
@@ -985,6 +987,7 @@ impl Actor for Node {
                         our_key: self.our_key.clone(),
                         network,
                         ledger_batch_size: self.ledger_batch_size,
+                        transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
                     },
                 )
@@ -1061,6 +1064,7 @@ impl Handler<Self> for Node {
                             our_key: self.our_key.clone(),
                             network,
                             ledger_batch_size: self.ledger_batch_size,
+                            transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                             hash,
                         },
                     )

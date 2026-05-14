@@ -318,32 +318,6 @@ where
     }
 }
 
-pub async fn check_create_witness_access<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    owner: PublicKey,
-    node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
-    gov_version: u64,
-) -> Result<bool, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let status = check_witness_status(
-        ctx,
-        governance_id,
-        node,
-        namespace,
-        schema_id,
-        None,
-        Some(owner),
-        Some(gov_version),
-    )
-    .await?;
-
-    Ok(status.create_access)
-}
 
 #[derive(
     Clone,
