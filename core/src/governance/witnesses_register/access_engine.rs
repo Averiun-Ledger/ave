@@ -184,8 +184,18 @@ impl WitnessesRegister {
             )
             .await?;
 
-        println!("[build_tracker_window_from_data] subject={} node={} actual_owner={} old_owners={:?} actual_new_owner={:?} data.sn={} sn_limit={:?} effective_owner={:?}",
-            subject_id, node, data.actual_owner, data.old_owners.keys().collect::<Vec<_>>(), data.actual_new_owner_data.as_ref().map(|(o,_)| o.clone()), data.sn, sn_limit, effective_owner);
+        debug!(
+            msg_type = "BuildTrackerWindow",
+            subject_id = %subject_id,
+            node = %node,
+            actual_owner = %data.actual_owner,
+            old_owners = ?data.old_owners.keys(),
+            actual_new_owner = ?data.actual_new_owner_data.as_ref().map(|(o,_)| o),
+            data.sn = data.sn,
+            sn_limit = ?sn_limit,
+            effective_owner = ?effective_owner,
+            "Starting build_tracker_window_from_data"
+        );
 
         let access_limit = match sn_limit {
             SnLimit::Sn(sn) => Some(sn),
@@ -208,7 +218,13 @@ impl WitnessesRegister {
             }
         };
 
-        println!("[build_tracker_window_from_data] subject={} node={} access_limit={:?}", subject_id, node, access_limit);
+        debug!(
+            msg_type = "BuildTrackerWindow",
+            subject_id = %subject_id,
+            node = %node,
+            access_limit = ?access_limit,
+            "Access limit computed"
+        );
 
         let Some(access_limit) = access_limit else {
             return Ok((None, None, None, true, Vec::new()));
@@ -288,6 +304,13 @@ impl WitnessesRegister {
             };
 
             let Some(gov_version) = gov_version else {
+                warn!(
+                    msg_type = "BuildTrackerWindow",
+                    subject_id = %subject_id,
+                    node = %node,
+                    sn = sn,
+                    "gov_version missing for sn"
+                );
                 continue;
             };
 
@@ -327,11 +350,16 @@ impl WitnessesRegister {
             }
         }
 
-        let transfer_sn = transfer_sn
-            .filter(|transfer_sn| actual_sn.is_none_or(|sn| *transfer_sn > sn));
-
-        println!("[build_tracker_window_from_data] subject={} node={} access_limit={:?} transfer_sn={:?} clear_sn={:?} actual_sn={:?}",
-            subject_id, node, access_limit, transfer_sn, clear_sn, actual_sn);
+        debug!(
+            msg_type = "BuildTrackerWindow",
+            subject_id = %subject_id,
+            node = %node,
+            access_limit = ?access_limit,
+            transfer_sn = ?transfer_sn,
+            clear_sn = ?clear_sn,
+            actual_sn = ?actual_sn,
+            "Tracker window built"
+        );
 
         Ok((Some(access_limit), transfer_sn, clear_sn, true, ranges))
     }

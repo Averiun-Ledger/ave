@@ -34,6 +34,9 @@ impl DistriWorker {
         let mut transfer_recorded = false;
 
         loop {
+            if pending_ledger.is_empty() {
+                break;
+            }
             let chunk_first_sn = pending_ledger[0].sn;
             let chunk_offered_hi_sn = pending_ledger
                 .last()
@@ -106,13 +109,13 @@ impl DistriWorker {
 
                 let lease = if is_gov {
                     let result = create_subject(ctx, create_ledger.clone()).await;
-                    self.handle_result(
+                    handle_distri_error!(
                         ctx,
                         result,
                         "LedgerDistribution",
                         &subject_id,
-                        "Failed to create subject from ledger",
-                    ).await?;
+                        "Failed to create subject from ledger"
+                    )?;
                     None
                 } else {
                     let request = create_ledger
@@ -140,13 +143,13 @@ impl DistriWorker {
                         request.schema_id,
                     )
                     .await;
-                    self.handle_result(
+                    handle_distri_error!(
                         ctx,
                         result,
                         "LedgerDistribution",
                         &subject_id,
-                        "Failed to validate subject creation from ledger",
-                    ).await?;
+                        "Failed to validate subject creation from ledger"
+                    )?;
 
                     let result = acquire_subject(
                         ctx,
@@ -156,13 +159,13 @@ impl DistriWorker {
                         true,
                     )
                     .await;
-                    Some(self.handle_result(
+                    Some(handle_distri_error!(
                         ctx,
                         result,
                         "LedgerDistribution",
                         &subject_id,
-                        "Failed to create subject from ledger",
-                    ).await?)
+                        "Failed to create subject from ledger"
+                    )?)
                 };
 
                 let _event = pending_ledger.remove(0);
@@ -378,17 +381,15 @@ impl DistriWorker {
                             sn,
                         )
                         .await;
-                    let auth = self
-                        .handle_result_with_sender_and_sn(
-                            ctx,
-                            result,
-                            "LastEventDistribution",
-                            &subject_id,
-                            &sender,
-                            sn,
-                            "Authorization check failed",
-                        )
-                        .await?;
+                    let auth = handle_distri_error!(
+                        ctx,
+                        result,
+                        "LastEventDistribution",
+                        &subject_id,
+                        "Authorization check failed",
+                        sender = &sender,
+                        sn = sn
+                    )?;
 
                     let is_gov = auth.is_gov;
 
@@ -406,13 +407,13 @@ impl DistriWorker {
 
                     let lease = if ledger.is_create_event() {
                         let result = create_subject(ctx, ledger.clone()).await;
-                        self.handle_result(
+                        handle_distri_error!(
                             ctx,
                             result,
                             "LastEventDistribution",
                             &subject_id,
-                            "Failed to create subject from create event",
-                        ).await?;
+                            "Failed to create subject from create event"
+                        )?;
                         None
                     } else {
                         let requester = Self::requester_id(

@@ -150,42 +150,18 @@ impl WitnessesRegister {
             for (witness_type, (_, current_lo)) in &entry.intervals {
                 if let WitnessesType::User(node) = witness_type {
                     if current_lo.is_some() {
-                        self.node_creator_index
-                            .entry(node.clone())
-                            .or_default()
-                            .insert((creator.clone(), namespace.clone(), schema_id.clone()));
+                        let key = (creator.clone(), namespace.clone(), schema_id.clone());
+                        if let Some(set) = self.node_creator_index.get_mut(node) {
+                            set.insert(key);
+                        } else {
+                            let mut set = HashSet::new();
+                            set.insert(key);
+                            self.node_creator_index.insert(node.clone(), set);
+                        }
                     }
                 }
             }
         }
-    }
-
-    pub(crate) fn is_current_witness_for_entry(
-        &self,
-        node: &PublicKey,
-        schema_id: &SchemaType,
-        namespace: &str,
-        creator_witnesses: &HashMap<WitnessesType, IntervalData>,
-    ) -> bool {
-        if creator_witnesses
-            .get(&WitnessesType::User(node.clone()))
-            .is_some_and(|(_, current_lo)| current_lo.is_some())
-        {
-            return true;
-        }
-
-        if !creator_witnesses
-            .get(&WitnessesType::Witnesses)
-            .is_some_and(|(_, current_lo)| current_lo.is_some())
-        {
-            return false;
-        }
-
-        self.has_active_schema_witness(
-            node,
-            schema_id,
-            &Namespace::from(namespace.to_owned()),
-        )
     }
 
     pub(crate) fn has_schema_witness_at_version(

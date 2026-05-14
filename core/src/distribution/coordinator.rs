@@ -74,6 +74,7 @@ impl Handler<Self> for DistriCoordinator {
                     );
                 }
                 warn!(
+                    msg_type = "Coordinator",
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -87,6 +88,7 @@ impl Handler<Self> for DistriCoordinator {
                             .await
                         {
                             error!(
+                                msg_type = "Coordinator",
                                 node_key = %self.node_key,
                                 error = %e,
                                 "Failed to notify parent distribution actor after retry exhausted"
@@ -94,6 +96,7 @@ impl Handler<Self> for DistriCoordinator {
                             emit_fail(ctx, e).await;
                         } else {
                             debug!(
+                                msg_type = "Coordinator",
                                 node_key = %self.node_key,
                                 "Parent distribution actor notified of retry exhaustion"
                             );
@@ -101,6 +104,7 @@ impl Handler<Self> for DistriCoordinator {
                     }
                     Err(e) => {
                         error!(
+                            msg_type = "Coordinator",
                             node_key = %self.node_key,
                             error = %e,
                             "Failed to get parent distribution actor after retry exhausted"
@@ -271,6 +275,7 @@ impl Handler<Self> for DistriCoordinator {
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
+            msg_type = "Coordinator",
             node_key = %self.node_key,
             error = %error,
             "Child actor fault in distributor coordinator"

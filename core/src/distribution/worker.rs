@@ -101,117 +101,6 @@ impl DistriWorker {
         }
     }
 
-    pub(crate) async fn handle_result<T>(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        result: Result<T, ActorError>,
-        msg_type: &'static str,
-        subject_id: &DigestIdentifier,
-        message: &'static str,
-    ) -> Result<T, ActorError> {
-        match result {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                if let ActorError::FunctionalCritical { .. } = e {
-                    error!(
-                        msg_type = msg_type,
-                        subject_id = %subject_id,
-                        error = %e,
-                        "{}",
-                        message
-                    );
-                    Err(emit_fail(ctx, e).await)
-                } else {
-                    warn!(
-                        msg_type = msg_type,
-                        subject_id = %subject_id,
-                        error = %e,
-                        "{}",
-                        message
-                    );
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    pub(crate) async fn handle_result_with_sender<T>(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        result: Result<T, ActorError>,
-        msg_type: &'static str,
-        subject_id: &DigestIdentifier,
-        sender: &PublicKey,
-        message: &'static str,
-    ) -> Result<T, ActorError> {
-        match result {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                if let ActorError::FunctionalCritical { .. } = e {
-                    error!(
-                        msg_type = msg_type,
-                        subject_id = %subject_id,
-                        sender = %sender,
-                        error = %e,
-                        "{}",
-                        message
-                    );
-                    Err(emit_fail(ctx, e).await)
-                } else {
-                    warn!(
-                        msg_type = msg_type,
-                        subject_id = %subject_id,
-                        sender = %sender,
-                        error = %e,
-                        "{}",
-                        message
-                    );
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    pub(crate) async fn handle_result_with_sender_and_sn<T>(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        result: Result<T, ActorError>,
-        msg_type: &'static str,
-        subject_id: &DigestIdentifier,
-        sender: &PublicKey,
-        sn: u64,
-        message: &'static str,
-    ) -> Result<T, ActorError> {
-        match result {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                if let ActorError::FunctionalCritical { .. } = e {
-                    error!(
-                        msg_type = msg_type,
-                        subject_id = %subject_id,
-                        sn = sn,
-                        sender = %sender,
-                        error = %e,
-                        "{}",
-                        message
-                    );
-                    Err(emit_fail(ctx, e).await)
-                } else {
-                    warn!(
-                        msg_type = msg_type,
-                        subject_id = %subject_id,
-                        sn = sn,
-                        sender = %sender,
-                        error = %e,
-                        "{}",
-                        message
-                    );
-                    Err(e)
-                }
-            }
-        }
-    }
-
     pub(crate) async fn send_last_event_ack(
         &self,
         sender: PublicKey,
@@ -471,6 +360,7 @@ impl DistriWorker {
 
         let Some(governance_id) = governance_id else {
             error!(
+                msg_type = "CheckAuthCommon",
                 subject_id = %subject_id,
                 "Tracker subject is missing governance_id during authorization check"
             );
@@ -900,10 +790,12 @@ impl DistriWorker {
         ranges: &[TrackerDeliveryRange],
         sn: u64,
     ) -> Option<TrackerDeliveryMode> {
-        ranges
-            .iter()
-            .find(|range| range.from_sn <= sn && sn <= range.to_sn)
-            .map(|range| range.mode.clone())
+        let idx = ranges.partition_point(|range| range.to_sn < sn);
+        if idx < ranges.len() && ranges[idx].from_sn <= sn {
+            Some(ranges[idx].mode.clone())
+        } else {
+            None
+        }
     }
 
     fn project_tracker_ledger(
@@ -1091,22 +983,23 @@ impl DistriWorker {
                         .is_some_and(|verified| verified >= transfer_sn)
                     {
                         None
-                    } else if let Some(event) =
-                        ledger.iter().find(|event| event.sn == transfer_sn)
-                    {
-                        Some(event.clone())
                     } else {
-                        let (mut event_ledger, _) = self
-                            .get_ledger(
-                                ctx,
-                                subject_id,
-                                transfer_sn,
-                                Some(transfer_sn.saturating_sub(1)),
-                                false,
-                            )
-                            .await?;
-                        let ev = event_ledger.pop();
-                        ev
+                        let idx = ledger.partition_point(|event| event.sn < transfer_sn);
+                        if idx < ledger.len() && ledger[idx].sn == transfer_sn {
+                            Some(ledger[idx].clone())
+                        } else {
+                            let (mut event_ledger, _) = self
+                                .get_ledger(
+                                    ctx,
+                                    subject_id,
+                                    transfer_sn,
+                                    Some(transfer_sn.saturating_sub(1)),
+                                    false,
+                                )
+                                .await?;
+                            let ev = event_ledger.pop();
+                            ev
+                        }
                     }
                 } else {
                     None
@@ -1158,16 +1051,32 @@ impl DistriWorker {
     ) -> Result<(), ActorError> {
         let verified = match get_subject_data(ctx, subject_id).await? {
             Some(SubjectData::Tracker { governance_id, .. }) => {
-                get_verified_transfer_sn(ctx, &governance_id, subject_id)
-                    .await
-                    .ok()
-                    .flatten()
+                match get_verified_transfer_sn(ctx, &governance_id, subject_id).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(
+                            msg_type = "RequestLedger",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "get_verified_transfer_sn failed"
+                        );
+                        None
+                    }
+                }
             }
             Some(SubjectData::Governance { .. }) => {
-                get_verified_transfer_sn(ctx, subject_id, subject_id)
-                    .await
-                    .ok()
-                    .flatten()
+                match get_verified_transfer_sn(ctx, subject_id, subject_id).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(
+                            msg_type = "RequestLedger",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "get_verified_transfer_sn failed"
+                        );
+                        None
+                    }
+                }
             }
             None => None,
         };
@@ -1226,6 +1135,7 @@ impl DistriWorker {
 
                 if received_first_sn != expected_sn {
                     debug!(
+                        msg_type = "EnsureNextSn",
                         subject_id = %subject_id,
                         local_last_sn = local_sn,
                         expected_sn = expected_sn,
@@ -1248,6 +1158,7 @@ impl DistriWorker {
             None => {
                 if received_first_sn != 0 {
                     debug!(
+                        msg_type = "EnsureNextSn",
                         subject_id = %subject_id,
                         received_first_sn = received_first_sn,
                         "Subject not present locally and first SN is not 0, requesting update"
@@ -1503,14 +1414,14 @@ impl Handler<Self> for DistriWorker {
                         receiver_actor,
                     )
                     .await;
-                self.handle_result_with_sender(
+                handle_distri_error!(
                     ctx,
                     result,
                     "GetGovernanceVersion",
                     &subject_id,
-                    &sender,
                     "Subject is not a governance",
-                ).await?;
+                    sender = &sender
+                )?;
             }
             DistriWorkerMessage::SendDistribution {
                 actual_sn,
@@ -1531,14 +1442,14 @@ impl Handler<Self> for DistriWorker {
                         already_verified_transfer_sn,
                     )
                     .await;
-                self.handle_result_with_sender(
+                handle_distri_error!(
                     ctx,
                     result,
                     "SendDistribution",
                     &subject_id,
-                    &sender,
                     "Witness check failed",
-                ).await?;
+                    sender = &sender
+                )?;
             }
             DistriWorkerMessage::LastEventDistribution {
                 ledger,
@@ -1607,9 +1518,20 @@ impl Handler<Self> for DistriWorker {
                 };
 
                 let mut verified_transfer_sn = if !common.is_gov {
-                    get_verified_transfer_sn(ctx, &common.governance_id, &subject_id).await.ok().flatten()
-                        .filter(|(_, verified_sender)| *verified_sender == sender)
-                        .map(|(sn, _)| sn)
+                    match get_verified_transfer_sn(ctx, &common.governance_id, &subject_id).await {
+                        Ok(v) => v
+                            .filter(|(_, verified_sender)| *verified_sender == sender)
+                            .map(|(sn, _)| sn),
+                        Err(e) => {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                error = %e,
+                                "get_verified_transfer_sn failed"
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

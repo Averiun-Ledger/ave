@@ -73,8 +73,15 @@ impl WitnessesRegister {
         for event in ledger {
             data.sn = event.sn;
 
-            println!("[transfer_data_from_ledger] subject={} event.sn={} event_type={:?} actual_owner={} actual_new_owner={:?}",
-                subject_id, event.sn, event.get_event_request_type(), data.actual_owner, data.actual_new_owner_data.as_ref().map(|(o,_)| o.clone()));
+            debug!(
+                msg_type = "TransferDataFromLedger",
+                subject_id = %subject_id,
+                event.sn = event.sn,
+                event_type = ?event.get_event_request_type(),
+                actual_owner = %data.actual_owner,
+                actual_new_owner = ?data.actual_new_owner_data.as_ref().map(|(o,_)| o),
+                "Processing ledger event"
+            );
 
             match event.get_event_request() {
                 Some(EventRequest::Transfer(transfer_request)) => {
@@ -97,6 +104,13 @@ impl WitnessesRegister {
 
                         data.actual_owner = new_owner;
                         data.gov_version = new_owner_gov_version;
+                    } else {
+                        warn!(
+                            msg_type = "TransferDataFromLedger",
+                            subject_id = %subject_id,
+                            event.sn = event.sn,
+                            "Confirm event without pending Transfer"
+                        );
                     }
                 }
                 Some(EventRequest::Reject(..)) => {
@@ -109,6 +123,13 @@ impl WitnessesRegister {
                             lo: new_owner_gov_version,
                             hi: event.gov_version,
                         });
+                    } else {
+                        warn!(
+                            msg_type = "TransferDataFromLedger",
+                            subject_id = %subject_id,
+                            event.sn = event.sn,
+                            "Reject event without pending Transfer"
+                        );
                     }
                 }
                 _ => {}

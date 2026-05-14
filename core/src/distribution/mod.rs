@@ -17,6 +17,93 @@ use crate::{
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
 
+macro_rules! handle_distri_error {
+    ($ctx:expr, $result:expr, $msg_type:expr, $subject_id:expr, $message:expr) => {
+        match $result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(emit_fail($ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+    ($ctx:expr, $result:expr, $msg_type:expr, $subject_id:expr, $message:expr, sender = $sender:expr) => {
+        match $result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(emit_fail($ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+    ($ctx:expr, $result:expr, $msg_type:expr, $subject_id:expr, $message:expr, sender = $sender:expr, sn = $sn:expr) => {
+        match $result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sn = $sn,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(emit_fail($ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sn = $sn,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+}
+
 pub mod coordinator;
 pub mod error;
 pub mod processor;
@@ -93,6 +180,7 @@ impl Distribution {
             Ok(child) => child,
             Err(e) => {
                 error!(
+                    msg_type = "CreateDistributor",
                     subject_id = %self.subject_id,
                     witness = %signer,
                     error = %e,
@@ -282,6 +370,7 @@ impl Handler<Self> for Distribution {
     ) -> ChildAction {
         Self::observe_event("error");
         error!(
+            msg_type = "ChildFault",
             subject_id = %self.subject_id,
             request_id = %self.request_id,
             distribution_type = ?self.distribution_type,

@@ -546,24 +546,39 @@ impl WitnessesRegister {
     ) -> IntervalSet {
         let mut covered = IntervalSet::new();
 
-        for owner_range in old_owner.interval_gov_version.iter() {
-            if let Some(from) = current_from {
-                let lo = from.max(owner_range.lo);
-                if lo <= owner_range.hi {
-                    covered.insert(Interval {
-                        lo,
-                        hi: owner_range.hi,
-                    });
-                }
-            }
+        let owners: Vec<&Interval> = old_owner.interval_gov_version.iter().collect();
+        let witnesses: Vec<&Interval> = intervals.iter().collect();
 
-            for witness_range in intervals.iter() {
-                let lo = witness_range.lo.max(owner_range.lo);
-                let hi = witness_range.hi.min(owner_range.hi);
+        let mut i = 0;
+        let mut j = 0;
+        while i < owners.len() && j < witnesses.len() {
+            let owner = owners[i];
+            let witness = witnesses[j];
 
+            if witness.hi < owner.lo {
+                j += 1;
+            } else if owner.hi < witness.lo {
+                i += 1;
+            } else {
+                let lo = witness.lo.max(owner.lo);
+                let hi = witness.hi.min(owner.hi);
                 if lo <= hi {
                     covered.insert(Interval { lo, hi });
                 }
+
+                if witness.hi < owner.hi {
+                    j += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        if let Some(from) = current_from {
+            let start = owners.partition_point(|owner| owner.hi < from);
+            for owner in &owners[start..] {
+                let lo = from.max(owner.lo);
+                covered.insert(Interval { lo, hi: owner.hi });
             }
         }
 
@@ -1023,6 +1038,7 @@ impl Actor for WitnessesRegister {
             .await
         {
             error!(
+                msg_type = "Init",
                 error = %e,
                 "Failed to initialize witnesses_register store"
             );
@@ -1547,6 +1563,7 @@ impl Handler<Self> for WitnessesRegister {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
+                msg_type = "Persist",
                 event = ?event,
                 error = %e,
                 "Failed to persist witnesses register event"
@@ -1574,6 +1591,7 @@ impl PersistentActor for WitnessesRegister {
                 self.gov_sn = *sn;
 
                 debug!(
+                    msg_type = "UpdateSnGov",
                     event_type = "UpdateSnGov",
                     sn = sn,
                     "Governance sn updated in state"
@@ -1612,6 +1630,7 @@ impl PersistentActor for WitnessesRegister {
                 self.rebuild_node_creator_index();
 
                 debug!(
+                    msg_type = "UpdateCreatorsWitnessesConfirm",
                     event_type = "UpdateCreatorsWitnessesConfirm",
                     version = version,
                     remove_witnesses_count = remove_witnesses.len(),
@@ -1690,6 +1709,7 @@ impl PersistentActor for WitnessesRegister {
                 self.rebuild_node_creator_index();
 
                 debug!(
+                    msg_type = "UpdateCreatorsWitnessesFact",
                     event_type = "UpdateCreatorsWitnessesFact",
                     version = version,
                     remove_creator_count = remove_creator.len(),
@@ -1706,6 +1726,7 @@ impl PersistentActor for WitnessesRegister {
                     data.sn = *sn;
 
                     debug!(
+                        msg_type = "UpdateSn",
                         event_type = "UpdateSn",
                         subject_id = %subject_id,
                         sn = sn,
@@ -1713,6 +1734,7 @@ impl PersistentActor for WitnessesRegister {
                     );
                 } else {
                     error!(
+                        msg_type = "UpdateSn",
                         event_type = "UpdateSn",
                         subject_id = %subject_id,
                         "Subject not found in register"
@@ -1735,6 +1757,7 @@ impl PersistentActor for WitnessesRegister {
                     );
                 } else {
                     warn!(
+                        msg_type = "UpdateTrackerVisibility",
                         event_type = "UpdateTrackerVisibility",
                         subject_id = %subject_id,
                         sn = sn,
@@ -1759,6 +1782,7 @@ impl PersistentActor for WitnessesRegister {
                 );
 
                 debug!(
+                    msg_type = "Create",
                     event_type = "Create",
                     subject_id = %subject_id,
                     owner = %owner,
@@ -1776,6 +1800,7 @@ impl PersistentActor for WitnessesRegister {
                         Some((new_owner.clone(), *gov_version));
 
                     debug!(
+                        msg_type = "Transfer",
                         event_type = "Transfer",
                         subject_id = %subject_id,
                         new_owner = %new_owner,
@@ -1784,6 +1809,7 @@ impl PersistentActor for WitnessesRegister {
                     );
                 } else {
                     error!(
+                        msg_type = "Transfer",
                         event_type = "Transfer",
                         subject_id = %subject_id,
                         new_owner = %new_owner,
@@ -1815,6 +1841,7 @@ impl PersistentActor for WitnessesRegister {
                         data.gov_version = new_owner_gov_version;
 
                         debug!(
+                            msg_type = "Confirm",
                             event_type = "Confirm",
                             subject_id = %subject_id,
                             sn = sn,
@@ -1823,6 +1850,7 @@ impl PersistentActor for WitnessesRegister {
                         );
                     } else {
                         error!(
+                            msg_type = "Confirm",
                             event_type = "Confirm",
                             subject_id = %subject_id,
                             sn = sn,
@@ -1831,6 +1859,7 @@ impl PersistentActor for WitnessesRegister {
                     };
                 } else {
                     error!(
+                        msg_type = "Confirm",
                         event_type = "Confirm",
                         subject_id = %subject_id,
                         sn = sn,
@@ -1842,6 +1871,7 @@ impl PersistentActor for WitnessesRegister {
                 self.subjects.remove(subject_id);
 
                 debug!(
+                    msg_type = "DeleteSubject",
                     event_type = "DeleteSubject",
                     subject_id = %subject_id,
                     "Witness subject entry deleted from state"
@@ -1866,6 +1896,7 @@ impl PersistentActor for WitnessesRegister {
                         });
 
                         debug!(
+                            msg_type = "Reject",
                             event_type = "Reject",
                             subject_id = %subject_id,
                             sn = sn,
@@ -1874,6 +1905,7 @@ impl PersistentActor for WitnessesRegister {
                         );
                     } else {
                         error!(
+                            msg_type = "Reject",
                             event_type = "Reject",
                             subject_id = %subject_id,
                             sn = sn,
@@ -1882,6 +1914,7 @@ impl PersistentActor for WitnessesRegister {
                     };
                 } else {
                     error!(
+                        msg_type = "Reject",
                         event_type = "Reject",
                         subject_id = %subject_id,
                         sn = sn,
