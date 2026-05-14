@@ -42,7 +42,7 @@ impl TransferVerifier {
         transfer_event: &Ledger,
         expected_subject_id: &DigestIdentifier,
         ledger: &Ledger,
-    ) -> Result<(DigestIdentifier, bool), DistributorError> {
+    ) -> Result<(DigestIdentifier, bool, Option<SubjectData>), DistributorError> {
         // 1. El protocolo debe ser Transfer.
         let (event_request, evaluation, validation) = match &transfer_event.protocols {
             Protocols::Transfer { event_request, evaluation, validation } => {
@@ -172,9 +172,9 @@ impl TransferVerifier {
                 details: format!("failed to get subject data: {}", e),
             })?;
 
-        let (governance_id, schema_id, namespace, is_register) = match subject_data {
+        let (governance_id, schema_id, namespace, is_register) = match &subject_data {
             Some(SubjectData::Tracker { governance_id, schema_id, namespace, .. }) => {
-                (governance_id, schema_id, Namespace::from(namespace), true)
+                (governance_id.clone(), schema_id.clone(), Namespace::from(namespace.clone()), true)
             }
             Some(SubjectData::Governance { .. }) => {
                 return Err(DistributorError::TransferEventInvalid {
@@ -225,7 +225,7 @@ impl TransferVerifier {
             });
         }
 
-        Ok((governance_id, is_register))
+        Ok((governance_id, is_register, subject_data))
     }
 
     /// Verifica criptográficamente un transfer_event, simula si el nodo local
@@ -242,23 +242,20 @@ impl TransferVerifier {
         let first_ledger = sender_ledger.first().ok_or_else(|| ActorError::Functional {
             description: "Empty sender ledger in verify_and_simulate_transfer".to_string(),
         })?;
-        let (governance_id, _) = self
+        let (governance_id, _, subject_data) = self
             .verify_light(ctx, transfer_event, subject_id, first_ledger)
             .await?;
 
-        let (schema_id, namespace) =
-            if let Some(data) = get_subject_data(ctx, subject_id).await? {
-                match data {
-                    SubjectData::Tracker {
-                        schema_id,
-                        namespace,
-                        ..
-                    } => (schema_id, namespace),
-                    SubjectData::Governance { .. } => {
-                        (SchemaType::Governance, String::default())
-                    }
-                }
-            } else {
+        let (schema_id, namespace) = match subject_data {
+            Some(SubjectData::Tracker {
+                schema_id,
+                namespace,
+                ..
+            }) => (schema_id, namespace),
+            Some(SubjectData::Governance { .. }) => {
+                (SchemaType::Governance, String::default())
+            }
+            None => {
                 let create = sender_ledger
                     .iter()
                     .find(|l| l.is_create_event())
@@ -267,7 +264,8 @@ impl TransferVerifier {
                         description: "Cannot resolve metadata needed for simulation: no create event in sender ledger".to_string(),
                     })?;
                 (create.schema_id, create.namespace.to_string())
-            };
+            }
+        };
 
         let simulated_limit = crate::model::common::subject::check_simulated_transfer_hi_sn_limit(
             ctx,

@@ -25,7 +25,7 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::db::Storable;
 
 mod access_engine;
-mod subject_ownership;
+pub(crate) mod subject_ownership;
 mod sync_support;
 mod witness_policy;
 
@@ -295,7 +295,7 @@ pub enum WitnessesRegisterMessage {
     },
     QueryWitnessStatusAndWindow {
         subject_id: DigestIdentifier,
-        ledger: Vec<Ledger>,
+        transfer_data: Option<TransferData>,
         node: PublicKey,
         sender: PublicKey,
         namespace: String,
@@ -763,16 +763,6 @@ impl WitnessesRegister {
                 expected: "SnRegisterResponse::GovVersionWindow".to_owned(),
             }),
         }
-    }
-
-    fn gov_version_for_sn(
-        gov_versions: &[(Interval, u64)],
-        sn: u64,
-    ) -> Option<u64> {
-        gov_versions
-            .iter()
-            .find(|(interval, _)| interval.contains(sn))
-            .map(|(_, gov_version)| *gov_version)
     }
 
     async fn get_sns(
@@ -1467,7 +1457,7 @@ impl Handler<Self> for WitnessesRegister {
             }
             WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
                 subject_id,
-                ledger,
+                transfer_data,
                 node,
                 sender,
                 namespace,
@@ -1476,8 +1466,20 @@ impl Handler<Self> for WitnessesRegister {
                 owner,
                 owner_gov_version,
             } => {
-                let data =
-                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
+                let data = match transfer_data {
+                    Some(data) => data,
+                    None => match self.subjects.get(&subject_id) {
+                        Some(data) => data.clone(),
+                        None => {
+                            return Err(ActorError::Functional {
+                                description: format!(
+                                    "Subject data not found for {}",
+                                    subject_id
+                                ),
+                            });
+                        }
+                    },
+                };
                 let status = self
                     .query_witness_status(
                         ctx,

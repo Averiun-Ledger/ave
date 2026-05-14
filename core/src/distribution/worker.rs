@@ -20,6 +20,7 @@ use crate::{
         witnesses_register::{
             GovVersionLimit, HiSnLimit, TrackerDeliveryMode,
             TrackerDeliveryRange,
+            TransferData, WitnessesRegister,
         },
     },
     helpers::network::service::NetworkSender,
@@ -97,6 +98,117 @@ impl DistriWorker {
                 .take_while(|event| event.gov_version <= limit)
                 .last()
                 .map(|event| event.sn.min(offered_hi_sn)),
+        }
+    }
+
+    pub(crate) async fn handle_result<T>(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        result: Result<T, ActorError>,
+        msg_type: &'static str,
+        subject_id: &DigestIdentifier,
+        message: &'static str,
+    ) -> Result<T, ActorError> {
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = msg_type,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "{}",
+                        message
+                    );
+                    Err(emit_fail(ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = msg_type,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "{}",
+                        message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn handle_result_with_sender<T>(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        result: Result<T, ActorError>,
+        msg_type: &'static str,
+        subject_id: &DigestIdentifier,
+        sender: &PublicKey,
+        message: &'static str,
+    ) -> Result<T, ActorError> {
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = msg_type,
+                        subject_id = %subject_id,
+                        sender = %sender,
+                        error = %e,
+                        "{}",
+                        message
+                    );
+                    Err(emit_fail(ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = msg_type,
+                        subject_id = %subject_id,
+                        sender = %sender,
+                        error = %e,
+                        "{}",
+                        message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn handle_result_with_sender_and_sn<T>(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        result: Result<T, ActorError>,
+        msg_type: &'static str,
+        subject_id: &DigestIdentifier,
+        sender: &PublicKey,
+        sn: u64,
+        message: &'static str,
+    ) -> Result<T, ActorError> {
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = msg_type,
+                        subject_id = %subject_id,
+                        sn = sn,
+                        sender = %sender,
+                        error = %e,
+                        "{}",
+                        message
+                    );
+                    Err(emit_fail(ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = msg_type,
+                        subject_id = %subject_id,
+                        sn = sn,
+                        sender = %sender,
+                        error = %e,
+                        "{}",
+                        message
+                    );
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -451,7 +563,7 @@ impl DistriWorker {
         let safe_hi_sn = if is_register {
             let receiver_status = check_witness_status(
                 ctx,
-                &governance_id,
+                governance_id,
                 (*self.our_key).clone(),
                 namespace.clone(),
                 schema_id.clone(),
@@ -461,7 +573,6 @@ impl DistriWorker {
             )
             .await?;
 
-            let receiver_gov_limit_clone = receiver_status.gov_version_limit.clone();
             let receiver_limit = Self::concrete_gov_version_limit(
                 ledger,
                 receiver_status.gov_version_limit,
@@ -475,20 +586,23 @@ impl DistriWorker {
 
             receiver_limit.min(offered_hi_sn)
         } else {
-            let owner = ledger.first().ok_or(DistributorError::EmptyEvents)?.ledger_seal_signature.signer.clone();
-            let gov_version = ledger.first().ok_or(DistributorError::EmptyEvents)?.gov_version;
+            let first_ledger = ledger.first().ok_or(DistributorError::EmptyEvents)?;
+            let owner = first_ledger.ledger_seal_signature.signer.clone();
+            let gov_version = first_ledger.gov_version;
+            let transfer_data =
+                Some(WitnessesRegister::transfer_data_from_ledger(&subject_id, ledger)?);
 
             let (witness_status, receiver_window_sn, ..) = check_witness_status_and_window(
                 ctx,
                 &governance_id,
                 &subject_id,
-                ledger.to_vec(),
+                transfer_data,
                 (*self.our_key).clone(),
                 sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
                 None,
-                Some(owner.clone()),
+                Some(owner),
                 Some(gov_version),
             )
             .await?;
@@ -634,19 +748,22 @@ impl DistriWorker {
             safe_hi_sn
         } else {
             let owner = first_ledger.ledger_seal_signature.signer.clone();
+            let gov_version = first_ledger.gov_version;
+            let transfer_data =
+                Some(WitnessesRegister::transfer_data_from_ledger(&subject_id, ledger)?);
 
             let (witness_status, receiver_window_sn, ..) = check_witness_status_and_window(
                 ctx,
                 &governance_id,
                 &subject_id,
-                ledger.to_vec(),
+                transfer_data,
                 (*self.our_key).clone(),
                 sender.clone(),
                 namespace.clone(),
                 schema_id.clone(),
                 None,
-                Some(owner.clone()),
-                Some(first_ledger.gov_version),
+                Some(owner),
+                Some(gov_version),
             )
             .await?;
 
@@ -715,6 +832,7 @@ impl DistriWorker {
         subject_id: &DigestIdentifier,
         sender: PublicKey,
         actual_sn: Option<u64>,
+        data: &SubjectData,
     ) -> Result<
         (
             u64,
@@ -725,14 +843,12 @@ impl DistriWorker {
         ),
         ActorError,
     > {
-        let data = get_subject_data(ctx, subject_id).await?;
-
-        let Some(SubjectData::Tracker {
+        let SubjectData::Tracker {
             governance_id,
             schema_id,
             namespace,
             ..
-        }) = data
+        } = data
         else {
             return Err(DistributorError::SubjectNotFound.into());
         };
@@ -753,10 +869,10 @@ impl DistriWorker {
         let Some(sn) = sn else {
             let witness_status = check_witness_status(
                 ctx,
-                &governance_id,
+                governance_id,
                 sender.clone(),
-                namespace,
-                schema_id,
+                namespace.clone(),
+                schema_id.clone(),
                 Some(subject_id.clone()),
                 None,
                 None,
@@ -822,13 +938,8 @@ impl DistriWorker {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         sender: PublicKey,
+        data: &SubjectData,
     ) -> Result<(u64, bool), ActorError> {
-        let data = get_subject_data(ctx, subject_id).await?;
-
-        let Some(data) = data else {
-            return Err(DistributorError::SubjectNotFound.into());
-        };
-
         match data {
             SubjectData::Tracker {
                 governance_id,
@@ -838,10 +949,10 @@ impl DistriWorker {
             } => {
                 let witness_status = check_witness_status(
                     ctx,
-                    &governance_id,
+                    governance_id,
                     sender.clone(),
-                    namespace,
-                    schema_id,
+                    namespace.clone(),
+                    schema_id.clone(),
                     Some(subject_id.clone()),
                     None,
                     None,
@@ -896,6 +1007,7 @@ impl DistriWorker {
                         subject_id,
                         sender.clone(),
                         actual_sn,
+                        &data,
                     )
                     .await?;
                 Ok(UpdateWitnessOffer {
@@ -907,7 +1019,7 @@ impl DistriWorker {
             }
             SubjectData::Governance { .. } => {
                 let (sn, ..) =
-                    self.check_witness(ctx, subject_id, sender.clone()).await?;
+                    self.check_witness(ctx, subject_id, sender.clone(), &data).await?;
                 Ok(UpdateWitnessOffer {
                     kind: UpdateSubjectKind::Governance,
                     sn,
@@ -935,7 +1047,7 @@ impl DistriWorker {
         match data {
             SubjectData::Tracker { .. } => {
                 let (window_sn, transfer_sn, clear_sn, _, ranges) = self
-                    .get_tracker_window(ctx, subject_id, sender.clone(), actual_sn)
+                    .get_tracker_window(ctx, subject_id, sender.clone(), actual_sn, &data)
                     .await?;
 
 
@@ -1006,7 +1118,7 @@ impl DistriWorker {
             }
             SubjectData::Governance { .. } => {
                 let (witness_hi_sn, ..) =
-                    self.check_witness(ctx, subject_id, sender).await?;
+                    self.check_witness(ctx, subject_id, sender, &data).await?;
 
                 if let Some(actual_sn) = actual_sn
                     && actual_sn >= witness_hi_sn
@@ -1381,39 +1493,25 @@ impl Handler<Self> for DistriWorker {
                 info,
                 sender,
                 receiver_actor,
-            } => match self
-                .handle_get_governance_version(
+            } => {
+                let result = self
+                    .handle_get_governance_version(
+                        ctx,
+                        subject_id.clone(),
+                        info,
+                        sender.clone(),
+                        receiver_actor,
+                    )
+                    .await;
+                self.handle_result_with_sender(
                     ctx,
-                    subject_id.clone(),
-                    info,
-                    sender.clone(),
-                    receiver_actor,
-                )
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    if let ActorError::FunctionalCritical { .. } = e {
-                        error!(
-                            msg_type = "GetGovernanceVersion",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Failed to send governance version response to network"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    } else {
-                        warn!(
-                            msg_type = "GetGovernanceVersion",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Subject is not a governance"
-                        );
-                        return Err(e);
-                    }
-                }
-            },
+                    result,
+                    "GetGovernanceVersion",
+                    &subject_id,
+                    &sender,
+                    "Subject is not a governance",
+                ).await?;
+            }
             DistriWorkerMessage::SendDistribution {
                 actual_sn,
                 target_sn,
@@ -1421,41 +1519,27 @@ impl Handler<Self> for DistriWorker {
                 subject_id,
                 sender,
                 already_verified_transfer_sn,
-            } => match self
-                .handle_send_distribution(
+            } => {
+                let result = self
+                    .handle_send_distribution(
+                        ctx,
+                        actual_sn,
+                        target_sn,
+                        info,
+                        subject_id.clone(),
+                        sender.clone(),
+                        already_verified_transfer_sn,
+                    )
+                    .await;
+                self.handle_result_with_sender(
                     ctx,
-                    actual_sn,
-                    target_sn,
-                    info,
-                    subject_id.clone(),
-                    sender.clone(),
-                    already_verified_transfer_sn,
-                )
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    if let ActorError::FunctionalCritical { .. } = e {
-                        error!(
-                            msg_type = "SendDistribution",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Failed to send ledger response to network"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    } else {
-                        warn!(
-                            msg_type = "SendDistribution",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Witness check failed"
-                        );
-                        return Err(e);
-                    }
-                }
-            },
+                    result,
+                    "SendDistribution",
+                    &subject_id,
+                    &sender,
+                    "Witness check failed",
+                ).await?;
+            }
             DistriWorkerMessage::LastEventDistribution {
                 ledger,
                 info,

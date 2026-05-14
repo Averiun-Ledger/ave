@@ -105,30 +105,14 @@ impl DistriWorker {
                 );
 
                 let lease = if is_gov {
-                    if let Err(e) =
-                        create_subject(ctx, create_ledger.clone()).await
-                    {
-                        if let ActorError::FunctionalCritical {
-                            ..
-                        } = e
-                        {
-                            error!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to create subject from ledger"
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        } else {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to create subject from ledger"
-                            );
-                            return Err(e);
-                        }
-                    };
+                    let result = create_subject(ctx, create_ledger.clone()).await;
+                    self.handle_result(
+                        ctx,
+                        result,
+                        "LedgerDistribution",
+                        &subject_id,
+                        "Failed to create subject from ledger",
+                    ).await?;
                     None
                 } else {
                     let request = create_ledger
@@ -144,7 +128,7 @@ impl DistriWorker {
                                 }
                             })?;
 
-                    if let Err(e) = check_subject_creation(
+                    let result = check_subject_creation(
                         ctx,
                         &request.governance_id,
                         create_ledger
@@ -155,63 +139,30 @@ impl DistriWorker {
                         request.namespace.to_string(),
                         request.schema_id,
                     )
-                    .await
-                    {
-                        if let ActorError::FunctionalCritical {
-                            ..
-                        } = e
-                        {
-                            error!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to validate subject creation from ledger"
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        } else {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to validate subject creation from ledger"
-                            );
-                            return Err(e);
-                        }
-                    }
+                    .await;
+                    self.handle_result(
+                        ctx,
+                        result,
+                        "LedgerDistribution",
+                        &subject_id,
+                        "Failed to validate subject creation from ledger",
+                    ).await?;
 
-                    match acquire_subject(
+                    let result = acquire_subject(
                         ctx,
                         &subject_id,
                         requester,
                         Some(create_ledger),
                         true,
                     )
-                    .await
-                    {
-                        Ok(lease) => Some(lease),
-                        Err(e) => {
-                            if let ActorError::FunctionalCritical {
-                                ..
-                            } = e
-                            {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to create subject from ledger"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            } else {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to create subject from ledger"
-                                );
-                                return Err(e);
-                            }
-                        }
-                    }
+                    .await;
+                    Some(self.handle_result(
+                        ctx,
+                        result,
+                        "LedgerDistribution",
+                        &subject_id,
+                        "Failed to create subject from ledger",
+                    ).await?)
                 };
 
                 let _event = pending_ledger.remove(0);
@@ -418,7 +369,7 @@ impl DistriWorker {
                         return Ok(());
                     }
 
-                    let auth = match self
+                    let result = self
                         .check_auth_single(
                             ctx,
                             sender.clone(),
@@ -426,33 +377,18 @@ impl DistriWorker {
                             std::slice::from_ref(&ledger),
                             sn,
                         )
-                        .await
-                    {
-                        Ok(auth) => auth,
-                        Err(e) => {
-                            if let ActorError::FunctionalCritical { .. } = e {
-                                error!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    sender = %sender,
-                                    error = %e,
-                                    "Authorization check failed"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            } else {
-                                warn!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    sender = %sender,
-                                    error = %e,
-                                    "Authorization check failed"
-                                );
-                                return Err(e);
-                            }
-                        }
-                    };
+                        .await;
+                    let auth = self
+                        .handle_result_with_sender_and_sn(
+                            ctx,
+                            result,
+                            "LastEventDistribution",
+                            &subject_id,
+                            &sender,
+                            sn,
+                            "Authorization check failed",
+                        )
+                        .await?;
 
                     let is_gov = auth.is_gov;
 
@@ -469,28 +405,14 @@ impl DistriWorker {
                     }
 
                     let lease = if ledger.is_create_event() {
-                        if let Err(e) = create_subject(ctx, ledger.clone()).await {
-                            if let ActorError::FunctionalCritical { .. } = e {
-                                error!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    error = %e,
-                                    "Failed to create subject from create event"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            } else {
-                                warn!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    sn = sn,
-                                    error = %e,
-                                    "Failed to create subject from create event"
-                                );
-                                return Err(e);
-                            }
-                        };
-
+                        let result = create_subject(ctx, ledger.clone()).await;
+                        self.handle_result(
+                            ctx,
+                            result,
+                            "LastEventDistribution",
+                            &subject_id,
+                            "Failed to create subject from create event",
+                        ).await?;
                         None
                     } else {
                         let requester = Self::requester_id(

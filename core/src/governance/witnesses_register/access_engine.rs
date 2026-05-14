@@ -272,11 +272,22 @@ impl WitnessesRegister {
 
         let mut ranges: Vec<TrackerDeliveryRange> = Vec::new();
         let mut clear_sn = None;
+        let mut gv_idx = 0;
 
         for sn in from_sn..=access_limit {
-            let Some(gov_version) = Self::gov_version_for_sn(&gov_versions, sn)
-                .or_else(|| (sn == 0).then_some(data.gov_version))
-            else {
+            while gv_idx < gov_versions.len() && gov_versions[gv_idx].0.hi < sn {
+                gv_idx += 1;
+            }
+
+            let gov_version = if gv_idx < gov_versions.len()
+                && gov_versions[gv_idx].0.contains(sn)
+            {
+                Some(gov_versions[gv_idx].1)
+            } else {
+                (sn == 0).then_some(data.gov_version)
+            };
+
+            let Some(gov_version) = gov_version else {
                 continue;
             };
 

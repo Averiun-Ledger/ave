@@ -258,7 +258,7 @@ where
         };
 
         // Start store
-        self.start_store(name, prefix, ctx, db, encrypt_key).await?;
+        self.start_store(name, prefix.as_deref(), ctx, db, encrypt_key).await?;
         Ok(())
     }
 }

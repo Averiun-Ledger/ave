@@ -14,7 +14,7 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
         witnesses_register::{
-            HiSnLimit, TrackerDeliveryRange, WitnessStatus, WitnessesRegister,
+            HiSnLimit, TrackerDeliveryRange, TransferData, WitnessStatus, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse,
         },
     },
@@ -641,7 +641,7 @@ pub async fn check_witness_status_and_window<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
-    ledger: Vec<Ledger>,
+    transfer_data: Option<TransferData>,
     node: PublicKey,
     sender: PublicKey,
     namespace: String,
@@ -674,7 +674,7 @@ where
     let response = actor
         .ask(WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
             subject_id: subject_id.clone(),
-            ledger,
+            transfer_data,
             node,
             sender,
             namespace,
