@@ -35,7 +35,7 @@ use crate::metrics::try_core_metrics;
 use crate::model::common::distribution_plan::build_tracker_event_distribution_plan;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::subject::{
-    acquire_subject, create_subject, get_gov, get_gov_sn,
+    acquire_subject, create_subject, get_gov, get_gov_sn, get_init_state, get_members, get_quorum_and_signers, get_schema_viewpoints, get_signers, get_version, get_witnesses, has_role,
     get_last_ledger_event, get_metadata, make_obsolete, update_ledger,
 };
 use crate::model::common::{purge_storage, send_to_tracking};
@@ -214,62 +214,6 @@ impl RequestManager {
     }
 
     //////// EVAL
-    ////////////////////////////////////////////////
-    //Revisado
-    fn tracker_evaluation_context(
-        governance_data: &GovernanceData,
-        schema_id: &SchemaType,
-        namespace: Namespace,
-        request_type: &EventRequestType,
-    ) -> Result<EvalWorkerContext, RequestManagerError> {
-        match request_type {
-            EventRequestType::Fact => {
-                let (issuers, issuer_any) = governance_data.get_signers(
-                    RoleTypes::Issuer,
-                    schema_id,
-                    namespace,
-                );
-                let schema_viewpoints = governance_data
-                    .schemas
-                    .get(schema_id)
-                    .ok_or_else(|| {
-                        crate::governance::error::GovernanceError::SchemaDoesNotExist {
-                            schema_id: schema_id.to_string(),
-                        }
-                    })?
-                    .viewpoints
-                    .clone();
-
-                Ok(EvalWorkerContext::TrackerFact {
-                    issuers: issuers.into_iter().collect(),
-                    issuer_any,
-                    schema_viewpoints,
-                })
-            }
-            EventRequestType::Transfer => {
-                let members = governance_data
-                    .members
-                    .values()
-                    .cloned()
-                    .collect::<BTreeSet<PublicKey>>();
-                let (creator_signers, _) = governance_data.get_signers(
-                    RoleTypes::Creator,
-                    schema_id,
-                    namespace.clone(),
-                );
-                let creators = creator_signers
-                    .into_iter()
-                    .map(|creator| {
-                        (creator, BTreeSet::from([namespace.clone()]))
-                    })
-                    .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
-
-                Ok(EvalWorkerContext::TrackerTransfer { members, creators })
-            }
-            _ => Ok(EvalWorkerContext::Empty),
-        }
-    }
-
     async fn build_evaluation(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -332,8 +276,9 @@ impl RequestManager {
         self.id.to_string()
     }
 
-    fn build_distribution_plan(
+    async fn build_distribution_plan(
         &self,
+        ctx: &mut ActorContext<Self>,
         validation_req: &ValidationReq,
         governance_data: Option<&GovernanceData>,
     ) -> Result<Vec<DistributionPlanEntry>, RequestManagerError> {
@@ -352,21 +297,16 @@ impl RequestManager {
                     return Ok(Vec::new());
                 }
 
-                let Some(governance_data) = governance_data else {
-                    return Err(RequestManagerError::ActorError(
-                        ActorError::FunctionalCritical {
-                            description:
-                                "Missing governance data for distribution plan"
-                                    .to_owned(),
-                        },
-                    ));
-                };
-                let witnesses =
-                    governance_data.get_witnesses(WitnessesData::Schema {
+                let witnesses = get_witnesses(
+                    ctx,
+                    &create.governance_id,
+                    WitnessesData::Schema {
                         creator: event_request.signature().signer.clone(),
                         schema_id: create.schema_id.clone(),
                         namespace: create.namespace.clone(),
-                    })?;
+                    },
+                )
+                .await?;
 
                 for witness in witnesses {
                     plan.insert(witness, DistributionPlanMode::Clear);
@@ -475,17 +415,15 @@ impl RequestManager {
         let is_gov = metadata.schema_id.is_gov();
 
         let request_type = EventRequestType::from(request.content());
-        let (evaluate_data, governance_data, init_state, tracker_context) =
+        let (evaluate_data, init_state, tracker_context) =
             match (is_gov, request_type.clone()) {
                 (true, EventRequestType::Fact) => {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
-
                     (
                         EvaluateData::GovFact {
                             state: state.clone(),
                         },
-                        state,
                         None,
                         EvalWorkerContext::default(),
                     )
@@ -493,12 +431,10 @@ impl RequestManager {
                 (true, EventRequestType::Transfer) => {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
-
                     (
                         EvaluateData::GovTransfer {
                             state: state.clone(),
                         },
-                        state,
                         None,
                         EvalWorkerContext::default(),
                     )
@@ -506,52 +442,88 @@ impl RequestManager {
                 (true, EventRequestType::Confirm) => {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
-
                     (
                         EvaluateData::GovConfirm {
                             state: state.clone(),
                         },
-                        state,
                         None,
                         EvalWorkerContext::default(),
                     )
                 }
                 (false, EventRequestType::Fact) => {
-                    let governance_data =
-                        get_gov(ctx, &metadata.governance_id).await?;
-
                     let init_state =
-                        governance_data.get_init_state(&metadata.schema_id)?;
-                    let tracker_context = Self::tracker_evaluation_context(
-                        &governance_data,
-                        &metadata.schema_id,
+                        get_init_state(
+                            ctx,
+                            &metadata.governance_id,
+                            metadata.schema_id.clone(),
+                        )
+                        .await?;
+                    let (issuers, issuer_any) = get_signers(
+                        ctx,
+                        &metadata.governance_id,
+                        RoleTypes::Issuer,
+                        metadata.schema_id.clone(),
                         metadata.namespace.clone(),
-                        &request_type,
-                    )?;
+                    )
+                    .await?;
+                    let schema_viewpoints = get_schema_viewpoints(
+                        ctx,
+                        &metadata.governance_id,
+                        metadata.schema_id.clone(),
+                    )
+                    .await?;
+                    let Some(schema_viewpoints) = schema_viewpoints else {
+                        return Err(RequestManagerError::Governance(
+                            crate::governance::error::GovernanceError::
+                                SchemaDoesNotExist {
+                                    schema_id: metadata.schema_id.to_string(),
+                                }
+                                .into(),
+                        ));
+                    };
+                    let tracker_context = EvalWorkerContext::TrackerFact {
+                        issuers: issuers.into_iter().collect(),
+                        issuer_any,
+                        schema_viewpoints,
+                    };
 
                     (
                         EvaluateData::TrackerSchemasFact {
                             state: metadata.properties.clone(),
                         },
-                        governance_data,
-                        Some(init_state),
+                        init_state,
                         tracker_context,
                     )
                 }
                 (false, EventRequestType::Transfer) => {
-                    let governance_data =
-                        get_gov(ctx, &metadata.governance_id).await?;
-                    let tracker_context = Self::tracker_evaluation_context(
-                        &governance_data,
-                        &metadata.schema_id,
+                    let members = get_members(ctx, &metadata.governance_id)
+                        .await?
+                        .values()
+                        .cloned()
+                        .collect::<BTreeSet<PublicKey>>();
+                    let (creator_signers, _) = get_signers(
+                        ctx,
+                        &metadata.governance_id,
+                        RoleTypes::Creator,
+                        metadata.schema_id.clone(),
                         metadata.namespace.clone(),
-                        &request_type,
-                    )?;
+                    )
+                    .await?;
+                    let creators = creator_signers
+                        .into_iter()
+                        .map(|creator| {
+                            (creator, BTreeSet::from([metadata.namespace.clone()]))
+                        })
+                        .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
+                    let tracker_context = EvalWorkerContext::TrackerTransfer {
+                        members,
+                        creators,
+                    };
+
                     (
                         EvaluateData::TrackerSchemasTransfer {
                             state: metadata.properties.clone(),
                         },
-                        governance_data,
                         None,
                         tracker_context,
                     )
@@ -569,17 +541,34 @@ impl RequestManager {
                 }
             };
 
-        let (signers, quorum) = governance_data.get_quorum_and_signers(
-            ProtocolTypes::Evaluation,
-            &metadata.schema_id,
-            metadata.namespace.clone(),
-        )?;
+        let (signers, quorum, gov_version) = if is_gov {
+            let governance_data =
+                GovernanceData::try_from(metadata.properties.clone())?;
+            let (signers, quorum) = governance_data.get_quorum_and_signers(
+                ProtocolTypes::Evaluation,
+                &metadata.schema_id,
+                metadata.namespace.clone(),
+            )?;
+            (signers, quorum, governance_data.version)
+        } else {
+            let (signers, quorum) = get_quorum_and_signers(
+                ctx,
+                &metadata.governance_id,
+                ProtocolTypes::Evaluation,
+                metadata.schema_id.clone(),
+                metadata.namespace.clone(),
+            )
+            .await?;
+            let gov_version =
+                get_version(ctx, &metadata.governance_id).await?;
+            (signers, quorum, gov_version)
+        };
 
         let eval_req = EvaluationReq {
             event_request: request.clone(),
             data: evaluate_data,
             sn: metadata.sn + 1,
-            gov_version: governance_data.version,
+            gov_version,
             namespace: metadata.namespace.clone(),
             schema_id: metadata.schema_id.clone(),
             signer: (*self.our_key).clone(),
@@ -686,14 +675,14 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         let request = self.build_request_appro(ctx, eval_req, eval_res).await?;
 
-        let governance_data =
-            get_gov(ctx, &request.content().subject_id).await?;
-
-        let (signers, quorum) = governance_data.get_quorum_and_signers(
+        let (signers, quorum) = get_quorum_and_signers(
+            ctx,
+            &request.content().subject_id,
             ProtocolTypes::Approval,
-            &SchemaType::Governance,
+            SchemaType::Governance,
             Namespace::new(),
-        )?;
+        )
+        .await?;
 
         if signers.is_empty() {
             warn!(
@@ -823,8 +812,9 @@ impl RequestManager {
         )
         .await?;
 
-        let distribution_plan =
-            self.build_distribution_plan(&vali_req, governance_data.as_ref())?;
+        let distribution_plan = self
+            .build_distribution_plan(ctx, &vali_req, governance_data.as_ref())
+            .await?;
 
         let signed_validation_req: Signed<ValidationReq> =
             Signed::from_parts(vali_req, signature);
@@ -908,28 +898,31 @@ impl RequestManager {
                     None,
                 ))
             } else {
-                let governance_data =
-                    get_gov(ctx, &create.governance_id).await?;
-
-                let (signers, quorum) = governance_data
-                    .get_quorum_and_signers(
-                        ProtocolTypes::Validation,
-                        &create.schema_id,
-                        create.namespace.clone(),
-                    )?;
+                let (signers, quorum) = get_quorum_and_signers(
+                    ctx,
+                    &create.governance_id,
+                    ProtocolTypes::Validation,
+                    create.schema_id.clone(),
+                    create.namespace.clone(),
+                )
+                .await?;
 
                 let init_state =
-                    governance_data.get_init_state(&create.schema_id)?;
+                    get_init_state(ctx, &create.governance_id, create.schema_id.clone())
+                        .await?;
+
+                let gov_version =
+                    get_version(ctx, &create.governance_id).await?;
 
                 Ok((
                     ValidationReq::Create {
                         event_request: request.clone(),
-                        gov_version: governance_data.version,
+                        gov_version,
                         subject_id: self.subject_id.clone(),
                     },
                     quorum,
                     signers,
-                    Some(init_state),
+                    init_state,
                     CurrentRequestRoles {
                         evaluation: RoleDataRegister {
                             workers: HashSet::new(),
@@ -941,7 +934,7 @@ impl RequestManager {
                         },
                     },
                     create.schema_id.clone(),
-                    Some(governance_data),
+                    None,
                 ))
             }
         } else {
@@ -1288,9 +1281,8 @@ impl RequestManager {
 
         if is_governance {
             let governance_id = ledger.get_subject_id();
-            let governance_data = get_gov(ctx, &governance_id).await?;
-            distribution_plan = governance_data
-                .get_witnesses(WitnessesData::Gov)?
+            distribution_plan = get_witnesses(ctx, &governance_id, WitnessesData::Gov)
+                .await?
                 .into_iter()
                 .map(|node| DistributionPlanEntry {
                     node,
@@ -1400,11 +1392,9 @@ impl RequestManager {
 
         let gov_sn = get_gov_sn(ctx, governance_id).await?;
 
-        let governance_data = get_gov(ctx, governance_id).await?;
-
         let mut witnesses = {
             let gov_witnesses =
-                governance_data.get_witnesses(WitnessesData::Gov)?;
+                get_witnesses(ctx, governance_id, WitnessesData::Gov).await?;
 
             let auth_witnesses =
                 Self::get_witnesses_auth(ctx, governance_id.clone())
@@ -1811,7 +1801,8 @@ impl RequestManager {
             return Err(RequestManagerError::RequestNotSet);
         };
 
-        let gov = self.get_governance_data(ctx).await?;
+        let governance_id =
+            self.governance_id.as_ref().unwrap_or(&self.subject_id);
         let subject_data = match request.content() {
             EventRequest::Create(..) => None,
             _ => get_subject_data(ctx, &self.subject_id).await?,
@@ -1838,12 +1829,17 @@ impl RequestManager {
             };
 
         if let Some((schema_id, namespace)) = creator_scope
-            && !gov.has_this_role(HashThisRole::Schema {
-                who: (*self.our_key).clone(),
-                role: RoleTypes::Creator,
-                schema_id,
-                namespace,
-            })
+            && !has_role(
+                ctx,
+                governance_id,
+                HashThisRole::Schema {
+                    who: (*self.our_key).clone(),
+                    role: RoleTypes::Creator,
+                    schema_id,
+                    namespace,
+                },
+            )
+            .await?
         {
             return Err(RequestManagerError::NotCreator);
         }
@@ -1859,20 +1855,32 @@ impl RequestManager {
                     namespace,
                     ..
                 } => {
-                    if !gov.has_this_role(HashThisRole::Schema {
-                        who: request.signature().signer.clone(),
-                        role: RoleTypes::Issuer,
-                        schema_id,
-                        namespace: Namespace::from(namespace),
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Schema {
+                            who: request.signature().signer.clone(),
+                            role: RoleTypes::Issuer,
+                            schema_id,
+                            namespace: Namespace::from(namespace),
+                        },
+                    )
+                    .await?
+                    {
                         return Err(RequestManagerError::NotIssuer);
                     }
                 }
                 SubjectData::Governance { .. } => {
-                    if !gov.has_this_role(HashThisRole::Gov {
-                        who: request.signature().signer.clone(),
-                        role: RoleTypes::Issuer,
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Gov {
+                            who: request.signature().signer.clone(),
+                            role: RoleTypes::Issuer,
+                        },
+                    )
+                    .await?
+                    {
                         return Err(RequestManagerError::NotIssuer);
                     }
                 }

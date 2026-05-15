@@ -16,14 +16,13 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
     governance::{
-        data::GovernanceData,
         model::{RoleTypes, WitnessesData},
     },
     helpers::network::service::NetworkSender,
     model::common::{
         emit_fail,
         node::i_can_send_last_ledger,
-        subject::{acquire_subject, get_gov, get_last_ledger_event},
+        subject::{acquire_subject, get_last_ledger_event, get_members, get_schema_roles, get_tracker_roles, get_witnesses},
     },
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
@@ -38,15 +37,16 @@ impl ManualDistribution {
     }
 
     fn tracker_fact_mode_for_creator(
-        governance_data: &GovernanceData,
-        schema_id: &ave_common::SchemaType,
+        members: &std::collections::BTreeMap<String, PublicKey>,
+        roles_schema: &crate::governance::model::RolesSchema,
+        roles_tracker_schemas: &crate::governance::model::RolesTrackerSchemas,
+        _schema_id: &ave_common::SchemaType,
         namespace: &ave_common::Namespace,
         creator: &PublicKey,
         witness: &PublicKey,
         viewpoints: &std::collections::BTreeSet<String>,
     ) -> DistributionPlanMode {
-        let Some(witness_name) = governance_data
-            .members
+        let Some(witness_name) = members
             .iter()
             .find(|(_, key)| *key == witness)
             .map(|(name, _)| name.clone())
@@ -54,16 +54,10 @@ impl ManualDistribution {
             return DistributionPlanMode::Opaque;
         };
 
-        let Some(creator_name) = governance_data
-            .members
+        let Some(creator_name) = members
             .iter()
             .find(|(_, key)| *key == creator)
             .map(|(name, _)| name.clone())
-        else {
-            return DistributionPlanMode::Opaque;
-        };
-
-        let Some(roles_schema) = governance_data.roles_schema.get(schema_id)
         else {
             return DistributionPlanMode::Opaque;
         };
@@ -82,7 +76,7 @@ impl ManualDistribution {
                 RoleTypes::Witness,
                 namespace.clone(),
                 &witness_name,
-            ) || governance_data.roles_tracker_schemas.hash_this_rol(
+            ) || roles_tracker_schemas.hash_this_rol(
                 RoleTypes::Witness,
                 namespace.clone(),
                 &witness_name,
@@ -114,29 +108,24 @@ impl ManualDistribution {
     }
 
     fn build_tracker_manual_plan(
-        governance_data: &GovernanceData,
+        witnesses: std::collections::HashSet<PublicKey>,
+        members: &std::collections::BTreeMap<String, PublicKey>,
+        roles_schema: &crate::governance::model::RolesSchema,
+        roles_tracker_schemas: &crate::governance::model::RolesTrackerSchemas,
         schema_id: ave_common::SchemaType,
         namespace: ave_common::Namespace,
         event_request: &EventRequest,
         signer: &PublicKey,
     ) -> Result<Vec<DistributionPlanEntry>, ActorError> {
-        let witnesses = governance_data
-            .get_witnesses(WitnessesData::Schema {
-                creator: signer.clone(),
-                schema_id: schema_id.clone(),
-                namespace: namespace.clone(),
-            })
-            .map_err(|e| ActorError::Functional {
-                description: e.to_string(),
-            })?;
-
         Ok(witnesses
             .into_iter()
             .map(|node| {
                 let mode = match event_request {
                     EventRequest::Fact(fact_request) => {
                         Self::tracker_fact_mode_for_creator(
-                            governance_data,
+                            members,
+                            roles_schema,
+                            roles_tracker_schemas,
                             &schema_id,
                             &namespace,
                             signer,
@@ -258,20 +247,10 @@ impl Handler<Self> for ManualDistribution {
 
                 let schema_id = data.get_schema_id();
                 let recipients = if is_gov {
-                    let gov =
-                        get_gov(ctx, &governance_id).await.map_err(|e| {
-                            error!(
-                                msg_type = "Update",
-                                subject_id = %subject_id,
-                                governance_id = %governance_id,
-                                error = %e,
-                                "Failed to get governance"
-                            );
-                            e
-                        })?;
-
                     let mut witnesses =
-                        gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
+                        get_witnesses(ctx, &governance_id, WitnessesData::Gov)
+                            .await
+                            .map_err(|e| {
                             error!(
                                 msg_type = "Update",
                                 subject_id = %subject_id,
@@ -292,18 +271,6 @@ impl Handler<Self> for ManualDistribution {
                         })
                         .collect::<Vec<_>>()
                 } else {
-                    let gov =
-                        get_gov(ctx, &governance_id).await.map_err(|e| {
-                            error!(
-                                msg_type = "Update",
-                                subject_id = %subject_id,
-                                governance_id = %governance_id,
-                                error = %e,
-                                "Failed to get governance"
-                            );
-                            e
-                        })?;
-
                     let Some(event_request) = ledger.get_event_request() else {
                         return Err(ActorError::Functional {
                             description:
@@ -312,12 +279,101 @@ impl Handler<Self> for ManualDistribution {
                         });
                     };
 
-                    Self::build_tracker_manual_plan(
-                        &gov,
+                    let namespace =
+                        ave_common::Namespace::from(data.get_namespace());
+                    let signer = &ledger.ledger_seal_signature.signer;
+
+                    let witnesses = get_witnesses(
+                        ctx,
+                        &governance_id,
+                        WitnessesData::Schema {
+                            creator: signer.clone(),
+                            schema_id: schema_id.clone(),
+                            namespace: namespace.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            governance_id = %governance_id,
+                            error = %e,
+                            "Failed to get witnesses for tracker manual plan"
+                        );
+                        ActorError::Functional {
+                            description: e.to_string(),
+                        }
+                    })?;
+
+                    let members = get_members(ctx, &governance_id)
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get members for tracker manual plan"
+                            );
+                            ActorError::Functional {
+                                description: e.to_string(),
+                            }
+                        })?;
+
+                    let roles_schema = get_schema_roles(
+                        ctx,
+                        &governance_id,
                         schema_id.clone(),
-                        ave_common::Namespace::from(data.get_namespace()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            governance_id = %governance_id,
+                            error = %e,
+                            "Failed to get schema roles for tracker manual plan"
+                        );
+                        ActorError::Functional {
+                            description: e.to_string(),
+                        }
+                    })?;
+
+                    let Some(roles_schema) = roles_schema else {
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "schema {} not found in governance {} for manual distribution",
+                                schema_id, governance_id
+                            ),
+                        });
+                    };
+
+                    let roles_tracker =
+                        get_tracker_roles(ctx, &governance_id)
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    governance_id = %governance_id,
+                                    error = %e,
+                                    "Failed to get tracker roles for tracker manual plan"
+                                );
+                                ActorError::Functional {
+                                    description: e.to_string(),
+                                }
+                            })?;
+
+                    Self::build_tracker_manual_plan(
+                        witnesses,
+                        &members,
+                        &roles_schema,
+                        &roles_tracker,
+                        schema_id.clone(),
+                        namespace,
                         &event_request,
-                        &ledger.ledger_seal_signature.signer,
+                        signer,
                     )?
                     .into_iter()
                     .filter(|entry| entry.node != *self.our_key)

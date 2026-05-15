@@ -107,7 +107,7 @@ impl Message for SnRegisterMessage {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum SnLimit {
     Sn(u64),
     LastSn,

@@ -255,6 +255,7 @@ impl DistriWorker {
                                     sender.clone(),
                                     &info,
                                     Some(last_sn),
+                                    common.subject_data.clone(),
                                 )
                                 .await
                             {
@@ -321,6 +322,7 @@ impl DistriWorker {
                             sender.clone(),
                             &info,
                             Some(applied_hi_sn),
+                            common.subject_data.clone(),
                         )
                         .await
                     {
@@ -477,6 +479,7 @@ impl DistriWorker {
                                         sender.clone(),
                                         &info,
                                         Some(last_sn),
+                                        None,
                                     )
                                     .await
                                 {

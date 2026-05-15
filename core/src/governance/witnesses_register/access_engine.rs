@@ -163,6 +163,7 @@ impl WitnessesRegister {
         namespace: String,
         schema_id: SchemaType,
         actual_sn: Option<u64>,
+        search_result: Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<
         (
             Option<u64>,
@@ -173,16 +174,21 @@ impl WitnessesRegister {
         ),
         ActorError,
     > {
-        let (sn_limit, mut effective_owner) = self
-            .search_witnesses_with_owner(
-                ctx,
-                node,
-                data,
-                namespace.clone(),
-                schema_id.clone(),
-                subject_id.clone(),
-            )
-            .await?;
+        let (sn_limit, mut effective_owner) = match search_result {
+            Some(result) => result,
+            None => {
+                self
+                    .search_witnesses_with_owner(
+                        ctx,
+                        node,
+                        data,
+                        namespace.clone(),
+                        schema_id.clone(),
+                        subject_id.clone(),
+                    )
+                    .await?
+            }
+        };
 
         debug!(
             msg_type = "BuildTrackerWindow",
@@ -390,6 +396,7 @@ impl WitnessesRegister {
         self.build_tracker_window_from_data(
             ctx, subject_id, data, node, sender, namespace, schema_id,
             actual_sn,
+            None,
         )
         .await
     }
@@ -401,6 +408,7 @@ impl WitnessesRegister {
         node: &PublicKey,
         namespace: &str,
         schema_id: &SchemaType,
+        cached: &mut Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<Option<u64>, ActorError> {
         let Some(data) = self.subjects.get(subject_id) else {
             return Ok(None);
@@ -421,6 +429,7 @@ impl WitnessesRegister {
                     namespace.to_owned(),
                     schema_id.clone(),
                     subject_id.clone(),
+                    cached,
                 )
                 .await?;
 
@@ -440,6 +449,7 @@ impl WitnessesRegister {
                     namespace.to_owned(),
                     schema_id.clone(),
                     subject_id.clone(),
+                    cached,
                 )
                 .await?;
 
@@ -461,6 +471,7 @@ impl WitnessesRegister {
         namespace: &str,
         schema_id: &SchemaType,
         data: &TransferData,
+        cached: &mut Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<HiSnLimit, ActorError> {
 
 
@@ -482,6 +493,7 @@ impl WitnessesRegister {
                 namespace.to_owned(),
                 schema_id.clone(),
                 subject_id.clone(),
+                cached,
             )
             .await?;
 
@@ -507,6 +519,7 @@ impl WitnessesRegister {
         node: &PublicKey,
         namespace: &str,
         schema_id: &SchemaType,
+        cached: &mut Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<HiSnLimit, ActorError> {
         let Some(data) = self.subjects.get(subject_id) else {
             return Ok(HiSnLimit::None);
@@ -523,7 +536,7 @@ impl WitnessesRegister {
 
         let limit = self
             .hi_sn_limit_for_transfer_data(
-                ctx, subject_id, node, namespace, schema_id, data,
+                ctx, subject_id, node, namespace, schema_id, data, cached,
             )
             .await?;
 
@@ -902,13 +915,20 @@ impl WitnessesRegister {
         namespace: String,
         schema_id: SchemaType,
         subject_id: DigestIdentifier,
+        cached: &mut Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<SnLimit, ActorError> {
-        let (sn_limit, _) = self
-            .search_witnesses_with_owner(
-                ctx, node, data, namespace, schema_id, subject_id,
-            )
-            .await?;
-        Ok(sn_limit)
+        match cached {
+            Some((sn_limit, _)) => Ok(*sn_limit),
+            None => {
+                let (sn_limit, effective_owner) = self
+                    .search_witnesses_with_owner(
+                        ctx, node, data, namespace, schema_id, subject_id,
+                    )
+                    .await?;
+                *cached = Some((sn_limit, effective_owner));
+                Ok(sn_limit)
+            }
+        }
     }
 
 }

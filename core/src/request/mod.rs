@@ -37,7 +37,7 @@ use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
 use crate::model::common::subject::{
-    get_gov, get_tracker_visibility_state, get_version,
+    get_schema_viewpoints, get_tracker_visibility_state, get_version, has_role,
 };
 use crate::model::common::{
     check_subject_creation, emit_fail, send_to_tracking,
@@ -119,34 +119,24 @@ impl RequestHandler {
         event_request: &EventRequestType,
         subject_data: SubjectData,
     ) -> Result<(), ActorError> {
-        let gov = if matches!(subject_data, SubjectData::Tracker { .. })
-            || matches!(event_request, EventRequestType::Fact)
-        {
-            Some(get_gov(ctx, governance_id).await?)
-        } else {
-            None
-        };
-
         if let SubjectData::Tracker {
             schema_id,
             namespace,
             ..
         } = &subject_data
         {
-            let Some(gov) = gov.as_ref() else {
-                return Err(ActorError::FunctionalCritical {
-                    description:
-                        "Governance required for tracker signer authorization"
-                            .to_owned(),
-                });
-            };
-
-            if !gov.has_this_role(HashThisRole::Schema {
-                who: our_key.clone(),
-                role: RoleTypes::Creator,
-                schema_id: schema_id.clone(),
-                namespace: Namespace::from(namespace.clone()),
-            }) {
+            if !has_role(
+                ctx,
+                governance_id,
+                HashThisRole::Schema {
+                    who: our_key.clone(),
+                    role: RoleTypes::Creator,
+                    schema_id: schema_id.clone(),
+                    namespace: Namespace::from(namespace.clone()),
+                },
+            )
+            .await?
+            {
                 return Err(ActorError::Functional {
                     description:
                         "In tracker events, the node has to be a creator"
@@ -171,20 +161,18 @@ impl RequestHandler {
                     namespace,
                     ..
                 } => {
-                    let Some(gov) = gov.as_ref() else {
-                        return Err(ActorError::FunctionalCritical {
-                            description:
-                                "Governance required for fact signer authorization"
-                                    .to_owned(),
-                        });
-                    };
-
-                    if !gov.has_this_role(HashThisRole::Schema {
-                        who: signer,
-                        role: RoleTypes::Issuer,
-                        schema_id,
-                        namespace: Namespace::from(namespace),
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Schema {
+                            who: signer,
+                            role: RoleTypes::Issuer,
+                            schema_id,
+                            namespace: Namespace::from(namespace),
+                        },
+                    )
+                    .await?
+                    {
                         return Err(ActorError::Functional {
                             description:
                                 "In fact events, the signer has to be an issuer"
@@ -193,18 +181,16 @@ impl RequestHandler {
                     }
                 }
                 SubjectData::Governance { .. } => {
-                    let Some(gov) = gov.as_ref() else {
-                        return Err(ActorError::FunctionalCritical {
-                            description:
-                                "Governance required for fact signer authorization"
-                                    .to_owned(),
-                        });
-                    };
-
-                    if !gov.has_this_role(HashThisRole::Gov {
-                        who: signer,
-                        role: RoleTypes::Issuer,
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Gov {
+                            who: signer,
+                            role: RoleTypes::Issuer,
+                        },
+                    )
+                    .await?
+                    {
                         return Err(ActorError::Functional {
                             description:
                                 "In fact events, the signer has to be an issuer"
@@ -521,8 +507,10 @@ impl RequestHandler {
                 schema_id,
                 ..
             } => {
-                let governance = get_gov(ctx, governance_id).await?;
-                let Some(schema) = governance.schemas.get(schema_id) else {
+                let viewpoints =
+                    get_schema_viewpoints(ctx, governance_id, schema_id.clone())
+                        .await?;
+                let Some(viewpoints) = viewpoints else {
                     return Err(RequestHandlerError::Actor(
                         ActorError::FunctionalCritical {
                             description: format!(
@@ -536,7 +524,7 @@ impl RequestHandler {
                 validate_fact_viewpoints(
                     &fact_request.viewpoints,
                     schema_id,
-                    Some(&schema.viewpoints),
+                    Some(&viewpoints),
                 )
                 .map_err(RequestHandlerError::InvalidTrackerFactViewpoints)
             }

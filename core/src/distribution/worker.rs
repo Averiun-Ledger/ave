@@ -20,7 +20,7 @@ use crate::{
         witnesses_register::{
             GovVersionLimit, HiSnLimit, TrackerDeliveryMode,
             TrackerDeliveryRange,
-            TransferData, WitnessesRegister,
+            WitnessesRegister,
         },
     },
     helpers::network::service::NetworkSender,
@@ -30,7 +30,7 @@ use crate::{
             emit_fail,
             get_verified_transfer_sn, node::get_subject_data,
             subject::{
-                acquire_subject, get_gov, get_gov_sn,
+                acquire_subject, get_gov_sn, get_version, has_role,
                 get_local_subject_sn,
                 get_tracker_window as resolve_tracker_window,
                 check_simulated_transfer_hi_sn_limit,
@@ -337,6 +337,7 @@ impl DistriWorker {
                     sender.clone(),
                     info,
                     None,
+                    None,
                 )
                 .await?;
                 return Err(DistributorError::UpdatingSubject.into());
@@ -370,15 +371,15 @@ impl DistriWorker {
             .into());
         };
 
-        let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+        let gov_version = get_version(ctx, &governance_id).await.map_err(|e| {
             DistributorError::GetGovernanceFailed {
                 details: e.to_string(),
             }
         })?;
 
-        if gov.version < first_ledger.gov_version {
+        if gov_version < first_ledger.gov_version {
             return Err(DistributorError::GovernanceVersionMismatch {
-                our_version: gov.version,
+                our_version: gov_version,
                 their_version: first_ledger.gov_version,
             }
             .into());
@@ -572,6 +573,7 @@ impl DistriWorker {
                 sender.clone(),
                 info,
                 None,
+                subject_data.clone(),
             )
             .await?;
             return Err(DistributorError::UpdatingSubject.into());
@@ -858,16 +860,22 @@ impl DistriWorker {
                 Ok((sn, false))
             }
             SubjectData::Governance { .. } => {
-                let gov = get_gov(ctx, subject_id).await.map_err(|e| {
+                let is_witness = has_role(
+                    ctx,
+                    subject_id,
+                    HashThisRole::Gov {
+                        who: sender.clone(),
+                        role: RoleTypes::Witness,
+                    },
+                )
+                .await
+                .map_err(|e| {
                     DistributorError::GetGovernanceFailed {
                         details: e.to_string(),
                     }
                 })?;
 
-                if !gov.has_this_role(HashThisRole::Gov {
-                    who: sender.clone(),
-                    role: RoleTypes::Witness,
-                }) {
+                if !is_witness {
                     return Err(DistributorError::SenderNotMember {
                         sender: sender.to_string(),
                     }
@@ -1048,8 +1056,9 @@ impl DistriWorker {
         sender: PublicKey,
         info: &ComunicateInfo,
         actual_sn: Option<u64>,
+        subject_data: Option<SubjectData>,
     ) -> Result<(), ActorError> {
-        let verified = match get_subject_data(ctx, subject_id).await? {
+        let verified = match subject_data {
             Some(SubjectData::Tracker { governance_id, .. }) => {
                 match get_verified_transfer_sn(ctx, &governance_id, subject_id).await {
                     Ok(v) => v,
@@ -1116,61 +1125,59 @@ impl DistriWorker {
     ) -> Result<bool, ActorError> {
         let subject_data = get_subject_data(ctx, subject_id).await?;
 
-        match subject_data {
-            Some(_) => {
-                let Some(local_sn) =
-                    get_local_subject_sn(ctx, subject_id).await?
-                else {
-                    self.request_ledger_from_sender(
-                        ctx, subject_id, sender, info, None,
-                    )
-                    .await?;
-                    return Ok(false);
-                };
-                let expected_sn = local_sn.saturating_add(1);
+        if subject_data.is_some() {
+            let Some(local_sn) =
+                get_local_subject_sn(ctx, subject_id).await?
+            else {
+                self.request_ledger_from_sender(
+                    ctx, subject_id, sender, info, None, subject_data.clone(),
+                )
+                .await?;
+                return Ok(false);
+            };
+            let expected_sn = local_sn.saturating_add(1);
 
-                if received_first_sn <= local_sn {
-                    return Ok(false);
-                }
-
-                if received_first_sn != expected_sn {
-                    debug!(
-                        msg_type = "EnsureNextSn",
-                        subject_id = %subject_id,
-                        local_last_sn = local_sn,
-                        expected_sn = expected_sn,
-                        received_first_sn = received_first_sn,
-                        "SN mismatch detected before authorization, requesting update"
-                    );
-
-                    self.request_ledger_from_sender(
-                        ctx,
-                        subject_id,
-                        sender,
-                        info,
-                        Some(local_sn),
-                    )
-                    .await?;
-
-                    return Ok(false);
-                }
+            if received_first_sn <= local_sn {
+                return Ok(false);
             }
-            None => {
-                if received_first_sn != 0 {
-                    debug!(
-                        msg_type = "EnsureNextSn",
-                        subject_id = %subject_id,
-                        received_first_sn = received_first_sn,
-                        "Subject not present locally and first SN is not 0, requesting update"
-                    );
 
-                    self.request_ledger_from_sender(
-                        ctx, subject_id, sender, info, None,
-                    )
-                    .await?;
+            if received_first_sn != expected_sn {
+                debug!(
+                    msg_type = "EnsureNextSn",
+                    subject_id = %subject_id,
+                    local_last_sn = local_sn,
+                    expected_sn = expected_sn,
+                    received_first_sn = received_first_sn,
+                    "SN mismatch detected before authorization, requesting update"
+                );
 
-                    return Ok(false);
-                }
+                self.request_ledger_from_sender(
+                    ctx,
+                    subject_id,
+                    sender,
+                    info,
+                    Some(local_sn),
+                    subject_data.clone(),
+                )
+                .await?;
+
+                return Ok(false);
+            }
+        } else {
+            if received_first_sn != 0 {
+                debug!(
+                    msg_type = "EnsureNextSn",
+                    subject_id = %subject_id,
+                    received_first_sn = received_first_sn,
+                    "Subject not present locally and first SN is not 0, requesting update"
+                );
+
+                self.request_ledger_from_sender(
+                    ctx, subject_id, sender, info, None, None,
+                )
+                .await?;
+
+                return Ok(false);
             }
         }
 
@@ -1517,7 +1524,7 @@ impl Handler<Self> for DistriWorker {
                     None
                 };
 
-                let mut verified_transfer_sn = if !common.is_gov {
+                let verified_transfer_sn = if !common.is_gov {
                     match get_verified_transfer_sn(ctx, &common.governance_id, &subject_id).await {
                         Ok(v) => v
                             .filter(|(_, verified_sender)| *verified_sender == sender)

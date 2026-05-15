@@ -608,14 +608,19 @@ impl WitnessesRegister {
             return Some(current_grant);
         }
 
-        history
+        // `closed` intervals are disjoint and sorted by `lo` because they are
+        // pushed in ascending governance-version order. We can locate the
+        // candidate with a binary search instead of a linear scan.
+        let idx = history
             .closed
-            .iter()
-            .rev()
-            .find(|range| {
-                range.interval.lo <= owner_hi && range.interval.hi >= owner_lo
-            })
-            .map(|range| &range.grant)
+            .partition_point(|range| range.interval.lo <= owner_hi);
+        if idx > 0 {
+            let range = &history.closed[idx - 1];
+            if range.interval.hi >= owner_lo {
+                return Some(&range.grant);
+            }
+        }
+        None
     }
 
     fn schema_witness_covers_owner_interval(
@@ -1393,6 +1398,7 @@ impl Handler<Self> for WitnessesRegister {
                         namespace,
                         schema_id,
                         actual_sn,
+                        None,
                     )
                     .await?;
 
@@ -1452,6 +1458,7 @@ impl Handler<Self> for WitnessesRegister {
                     TrackerEventVisibility::NonFact,
                 );
 
+                let mut cached = None;
                 let limit = self
                     .hi_sn_limit_for_transfer_data(
                         ctx,
@@ -1460,6 +1467,7 @@ impl Handler<Self> for WitnessesRegister {
                         &namespace,
                         &schema_id,
                         &data,
+                        &mut cached,
                     )
                     .await?;
 
@@ -1496,7 +1504,7 @@ impl Handler<Self> for WitnessesRegister {
                         }
                     },
                 };
-                let status = self
+                let (status, cached) = self
                     .query_witness_status(
                         ctx,
                         Some(subject_id.clone()),
@@ -1505,6 +1513,7 @@ impl Handler<Self> for WitnessesRegister {
                         schema_id.clone(),
                         owner,
                         owner_gov_version,
+                        None,
                     )
                     .await?;
                 let (sn, transfer_sn, clear_sn, is_all, ranges) = self
@@ -1517,6 +1526,7 @@ impl Handler<Self> for WitnessesRegister {
                         namespace,
                         schema_id,
                         actual_sn,
+                        cached,
                     )
                     .await?;
 
@@ -1537,7 +1547,7 @@ impl Handler<Self> for WitnessesRegister {
                 owner,
                 owner_gov_version,
             } => {
-                let status = self
+                let (status, _) = self
                     .query_witness_status(
                         ctx,
                         subject_id,
@@ -1546,6 +1556,7 @@ impl Handler<Self> for WitnessesRegister {
                         schema_id,
                         owner,
                         owner_gov_version,
+                        None,
                     )
                     .await?;
 

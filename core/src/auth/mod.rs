@@ -16,7 +16,7 @@ use tracing::{Span, debug, error, info, info_span, warn};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::get_subject_data;
 use crate::model::common::subject::{
-    get_gov, get_gov_sn, get_tracker_sn_owner,
+    get_gov_sn, get_tracker_sn_owner, get_witnesses,
 };
 use crate::node::SubjectData;
 use crate::update::UpdateType;
@@ -149,26 +149,29 @@ impl Auth {
                         get_tracker_sn_owner(ctx, governance_id, subject_id)
                             .await?
                     {
-                        let gov = get_gov(ctx, governance_id).await?;
-                        let witnesses = gov
-                            .get_witnesses(WitnessesData::Schema {
+                        let witnesses = get_witnesses(
+                            ctx,
+                            governance_id,
+                            WitnessesData::Schema {
                                 creator: owner,
                                 schema_id: schema_id.clone(),
                                 namespace: Namespace::from(
                                     namespace.to_owned(),
                                 ),
-                            })
-                            .map_err(|e| {
-                                error!(
-                                    subject_id = %subject_id,
-                                    governance_id = %governance_id,
-                                    error = %e,
-                                    "Failed to get witnesses for tracker schema"
-                                );
-                                ActorError::Functional {
-                                    description: e.to_string(),
-                                }
-                            })?;
+                            },
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get witnesses for tracker schema"
+                            );
+                            ActorError::Functional {
+                                description: e.to_string(),
+                            }
+                        })?;
 
                         (
                             witnesses,
@@ -184,18 +187,19 @@ impl Auth {
                     }
                 }
                 SubjectData::Governance { .. } => {
-                    let gov = get_gov(ctx, subject_id).await?;
                     let witnesses =
-                        gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
-                            warn!(
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to get witnesses for governance"
-                            );
-                            ActorError::Functional {
-                                description: e.to_string(),
-                            }
-                        })?;
+                        get_witnesses(ctx, subject_id, WitnessesData::Gov)
+                            .await
+                            .map_err(|e| {
+                                warn!(
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to get witnesses for governance"
+                                );
+                                ActorError::Functional {
+                                    description: e.to_string(),
+                                }
+                            })?;
 
                     let sn = get_gov_sn(ctx, subject_id).await?;
 

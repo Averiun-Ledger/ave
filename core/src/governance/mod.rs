@@ -19,14 +19,14 @@ use crate::{
         contract_register::{
             ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
         },
-        data::GovernanceData,
+        data::{GovernanceData, MemberName},
         events::{
             GovernanceEvent, governance_event_roles_update_fact,
             governance_event_update_creator_change,
         },
         model::{
             CreatorQuantity, CreatorWitness, HashThisRole, ProtocolTypes,
-            Quorum, RoleCreator, RoleTypes, Schema, WitnessesData,
+            Quorum, RoleCreator, RoleTypes, RolesSchema, RolesTrackerSchemas, Schema, WitnessesData,
         },
         role_register::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
@@ -3108,6 +3108,44 @@ pub enum GovernanceMessage {
     UpdateLedger { events: Vec<Ledger> },
     GetGovernance,
     GetVersion,
+    HasRole {
+        governance_id: DigestIdentifier,
+        role_query: HashThisRole,
+    },
+    GetWitnesses {
+        governance_id: DigestIdentifier,
+        data: WitnessesData,
+    },
+    GetSchemaViewpoints {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+    GetQuorumAndSigners {
+        governance_id: DigestIdentifier,
+        protocol: ProtocolTypes,
+        schema_id: SchemaType,
+        namespace: Namespace,
+    },
+    GetInitState {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+    GetSigners {
+        governance_id: DigestIdentifier,
+        role: RoleTypes,
+        schema_id: SchemaType,
+        namespace: Namespace,
+    },
+    GetMembers {
+        governance_id: DigestIdentifier,
+    },
+    GetSchemaRoles {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+    GetTrackerRoles {
+        governance_id: DigestIdentifier,
+    },
 }
 
 impl Message for GovernanceMessage {}
@@ -3128,6 +3166,15 @@ pub enum GovernanceResponse {
     NewCompilers(Vec<SchemaType>),
     Sn(u64),
     Version(u64),
+    Bool(bool),
+    Witnesses(HashSet<PublicKey>),
+    SchemaViewpoints(Option<BTreeSet<String>>),
+    QuorumAndSigners(HashSet<PublicKey>, Quorum),
+    InitState(Option<ValueWrapper>),
+    Signers(HashSet<PublicKey>, bool),
+    Members(BTreeMap<MemberName, PublicKey>),
+    SchemaRoles(Option<RolesSchema>),
+    TrackerRoles(RolesTrackerSchemas),
     Ok,
 }
 impl Response for GovernanceResponse {}
@@ -3510,6 +3557,105 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::Governance(Box::new(
                     self.properties.clone(),
                 )))
+            }
+            GovernanceMessage::HasRole {
+                governance_id: _,
+                role_query,
+            } => {
+                let result = self.properties.has_this_role(role_query);
+                Ok(GovernanceResponse::Bool(result))
+            }
+            GovernanceMessage::GetWitnesses {
+                governance_id: _,
+                data,
+            } => {
+                let witnesses = self.properties.get_witnesses(data).map_err(
+                    |e| ActorError::Functional {
+                        description: format!(
+                            "Failed to get witnesses from governance: {}",
+                            e
+                        ),
+                    },
+                )?;
+                Ok(GovernanceResponse::Witnesses(witnesses))
+            }
+            GovernanceMessage::GetSchemaViewpoints {
+                governance_id: _,
+                schema_id,
+            } => {
+                let viewpoints = self
+                    .properties
+                    .schemas
+                    .get(&schema_id)
+                    .map(|schema| schema.viewpoints.clone());
+                Ok(GovernanceResponse::SchemaViewpoints(viewpoints))
+            }
+            GovernanceMessage::GetQuorumAndSigners {
+                governance_id: _,
+                protocol,
+                schema_id,
+                namespace,
+            } => {
+                let (signers, quorum) = self
+                    .properties
+                    .get_quorum_and_signers(protocol, &schema_id, namespace)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Failed to get quorum and signers: {}",
+                            e
+                        ),
+                    })?;
+                Ok(GovernanceResponse::QuorumAndSigners(signers, quorum))
+            }
+            GovernanceMessage::GetInitState {
+                governance_id: _,
+                schema_id,
+            } => {
+                let init_state = self
+                    .properties
+                    .get_init_state(&schema_id)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Failed to get init state for schema {}: {}",
+                            schema_id, e
+                        ),
+                    })?;
+                Ok(GovernanceResponse::InitState(Some(init_state)))
+            }
+            GovernanceMessage::GetSigners {
+                governance_id: _,
+                role,
+                schema_id,
+                namespace,
+            } => {
+                let (signers, any) =
+                    self.properties.get_signers(role, &schema_id, namespace);
+                Ok(GovernanceResponse::Signers(signers, any))
+            }
+            GovernanceMessage::GetMembers {
+                governance_id: _,
+            } => {
+                Ok(GovernanceResponse::Members(
+                    self.properties.members.clone(),
+                ))
+            }
+            GovernanceMessage::GetSchemaRoles {
+                governance_id: _,
+                schema_id,
+            } => {
+                let roles = self
+                    .properties
+                    .roles_schema
+                    .get(&schema_id)
+                    .cloned();
+                Ok(GovernanceResponse::SchemaRoles(roles))
+            }
+            GovernanceMessage::GetTrackerRoles {
+                governance_id: _,
+            } => {
+                Ok(GovernanceResponse::TrackerRoles(
+                    self.properties.roles_tracker_schemas.clone(),
+                ))
             }
         }
     }

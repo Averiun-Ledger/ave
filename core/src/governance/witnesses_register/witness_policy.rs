@@ -289,22 +289,24 @@ impl WitnessesRegister {
         schema_id: SchemaType,
         owner: Option<PublicKey>,
         owner_gov_version: Option<u64>,
-    ) -> Result<WitnessStatus, ActorError> {
+        cached_search: Option<(SnLimit, Option<PublicKey>)>,
+    ) -> Result<(WitnessStatus, Option<(SnLimit, Option<PublicKey>)>), ActorError> {
         let mut access_sn = None;
         let mut hi_sn_limit = HiSnLimit::None;
         let mut gov_version_limit = GovVersionLimit::None;
         let mut create_access = false;
         let mut create_gov_version_limit = GovVersionLimit::None;
+        let mut cached = cached_search;
 
-        if let Some(subject_id) = subject_id {
+        if let Some(subject_id) = &subject_id {
             access_sn = self
-                .access_limit_for_node(ctx, &subject_id, &node, &namespace, &schema_id)
+                .access_limit_for_node(ctx, subject_id, &node, &namespace, &schema_id, &mut cached)
                 .await?;
             hi_sn_limit = self
-                .hi_sn_limit_for_node(ctx, &subject_id, &node, &namespace, &schema_id)
+                .hi_sn_limit_for_node(ctx, subject_id, &node, &namespace, &schema_id, &mut cached)
                 .await?;
             gov_version_limit = self
-                .gov_version_limit_for_node(&subject_id, &node, &namespace, &schema_id)
+                .gov_version_limit_for_node(subject_id, &node, &namespace, &schema_id)
                 .await?;
         }
 
@@ -321,13 +323,13 @@ impl WitnessesRegister {
             }
         }
 
-        Ok(WitnessStatus {
+        Ok((WitnessStatus {
             access_sn,
             hi_sn_limit,
             gov_version_limit,
             create_access,
             create_gov_version_limit,
-        })
+        }, cached))
     }
 
 }
