@@ -213,7 +213,7 @@ impl BorshDeserialize for Node {
 
 impl Node {
     fn hash(&self) -> Result<HashAlgorithm, ActorError> {
-        self.hash.clone().ok_or_else(|| ActorError::FunctionalCritical {
+        self.hash.ok_or_else(|| ActorError::FunctionalCritical {
             description: "Hash is None".to_string(),
         })
     }

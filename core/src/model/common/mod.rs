@@ -28,7 +28,7 @@ use crate::governance::transfer_verification_register::{
     TransferVerificationRegisterResponse,
 };
 use crate::governance::witnesses_register::{
-    GovVersionLimit, HiSnLimit, WitnessStatus, WitnessesRegister,
+    WitnessStatus, WitnessesRegister,
     WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
 use crate::request::manager::{

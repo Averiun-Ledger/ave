@@ -422,7 +422,7 @@ impl RequestManager {
                         GovernanceData::try_from(metadata.properties.clone())?;
                     (
                         EvaluateData::GovFact {
-                            state: state.clone(),
+                            state,
                         },
                         None,
                         EvalWorkerContext::default(),
@@ -433,7 +433,7 @@ impl RequestManager {
                         GovernanceData::try_from(metadata.properties.clone())?;
                     (
                         EvaluateData::GovTransfer {
-                            state: state.clone(),
+                            state,
                         },
                         None,
                         EvalWorkerContext::default(),
@@ -444,7 +444,7 @@ impl RequestManager {
                         GovernanceData::try_from(metadata.properties.clone())?;
                     (
                         EvaluateData::GovConfirm {
-                            state: state.clone(),
+                            state,
                         },
                         None,
                         EvalWorkerContext::default(),
@@ -477,8 +477,7 @@ impl RequestManager {
                             crate::governance::error::GovernanceError::
                                 SchemaDoesNotExist {
                                     schema_id: metadata.schema_id.to_string(),
-                                }
-                                .into(),
+                                },
                         ));
                     };
                     let tracker_context = EvalWorkerContext::TrackerFact {

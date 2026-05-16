@@ -124,8 +124,7 @@ impl RequestHandler {
             namespace,
             ..
         } = &subject_data
-        {
-            if !has_role(
+            && !has_role(
                 ctx,
                 governance_id,
                 HashThisRole::Schema {
@@ -136,13 +135,12 @@ impl RequestHandler {
                 },
             )
             .await?
-            {
-                return Err(ActorError::Functional {
-                    description:
-                        "In tracker events, the node has to be a creator"
-                            .to_string(),
-                });
-            }
+        {
+            return Err(ActorError::Functional {
+                description:
+                    "In tracker events, the node has to be a creator"
+                        .to_string(),
+            });
         }
 
         match event_request {

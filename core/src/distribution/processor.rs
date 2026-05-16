@@ -50,7 +50,7 @@ impl DistriWorker {
                     sender.clone(),
                     &pending_ledger,
                     chunk_offered_hi_sn,
-                    &common,
+                    common,
                     transfer_event,
                     transfer_simulation.as_ref(),
                     verified_transfer_sn,
@@ -58,20 +58,18 @@ impl DistriWorker {
                 .await?;
 
 
-            if !transfer_recorded && transfer_simulation.is_some() && !common.is_gov {
-                if let Some(ref transfer_event) = transfer_event {
-                    record_verified_transfer(
-                        ctx,
-                        &common.governance_id,
-                        &subject_id,
-                        transfer_event.sn,
-                        sender.clone(),
-                    ).await?;
-                    transfer_recorded = true;
-                    // Refrescar verified_transfer_sn para que la siguiente
-                    // iteración del loop pueda usar Path C (free passage).
-                    verified_transfer_sn = Some(transfer_event.sn);
-                }
+            if !transfer_recorded && transfer_simulation.is_some() && !common.is_gov && let Some(transfer_event) = transfer_event {
+                record_verified_transfer(
+                    ctx,
+                    &common.governance_id,
+                    &subject_id,
+                    transfer_event.sn,
+                    sender.clone(),
+                ).await?;
+                transfer_recorded = true;
+                // Refrescar verified_transfer_sn para que la siguiente
+                // iteración del loop pueda usar Path C (free passage).
+                verified_transfer_sn = Some(transfer_event.sn);
             }
 
             let is_gov = auth.is_gov;
@@ -103,7 +101,7 @@ impl DistriWorker {
                 let requester = Self::requester_id(
                     "ledger_distribution_create",
                     &subject_id,
-                    &info,
+                    info,
                     &sender,
                 );
 
@@ -178,7 +176,7 @@ impl DistriWorker {
                 let requester = Self::requester_id(
                     "ledger_distribution",
                     &subject_id,
-                    &info,
+                    info,
                     &sender,
                 );
                 if !pending_ledger.is_empty() && !is_gov {
@@ -253,7 +251,7 @@ impl DistriWorker {
                                     ctx,
                                     &subject_id,
                                     sender.clone(),
-                                    &info,
+                                    info,
                                     Some(last_sn),
                                     common.subject_data.clone(),
                                 )
@@ -320,7 +318,7 @@ impl DistriWorker {
                             ctx,
                             &subject_id,
                             sender.clone(),
-                            &info,
+                            info,
                             Some(applied_hi_sn),
                             common.subject_data.clone(),
                         )

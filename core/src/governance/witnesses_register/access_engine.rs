@@ -3,31 +3,17 @@ use std::collections::{BTreeSet, HashMap};
 use crate::governance::sn_register::SnLimit;
 
 use crate::model::common::{
-    Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
+    Interval, TrackerEventVisibility, TrackerStoredVisibility,
+    TrackerVisibilityState,
 };
-use crate::model::event::Ledger;
-use async_trait::async_trait;
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response,
-};
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
-use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span, warn};
-
-use crate::db::Storable;
+use tracing::{debug, warn};
 
 use super::{
-    CreatorWitnessGrant, CreatorWitnessGrantHistory, CreatorWitnessGrantRange,
-    CreatorWitnessRegistration, CurrentWitnessSubject, GovVersionLimit,
-    HiSnLimit, IntervalData, OldOwnerData, TransferData, TrackerDeliveryMode,
-    TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterEvent,
-    WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
+    CreatorWitnessGrant, GovVersionLimit, HiSnLimit, OldOwnerData, TransferData,
+    TrackerDeliveryMode, TrackerDeliveryRange, WitnessesRegister, WitnessesType,
     ActualSearch,
 };
 
@@ -172,7 +158,7 @@ impl WitnessesRegister {
             if range.from_sn > access_limit {
                 continue;
             }
-            if range.to_sn.map_or(false, |to| to < from_sn) {
+            if range.to_sn.is_some_and(|to| to < from_sn) {
                 continue;
             }
             if range.from_sn >= from_sn {
@@ -191,7 +177,7 @@ impl WitnessesRegister {
             if range.from_sn > access_limit {
                 continue;
             }
-            if range.to_sn.map_or(false, |to| to < from_sn) {
+            if range.to_sn.is_some_and(|to| to < from_sn) {
                 continue;
             }
             if range.from_sn >= from_sn {
@@ -223,7 +209,7 @@ impl WitnessesRegister {
         }
 
         // Corte por old_owners (condición sn <= old_owner.sn cambia en old_owner.sn + 1)
-        for (_, old_data) in old_owners {
+        for old_data in old_owners.values() {
             if old_data.sn >= from_sn && old_data.sn <= access_limit {
                 let next = old_data.sn.saturating_add(1);
                 if next <= access_limit {
@@ -325,7 +311,7 @@ impl WitnessesRegister {
             .collect();
         sorted_old_owners.sort_by_key(|(_, sn)| *sn);
 
-        let transfer_sn = if let Some(owner) = effective_owner {
+        let transfer_sn = effective_owner.and_then(|owner| {
             if data.actual_new_owner_data.as_ref().is_some_and(|(new_owner, _)| new_owner == &owner)
             {
                 // Es el new_owner pendiente: necesita ver la transferencia actual
@@ -356,9 +342,7 @@ impl WitnessesRegister {
             } else {
                 None
             }
-        } else {
-            None
-        }
+        })
         .filter(|transfer_sn| actual_sn.is_none_or(|sn| sn < *transfer_sn));
 
 
@@ -598,10 +582,7 @@ impl WitnessesRegister {
             SnLimit::Sn(sn) => {
                 HiSnLimit::Sn(old_owner_limit.map_or(sn, |old| sn.max(old)))
             }
-            SnLimit::NotSn => match old_owner_limit {
-                Some(sn) => HiSnLimit::Sn(sn),
-                None => HiSnLimit::None,
-            },
+            SnLimit::NotSn => old_owner_limit.map_or(HiSnLimit::None, HiSnLimit::Sn),
         };
         Ok(limit)
     }
@@ -783,10 +764,7 @@ impl WitnessesRegister {
             }
         }
 
-        match better_gov_version {
-            Some(version) => GovVersionLimit::Version(version),
-            None => GovVersionLimit::None,
-        }
+        better_gov_version.map_or(GovVersionLimit::None, GovVersionLimit::Version)
     }
 
     pub(crate) async fn search_witnesses_with_owner(
@@ -947,7 +925,7 @@ impl WitnessesRegister {
             let sns = self
                 .get_sns(ctx, subject_id.clone(), unique_vec.clone())
                 .await?;
-            unique_vec.into_iter().zip(sns.into_iter()).collect()
+            unique_vec.into_iter().zip(sns).collect()
         };
 
         // === FASE 3: Evaluación con cache ===
@@ -959,13 +937,13 @@ impl WitnessesRegister {
                     match sn_limit {
                         SnLimit::Sn(sn) => {
                             let candidate = *sn.min(&old_data.sn);
-                            if better_sn.map_or(true, |bs| candidate > bs) {
+                            if better_sn.is_none_or(|bs| candidate > bs) {
                                 better_sn = Some(candidate);
                                 effective_owner = Some(creator.clone());
                             }
                         }
                         SnLimit::LastSn => {
-                            if better_sn.map_or(true, |bs| old_data.sn > bs) {
+                            if better_sn.is_none_or(|bs| old_data.sn > bs) {
                                 better_sn = Some(old_data.sn);
                                 effective_owner = Some(creator.clone());
                             }
@@ -975,28 +953,25 @@ impl WitnessesRegister {
                 }
             }
 
-            if is_direct {
-                if better_sn.map_or(true, |bs| old_data.sn > bs) {
-                    better_sn = Some(old_data.sn);
-                    effective_owner = Some(creator.clone());
-                }
+            if is_direct && better_sn.is_none_or(|bs| old_data.sn > bs) {
+                better_sn = Some(old_data.sn);
+                effective_owner = Some(creator.clone());
             }
         }
 
-        let sn_limit = if let Some(gov_version) = better_gov_version {
-            match sn_cache.get(&gov_version).cloned().unwrap_or(SnLimit::NotSn) {
-                SnLimit::Sn(sn) => better_sn
-                    .map_or(SnLimit::Sn(sn), |better_sn| {
-                        SnLimit::Sn(sn.max(better_sn))
-                    }),
-                SnLimit::LastSn => SnLimit::Sn(data.sn),
-                SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
-            }
-        } else if let Some(better_sn) = better_sn {
-            SnLimit::Sn(better_sn)
-        } else {
-            SnLimit::NotSn
-        };
+        let sn_limit = better_gov_version.map_or_else(
+            || better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
+            |gov_version| {
+                match sn_cache.get(&gov_version).cloned().unwrap_or(SnLimit::NotSn) {
+                    SnLimit::Sn(sn) => better_sn
+                        .map_or(SnLimit::Sn(sn), |better_sn| {
+                            SnLimit::Sn(sn.max(better_sn))
+                        }),
+                    SnLimit::LastSn => SnLimit::Sn(data.sn),
+                    SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
+                }
+            },
+        );
 
         Ok((sn_limit, effective_owner))
     }

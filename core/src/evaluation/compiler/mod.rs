@@ -301,7 +301,7 @@ impl CompilerSupport {
             &Self::shared_target_dir_for_contract(),
             vendor_dir
                 .exists()
-                .then(|| Self::vendor_dir_for_contract())
+                .then(Self::vendor_dir_for_contract)
                 .as_deref(),
         );
         let cargo_config_path = Self::cargo_config_path(contract_path);

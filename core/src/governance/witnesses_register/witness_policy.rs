@@ -1,38 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
-use crate::governance::sn_register::{
-    SnLimit, SnRegister, SnRegisterMessage, SnRegisterResponse,
-};
-use crate::governance::subject_register::{
-    SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
-};
-use crate::model::common::{
-    Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
-};
-use crate::model::event::Ledger;
-use async_trait::async_trait;
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response,
-};
-use ave_actors::{LightPersistence, PersistentActor};
+use crate::governance::sn_register::SnLimit;
+use crate::model::common::{Interval, IntervalSet};
+use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
-use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span, warn};
-
-use crate::db::Storable;
 
 use super::{
-    CreatorWitnessGrant, CreatorWitnessGrantHistory, CreatorWitnessGrantRange,
-    CreatorWitnessRegistration, CurrentWitnessSubject, GovVersionLimit,
-    HiSnLimit, IntervalData, OldOwnerData, TransferData, TrackerDeliveryMode,
-    TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterEvent,
-    WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
-    ActualSearch, WitnessStatus,
+    CreatorWitnessRegistration, GovVersionLimit, HiSnLimit, IntervalData,
+    WitnessesRegister, WitnessesType, ActualSearch, WitnessStatus,
 };
 
 impl WitnessesRegister {
@@ -148,16 +124,14 @@ impl WitnessesRegister {
             &self.creator_witnesses
         {
             for (witness_type, (_, current_lo)) in &entry.intervals {
-                if let WitnessesType::User(node) = witness_type {
-                    if current_lo.is_some() {
-                        let key = (creator.clone(), namespace.clone(), schema_id.clone());
-                        if let Some(set) = self.node_creator_index.get_mut(node) {
-                            set.insert(key);
-                        } else {
-                            let mut set = HashSet::new();
-                            set.insert(key);
-                            self.node_creator_index.insert(node.clone(), set);
-                        }
+                if let WitnessesType::User(node) = witness_type && current_lo.is_some() {
+                    let key = (creator.clone(), namespace.clone(), schema_id.clone());
+                    if let Some(set) = self.node_creator_index.get_mut(node) {
+                        set.insert(key);
+                    } else {
+                        let mut set = HashSet::new();
+                        set.insert(key);
+                        self.node_creator_index.insert(node.clone(), set);
                     }
                 }
             }
@@ -310,17 +284,15 @@ impl WitnessesRegister {
                 .await?;
         }
 
-        if let Some(owner) = owner {
-            if let Some(gov_version) = owner_gov_version {
-                create_access = self.has_create_access_for_node_at_version(
+        if let Some(owner) = owner && let Some(gov_version) = owner_gov_version {
+            create_access = self.has_create_access_for_node_at_version(
+                &node, &owner, &schema_id, &namespace, gov_version,
+            );
+            create_gov_version_limit = self
+                .create_gov_version_limit_for_node(
                     &node, &owner, &schema_id, &namespace, gov_version,
-                );
-                create_gov_version_limit = self
-                    .create_gov_version_limit_for_node(
-                        &node, &owner, &schema_id, &namespace, gov_version,
-                    )
-                    .await;
-            }
+                )
+                .await;
         }
 
         Ok((WitnessStatus {

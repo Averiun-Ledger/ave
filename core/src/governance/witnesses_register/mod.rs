@@ -852,7 +852,6 @@ impl WitnessesRegister {
                     // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
                     better_gov_version = better_gov_version.max(Some(range.hi));
                 }
-            } else {
             }
         }
         ActualSearch::Continue {

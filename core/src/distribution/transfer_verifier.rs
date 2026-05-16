@@ -30,7 +30,7 @@ pub(crate) struct TransferVerifier {
 }
 
 impl TransferVerifier {
-    pub(crate) fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
+    pub(crate) const fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
         Self { hash, our_key }
     }
 
@@ -193,7 +193,7 @@ impl TransferVerifier {
                     });
                 }
 
-                (create.governance_id.clone(), create.schema_id.clone(), create.namespace.clone(), false)
+                (create.governance_id, create.schema_id, create.namespace, false)
             }
         };
 
@@ -236,7 +236,6 @@ impl TransferVerifier {
         ctx: &mut ActorContext<super::worker::DistriWorker>,
         subject_id: &DigestIdentifier,
         sender_ledger: &[Ledger],
-        sender: PublicKey,
         transfer_event: &Ledger,
     ) -> Result<TransferSimulationResult, ActorError> {
         let first_ledger = sender_ledger.first().ok_or_else(|| ActorError::Functional {

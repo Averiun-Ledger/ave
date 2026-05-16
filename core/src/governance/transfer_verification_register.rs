@@ -256,7 +256,7 @@ impl PersistentActor for TransferVerificationRegister {
                             *existing_sender = sender.clone();
                         }
                     })
-                    .or_insert((*transfer_sn, sender.clone()));
+                    .or_insert_with(|| (*transfer_sn, sender.clone()));
 
                 debug!(
                     event_type = "RecordVerifiedTransfer",

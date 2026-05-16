@@ -3,8 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
-use async_trait::async_trait;
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath};
+use ave_actors::{ActorContext, ActorError, ActorPath};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};
 
