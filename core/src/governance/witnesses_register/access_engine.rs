@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::governance::sn_register::SnLimit;
 
@@ -153,6 +153,88 @@ impl WitnessesRegister {
         }
     }
 
+    /// Calcula los puntos de corte (cut points) donde cualquier factor que afecta
+    /// `event_delivery_mode` puede cambiar. Entre dos cortes consecutivos el modo
+    /// es constante, permitiendo iterar por rangos en lugar de SN-a-SN.
+    fn compute_cut_points(
+        from_sn: u64,
+        access_limit: u64,
+        visibility_state: &TrackerVisibilityState,
+        gov_versions: &[(Interval, u64)],
+        old_owners: &HashMap<PublicKey, OldOwnerData>,
+    ) -> Vec<u64> {
+        let mut cuts: BTreeSet<u64> = BTreeSet::new();
+        cuts.insert(from_sn);
+        cuts.insert(access_limit.saturating_add(1));
+
+        // Corte por stored_ranges
+        for range in &visibility_state.stored_ranges {
+            if range.from_sn > access_limit {
+                continue;
+            }
+            if range.to_sn.map_or(false, |to| to < from_sn) {
+                continue;
+            }
+            if range.from_sn >= from_sn {
+                cuts.insert(range.from_sn);
+            }
+            if let Some(to) = range.to_sn {
+                let next = to.saturating_add(1);
+                if next <= access_limit {
+                    cuts.insert(next);
+                }
+            }
+        }
+
+        // Corte por event_ranges
+        for range in &visibility_state.event_ranges {
+            if range.from_sn > access_limit {
+                continue;
+            }
+            if range.to_sn.map_or(false, |to| to < from_sn) {
+                continue;
+            }
+            if range.from_sn >= from_sn {
+                cuts.insert(range.from_sn);
+            }
+            if let Some(to) = range.to_sn {
+                let next = to.saturating_add(1);
+                if next <= access_limit {
+                    cuts.insert(next);
+                }
+            }
+        }
+
+        // Corte por gov_versions
+        for (interval, _) in gov_versions {
+            if interval.lo > access_limit {
+                continue;
+            }
+            if interval.hi < from_sn {
+                continue;
+            }
+            if interval.lo >= from_sn {
+                cuts.insert(interval.lo);
+            }
+            let next = interval.hi.saturating_add(1);
+            if next <= access_limit {
+                cuts.insert(next);
+            }
+        }
+
+        // Corte por old_owners (condición sn <= old_owner.sn cambia en old_owner.sn + 1)
+        for (_, old_data) in old_owners {
+            if old_data.sn >= from_sn && old_data.sn <= access_limit {
+                let next = old_data.sn.saturating_add(1);
+                if next <= access_limit {
+                    cuts.insert(next);
+                }
+            }
+        }
+
+        cuts.into_iter().collect()
+    }
+
     pub(crate) async fn build_tracker_window_from_data(
         &self,
         ctx: &ActorContext<Self>,
@@ -294,19 +376,30 @@ impl WitnessesRegister {
 
         let mut ranges: Vec<TrackerDeliveryRange> = Vec::new();
         let mut clear_sn = None;
-        let mut gv_idx = 0;
 
-        for sn in from_sn..=access_limit {
-            while gv_idx < gov_versions.len() && gov_versions[gv_idx].0.hi < sn {
+        let cuts = Self::compute_cut_points(
+            from_sn,
+            access_limit,
+            &data.visibility_state,
+            &gov_versions,
+            &data.old_owners,
+        );
+
+        let mut gv_idx = 0;
+        for window in cuts.windows(2) {
+            let range_from = window[0];
+            let range_to = window[1].saturating_sub(1);
+
+            while gv_idx < gov_versions.len() && gov_versions[gv_idx].0.hi < range_from {
                 gv_idx += 1;
             }
 
             let gov_version = if gv_idx < gov_versions.len()
-                && gov_versions[gv_idx].0.contains(sn)
+                && gov_versions[gv_idx].0.contains(range_from)
             {
                 Some(gov_versions[gv_idx].1)
             } else {
-                (sn == 0).then_some(data.gov_version)
+                (range_from == 0).then_some(data.gov_version)
             };
 
             let Some(gov_version) = gov_version else {
@@ -314,8 +407,9 @@ impl WitnessesRegister {
                     msg_type = "BuildTrackerWindow",
                     subject_id = %subject_id,
                     node = %node,
-                    sn = sn,
-                    "gov_version missing for sn"
+                    range_from = range_from,
+                    range_to = range_to,
+                    "gov_version missing for range"
                 );
                 continue;
             };
@@ -325,7 +419,7 @@ impl WitnessesRegister {
                 node,
                 &namespace,
                 &schema_id,
-                sn,
+                range_from,
                 gov_version,
             );
 
@@ -333,13 +427,13 @@ impl WitnessesRegister {
                 Some(last)
                     if std::mem::discriminant(&last.mode)
                         == std::mem::discriminant(&mode)
-                        && last.to_sn + 1 == sn =>
+                        && last.to_sn + 1 == range_from =>
                 {
-                    last.to_sn = sn;
+                    last.to_sn = range_to;
                 }
                 _ => ranges.push(TrackerDeliveryRange {
-                    from_sn: sn,
-                    to_sn: sn,
+                    from_sn: range_from,
+                    to_sn: range_to,
                     mode: mode.clone(),
                 }),
             }
@@ -350,9 +444,9 @@ impl WitnessesRegister {
                         ranges.first().map(|x| &x.mode),
                         Some(TrackerDeliveryMode::Clear)
                     ))
-                    || clear_sn == Some(sn.saturating_sub(1)))
+                    || clear_sn == Some(range_from.saturating_sub(1)))
             {
-                clear_sn = Some(sn);
+                clear_sn = Some(range_to);
             }
         }
 

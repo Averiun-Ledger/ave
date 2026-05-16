@@ -93,11 +93,10 @@ impl DistriWorker {
         match limit {
             GovVersionLimit::None => None,
             GovVersionLimit::Infinity => Some(offered_hi_sn),
-            GovVersionLimit::Version(limit) => ledger
-                .iter()
-                .take_while(|event| event.gov_version <= limit)
-                .last()
-                .map(|event| event.sn.min(offered_hi_sn)),
+            GovVersionLimit::Version(limit) => {
+                let idx = ledger.partition_point(|event| event.gov_version <= limit);
+                ledger.get(idx.saturating_sub(1)).map(|event| event.sn.min(offered_hi_sn))
+            }
         }
     }
 
@@ -788,27 +787,23 @@ impl DistriWorker {
         Ok((sn, transfer_sn, clear_sn, is_all, ranges))
     }
 
-    fn tracker_delivery_mode(
-        ranges: &[TrackerDeliveryRange],
-        sn: u64,
-    ) -> Option<TrackerDeliveryMode> {
-        let idx = ranges.partition_point(|range| range.to_sn < sn);
-        if idx < ranges.len() && ranges[idx].from_sn <= sn {
-            Some(ranges[idx].mode.clone())
-        } else {
-            None
-        }
-    }
-
     fn project_tracker_ledger(
         ledger: Vec<Ledger>,
         ranges: &[TrackerDeliveryRange],
     ) -> Result<Vec<Ledger>, ActorError> {
         let mut projected = Vec::with_capacity(ledger.len());
+        let mut range_idx = 0;
 
         for event in ledger {
-            let Some(mode) = Self::tracker_delivery_mode(ranges, event.sn)
-            else {
+            while range_idx < ranges.len() && ranges[range_idx].to_sn < event.sn {
+                range_idx += 1;
+            }
+
+            let mode = if range_idx < ranges.len()
+                && ranges[range_idx].from_sn <= event.sn
+            {
+                ranges[range_idx].mode.clone()
+            } else {
                 return Err(ActorError::Functional {
                     description: format!(
                         "Missing tracker delivery range for sn {}",
@@ -1481,7 +1476,9 @@ impl Handler<Self> for DistriWorker {
                     return Err(DistributorError::EmptyEvents.into());
                 }
 
-                ledger.sort_by_key(|event| event.sn);
+                if !ledger.windows(2).all(|w| w[0].sn <= w[1].sn) {
+                    ledger.sort_by_key(|event| event.sn);
+                }
 
                 let subject_id = ledger[0].get_subject_id();
                 let ledger_count = ledger.len();
