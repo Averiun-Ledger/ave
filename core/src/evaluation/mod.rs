@@ -347,7 +347,7 @@ impl Actor for Evaluation {
 impl Handler<Self> for Evaluation {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvaluationMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -1080,7 +1080,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1201,7 +1201,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1237,7 +1237,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request.clone(),
             &node_actor,
             &request_actor,
@@ -1380,7 +1380,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1416,7 +1416,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request,
             &node_actor,
             &request_actor,
@@ -1929,7 +1929,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -2049,7 +2049,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request,
             &node_actor,
             &request_actor,
@@ -2404,7 +2404,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request.clone(),
             &node_actor,
             &request_actor,
@@ -2531,7 +2531,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request.clone(),
             &node_actor,
             &request_actor,

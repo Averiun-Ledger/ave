@@ -59,7 +59,7 @@ impl Actor for TempCompiler {
 impl Handler<Self> for TempCompiler {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: TempCompilerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<CompilerResponse, ActorError> {

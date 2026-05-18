@@ -43,6 +43,27 @@ pub mod node;
 pub mod subject;
 pub mod viewpoints;
 
+pub struct TrackerIdentity {
+    pub namespace: String,
+    pub schema_id: SchemaType,
+}
+
+pub struct OwnerContext {
+    pub owner: Option<PublicKey>,
+    pub gov_version: Option<u64>,
+}
+
+pub struct TrackerPeers {
+    pub node: PublicKey,
+    pub sender: PublicKey,
+}
+
+pub struct TrackerParams {
+    pub namespace: String,
+    pub schema_id: SchemaType,
+    pub actual_sn: Option<u64>,
+}
+
 pub fn check_quorum_signers(
     signers: &HashSet<PublicKey>,
     quorum: &Quorum,
@@ -167,7 +188,7 @@ where
             }
         })?;
 
-    let _response = actor
+    let _ = actor
         .ask(SubjectRegisterMessage::Check {
             creator,
             gov_version,
@@ -183,11 +204,9 @@ pub async fn check_witness_status<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
     subject_id: Option<DigestIdentifier>,
-    owner: Option<PublicKey>,
-    owner_gov_version: Option<u64>,
+    identity: TrackerIdentity,
+    owner_ctx: OwnerContext,
 ) -> Result<WitnessStatus, ActorError>
 where
     A: Actor + Handler<A>,
@@ -204,10 +223,10 @@ where
         .ask(WitnessesRegisterMessage::QueryWitnessStatus {
             subject_id,
             node,
-            namespace,
-            schema_id,
-            owner,
-            owner_gov_version,
+            namespace: identity.namespace,
+            schema_id: identity.schema_id,
+            owner: owner_ctx.owner,
+            owner_gov_version: owner_ctx.gov_version,
         })
         .await?;
 
@@ -980,7 +999,7 @@ where
     A::Event: BorshSerialize + BorshDeserialize,
 {
     let store = ctx.get_child::<Store<A>>("store").await?;
-    let _response = store.ask(StoreCommand::Purge).await?;
+    let _ = store.ask(StoreCommand::Purge).await?;
 
     Ok(())
 }

@@ -135,7 +135,7 @@ impl Actor for Reboot {
 impl Handler<Self> for Reboot {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RebootMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {

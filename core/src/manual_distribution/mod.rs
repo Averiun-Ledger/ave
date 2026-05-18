@@ -27,6 +27,11 @@ use crate::{
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
 
+struct RolesContext<'a> {
+    schema: &'a crate::governance::model::RolesSchema,
+    tracker: &'a crate::governance::model::RolesTrackerSchemas,
+}
+
 pub struct ManualDistribution {
     our_key: Arc<PublicKey>,
 }
@@ -38,8 +43,7 @@ impl ManualDistribution {
 
     fn tracker_fact_mode_for_creator(
         members: &std::collections::BTreeMap<String, PublicKey>,
-        roles_schema: &crate::governance::model::RolesSchema,
-        roles_tracker_schemas: &crate::governance::model::RolesTrackerSchemas,
+        roles_ctx: &RolesContext<'_>,
         _schema_id: &ave_common::SchemaType,
         namespace: &ave_common::Namespace,
         creator: &PublicKey,
@@ -62,7 +66,7 @@ impl ManualDistribution {
             return DistributionPlanMode::Opaque;
         };
 
-        let Some(role_creator) = roles_schema.creator.get(
+        let Some(role_creator) = roles_ctx.schema.creator.get(
             &ave_common::governance::RoleCreator::create(
                 &creator_name,
                 namespace.clone(),
@@ -72,11 +76,11 @@ impl ManualDistribution {
         };
 
         let is_generic_witness =
-            roles_schema.hash_this_rol(
+            roles_ctx.schema.hash_this_rol(
                 RoleTypes::Witness,
                 namespace.clone(),
                 &witness_name,
-            ) || roles_tracker_schemas.hash_this_rol(
+            ) || roles_ctx.tracker.hash_this_rol(
                 RoleTypes::Witness,
                 namespace.clone(),
                 &witness_name,
@@ -110,8 +114,7 @@ impl ManualDistribution {
     fn build_tracker_manual_plan(
         witnesses: std::collections::HashSet<PublicKey>,
         members: &std::collections::BTreeMap<String, PublicKey>,
-        roles_schema: &crate::governance::model::RolesSchema,
-        roles_tracker_schemas: &crate::governance::model::RolesTrackerSchemas,
+        roles_ctx: &RolesContext<'_>,
         schema_id: ave_common::SchemaType,
         namespace: ave_common::Namespace,
         event_request: &EventRequest,
@@ -124,8 +127,7 @@ impl ManualDistribution {
                     EventRequest::Fact(fact_request) => {
                         Self::tracker_fact_mode_for_creator(
                             members,
-                            roles_schema,
-                            roles_tracker_schemas,
+                            roles_ctx,
                             &schema_id,
                             &namespace,
                             signer,
@@ -169,7 +171,7 @@ impl Actor for ManualDistribution {
 impl Handler<Self> for ManualDistribution {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ManualDistributionMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -368,8 +370,10 @@ impl Handler<Self> for ManualDistribution {
                     Self::build_tracker_manual_plan(
                         witnesses,
                         &members,
-                        &roles_schema,
-                        &roles_tracker,
+                        &RolesContext {
+                            schema: &roles_schema,
+                            tracker: &roles_tracker,
+                        },
                         schema_id.clone(),
                         namespace,
                         &event_request,

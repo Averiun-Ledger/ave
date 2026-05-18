@@ -293,7 +293,7 @@ impl Actor for Auth {
 impl Handler<Self> for Auth {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: AuthMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<AuthResponse, ActorError> {

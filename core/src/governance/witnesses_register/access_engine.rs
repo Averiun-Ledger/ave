@@ -4,7 +4,7 @@ use crate::governance::sn_register::SnLimit;
 
 use crate::model::common::{
     Interval, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerVisibilityState,
+    TrackerIdentity, TrackerParams, TrackerVisibilityState,
 };
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
@@ -16,6 +16,8 @@ use super::{
     TrackerDeliveryMode, TrackerDeliveryRange, WitnessesRegister, WitnessesType,
     ActualSearch,
 };
+
+type OldOwnerCandidate = (PublicKey, OldOwnerData, Option<u64>, Option<u64>, bool);
 
 impl WitnessesRegister {
     pub(crate) fn event_delivery_mode(
@@ -227,10 +229,7 @@ impl WitnessesRegister {
         subject_id: &DigestIdentifier,
         data: &TransferData,
         node: &PublicKey,
-        _sender: &PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        actual_sn: Option<u64>,
+        params: TrackerParams,
         search_result: Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<
         (
@@ -250,8 +249,8 @@ impl WitnessesRegister {
                         ctx,
                         node,
                         data,
-                        namespace.clone(),
-                        schema_id.clone(),
+                        params.namespace.clone(),
+                        params.schema_id.clone(),
                         subject_id.clone(),
                     )
                     .await?
@@ -343,17 +342,17 @@ impl WitnessesRegister {
                 None
             }
         })
-        .filter(|transfer_sn| actual_sn.is_none_or(|sn| sn < *transfer_sn));
+        .filter(|transfer_sn| params.actual_sn.is_none_or(|sn| sn < *transfer_sn));
 
 
 
-        let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
+        let from_sn = params.actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
 
             return Ok((None, transfer_sn, None, true, Vec::new()));
         }
 
-        let namespace = Namespace::from(namespace);
+        let namespace = Namespace::from(params.namespace);
         let gov_versions = self
             .get_gov_version_window(ctx, subject_id, from_sn, access_limit)
             .await?;
@@ -402,7 +401,7 @@ impl WitnessesRegister {
                 data,
                 node,
                 &namespace,
-                &schema_id,
+                &params.schema_id,
                 range_from,
                 gov_version,
             );
@@ -441,7 +440,7 @@ impl WitnessesRegister {
             access_limit = ?access_limit,
             transfer_sn = ?transfer_sn,
             clear_sn = ?clear_sn,
-            actual_sn = ?actual_sn,
+            actual_sn = ?params.actual_sn,
             "Tracker window built"
         );
 
@@ -453,10 +452,7 @@ impl WitnessesRegister {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         node: &PublicKey,
-        sender: &PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        actual_sn: Option<u64>,
+        params: TrackerParams,
     ) -> Result<
         (
             Option<u64>,
@@ -472,9 +468,7 @@ impl WitnessesRegister {
         };
 
         self.build_tracker_window_from_data(
-            ctx, subject_id, data, node, sender, namespace, schema_id,
-            actual_sn,
-            None,
+            ctx, subject_id, data, node, params, None,
         )
         .await
     }
@@ -504,10 +498,12 @@ impl WitnessesRegister {
                     ctx,
                     node,
                     data,
-                    namespace.to_owned(),
-                    schema_id.clone(),
                     subject_id.clone(),
                     cached,
+                    TrackerIdentity {
+                        namespace: namespace.to_owned(),
+                        schema_id: schema_id.clone(),
+                    },
                 )
                 .await?;
 
@@ -524,10 +520,12 @@ impl WitnessesRegister {
                     ctx,
                     node,
                     data,
-                    namespace.to_owned(),
-                    schema_id.clone(),
                     subject_id.clone(),
                     cached,
+                    TrackerIdentity {
+                        namespace: namespace.to_owned(),
+                        schema_id: schema_id.clone(),
+                    },
                 )
                 .await?;
 
@@ -546,8 +544,7 @@ impl WitnessesRegister {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         node: &PublicKey,
-        namespace: &str,
-        schema_id: &SchemaType,
+        identity: TrackerIdentity,
         data: &TransferData,
         cached: &mut Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<HiSnLimit, ActorError> {
@@ -568,10 +565,9 @@ impl WitnessesRegister {
                 ctx,
                 node,
                 data,
-                namespace.to_owned(),
-                schema_id.clone(),
                 subject_id.clone(),
                 cached,
+                identity,
             )
             .await?;
 
@@ -611,7 +607,15 @@ impl WitnessesRegister {
 
         let limit = self
             .hi_sn_limit_for_transfer_data(
-                ctx, subject_id, node, namespace, schema_id, data, cached,
+                ctx,
+                subject_id,
+                node,
+                TrackerIdentity {
+                    namespace: namespace.to_owned(),
+                    schema_id: schema_id.clone(),
+                },
+                data,
+                cached,
             )
             .await?;
 
@@ -837,13 +841,7 @@ impl WitnessesRegister {
 
         // === FASE 1: Recolección de gov_versions candidatas ===
         let mut gov_versions_to_fetch: Vec<u64> = Vec::new();
-        let mut old_owner_candidates: Vec<(
-            PublicKey,
-            OldOwnerData,
-            Option<u64>,
-            Option<u64>,
-            bool,
-        )> = Vec::new();
+        let mut old_owner_candidates: Vec<OldOwnerCandidate> = Vec::new();
 
         for (creator, old_data) in data.old_owners.iter() {
             let mut user_gv = None;
@@ -981,17 +979,16 @@ impl WitnessesRegister {
         ctx: &ActorContext<Self>,
         node: &PublicKey,
         data: &TransferData,
-        namespace: String,
-        schema_id: SchemaType,
         subject_id: DigestIdentifier,
         cached: &mut Option<(SnLimit, Option<PublicKey>)>,
+        identity: TrackerIdentity,
     ) -> Result<SnLimit, ActorError> {
         match cached {
             Some((sn_limit, _)) => Ok(*sn_limit),
             None => {
                 let (sn_limit, effective_owner) = self
                     .search_witnesses_with_owner(
-                        ctx, node, data, namespace, schema_id, subject_id,
+                        ctx, node, data, identity.namespace, identity.schema_id, subject_id,
                     )
                     .await?;
                 *cached = Some((sn_limit, effective_owner));

@@ -114,7 +114,7 @@ impl Actor for EvaluationSchema {
 impl Handler<Self> for EvaluationSchema {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvaluationSchemaMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

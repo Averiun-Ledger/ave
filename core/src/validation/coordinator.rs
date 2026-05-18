@@ -87,7 +87,7 @@ impl NotPersistentActor for ValiCoordinator {}
 impl Handler<Self> for ValiCoordinator {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ValiCoordinatorMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

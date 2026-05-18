@@ -63,7 +63,7 @@ impl Actor for ContractCompiler {
 impl Handler<Self> for ContractCompiler {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ContractCompilerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<CompilerResponse, ActorError> {

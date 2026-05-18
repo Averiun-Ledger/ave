@@ -268,7 +268,7 @@ impl Actor for RoleRegister {
 impl Handler<Self> for RoleRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RoleRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RoleRegisterResponse, ActorError> {

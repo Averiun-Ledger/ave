@@ -1143,7 +1143,7 @@ impl Actor for RequestHandler {
 impl Handler<Self> for RequestHandler {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RequestHandlerMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RequestHandlerResponse, ActorError> {

@@ -182,7 +182,7 @@ impl Actor for SnRegister {
 impl Handler<Self> for SnRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SnRegisterMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SnRegisterResponse, ActorError> {

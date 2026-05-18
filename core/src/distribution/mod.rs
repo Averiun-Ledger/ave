@@ -259,7 +259,7 @@ impl NotPersistentActor for Distribution {}
 impl Handler<Self> for Distribution {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DistributionMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

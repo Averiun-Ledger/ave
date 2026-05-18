@@ -63,7 +63,7 @@ impl NotPersistentActor for RetryNetwork {}
 impl Handler<Self> for RetryNetwork {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: NetworkMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

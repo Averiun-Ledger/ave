@@ -37,7 +37,7 @@ impl Actor for DBManager {
 impl Handler<Self> for DBManager {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DBManagerMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {

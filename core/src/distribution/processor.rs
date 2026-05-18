@@ -1,11 +1,10 @@
 use ave_actors::{ActorContext, ActorError};
-use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::identity::PublicKey;
 use ave_network::ComunicateInfo;
 
 use crate::{
     distribution::error::DistributorError,
-    distribution::transfer_verifier::TransferSimulationResult,
-    distribution::worker::{CheckAuthCommon, DistriWorker},
+    distribution::worker::{CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch},
     model::event::Ledger,
 };
 use crate::model::common::{
@@ -21,17 +20,19 @@ impl DistriWorker {
         &self,
         ctx: &mut ActorContext<Self>,
         mut pending_ledger: Vec<Ledger>,
-        sender_is_all: bool,
         common: &CheckAuthCommon,
-        transfer_event: Option<&Ledger>,
-        transfer_simulation: Option<TransferSimulationResult>,
-        mut verified_transfer_sn: Option<u64>,
-        info: &ComunicateInfo,
-        sender: PublicKey,
-        subject_id: DigestIdentifier,
-        ledger_count: usize,
+        transfer_batch: TransferBatch<'_>,
+        dist_ctx: DistributionContext,
     ) -> Result<(), ActorError> {
         let mut transfer_recorded = false;
+        let sender_is_all = dist_ctx.sender_is_all;
+        let mut verified_transfer_sn = transfer_batch.verified_sn;
+        let info = &dist_ctx.info;
+        let sender = dist_ctx.sender;
+        let subject_id = dist_ctx.subject_id;
+        let ledger_count = dist_ctx.ledger_count;
+        let transfer_event = transfer_batch.event;
+        let transfer_simulation = transfer_batch.simulation;
 
         loop {
             if pending_ledger.is_empty() {
@@ -51,9 +52,11 @@ impl DistriWorker {
                     &pending_ledger,
                     chunk_offered_hi_sn,
                     common,
-                    transfer_event,
-                    transfer_simulation.as_ref(),
-                    verified_transfer_sn,
+                    TransferBatch {
+                        event: transfer_event,
+                        simulation: transfer_simulation,
+                        verified_sn: verified_transfer_sn,
+                    },
                 )
                 .await?;
 
@@ -166,11 +169,11 @@ impl DistriWorker {
                     )?)
                 };
 
-                let _event = pending_ledger.remove(0);
+                let _ = pending_ledger.remove(0);
                 lease
             } else {
                 if pending_ledger[0].is_create_event() && is_register {
-                    let _event = pending_ledger.remove(0);
+                    let _ = pending_ledger.remove(0);
                 }
 
                 let requester = Self::requester_id(

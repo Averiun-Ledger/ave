@@ -1722,7 +1722,7 @@ impl Governance {
             let Schema {
                 contract,
                 initial_value,
-                viewpoints: _,
+                ..
             } = schema;
 
             let response = compiler
@@ -3478,7 +3478,7 @@ impl Actor for Governance {
 impl Handler<Self> for Governance {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: GovernanceMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceResponse, ActorError> {
@@ -3559,15 +3559,15 @@ impl Handler<Self> for Governance {
                 )))
             }
             GovernanceMessage::HasRole {
-                governance_id: _,
                 role_query,
+                ..
             } => {
                 let result = self.properties.has_this_role(role_query);
                 Ok(GovernanceResponse::Bool(result))
             }
             GovernanceMessage::GetWitnesses {
-                governance_id: _,
                 data,
+                ..
             } => {
                 let witnesses = self.properties.get_witnesses(data).map_err(
                     |e| ActorError::Functional {
@@ -3580,8 +3580,8 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::Witnesses(witnesses))
             }
             GovernanceMessage::GetSchemaViewpoints {
-                governance_id: _,
                 schema_id,
+                ..
             } => {
                 let viewpoints = self
                     .properties
@@ -3591,10 +3591,10 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::SchemaViewpoints(viewpoints))
             }
             GovernanceMessage::GetQuorumAndSigners {
-                governance_id: _,
                 protocol,
                 schema_id,
                 namespace,
+                ..
             } => {
                 let (signers, quorum) = self
                     .properties
@@ -3608,8 +3608,8 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::QuorumAndSigners(signers, quorum))
             }
             GovernanceMessage::GetInitState {
-                governance_id: _,
                 schema_id,
+                ..
             } => {
                 let init_state = self
                     .properties
@@ -3623,25 +3623,25 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::InitState(Some(init_state)))
             }
             GovernanceMessage::GetSigners {
-                governance_id: _,
                 role,
                 schema_id,
                 namespace,
+                ..
             } => {
                 let (signers, any) =
                     self.properties.get_signers(role, &schema_id, namespace);
                 Ok(GovernanceResponse::Signers(signers, any))
             }
             GovernanceMessage::GetMembers {
-                governance_id: _,
+                ..
             } => {
                 Ok(GovernanceResponse::Members(
                     self.properties.members.clone(),
                 ))
             }
             GovernanceMessage::GetSchemaRoles {
-                governance_id: _,
                 schema_id,
+                ..
             } => {
                 let roles = self
                     .properties
@@ -3651,7 +3651,7 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::SchemaRoles(roles))
             }
             GovernanceMessage::GetTrackerRoles {
-                governance_id: _,
+                ..
             } => {
                 Ok(GovernanceResponse::TrackerRoles(
                     self.properties.roles_tracker_schemas.clone(),

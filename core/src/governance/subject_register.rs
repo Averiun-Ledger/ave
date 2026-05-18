@@ -225,7 +225,7 @@ impl Actor for SubjectRegister {
 impl Handler<Self> for SubjectRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SubjectRegisterMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SubjectRegisterResponse, ActorError> {

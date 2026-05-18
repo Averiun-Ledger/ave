@@ -78,7 +78,7 @@ impl Actor for ValidationSchema {
 impl Handler<Self> for ValidationSchema {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ValidationSchemaMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

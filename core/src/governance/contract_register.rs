@@ -111,7 +111,7 @@ impl Actor for ContractRegister {
 impl Handler<Self> for ContractRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ContractRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ContractRegisterResponse, ActorError> {

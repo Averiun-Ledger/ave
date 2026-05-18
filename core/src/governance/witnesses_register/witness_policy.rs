@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::governance::sn_register::SnLimit;
-use crate::model::common::{Interval, IntervalSet};
+use crate::model::common::{Interval, IntervalSet, OwnerContext, TrackerIdentity};
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};
@@ -259,10 +259,8 @@ impl WitnessesRegister {
         ctx: &ActorContext<Self>,
         subject_id: Option<DigestIdentifier>,
         node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        owner: Option<PublicKey>,
-        owner_gov_version: Option<u64>,
+        identity: TrackerIdentity,
+        owner_ctx: OwnerContext,
         cached_search: Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<(WitnessStatus, Option<(SnLimit, Option<PublicKey>)>), ActorError> {
         let mut access_sn = None;
@@ -274,23 +272,23 @@ impl WitnessesRegister {
 
         if let Some(subject_id) = &subject_id {
             access_sn = self
-                .access_limit_for_node(ctx, subject_id, &node, &namespace, &schema_id, &mut cached)
+                .access_limit_for_node(ctx, subject_id, &node, &identity.namespace, &identity.schema_id, &mut cached)
                 .await?;
             hi_sn_limit = self
-                .hi_sn_limit_for_node(ctx, subject_id, &node, &namespace, &schema_id, &mut cached)
+                .hi_sn_limit_for_node(ctx, subject_id, &node, &identity.namespace, &identity.schema_id, &mut cached)
                 .await?;
             gov_version_limit = self
-                .gov_version_limit_for_node(subject_id, &node, &namespace, &schema_id)
+                .gov_version_limit_for_node(subject_id, &node, &identity.namespace, &identity.schema_id)
                 .await?;
         }
 
-        if let Some(owner) = owner && let Some(gov_version) = owner_gov_version {
+        if let Some(owner) = owner_ctx.owner && let Some(gov_version) = owner_ctx.gov_version {
             create_access = self.has_create_access_for_node_at_version(
-                &node, &owner, &schema_id, &namespace, gov_version,
+                &node, &owner, &identity.schema_id, &identity.namespace, gov_version,
             );
             create_gov_version_limit = self
                 .create_gov_version_limit_for_node(
-                    &node, &owner, &schema_id, &namespace, gov_version,
+                    &node, &owner, &identity.schema_id, &identity.namespace, gov_version,
                 )
                 .await;
         }

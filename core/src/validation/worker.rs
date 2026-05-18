@@ -1111,7 +1111,7 @@ impl NotPersistentActor for ValiWorker {}
 impl Handler<Self> for ValiWorker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ValiWorkerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

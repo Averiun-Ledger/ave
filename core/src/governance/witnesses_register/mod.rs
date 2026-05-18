@@ -5,8 +5,9 @@ use crate::governance::sn_register::{
 };
 
 use crate::model::common::{
-    Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
+    Interval, IntervalSet, OwnerContext, TrackerEventVisibility, TrackerIdentity,
+    TrackerParams, TrackerStoredVisibility, TrackerVisibilityMode, TrackerVisibilityState,
+    emit_fail, purge_storage,
 };
 use crate::model::event::Ledger;
 use async_trait::async_trait;
@@ -288,7 +289,7 @@ pub enum WitnessesRegisterMessage {
     },
     SimulateTransferHiSnLimit {
         subject_id: DigestIdentifier,
-        transfer_event: Ledger,
+        transfer_event: Box<Ledger>,
         node: PublicKey,
         namespace: String,
         schema_id: SchemaType,
@@ -1057,7 +1058,7 @@ impl Actor for WitnessesRegister {
 impl Handler<Self> for WitnessesRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: WitnessesRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
@@ -1351,20 +1352,21 @@ impl Handler<Self> for WitnessesRegister {
             WitnessesRegisterMessage::GetTrackerWindow {
                 subject_id,
                 node,
-                sender,
                 namespace,
                 schema_id,
                 actual_sn,
+                ..
             } => {
                 let (sn, transfer_sn, clear_sn, is_all, ranges) = self
                     .build_tracker_window(
                         ctx,
                         &subject_id,
                         &node,
-                        &sender,
-                        namespace,
-                        schema_id,
-                        actual_sn,
+                        TrackerParams {
+                            namespace,
+                            schema_id,
+                            actual_sn,
+                        },
                     )
                     .await?;
 
@@ -1380,10 +1382,10 @@ impl Handler<Self> for WitnessesRegister {
                 subject_id,
                 ledger,
                 node,
-                sender,
                 namespace,
                 schema_id,
                 actual_sn,
+                ..
             } => {
                 let data =
                     Self::transfer_data_from_ledger(&subject_id, &ledger)?;
@@ -1393,10 +1395,11 @@ impl Handler<Self> for WitnessesRegister {
                         &subject_id,
                         &data,
                         &node,
-                        &sender,
-                        namespace,
-                        schema_id,
-                        actual_sn,
+                        TrackerParams {
+                            namespace,
+                            schema_id,
+                            actual_sn,
+                        },
                         None,
                     )
                     .await?;
@@ -1463,8 +1466,10 @@ impl Handler<Self> for WitnessesRegister {
                         ctx,
                         &subject_id,
                         &node,
-                        &namespace,
-                        &schema_id,
+                        TrackerIdentity {
+                            namespace,
+                            schema_id,
+                        },
                         &data,
                         &mut cached,
                     )
@@ -1482,12 +1487,12 @@ impl Handler<Self> for WitnessesRegister {
                 subject_id,
                 transfer_data,
                 node,
-                sender,
                 namespace,
                 schema_id,
                 actual_sn,
                 owner,
                 owner_gov_version,
+                ..
             } => {
                 let data = match transfer_data {
                     Some(data) => data,
@@ -1508,10 +1513,14 @@ impl Handler<Self> for WitnessesRegister {
                         ctx,
                         Some(subject_id.clone()),
                         node.clone(),
-                        namespace.clone(),
-                        schema_id.clone(),
-                        owner,
-                        owner_gov_version,
+                        TrackerIdentity {
+                            namespace: namespace.clone(),
+                            schema_id: schema_id.clone(),
+                        },
+                        OwnerContext {
+                            owner,
+                            gov_version: owner_gov_version,
+                        },
                         None,
                     )
                     .await?;
@@ -1521,10 +1530,11 @@ impl Handler<Self> for WitnessesRegister {
                         &subject_id,
                         &data,
                         &node,
-                        &sender,
-                        namespace,
-                        schema_id,
-                        actual_sn,
+                        TrackerParams {
+                            namespace,
+                            schema_id,
+                            actual_sn,
+                        },
                         cached,
                     )
                     .await?;
@@ -1551,10 +1561,14 @@ impl Handler<Self> for WitnessesRegister {
                         ctx,
                         subject_id,
                         node,
-                        namespace,
-                        schema_id,
-                        owner,
-                        owner_gov_version,
+                        TrackerIdentity {
+                            namespace,
+                            schema_id,
+                        },
+                        OwnerContext {
+                            owner,
+                            gov_version: owner_gov_version,
+                        },
                         None,
                     )
                     .await?;

@@ -639,7 +639,7 @@ impl CompilerSupport {
             }
         })?;
 
-        let _main_contract_entrypoint = instance
+        let _ = instance
             .get_typed_func::<(u32, u32, u32, u32), u32>(
                 &mut store,
                 "main_function",

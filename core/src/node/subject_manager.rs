@@ -661,7 +661,7 @@ impl NotPersistentActor for SubjectManager {}
 impl Handler<Self> for SubjectManager {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SubjectManagerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<SubjectManagerResponse, ActorError> {

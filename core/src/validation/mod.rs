@@ -262,7 +262,7 @@ impl Actor for Validation {
 impl Handler<Self> for Validation {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ValidationMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

@@ -122,7 +122,7 @@ impl Actor for TransferVerificationRegister {
 impl Handler<Self> for TransferVerificationRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: TransferVerificationRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<TransferVerificationRegisterResponse, ActorError> {

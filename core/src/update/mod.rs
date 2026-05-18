@@ -410,7 +410,7 @@ impl NotPersistentActor for Update {}
 impl Handler<Self> for Update {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: UpdateMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

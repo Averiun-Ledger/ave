@@ -61,7 +61,7 @@ impl NotPersistentActor for DistriCoordinator {}
 impl Handler<Self> for DistriCoordinator {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DistriCoordinatorMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

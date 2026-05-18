@@ -135,7 +135,7 @@ impl Actor for SinkData {
 impl Handler<Self> for SinkData {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SinkDataMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SinkDataResponse, ActorError> {

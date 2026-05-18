@@ -49,7 +49,7 @@ pub enum ActorMessage {
     DistributionLedgerRes {
         ledger: Vec<Ledger>,
         is_all: bool,
-        transfer_event: Option<Ledger>,
+        transfer_event: Option<Box<Ledger>>,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,

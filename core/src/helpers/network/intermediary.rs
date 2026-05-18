@@ -303,12 +303,12 @@ impl Intermediary {
                             })?;
                     }
                     ActorMessage::TrackerSyncReq {
-                        subject_id: _,
                         request_nonce,
                         governance_version,
                         after_subject_id,
                         limit,
                         receiver_actor,
+                        ..
                     } => {
                         let actor = system
                             .get_actor::<TrackerSync>(&path)

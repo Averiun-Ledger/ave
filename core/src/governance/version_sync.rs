@@ -317,7 +317,7 @@ impl NotPersistentActor for GovernanceVersionSync {}
 impl Handler<Self> for GovernanceVersionSync {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: GovernanceVersionSyncMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceVersionSyncResponse, ActorError> {

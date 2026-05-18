@@ -11,6 +11,8 @@ use ave_common::{
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use crate::model::common::{OwnerContext, TrackerParams, TrackerPeers};
+
 use crate::{
     approval::persist::{ApprPersist, ApprPersistMessage},
     governance::{
@@ -801,9 +803,7 @@ pub async fn get_tracker_window<A>(
     subject_id: &DigestIdentifier,
     node: PublicKey,
     sender: PublicKey,
-    namespace: String,
-    schema_id: ave_common::SchemaType,
-    actual_sn: Option<u64>,
+    params: TrackerParams,
 ) -> Result<
     (
         Option<u64>,
@@ -830,9 +830,9 @@ where
             subject_id: subject_id.clone(),
             node,
             sender,
-            namespace,
-            schema_id,
-            actual_sn,
+            namespace: params.namespace,
+            schema_id: params.schema_id,
+            actual_sn: params.actual_sn,
         })
         .await?;
 
@@ -858,9 +858,7 @@ pub async fn get_tracker_window_from_ledger<A>(
     ledger: Vec<Ledger>,
     node: PublicKey,
     sender: PublicKey,
-    namespace: String,
-    schema_id: ave_common::SchemaType,
-    actual_sn: Option<u64>,
+    params: TrackerParams,
 ) -> Result<
     (
         Option<u64>,
@@ -888,9 +886,9 @@ where
             ledger,
             node,
             sender,
-            namespace,
-            schema_id,
-            actual_sn,
+            namespace: params.namespace,
+            schema_id: params.schema_id,
+            actual_sn: params.actual_sn,
         })
         .await?;
 
@@ -914,13 +912,9 @@ pub async fn check_witness_status_and_window<A>(
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
     transfer_data: Option<TransferData>,
-    node: PublicKey,
-    sender: PublicKey,
-    namespace: String,
-    schema_id: ave_common::SchemaType,
-    actual_sn: Option<u64>,
-    owner: Option<PublicKey>,
-    owner_gov_version: Option<u64>,
+    peers: TrackerPeers,
+    params: TrackerParams,
+    owner_ctx: OwnerContext,
 ) -> Result<
     (
         WitnessStatus,
@@ -947,13 +941,13 @@ where
         .ask(WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
             subject_id: subject_id.clone(),
             transfer_data,
-            node,
-            sender,
-            namespace,
-            schema_id,
-            actual_sn,
-            owner,
-            owner_gov_version,
+            node: peers.node,
+            sender: peers.sender,
+            namespace: params.namespace,
+            schema_id: params.schema_id,
+            actual_sn: params.actual_sn,
+            owner: owner_ctx.owner,
+            owner_gov_version: owner_ctx.gov_version,
         })
         .await?;
 
@@ -996,7 +990,7 @@ where
     let response = actor
         .ask(WitnessesRegisterMessage::SimulateTransferHiSnLimit {
             subject_id: subject_id.clone(),
-            transfer_event,
+            transfer_event: Box::new(transfer_event),
             node,
             namespace,
             schema_id,

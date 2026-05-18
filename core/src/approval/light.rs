@@ -96,7 +96,7 @@ impl Actor for ApprLight {
 impl Handler<Self> for ApprLight {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ApprLightMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

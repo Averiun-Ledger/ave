@@ -150,7 +150,7 @@ impl NotPersistentActor for EvalCoordinator {}
 impl Handler<Self> for EvalCoordinator {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvalCoordinatorMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

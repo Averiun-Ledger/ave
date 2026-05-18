@@ -85,7 +85,7 @@ impl Actor for Updater {
 impl Handler<Self> for Updater {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: UpdaterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

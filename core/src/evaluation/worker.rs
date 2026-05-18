@@ -538,7 +538,7 @@ impl NotPersistentActor for EvalWorker {}
 impl Handler<Self> for EvalWorker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvalWorkerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

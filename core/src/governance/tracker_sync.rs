@@ -646,7 +646,7 @@ impl NotPersistentActor for TrackerSync {}
 impl Handler<Self> for TrackerSync {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: TrackerSyncMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerSyncResponse, ActorError> {

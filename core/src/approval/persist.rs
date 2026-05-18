@@ -371,7 +371,7 @@ impl Actor for ApprPersist {
 impl Handler<Self> for ApprPersist {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ApprPersistMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ApprPersistResponse, ActorError> {

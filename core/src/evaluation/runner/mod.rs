@@ -1626,7 +1626,7 @@ impl NotPersistentActor for Runner {}
 impl Handler<Self> for Runner {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RunnerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {

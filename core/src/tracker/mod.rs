@@ -227,7 +227,7 @@ impl Subject for Tracker {
                 )))
                 .await?;
 
-            let _response = subject_register
+            let _ = subject_register
                 .ask(SubjectRegisterMessage::UpdateSubject {
                     new_owner,
                     old_owner: self.subject_metadata.owner.clone(),
@@ -592,7 +592,7 @@ impl Tracker {
                 )))
                 .await?;
 
-            let _response = subject_register
+            let _ = subject_register
                 .ask(SubjectRegisterMessage::CreateSubject {
                     creator: self.subject_metadata.owner.clone(),
                     subject_id: self.subject_metadata.subject_id.clone(),
@@ -995,7 +995,7 @@ impl Actor for Tracker {
 impl Handler<Self> for Tracker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: TrackerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerResponse, ActorError> {

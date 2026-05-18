@@ -36,6 +36,7 @@ use crate::{
                 check_simulated_transfer_hi_sn_limit,
                 check_witness_status_and_window,
             },
+            TrackerIdentity, OwnerContext, TrackerParams, TrackerPeers,
         },
         event::Ledger,
     },
@@ -71,6 +72,26 @@ pub(crate) struct CheckAuthCommon {
     pub(crate) governance_id: DigestIdentifier,
     pub(crate) namespace: String,
     pub(crate) is_gov: bool,
+}
+
+pub(crate) struct TransferBatch<'a> {
+    pub event: Option<&'a Ledger>,
+    pub simulation: Option<TransferSimulationResult>,
+    pub verified_sn: Option<u64>,
+}
+
+pub(crate) struct DistributionContext {
+    pub info: ComunicateInfo,
+    pub sender: PublicKey,
+    pub subject_id: DigestIdentifier,
+    pub sender_is_all: bool,
+    pub ledger_count: usize,
+}
+
+pub(crate) struct DistributionRange {
+    pub actual_sn: Option<u64>,
+    pub target_sn: Option<u64>,
+    pub already_verified_transfer_sn: Option<u64>,
 }
 
 impl DistriWorker {
@@ -401,9 +422,7 @@ impl DistriWorker {
         ledger: &[Ledger],
         offered_hi_sn: u64,
         common: &CheckAuthCommon,
-        transfer_event: Option<&Ledger>,
-        transfer_simulation: Option<&TransferSimulationResult>,
-        verified_transfer_sn: Option<u64>,
+        transfer_batch: TransferBatch<'_>,
     ) -> Result<DistributionAuth, ActorError> {
         if common.is_gov {
             return Ok(DistributionAuth {
@@ -425,7 +444,7 @@ impl DistriWorker {
         };
 
         // 1. Batch actual trae un transfer_event nuevo y la simulación dice Witness
-        if let (Some(transfer_event), Some(TransferSimulationResult::Witness)) = (transfer_event, transfer_simulation) {
+        if let (Some(transfer_event), Some(TransferSimulationResult::Witness)) = (transfer_batch.event, transfer_batch.simulation.as_ref()) {
             let chunk_first_sn = ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
             if chunk_first_sn <= transfer_event.sn {
                 return Ok(DistributionAuth {
@@ -439,7 +458,7 @@ impl DistriWorker {
         // 2. Tenemos un transfer verificado anteriormente y el chunk está dentro
         //    de su rango de free passage. Vía libre hasta verified_transfer_sn.
         let chunk_first_sn = ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
-        if let Some(verified_sn) = verified_transfer_sn && chunk_first_sn <= verified_sn {
+        if let Some(verified_sn) = transfer_batch.verified_sn && chunk_first_sn <= verified_sn {
             return Ok(DistributionAuth {
                 is_gov: false,
                 is_register,
@@ -453,11 +472,9 @@ impl DistriWorker {
                 ctx,
                 governance_id,
                 (*self.our_key).clone(),
-                namespace.clone(),
-                schema_id.clone(),
                 Some(subject_id.clone()),
-                None,
-                None,
+                TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
+                OwnerContext { owner: None, gov_version: None },
             )
             .await?;
 
@@ -485,13 +502,19 @@ impl DistriWorker {
                 governance_id,
                 subject_id,
                 transfer_data,
-                (*self.our_key).clone(),
-                sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                None,
-                Some(owner),
-                Some(gov_version),
+                TrackerPeers {
+                    node: (*self.our_key).clone(),
+                    sender: sender.clone(),
+                },
+                TrackerParams {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                    actual_sn: None,
+                },
+                OwnerContext {
+                    owner: Some(owner),
+                    gov_version: Some(gov_version),
+                },
             )
             .await?;
 
@@ -600,11 +623,9 @@ impl DistriWorker {
                 ctx,
                 &governance_id,
                 (*self.our_key).clone(),
-                namespace.clone(),
-                schema_id.clone(),
                 Some(subject_id.clone()),
-                None,
-                None,
+                TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
+                OwnerContext { owner: None, gov_version: None },
             )
             .await?;
 
@@ -642,13 +663,19 @@ impl DistriWorker {
                 &governance_id,
                 &subject_id,
                 transfer_data,
-                (*self.our_key).clone(),
-                sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                None,
-                Some(owner),
-                Some(gov_version),
+                TrackerPeers {
+                    node: (*self.our_key).clone(),
+                    sender: sender.clone(),
+                },
+                TrackerParams {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                    actual_sn: None,
+                },
+                OwnerContext {
+                    owner: Some(owner),
+                    gov_version: Some(gov_version),
+                },
             )
             .await?;
 
@@ -741,9 +768,11 @@ impl DistriWorker {
                 subject_id,
                 sender.clone(),
                 (*self.our_key).clone(),
-                namespace.clone(),
-                schema_id.clone(),
-                actual_sn,
+                TrackerParams {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                    actual_sn,
+                },
             )
             .await?;
 
@@ -752,11 +781,9 @@ impl DistriWorker {
                 ctx,
                 governance_id,
                 sender.clone(),
-                namespace.clone(),
-                schema_id.clone(),
                 Some(subject_id.clone()),
-                None,
-                None,
+                TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
+                OwnerContext { owner: None, gov_version: None },
             )
             .await?;
 
@@ -830,11 +857,9 @@ impl DistriWorker {
                     ctx,
                     governance_id,
                     sender.clone(),
-                    namespace.clone(),
-                    schema_id.clone(),
                     Some(subject_id.clone()),
-                    None,
-                    None,
+                    TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
+                    OwnerContext { owner: None, gov_version: None },
                 )
                 .await?;
 
@@ -1227,21 +1252,19 @@ impl DistriWorker {
     async fn handle_send_distribution(
         &self,
         ctx: &mut ActorContext<Self>,
-        actual_sn: Option<u64>,
-        target_sn: Option<u64>,
         info: ComunicateInfo,
         subject_id: DigestIdentifier,
         sender: PublicKey,
-        already_verified_transfer_sn: Option<u64>,
+        range: DistributionRange,
     ) -> Result<(), ActorError> {
         let (ledger, is_all, hi_sn, transfer_event) = self
             .build_distribution_batch(
                 ctx,
                 &subject_id,
                 sender.clone(),
-                actual_sn,
-                target_sn,
-                already_verified_transfer_sn,
+                range.actual_sn,
+                range.target_sn,
+                range.already_verified_transfer_sn,
             )
             .await?;
 
@@ -1256,7 +1279,7 @@ impl DistriWorker {
             ActorMessage::DistributionLedgerRes {
                 ledger: ledger.clone(),
                 is_all,
-                transfer_event,
+                transfer_event: transfer_event.map(Box::new),
             },
         )
         .await?;
@@ -1268,7 +1291,7 @@ impl DistriWorker {
             ledger_count = ledger.len(),
             is_all = is_all,
             hi_sn = hi_sn,
-            actual_sn = ?actual_sn,
+            actual_sn = ?range.actual_sn,
             "Ledger distribution sent successfully"
         );
 
@@ -1325,7 +1348,7 @@ pub enum DistriWorkerMessage {
     LedgerDistribution {
         ledger: Vec<Ledger>,
         is_all: bool,
-        transfer_event: Option<Ledger>,
+        transfer_event: Option<Box<Ledger>>,
         info: ComunicateInfo,
         sender: PublicKey,
     },
@@ -1339,7 +1362,7 @@ impl NotPersistentActor for DistriWorker {}
 impl Handler<Self> for DistriWorker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DistriWorkerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -1425,12 +1448,14 @@ impl Handler<Self> for DistriWorker {
                 let result = self
                     .handle_send_distribution(
                         ctx,
-                        actual_sn,
-                        target_sn,
                         info,
                         subject_id.clone(),
                         sender.clone(),
-                        already_verified_transfer_sn,
+                        DistributionRange {
+                            actual_sn,
+                            target_sn,
+                            already_verified_transfer_sn,
+                        },
                     )
                     .await;
                 handle_distri_error!(
@@ -1534,15 +1559,19 @@ impl Handler<Self> for DistriWorker {
                 self.process_ledger_chunks(
                     ctx,
                     pending_ledger,
-                    sender_is_all,
                     &common,
-                    transfer_event.as_ref(),
-                    transfer_simulation,
-                    verified_transfer_sn,
-                    &info,
-                    sender.clone(),
-                    subject_id.clone(),
-                    ledger_count,
+                    TransferBatch {
+                        event: transfer_event.as_deref(),
+                        simulation: transfer_simulation,
+                        verified_sn: verified_transfer_sn,
+                    },
+                    DistributionContext {
+                        info,
+                        sender: sender.clone(),
+                        subject_id: subject_id.clone(),
+                        sender_is_all,
+                        ledger_count,
+                    },
                 ).await?;
 
                 debug!(

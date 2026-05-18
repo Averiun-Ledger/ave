@@ -2103,7 +2103,7 @@ impl Handler<Self> for RequestManager {
     #[allow(clippy::large_stack_frames)]
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RequestManagerMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -2463,7 +2463,7 @@ impl Handler<Self> for RequestManager {
                         init_state,
                         current_request_roles,
                         signers,
-                        distribution_plan: _,
+                        ..
                     } => {
                         if let Err(e) = self
                             .run_validation(

@@ -197,7 +197,7 @@ impl Actor for Approval {
 impl Handler<Self> for Approval {
     async fn handle_message(
         &mut self,
-        __sender: ActorPath,
+        _: ActorPath,
         msg: ApprovalMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {

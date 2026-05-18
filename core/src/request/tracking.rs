@@ -89,7 +89,7 @@ impl Event for RequestTrackingEvent {}
 impl Handler<Self> for RequestTracking {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RequestTrackingMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RequestTrackingResponse, ActorError> {
