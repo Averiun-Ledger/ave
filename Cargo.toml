@@ -49,7 +49,7 @@ ave-core = { path = "core", version = "0.11.0", default-features = false }
 ave-bridge = { path = "bridge", version = "0.11.0", default-features = false }
 ave-network = { path = "network", version = "0.9.1" }
 ave-identity = { path = "identity", version = "0.3.0" }
-ave-common = { path = "common", version = "0.9.0" }
+ave-common = { path = "common", version = "0.10.0" }
 pkcs8 = { version = "0.10.2" }
 axum = { version = "0.8.9" }
 utoipa = { version = "5.4.0" }
@@ -94,7 +94,7 @@ lru = "0.17.0"
 
 [dependencies]
 ave-identity = { path = "identity", version = "0.3.0" }
-ave-common = { path = "common", version = "0.9.0" }
+ave-common = { path = "common", version = "0.10.0" }
 ave-network = { path = "network", version = "0.9.1" }
 ave-core = { path = "core", version = "0.11.0", default-features = false }
 ave-bridge = { path = "bridge", version = "0.11.0", default-features = false }

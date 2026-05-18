@@ -13,7 +13,7 @@ use std::{
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
-    ContractData, ValueWrapper,
+    ContractData, ContractInitCheckData, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
@@ -45,14 +45,6 @@ pub use contract_compiler::{ContractCompiler, ContractCompilerMessage};
 pub use temp_compiler::{TempCompiler, TempCompilerMessage};
 
 use error::*;
-
-#[derive(
-    Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
-)]
-pub struct ContractResult {
-    pub success: bool,
-    pub error: String,
-}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
@@ -1396,7 +1388,7 @@ impl CompilerSupport {
         pointer: u32,
     ) -> Result<(), CompilerError> {
         let bytes = store.data().read_data(pointer as usize)?;
-        let contract_result: ContractResult =
+        let contract_result: ContractInitCheckData =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
                 CompilerError::InvalidContractOutput {
                     details: e.to_string(),
@@ -1432,7 +1424,7 @@ impl CompilerSupport {
     }
 
     fn get_sdk_functions_identifier() -> HashSet<&'static str> {
-        ["alloc", "write_byte", "pointer_len", "read_byte"]
+        ["alloc", "write_bytes", "pointer_len", "read_bytes"]
             .into_iter()
             .collect()
     }

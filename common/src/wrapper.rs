@@ -1024,11 +1024,14 @@ pub struct ContractResultData {
     pub error: String,
 }
 
+/// Pre-serialized JSON `null` value, used as a placeholder for failed results.
+const JSON_NULL: &[u8] = b"null";
+
 impl ContractResultData {
     /// Creates a failed result with a null final state.
     pub fn error(error: &str) -> Self {
         Self {
-            final_state: ContractData(serde_json::to_vec(&serde_json::Value::Null).unwrap_or_default()),
+            final_state: ContractData(JSON_NULL.to_vec()),
             success: false,
             error: error.to_owned(),
         }
@@ -1059,5 +1062,76 @@ impl ContractInitCheckData {
             success: true,
             error: String::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod contract_data_tests {
+    use super::*;
+
+    #[test]
+    fn contract_data_round_trip_json_value() {
+        let value = serde_json::json!({"count": 42, "active": true});
+        let data = ContractData::from_json_value(&value).unwrap();
+        let recovered = data.to_json_value().unwrap();
+        assert_eq!(value, recovered);
+    }
+
+    #[test]
+    fn contract_data_borsh_round_trip() {
+        let value = serde_json::json!({"name": "test"});
+        let data = ContractData::from_json_value(&value).unwrap();
+        let bytes = borsh::to_vec(&data).unwrap();
+        let recovered: ContractData = BorshDeserialize::try_from_slice(&bytes).unwrap();
+        assert_eq!(data.0, recovered.0);
+        assert_eq!(
+            data.to_json_value().unwrap(),
+            recovered.to_json_value().unwrap()
+        );
+    }
+
+    #[test]
+    fn contract_result_data_borsh_round_trip() {
+        let result = ContractResultData {
+            final_state: ContractData::from_json_value(&serde_json::json!({"state": 1})).unwrap(),
+            success: true,
+            error: String::new(),
+        };
+        let bytes = borsh::to_vec(&result).unwrap();
+        let recovered: ContractResultData = BorshDeserialize::try_from_slice(&bytes).unwrap();
+        assert_eq!(result.final_state.0, recovered.final_state.0);
+        assert_eq!(result.success, recovered.success);
+        assert_eq!(result.error, recovered.error);
+    }
+
+    #[test]
+    fn contract_init_check_data_borsh_round_trip() {
+        let check = ContractInitCheckData {
+            success: false,
+            error: "invalid state".to_owned(),
+        };
+        let bytes = borsh::to_vec(&check).unwrap();
+        let recovered: ContractInitCheckData = BorshDeserialize::try_from_slice(&bytes).unwrap();
+        assert_eq!(check.success, recovered.success);
+        assert_eq!(check.error, recovered.error);
+    }
+
+    #[test]
+    fn contract_result_data_error_helper() {
+        let err = ContractResultData::error("something went wrong");
+        assert!(!err.success);
+        assert_eq!(err.error, "something went wrong");
+        assert_eq!(err.final_state.to_json_value().unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn contract_init_check_data_helpers() {
+        let ok = ContractInitCheckData::ok();
+        assert!(ok.success);
+        assert!(ok.error.is_empty());
+
+        let err = ContractInitCheckData::error("bad init");
+        assert!(!err.success);
+        assert_eq!(err.error, "bad init");
     }
 }
