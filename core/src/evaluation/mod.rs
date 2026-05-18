@@ -2329,7 +2329,7 @@ pub mod tests {
         };
 
         assert_eq!(
-            "runner error: contract failed: contract returned failure: Contract execution in running was not successful: Cannot parse Event from JSON value: missing field `data`",
+            "runner error: contract failed: contract returned failure: Contract execution in running was not successful: Cannot parse Event from JSON bytes: missing field `data` at line 1 column 31",
             e
         );
         assert_eq!(metadata.name, subject_data.name);

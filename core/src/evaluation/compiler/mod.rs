@@ -13,7 +13,7 @@ use std::{
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
-    ValueWrapper,
+    ContractData, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
@@ -1417,8 +1417,13 @@ impl CompilerSupport {
         limits: &WasmLimits,
     ) -> Result<(MemoryManager, u32), CompilerError> {
         let mut context = MemoryManager::from_limits(limits);
+        let state_data = ContractData::from_json_value(&state.0)
+            .map_err(|e| CompilerError::SerializationError {
+                context: "state serialization to JSON bytes",
+                details: e.to_string(),
+            })?;
         let state_bytes =
-            to_vec(&state).map_err(|e| CompilerError::SerializationError {
+            to_vec(&state_data).map_err(|e| CompilerError::SerializationError {
                 context: "state serialization",
                 details: e.to_string(),
             })?;

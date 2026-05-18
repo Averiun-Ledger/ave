@@ -673,7 +673,6 @@ impl WitnessesRegister {
                     node,
                     schema_id,
                     &parse_namespace,
-                    data.sn,
                     (data.gov_version, better_gov_version),
                 )
                 .await
@@ -703,7 +702,6 @@ impl WitnessesRegister {
                     node,
                     schema_id,
                     &parse_namespace,
-                    data.sn,
                     (*new_owner_gov_version, better_gov_version),
                 )
                 .await
@@ -797,7 +795,6 @@ impl WitnessesRegister {
                     node,
                     &schema_id,
                     &parse_namespace,
-                    data.sn,
                     (data.gov_version, better_gov_version),
                 )
                 .await
@@ -825,7 +822,6 @@ impl WitnessesRegister {
                     node,
                     &schema_id,
                     &parse_namespace,
-                    data.sn,
                     (*new_owner_gov_version, better_gov_version),
                 )
                 .await

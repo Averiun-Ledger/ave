@@ -10,7 +10,7 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
+    ContractData, ContractResultData, Namespace, SchemaType, ValueWrapper, identity::PublicKey,
     schematype::ReservedWords,
 };
 use borsh::{BorshDeserialize, to_vec};
@@ -1530,14 +1530,23 @@ impl Runner {
     ) -> Result<(MemoryManager, u32, u32, u32), RunnerError> {
         let mut context = MemoryManager::from_limits(limits);
 
-        let state_bytes =
-            to_vec(&state).map_err(|e| RunnerError::SerializationError {
-                context: "serialize state",
+        let state_data = ContractData::from_json_value(&state.0)
+            .map_err(|e| RunnerError::SerializationError {
+                context: "serialize state to JSON bytes",
                 details: e.to_string(),
             })?;
+        let state_bytes = to_vec(&state_data).map_err(|e| RunnerError::SerializationError {
+            context: "serialize state",
+            details: e.to_string(),
+        })?;
         let state_ptr = context.add_data_raw(&state_bytes)?;
 
-        let init_state_bytes = to_vec(&init_state).map_err(|e| {
+        let init_state_data = ContractData::from_json_value(&init_state.0)
+            .map_err(|e| RunnerError::SerializationError {
+                context: "serialize init_state to JSON bytes",
+                details: e.to_string(),
+            })?;
+        let init_state_bytes = to_vec(&init_state_data).map_err(|e| {
             RunnerError::SerializationError {
                 context: "serialize init_state",
                 details: e.to_string(),
@@ -1545,11 +1554,15 @@ impl Runner {
         })?;
         let init_state_ptr = context.add_data_raw(&init_state_bytes)?;
 
-        let event_bytes =
-            to_vec(&event).map_err(|e| RunnerError::SerializationError {
-                context: "serialize event",
+        let event_data = ContractData::from_json_value(&event.0)
+            .map_err(|e| RunnerError::SerializationError {
+                context: "serialize event to JSON bytes",
                 details: e.to_string(),
             })?;
+        let event_bytes = to_vec(&event_data).map_err(|e| RunnerError::SerializationError {
+            context: "serialize event",
+            details: e.to_string(),
+        })?;
         let event_ptr = context.add_data_raw(&event_bytes)?;
 
         Ok((
@@ -1566,16 +1579,26 @@ impl Runner {
     ) -> Result<ContractResult, RunnerError> {
         let bytes = store.data().read_data(pointer as usize)?;
 
-        let contract_result: ContractResult =
+        let contract_result: ContractResultData =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
                 RunnerError::SerializationError {
-                    context: "deserialize ContractResult",
+                    context: "deserialize ContractResultData",
                     details: e.to_string(),
                 }
             })?;
 
         if contract_result.success {
-            Ok(contract_result)
+            let final_state_json = contract_result.final_state.to_json_value()
+                .map_err(|e| RunnerError::SerializationError {
+                    context: "parse final_state JSON",
+                    details: e.to_string(),
+                })?;
+
+            Ok(ContractResult {
+                final_state: ValueWrapper(final_state_json),
+                success: true,
+                error: String::new(),
+            })
         } else {
             Err(RunnerError::ContractFailed {
                 details: format!(

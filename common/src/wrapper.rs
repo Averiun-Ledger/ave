@@ -989,3 +989,75 @@ mod tests {
         }
     }
 }
+
+/// Payload de boundary host-contrato.
+///
+/// Transporta bytes JSON crudos entre el runtime Ave y los contratos WASM.
+/// No contiene un DOM; es una envoltura Borsh nativa de `Vec<u8>`.
+///
+/// El host serializa su `serde_json::Value` a bytes UTF-8, los envuelve en
+/// `ContractData` y los envía al contrato. El contrato recibe `ContractData`,
+/// extrae los bytes y hace `serde_json::from_slice::<T>()` directamente.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ContractData(pub Vec<u8>);
+
+impl ContractData {
+    /// Crea `ContractData` a partir de un `serde_json::Value`.
+    pub fn from_json_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        Ok(Self(serde_json::to_vec(value)?))
+    }
+
+    /// Reconstruye un `serde_json::Value` a partir de los bytes internos.
+    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_slice(&self.0)
+    }
+}
+
+/// Resultado de ejecución de contrato en el boundary.
+///
+/// Usado por el contrato para devolver el estado final al host.
+/// El host convierte `ContractData` → `ValueWrapper` para uso interno.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ContractResultData {
+    pub final_state: ContractData,
+    pub success: bool,
+    pub error: String,
+}
+
+impl ContractResultData {
+    /// Creates a failed result with a null final state.
+    pub fn error(error: &str) -> Self {
+        Self {
+            final_state: ContractData(serde_json::to_vec(&serde_json::Value::Null).unwrap_or_default()),
+            success: false,
+            error: error.to_owned(),
+        }
+    }
+}
+
+/// Resultado de validación de inicialización en el boundary.
+///
+/// Usado por el contrato para devolver el resultado de `init_check_function`.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ContractInitCheckData {
+    pub success: bool,
+    pub error: String,
+}
+
+impl ContractInitCheckData {
+    /// Creates a failed init-check result.
+    pub fn error(error: &str) -> Self {
+        Self {
+            success: false,
+            error: error.to_owned(),
+        }
+    }
+
+    /// Creates a successful init-check result.
+    pub fn ok() -> Self {
+        Self {
+            success: true,
+            error: String::default(),
+        }
+    }
+}

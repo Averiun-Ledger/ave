@@ -44,7 +44,6 @@ impl ManualDistribution {
     fn tracker_fact_mode_for_creator(
         members: &std::collections::BTreeMap<String, PublicKey>,
         roles_ctx: &RolesContext<'_>,
-        _schema_id: &ave_common::SchemaType,
         namespace: &ave_common::Namespace,
         creator: &PublicKey,
         witness: &PublicKey,
@@ -115,7 +114,6 @@ impl ManualDistribution {
         witnesses: std::collections::HashSet<PublicKey>,
         members: &std::collections::BTreeMap<String, PublicKey>,
         roles_ctx: &RolesContext<'_>,
-        schema_id: ave_common::SchemaType,
         namespace: ave_common::Namespace,
         event_request: &EventRequest,
         signer: &PublicKey,
@@ -128,7 +126,6 @@ impl ManualDistribution {
                         Self::tracker_fact_mode_for_creator(
                             members,
                             roles_ctx,
-                            &schema_id,
                             &namespace,
                             signer,
                             &node,
@@ -374,7 +371,6 @@ impl Handler<Self> for ManualDistribution {
                             schema: &roles_schema,
                             tracker: &roles_tracker,
                         },
-                        schema_id.clone(),
                         namespace,
                         &event_request,
                         signer,

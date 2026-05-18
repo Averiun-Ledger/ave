@@ -238,7 +238,6 @@ impl WitnessesRegister {
                 node,
                 schema_id,
                 &namespace,
-                0,
                 (owner_gov_version, None),
             )
             .await

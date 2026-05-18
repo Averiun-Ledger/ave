@@ -93,7 +93,12 @@ impl GovernanceVersionSync {
         let delay = self.tick_interval;
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _ = actor.tell(GovernanceVersionSyncMessage::Tick).await;
+            if let Err(e) = actor.tell(GovernanceVersionSyncMessage::Tick).await {
+                debug!(
+                    error = %e,
+                    "Failed to send scheduled tick to GovernanceVersionSync"
+                );
+            }
         });
         Ok(())
     }
@@ -132,7 +137,6 @@ impl GovernanceVersionSync {
 
     async fn trigger_update_if_needed(
         &self,
-        _ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let Some(UpdateTarget { peer, .. }) = self.update_target.clone() else {
             return Ok(());
@@ -341,7 +345,7 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
-                    if let Err(error) = self.trigger_update_if_needed(ctx).await
+                    if let Err(error) = self.trigger_update_if_needed().await
                     {
                         warn!(
                             governance_id = %self.governance_id,
@@ -354,7 +358,7 @@ impl Handler<Self> for GovernanceVersionSync {
             GovernanceVersionSyncMessage::PeerVersion { peer, version } => {
                 if self.peer_version(peer, version) {
                     self.round_open = false;
-                    if let Err(error) = self.trigger_update_if_needed(ctx).await
+                    if let Err(error) = self.trigger_update_if_needed().await
                     {
                         warn!(
                             governance_id = %self.governance_id,

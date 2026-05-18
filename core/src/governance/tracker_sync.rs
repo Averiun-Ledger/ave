@@ -180,7 +180,12 @@ impl TrackerSync {
         let delay = self.tick_interval;
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _ = actor.tell(TrackerSyncMessage::Tick).await;
+            if let Err(e) = actor.tell(TrackerSyncMessage::Tick).await {
+                debug!(
+                    error = %e,
+                    "Failed to send scheduled tick to TrackerSync"
+                );
+            }
         });
         Ok(())
     }

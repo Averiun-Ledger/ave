@@ -837,7 +837,6 @@ impl WitnessesRegister {
         witness_data: &HashMap<Namespace, (IntervalSet, Option<u64>)>,
         parse_namespace: &Namespace,
         gov_version: u64,
-        _sn: u64,
         mut better_gov_version: Option<u64>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
@@ -867,7 +866,6 @@ impl WitnessesRegister {
         schema_id: &SchemaType,
         parse_namespace: &Namespace,
         gov_version: u64,
-        sn: u64,
         better_gov_version: Option<u64>,
     ) -> ActualSearch {
         // el esquema específico
@@ -878,7 +876,6 @@ impl WitnessesRegister {
                 witness_data,
                 parse_namespace,
                 gov_version,
-                sn,
                 better_gov_version,
             )
             .await
@@ -901,7 +898,6 @@ impl WitnessesRegister {
                 witness_data,
                 parse_namespace,
                 gov_version,
-                sn,
                 better_gov_version,
             )
             .await;
@@ -956,7 +952,6 @@ impl WitnessesRegister {
         node: &PublicKey,
         schema_id: &SchemaType,
         parse_namespace: &Namespace,
-        sn: u64,
         owner_better_gov_version: (u64, Option<u64>),
     ) -> ActualSearch {
         let (owner_gov_version, mut better_gov_version) =
@@ -999,7 +994,6 @@ impl WitnessesRegister {
                         schema_id,
                         parse_namespace,
                         owner_gov_version,
-                        sn,
                         better_gov_version,
                     )
                     .await;
