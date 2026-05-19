@@ -1088,4 +1088,41 @@ mod tests {
 
         server_stop.cancel();
     }
+
+    #[test]
+    fn config_default_and_getters() {
+        let cfg = Config::default();
+        assert!(!cfg.get_enable());
+        assert_eq!(cfg.get_interval_request(), Duration::from_secs(60));
+        assert_eq!(cfg.get_request_timeout(), Duration::from_secs(5));
+        assert_eq!(cfg.get_max_concurrent_requests(), 8);
+        assert!(cfg.get_allow_list().is_empty());
+        assert!(cfg.get_block_list().is_empty());
+        assert!(cfg.get_service_allow_list().is_empty());
+        assert!(cfg.get_service_block_list().is_empty());
+    }
+
+    #[test]
+    fn config_setters_and_chaining() {
+        let cfg = Config::default()
+            .with_enable(true)
+            .with_allow_list(vec!["a".to_string()])
+            .with_block_list(vec!["b".to_string()])
+            .with_service_allow_list(vec!["http://allow".to_string()])
+            .with_service_block_list(vec!["http://block".to_string()])
+            .with_interval_request(Duration::from_secs(30))
+            .with_request_timeout(Duration::from_secs(10))
+            .with_max_concurrent_requests(4);
+
+        assert!(cfg.get_enable());
+        assert_eq!(cfg.get_allow_list(), vec!["a"]);
+        assert_eq!(cfg.get_block_list(), vec!["b"]);
+        assert_eq!(cfg.get_service_allow_list(), vec!["http://allow"]);
+        assert_eq!(cfg.get_service_block_list(), vec!["http://block"]);
+        assert_eq!(cfg.get_interval_request(), Duration::from_secs(30));
+        assert_eq!(cfg.get_request_timeout(), Duration::from_secs(10));
+        assert_eq!(cfg.get_max_concurrent_requests(), 4);
+    }
+
+
 }

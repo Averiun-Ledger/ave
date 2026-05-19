@@ -806,4 +806,41 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn test_behaviour_peer_management_methods() {
+        let config = create_config(vec![], false, NodeType::Bootstrap);
+        let mut swarm = build_node(config);
+        let behaviour = swarm.behaviour_mut();
+
+        let peer = PeerId::random();
+
+        // is_known_peer on empty routing table
+        assert!(!behaviour.is_known_peer(&peer));
+
+        // is_invalid_address in test mode always returns false
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(!behaviour.is_invalid_address(&addr));
+
+        // add_peer_to_remove
+        behaviour.add_peer_to_remove(&peer);
+
+        // close_connections
+        behaviour.close_connections(&peer, None);
+
+        // clean_hard_peer_to_remove
+        behaviour.clean_hard_peer_to_remove(&peer);
+    }
+
+    #[test]
+    fn test_reqres_failure_direction_labels() {
+        assert_eq!(
+            ReqresFailureDirection::Inbound.as_metric_label(),
+            "inbound"
+        );
+        assert_eq!(
+            ReqresFailureDirection::Outbound.as_metric_label(),
+            "outbound"
+        );
+    }
 }

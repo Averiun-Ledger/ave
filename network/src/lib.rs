@@ -445,6 +445,121 @@ where
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_machine_profile_ram_mb() {
+        assert_eq!(MachineProfile::Nano.ram_mb(), 512);
+        assert_eq!(MachineProfile::Micro.ram_mb(), 1_024);
+        assert_eq!(MachineProfile::Small.ram_mb(), 2_048);
+        assert_eq!(MachineProfile::Medium.ram_mb(), 4_096);
+        assert_eq!(MachineProfile::Large.ram_mb(), 8_192);
+        assert_eq!(MachineProfile::XLarge.ram_mb(), 16_384);
+        assert_eq!(MachineProfile::XXLarge.ram_mb(), 32_768);
+    }
+
+    #[test]
+    fn test_machine_profile_cpu_cores() {
+        assert_eq!(MachineProfile::Nano.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Micro.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Small.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Medium.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Large.cpu_cores(), 2);
+        assert_eq!(MachineProfile::XLarge.cpu_cores(), 4);
+        assert_eq!(MachineProfile::XXLarge.cpu_cores(), 8);
+    }
+
+    #[test]
+    fn test_machine_profile_display() {
+        assert_eq!(format!("{}", MachineProfile::Nano), "nano");
+        assert_eq!(format!("{}", MachineProfile::Micro), "micro");
+        assert_eq!(format!("{}", MachineProfile::Small), "small");
+        assert_eq!(format!("{}", MachineProfile::Medium), "medium");
+        assert_eq!(format!("{}", MachineProfile::Large), "large");
+        assert_eq!(format!("{}", MachineProfile::XLarge), "xlarge");
+        assert_eq!(format!("{}", MachineProfile::XXLarge), "2xlarge");
+    }
+
+    #[test]
+    fn test_resolve_spec_profile() {
+        let spec = resolve_spec(Some(MachineSpec::Profile(MachineProfile::Medium)));
+        assert_eq!(spec.ram_mb, 4_096);
+        assert_eq!(spec.cpu_cores, 2);
+    }
+
+    #[test]
+    fn test_resolve_spec_custom() {
+        let spec = resolve_spec(Some(MachineSpec::Custom {
+            ram_mb: 8192,
+            cpu_cores: 4,
+        }));
+        assert_eq!(spec.ram_mb, 8192);
+        assert_eq!(spec.cpu_cores, 4);
+    }
+
+    #[test]
+    fn test_resolve_spec_none() {
+        let spec = resolve_spec(None);
+        assert!(spec.ram_mb > 0);
+        assert!(spec.cpu_cores > 0);
+    }
+
+    #[test]
+    fn test_memory_limits_validate_ok() {
+        assert!(MemoryLimitsConfig::Disabled.validate().is_ok());
+        assert!(MemoryLimitsConfig::Percentage { value: 0.5 }.validate().is_ok());
+        assert!(MemoryLimitsConfig::Percentage { value: 1.0 }.validate().is_ok());
+        assert!(MemoryLimitsConfig::Mb { value: 1024 }.validate().is_ok());
+    }
+
+    #[test]
+    fn test_memory_limits_validate_err() {
+        assert!(MemoryLimitsConfig::Percentage { value: 0.0 }.validate().is_err());
+        assert!(MemoryLimitsConfig::Percentage { value: -0.5 }.validate().is_err());
+        assert!(MemoryLimitsConfig::Percentage { value: 1.5 }.validate().is_err());
+    }
+
+    #[test]
+    fn test_memory_limits_display() {
+        assert_eq!(
+            format!("{}", MemoryLimitsConfig::Disabled),
+            "disabled"
+        );
+        assert_eq!(
+            format!("{}", MemoryLimitsConfig::Percentage { value: 0.75 }),
+            "75% of system RAM"
+        );
+        assert_eq!(
+            format!("{}", MemoryLimitsConfig::Mb { value: 2048 }),
+            "2048 MB"
+        );
+    }
+
+    #[test]
+    fn test_config_new_and_default() {
+        let config = Config::new(
+            NodeType::Addressable,
+            vec!["/memory/1234".to_string()],
+            vec![],
+            vec![],
+        );
+        assert_eq!(config.node_type, NodeType::Addressable);
+        assert_eq!(config.listen_addresses, vec!["/memory/1234"]);
+
+        let default_config = Config::default();
+        assert_eq!(default_config.node_type, NodeType::Bootstrap);
+    }
+
+    #[test]
+    fn test_node_type_display() {
+        assert_eq!(format!("{}", NodeType::Bootstrap), "Bootstrap");
+        assert_eq!(format!("{}", NodeType::Addressable), "Addressable");
+        assert_eq!(format!("{}", NodeType::Ephemeral), "Ephemeral");
+    }
+}
+
 /// Event enumeration for the Helper service.
 #[derive(
     Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize,

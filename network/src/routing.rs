@@ -689,3 +689,108 @@ pub struct RoutingNode {
     /// Address.
     pub address: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{NodeType, utils::LimitsConfig};
+
+    fn build_behaviour(node_type: NodeType) -> Behaviour {
+        let peer_id = PeerId::random();
+        let config = Config::default();
+        let protocol = StreamProtocol::new("/test/routing/1.0.0");
+        let limits = LimitsConfig::build(1024, 1);
+        Behaviour::new(peer_id, config, protocol, node_type, limits)
+    }
+
+    #[test]
+    fn test_new_close_connections() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.new_close_connections(peer, None);
+        assert_eq!(behaviour.close_connections.len(), 1);
+    }
+
+    #[test]
+    fn test_new_close_connections_with_waker() {
+        use std::task::{RawWaker, RawWakerVTable, Waker};
+        fn dummy_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)
+        }
+        fn dummy_wake(_: *const ()) {}
+        fn dummy_wake_by_ref(_: *const ()) {}
+        fn dummy_drop(_: *const ()) {}
+        static DUMMY_VTABLE: RawWakerVTable =
+            RawWakerVTable::new(dummy_clone, dummy_wake, dummy_wake_by_ref, dummy_drop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)) };
+
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        behaviour.waker = Some(waker);
+        let peer = PeerId::random();
+        behaviour.new_close_connections(peer, None);
+        assert_eq!(behaviour.close_connections.len(), 1);
+        assert!(behaviour.waker.is_none());
+    }
+
+    #[test]
+    fn test_is_known_peer_empty() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        assert!(!behaviour.is_known_peer(&peer));
+    }
+
+    #[test]
+    fn test_is_known_peer_after_add() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        behaviour.add_self_reported_address(&peer, &addr);
+        assert!(behaviour.is_known_peer(&peer));
+    }
+
+    #[test]
+    fn test_add_peer_to_remove_once() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.add_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), Some(&1));
+    }
+
+    #[test]
+    fn test_add_peer_to_remove_three_times_triggers_removal() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        // First two calls just increment the counter
+        behaviour.add_peer_to_remove(&peer);
+        behaviour.add_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), Some(&2));
+        // Third call triggers removal and cleanup
+        behaviour.add_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), None);
+    }
+
+    #[test]
+    fn test_clean_peer_to_remove() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.add_peer_to_remove(&peer);
+        behaviour.clean_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), None);
+    }
+
+    #[test]
+    fn test_finish_prerouting_state() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        assert!(behaviour.pre_routing);
+        behaviour.finish_prerouting_state();
+        assert!(!behaviour.pre_routing);
+    }
+
+    #[test]
+    fn test_add_self_reported_address() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(behaviour.add_self_reported_address(&peer, &addr));
+    }
+}

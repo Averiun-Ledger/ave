@@ -574,3 +574,81 @@ pub fn register(registry: &mut Registry) -> Arc<NetworkMetrics> {
     metrics.register_into(registry);
     metrics
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_metrics_methods() {
+        let mut registry = Registry::default();
+        let m = register(&mut registry);
+
+        m.inc_dial_attempt_bootstrap();
+        m.inc_dial_attempt_runtime();
+        m.observe_dial_failure("bootstrap", "timeout");
+        m.inc_outbound_queue_drop_by(1);
+        m.inc_inbound_queue_drop_by(1);
+        m.inc_outbound_queue_bytes_drop_per_peer_by(1);
+        m.inc_outbound_queue_bytes_drop_global_by(1);
+        m.inc_inbound_queue_bytes_drop_per_peer_by(1);
+        m.inc_inbound_queue_bytes_drop_global_by(1);
+        m.inc_max_retries_drop_by(1);
+        m.inc_oversized_inbound_drop();
+        m.inc_oversized_outbound_drop();
+        m.inc_reqres_request_received();
+        m.inc_reqres_response_received();
+        m.observe_reqres_failure("inbound", "timeout");
+        m.observe_identify_error("decode");
+        m.observe_control_list_denied("block");
+        m.observe_control_list_allow_update(true);
+        m.observe_control_list_allow_update(false);
+        m.observe_control_list_block_update(true);
+        m.observe_control_list_block_update(false);
+        m.inc_control_list_allow_apply();
+        m.inc_control_list_block_apply();
+        m.set_control_list_allow_last_success_age_seconds(42);
+        m.set_control_list_block_last_success_age_seconds(42);
+        m.set_control_list_allow_peers(10);
+        m.set_control_list_block_peers(5);
+        m.set_state_current(&NetworkState::Start);
+        m.observe_state_transition(&NetworkState::Running);
+        m.observe_pending_message_age_seconds(1.5);
+        m.set_retry_queue_len(3);
+        m.set_pending_outbound_peers(2);
+        m.set_pending_outbound_messages(4);
+        m.set_pending_outbound_bytes(1024);
+        m.set_pending_inbound_peers(1);
+        m.set_pending_inbound_messages(2);
+        m.set_pending_inbound_bytes(512);
+        m.set_identified_peers(5);
+        m.set_response_channels_pending(1);
+        m.observe_bootstrap_duration_seconds("success", 2.5);
+    }
+
+    #[test]
+    fn test_metrics_zero_count_drops() {
+        let mut registry = Registry::default();
+        let m = register(&mut registry);
+        // These should not panic even with count == 0
+        m.inc_outbound_queue_drop_by(0);
+        m.inc_inbound_queue_drop_by(0);
+        m.inc_outbound_queue_bytes_drop_per_peer_by(0);
+        m.inc_outbound_queue_bytes_drop_global_by(0);
+        m.inc_inbound_queue_bytes_drop_per_peer_by(0);
+        m.inc_inbound_queue_bytes_drop_global_by(0);
+        m.inc_max_retries_drop_by(0);
+    }
+
+    #[test]
+    fn test_state_label_all_variants() {
+        assert_eq!(NetworkMetrics::state_label(&NetworkState::Start), "start");
+        assert_eq!(NetworkMetrics::state_label(&NetworkState::Dial), "dial");
+        assert_eq!(NetworkMetrics::state_label(&NetworkState::Dialing), "dialing");
+        assert_eq!(NetworkMetrics::state_label(&NetworkState::Running), "running");
+        assert_eq!(
+            NetworkMetrics::state_label(&NetworkState::Disconnected),
+            "disconnected"
+        );
+    }
+}

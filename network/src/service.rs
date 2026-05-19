@@ -34,3 +34,35 @@ impl NetworkService {
         self.command_sender.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Command;
+    use bytes::Bytes;
+    use libp2p::PeerId;
+
+    #[tokio::test]
+    async fn test_send_command() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let mut service = NetworkService::new(tx);
+
+        let peer = PeerId::random();
+        let command = Command::SendMessage {
+            peer,
+            message: Bytes::from_static(b"hello"),
+        };
+
+        service.send_command(command).await.unwrap();
+
+        let received = rx.recv().await;
+        assert!(received.is_some());
+    }
+
+    #[test]
+    fn test_sender() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let service = NetworkService::new(tx.clone());
+        assert_eq!(service.sender().capacity(), tx.capacity());
+    }
+}
