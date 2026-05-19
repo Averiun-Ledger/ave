@@ -17,6 +17,8 @@ Cargo.lock
 # Macs files
 .DS_Store
 
+.vscode
+
 **/*.profraw
 coverage
 

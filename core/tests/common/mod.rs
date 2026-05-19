@@ -78,6 +78,7 @@ pub struct CreateNodeConfig {
     pub local_db: Option<PathBuf>,
     pub ext_db: Option<PathBuf>,
     pub ledger_batch_size: Option<usize>,
+    pub safe_mode: bool,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
@@ -92,6 +93,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         local_db,
         ext_db,
         ledger_batch_size,
+        safe_mode,
     } = config;
 
     let keys =
@@ -150,7 +152,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         },
         network: network_config,
         contracts_path,
-        safe_mode: false,
+        safe_mode,
         always_accept,
         tracking_size: 100,
         sync: SyncConfig {
@@ -866,3 +868,4 @@ pub fn assert_tracker_visibility(
 
     Ok(())
 }
+
