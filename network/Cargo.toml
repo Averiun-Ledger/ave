@@ -50,6 +50,7 @@ libp2p = { workspace = true, default-features = false, features = [
 ] }
 libp2p-swarm-test = { workspace = true }
 serial_test = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 test =[]

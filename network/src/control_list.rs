@@ -1173,4 +1173,43 @@ mod tests {
         );
         assert!(behaviour.check_allow(&boot_peer).is_ok());
     }
+
+    #[test]
+    fn deserialize_duration_secs_accepts_positive_integer() {
+        let raw: u64 = serde_json::from_str("42").unwrap();
+        assert_eq!(raw, 42);
+        // The function itself is invoked via serde attribute on Config fields;
+        // verify that Config deserialization uses it correctly.
+        let config: Config = serde_json::from_str(r#"{"interval_request": 300}"#).unwrap();
+        assert_eq!(config.get_interval_request(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn deserialize_duration_secs_rejects_non_integer() {
+        let result = serde_json::from_str::<Config>(r#"{"interval_request": "not-a-number"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_deserialize_complete() {
+        let json = r#"{
+            "enable": true,
+            "allow_list": ["a", "b"],
+            "block_list": ["c"],
+            "service_allow_list": ["d"],
+            "service_block_list": ["e"],
+            "interval_request": 120,
+            "request_timeout": 10,
+            "max_concurrent_requests": 5
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.get_enable());
+        assert_eq!(config.get_allow_list(), vec!["a", "b"]);
+        assert_eq!(config.get_block_list(), vec!["c"]);
+        assert_eq!(config.get_service_allow_list(), vec!["d"]);
+        assert_eq!(config.get_service_block_list(), vec!["e"]);
+        assert_eq!(config.get_interval_request(), Duration::from_secs(120));
+        assert_eq!(config.get_request_timeout(), Duration::from_secs(10));
+        assert_eq!(config.get_max_concurrent_requests(), 5);
+    }
 }

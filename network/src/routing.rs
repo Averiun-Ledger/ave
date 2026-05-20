@@ -828,4 +828,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_add_self_reported_address_accepts_valid() {
+        let mut behaviour = build_behaviour(NodeType::Addressable);
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(behaviour.add_self_reported_address(&peer, &addr));
+    }
+
+    #[test]
+    fn test_routing_config_builder_chain() {
+        let config = crate::routing::Config::default()
+            .with_dht_random_walk(false)
+            .with_discovery_limit(50)
+            .with_allow_private_address_in_dht(true)
+            .with_allow_dns_address_in_dht(true)
+            .with_allow_loop_back_address_in_dht(true)
+            .with_kademlia_disjoint_query_paths(false);
+
+        assert!(!config.get_dht_random_walk());
+        assert_eq!(config.get_discovery_limit(), 50);
+        assert!(config.get_allow_private_address_in_dht());
+        assert!(config.get_allow_dns_address_in_dht());
+        assert!(config.get_allow_loop_back_address_in_dht());
+        assert!(!config.get_kademlia_disjoint_query_paths());
+    }
+
+    #[test]
+    fn test_is_known_peer_false_for_unknown() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        assert!(!behaviour.is_known_peer(&peer));
+    }
 }

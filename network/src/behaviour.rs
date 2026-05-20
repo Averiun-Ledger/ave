@@ -739,4 +739,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_peer_management_methods() {
+        let mut node = build_node(create_config(vec![], false, NodeType::Addressable));
+        let peer = PeerId::random();
+
+        node.behaviour_mut().add_peer_to_remove(&peer);
+        node.behaviour_mut().clean_peer_to_remove(&peer);
+        node.behaviour_mut().clean_hard_peer_to_remove(&peer);
+        node.behaviour_mut().discover(&peer);
+
+        assert!(!node.behaviour_mut().is_known_peer(&peer));
+
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(node.behaviour_mut().add_self_reported_address(&peer, &addr));
+        assert!(!node.behaviour_mut().is_invalid_address(&addr));
+
+        node.behaviour_mut().close_connections(&peer, None);
+        node.behaviour_mut().finish_prerouting_state();
+        // All calls above should complete without panic.
+    }
+
+    #[test]
+    fn test_is_invalid_address_always_false_in_test_mode() {
+        let mut node = build_node(create_config(vec![], false, NodeType::Addressable));
+        // In test builds is_invalid_address always returns false.
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(!node.behaviour_mut().is_invalid_address(&addr));
+    }
 }

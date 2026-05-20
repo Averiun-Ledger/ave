@@ -59,4 +59,20 @@ mod tests {
         assert!(received.is_some());
     }
 
+    #[tokio::test]
+    async fn test_send_command_fails_when_receiver_dropped() {
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let mut service = NetworkService::new(tx);
+        drop(rx);
+
+        let peer = PeerId::random();
+        let command = Command::SendMessage {
+            peer,
+            message: Bytes::from_static(b"hello"),
+        };
+
+        let result = service.send_command(command).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::CommandSend(_)));
+    }
 }

@@ -170,7 +170,7 @@ pub enum ScheduleType {
     Dial(Vec<Multiaddr>),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Discover,
     Dial,
@@ -186,7 +186,7 @@ impl From<RetryKind> for Action {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RetryKind {
     Discover,
     Dial,
@@ -660,4 +660,18 @@ mod tests {
         assert_eq!(result.unwrap().len(), 1);
     }
 
+    #[test]
+    fn req_res_config_deserialize_duration_secs() {
+        let cfg: ReqResConfig = serde_json::from_str(r#"{"message_timeout": 5}"#).unwrap();
+        assert_eq!(cfg.message_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn req_res_config_builder_chaining() {
+        let cfg = ReqResConfig::default()
+            .with_message_timeout(Duration::from_secs(3))
+            .with_max_concurrent_streams(50);
+        assert_eq!(cfg.get_message_timeout(), Duration::from_secs(3));
+        assert_eq!(cfg.get_max_concurrent_streams(), 50);
+    }
 }
