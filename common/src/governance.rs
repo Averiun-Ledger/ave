@@ -632,7 +632,8 @@ impl Quorum {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreatorWitness, RoleCreator, SchemaAdd, SchemaChange};
+    use super::{CreatorWitness, CreatorQuantity, Quorum, RoleCreator, SchemaAdd, SchemaChange, default_creator_witnesses};
+    use crate::Namespace;
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -712,6 +713,107 @@ mod tests {
                 viewpoints: BTreeSet::new(),
             }])
         );
+    }
+
+    #[test]
+    fn test_creator_quantity_serde_and_check() {
+        let q: CreatorQuantity = serde_json::from_str("5").unwrap();
+        assert!(matches!(q, CreatorQuantity::Quantity(5)));
+        assert!(q.check());
+
+        let q: CreatorQuantity = serde_json::from_str("\"infinity\"").unwrap();
+        assert!(matches!(q, CreatorQuantity::Infinity));
+        assert!(q.check());
+
+        let q: CreatorQuantity = serde_json::from_str("0").unwrap();
+        assert!(!q.check());
+
+        let err = serde_json::from_str::<CreatorQuantity>("\"other\"").unwrap_err();
+        assert!(err.to_string().contains("number or 'infinity'"));
+
+        let json = serde_json::to_string(&CreatorQuantity::Quantity(3)).unwrap();
+        assert_eq!(json, "3");
+        let json = serde_json::to_string(&CreatorQuantity::Infinity).unwrap();
+        assert_eq!(json, "\"infinity\"");
+    }
+
+    #[test]
+    fn test_quorum_check_values() {
+        assert!(Quorum::Majority.check_values().is_ok());
+        assert!(Quorum::Fixed(3).check_values().is_ok());
+        assert!(Quorum::Percentage(50).check_values().is_ok());
+        assert!(Quorum::Percentage(0).check_values().is_err());
+        assert!(Quorum::Percentage(101).check_values().is_err());
+    }
+
+    #[test]
+    fn test_quorum_get_signers() {
+        assert_eq!(Quorum::Majority.get_signers(10, 10), 6);
+        assert_eq!(Quorum::Fixed(3).get_signers(10, 10), 3);
+        assert_eq!(Quorum::Fixed(15).get_signers(10, 10), 10);
+        assert_eq!(Quorum::Percentage(50).get_signers(10, 10), 0);
+        assert_eq!(Quorum::Majority.get_signers(10, 3), 3);
+    }
+
+    #[test]
+    fn test_quorum_check_quorum() {
+        assert!(Quorum::Majority.check_quorum(10, 6));
+        assert!(!Quorum::Majority.check_quorum(10, 5));
+        assert!(Quorum::Fixed(3).check_quorum(10, 3));
+        assert!(!Quorum::Fixed(3).check_quorum(10, 2));
+        // Percentage uses integer division percentage/100, so any value <100 yields 0
+        assert!(Quorum::Percentage(50).check_quorum(10, 0));
+        assert!(Quorum::Percentage(100).check_quorum(10, 10));
+        assert!(!Quorum::Percentage(100).check_quorum(10, 9));
+    }
+
+    #[test]
+    fn test_role_creator_create() {
+        let creator = RoleCreator::create("Admin", Namespace::from("sys"));
+        assert_eq!(creator.name, "Admin");
+        assert_eq!(creator.namespace, Namespace::from("sys"));
+        assert!(matches!(creator.quantity, CreatorQuantity::Infinity));
+        assert_eq!(creator.witnesses, default_creator_witnesses());
+    }
+
+    #[test]
+    fn test_role_creator_with_detailed_witnesses() {
+        let creator = serde_json::from_value::<RoleCreator>(json!({
+            "name": "Owner",
+            "namespace": [],
+            "witnesses": [{"name": "W1", "viewpoints": ["vp1"]}],
+            "quantity": 2
+        }))
+        .unwrap();
+
+        assert_eq!(creator.witnesses.len(), 1);
+        let w1 = creator.witnesses.iter().next().unwrap();
+        assert_eq!(w1.name, "W1");
+        assert!(w1.viewpoints.contains("vp1"));
+    }
+
+    #[test]
+    fn test_role_creator_rejects_duplicate_witness_names() {
+        let err = serde_json::from_value::<RoleCreator>(json!({
+            "name": "Owner",
+            "namespace": [],
+            "witnesses": ["Alice", "Alice"],
+            "quantity": 1
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("duplicated creator witness"));
+    }
+
+    #[test]
+    fn test_creator_witness_rejects_duplicated_viewpoints_in_detailed_form() {
+        let err = serde_json::from_value::<CreatorWitness>(json!({
+            "name": "pepito",
+            "viewpoints": ["agua", "agua"]
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("duplicated viewpoint"));
     }
 }
 

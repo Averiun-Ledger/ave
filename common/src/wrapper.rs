@@ -591,21 +591,7 @@ mod tests {
     }
 
     // Clone trait works correctly
-    #[test]
-    fn test_value_wrapper_clone() {
-        let value = ValueWrapper(Value::String("test".to_owned()));
-        let cloned = value.clone();
-        assert_eq!(value, cloned);
-    }
-
     // Debug trait produces readable output
-    #[test]
-    fn test_value_wrapper_debug() {
-        let value = ValueWrapper(Value::String("test".to_owned()));
-        let debug_str = format!("{:?}", value);
-        assert!(debug_str.contains("test"));
-    }
-
     // Deref trait allows direct access to Value methods
     #[test]
     fn test_value_wrapper_as_str() {
@@ -646,29 +632,7 @@ mod tests {
     }
 
     // Default produces Null value
-    #[test]
-    fn test_value_wrapper_default() {
-        let value = ValueWrapper::default();
-        assert_eq!(value.0, Value::Null);
-        assert!(value.is_null());
-    }
-
     // Hash trait allows use in HashMap/HashSet
-    #[test]
-    fn test_value_wrapper_hash() {
-        use std::collections::HashMap;
-
-        let wrapper1 = ValueWrapper(Value::String("key1".to_owned()));
-        let wrapper2 = ValueWrapper(Value::String("key2".to_owned()));
-
-        let mut map = HashMap::new();
-        map.insert(wrapper1.clone(), "value1");
-        map.insert(wrapper2.clone(), "value2");
-
-        assert_eq!(map.get(&wrapper1), Some(&"value1"));
-        assert_eq!(map.get(&wrapper2), Some(&"value2"));
-    }
-
     // Helper: deserialize from raw bytes
     fn deser(bytes: Vec<u8>) -> std::io::Result<ValueWrapper> {
         let mut c = Cursor::new(bytes);

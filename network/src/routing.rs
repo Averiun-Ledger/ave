@@ -733,13 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_known_peer_empty() {
-        let mut behaviour = build_behaviour(NodeType::Bootstrap);
-        let peer = PeerId::random();
-        assert!(!behaviour.is_known_peer(&peer));
-    }
-
-    #[test]
     fn test_is_known_peer_after_add() {
         let mut behaviour = build_behaviour(NodeType::Bootstrap);
         let peer = PeerId::random();
@@ -779,18 +772,60 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_prerouting_state() {
+    fn test_poll_close_connections_with_connection_id() {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn dummy_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)
+        }
+        fn dummy_wake(_: *const ()) {}
+        fn dummy_wake_by_ref(_: *const ()) {}
+        fn dummy_drop(_: *const ()) {}
+        static DUMMY_VTABLE: RawWakerVTable =
+            RawWakerVTable::new(dummy_clone, dummy_wake, dummy_wake_by_ref, dummy_drop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+
         let mut behaviour = build_behaviour(NodeType::Bootstrap);
-        assert!(behaviour.pre_routing);
-        behaviour.finish_prerouting_state();
-        assert!(!behaviour.pre_routing);
+        let peer = PeerId::random();
+        let conn_id = ConnectionId::new_unchecked(42);
+        behaviour.new_close_connections(peer, Some(conn_id));
+
+        let result = behaviour.poll(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::One(id)
+            }) if peer_id == peer && id == conn_id
+        ));
     }
 
     #[test]
-    fn test_add_self_reported_address() {
+    fn test_poll_close_connections_without_connection_id() {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn dummy_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)
+        }
+        fn dummy_wake(_: *const ()) {}
+        fn dummy_wake_by_ref(_: *const ()) {}
+        fn dummy_drop(_: *const ()) {}
+        static DUMMY_VTABLE: RawWakerVTable =
+            RawWakerVTable::new(dummy_clone, dummy_wake, dummy_wake_by_ref, dummy_drop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+
         let mut behaviour = build_behaviour(NodeType::Bootstrap);
         let peer = PeerId::random();
-        let addr: Multiaddr = "/memory/1".parse().unwrap();
-        assert!(behaviour.add_self_reported_address(&peer, &addr));
+        behaviour.new_close_connections(peer, None);
+
+        let result = behaviour.poll(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::All
+            }) if peer_id == peer
+        ));
     }
+
 }

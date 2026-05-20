@@ -461,3 +461,60 @@ pub struct TimeRange {
     /// End of the range (inclusive). ISO 8601 format.
     pub to: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_subjs_data_deserialize_with_custom_schema() {
+        let json = r#"{
+            "subject_id": "sub1",
+            "schema_id": "custom_schema",
+            "active": false,
+            "namespace": "ns",
+            "name": null,
+            "description": null
+        }"#;
+        let decoded: SubjsData = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.schema_id, SchemaType::Type("custom_schema".to_string()));
+        assert!(!decoded.active);
+        assert_eq!(decoded.name, None);
+    }
+
+    #[test]
+    fn test_approval_entry_deserialize_variants() {
+        for state in [ApprovalState::Pending, ApprovalState::Accepted, ApprovalState::Rejected] {
+            let entry = ApprovalEntry {
+                request: ApprovalReq {
+                    subject_id: "sub1".to_string(),
+                    sn: 1,
+                    gov_version: 1,
+                    patch: json!({}),
+                    signer: "signer".to_string(),
+                },
+                state: state.clone(),
+            };
+            let json_str = serde_json::to_string(&entry).unwrap();
+            let decoded: ApprovalEntry = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(decoded.state, state);
+        }
+    }
+
+    #[test]
+    fn test_time_range_deserialize_empty() {
+        let decoded: TimeRange = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded.from, None);
+        assert_eq!(decoded.to, None);
+    }
+
+    #[test]
+    fn test_tracker_stored_visibility_deserialize_full_and_none() {
+        let full: TrackerStoredVisibilityDB = serde_json::from_str(r#"{"kind":"full"}"#).unwrap();
+        assert_eq!(full, TrackerStoredVisibilityDB::Full);
+
+        let none: TrackerStoredVisibilityDB = serde_json::from_str(r#"{"kind":"none"}"#).unwrap();
+        assert_eq!(none, TrackerStoredVisibilityDB::None);
+    }
+}

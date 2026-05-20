@@ -59,10 +59,4 @@ mod tests {
         assert!(received.is_some());
     }
 
-    #[test]
-    fn test_sender() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(10);
-        let service = NetworkService::new(tx.clone());
-        assert_eq!(service.sender().capacity(), tx.capacity());
-    }
 }

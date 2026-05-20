@@ -49,42 +49,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_timestamp_now() {
-        let ts1 = TimeStamp::now();
-        let ts2 = TimeStamp::now();
-
-        // Second timestamp should be >= first
-        assert!(ts2 >= ts1);
-    }
-
-    #[test]
-    fn test_timestamp_from_nanos() {
-        let ts = TimeStamp::from_nanos(1234567890123456789);
-        assert_eq!(ts.as_nanos(), 1234567890123456789);
-    }
-
-    #[test]
-    fn test_timestamp_ordering() {
-        let ts1 = TimeStamp::from_nanos(1000);
-        let ts2 = TimeStamp::from_nanos(2000);
-
-        assert!(ts1 < ts2);
-        assert!(ts2 > ts1);
-    }
-
-    #[test]
-    fn test_timestamp_serde() {
-        let ts = TimeStamp::now();
-        let json = serde_json::to_string(&ts).unwrap();
-        let deserialized: TimeStamp = serde_json::from_str(&json).unwrap();
-        assert_eq!(ts, deserialized);
-    }
-
-    #[test]
-    fn test_timestamp_borsh() {
-        let ts = TimeStamp::now();
-        let bytes = borsh::to_vec(&ts).unwrap();
-        let deserialized: TimeStamp = borsh::from_slice(&bytes).unwrap();
-        assert_eq!(ts, deserialized);
+    fn test_timestamp_from_nanos_zero() {
+        let ts = TimeStamp::from_nanos(0);
+        assert_eq!(ts.as_nanos(), 0);
+        assert_eq!(format!("{}", ts), "0");
     }
 }

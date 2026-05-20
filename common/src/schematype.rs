@@ -175,3 +175,55 @@ impl Serialize for SchemaType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_schema_type_from_str() {
+        assert!(matches!(
+            SchemaType::from_str("governance").unwrap(),
+            SchemaType::Governance
+        ));
+        assert!(matches!(
+            SchemaType::from_str("tracker_schemas").unwrap(),
+            SchemaType::TrackerSchemas
+        ));
+        assert_eq!(
+            SchemaType::from_str("custom").unwrap(),
+            SchemaType::Type("custom".to_string())
+        );
+    }
+
+    #[test]
+    fn test_schema_type_from_str_rejects_empty() {
+        let err = SchemaType::from_str("").unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn test_schema_type_is_valid() {
+        assert!(SchemaType::Governance.is_valid());
+        assert!(SchemaType::TrackerSchemas.is_valid());
+        assert!(SchemaType::Type("valid".to_string()).is_valid());
+        assert!(!SchemaType::Type("".to_string()).is_valid());
+        assert!(!SchemaType::Type("governance".to_string()).is_valid());
+        assert!(!SchemaType::Type("tracker_schemas".to_string()).is_valid());
+        assert!(!SchemaType::Type(" spaced ".to_string()).is_valid());
+    }
+
+    #[test]
+    fn test_schema_type_is_valid_in_request() {
+        assert!(SchemaType::Governance.is_valid_in_request());
+        assert!(!SchemaType::TrackerSchemas.is_valid_in_request());
+        assert!(SchemaType::Type("valid".to_string()).is_valid_in_request());
+    }
+
+    #[test]
+    fn test_schema_type_deserialize_rejects_empty() {
+        let err = serde_json::from_str::<SchemaType>("\"\"").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+}

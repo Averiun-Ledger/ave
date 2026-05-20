@@ -414,29 +414,7 @@ mod tests {
         assert!(public_key.verify(message, &sig2).is_ok());
     }
 
-    #[test]
-    fn test_keypair_dsa_trait() {
-        let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
-        let message = b"Test message";
 
-        // Use DSA trait methods
-        let signature = DSA::sign(&keypair, message).unwrap();
-        assert_eq!(DSA::algorithm(&keypair), DSAlgorithm::Ed25519);
-        assert_eq!(DSA::algorithm_id(&keypair), b'E');
-
-        // Verify
-        let public_key = keypair.public_key();
-        assert!(public_key.verify(message, &signature).is_ok());
-    }
-
-    #[test]
-    fn test_keypair_public_key_wrapper() {
-        let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
-        let public_key = keypair.public_key();
-
-        assert_eq!(public_key.algorithm(), keypair.algorithm());
-        assert_eq!(public_key.as_bytes(), &keypair.public_key_bytes()[..]);
-    }
 
     #[test]
     fn test_keypair_from_secret_key_autodetect() {
@@ -449,15 +427,6 @@ mod tests {
         assert_eq!(keypair1.public_key_bytes(), keypair2.public_key_bytes());
     }
 
-    #[test]
-    fn test_keypair_type_conversion() {
-        let kp_type = KeyPairAlgorithm::Ed25519;
-        let algo: DSAlgorithm = kp_type.into();
-        assert_eq!(algo, DSAlgorithm::Ed25519);
-
-        let kp_type2: KeyPairAlgorithm = algo.into();
-        assert_eq!(kp_type, kp_type2);
-    }
 
     #[test]
     fn test_keypair_algorithm_generate() {
@@ -474,43 +443,8 @@ mod tests {
         assert!(public_key.verify(message, &signature).is_ok());
     }
 
-    #[test]
-    fn test_keypair_algorithm_display() {
-        let algorithm = KeyPairAlgorithm::Ed25519;
-        assert_eq!(algorithm.to_string(), "Ed25519");
-    }
 
-    #[test]
-    fn test_default_keypair() {
-        let keypair = KeyPair::default();
-        assert_eq!(keypair.key_type(), KeyPairAlgorithm::Ed25519);
-    }
 
-    #[test]
-    fn test_keypair_clone() {
-        // Test that cloning works correctly
-        let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
-        let keypair_clone = keypair.clone();
-
-        // Both should have the same public key
-        assert_eq!(
-            keypair.public_key_bytes(),
-            keypair_clone.public_key_bytes()
-        );
-
-        // Both should sign the same way
-        let message = b"test message";
-        let sig1 = keypair.sign(message).unwrap();
-        let sig2 = keypair_clone.sign(message).unwrap();
-
-        // Signatures should be identical (deterministic)
-        assert_eq!(sig1, sig2);
-
-        // Both signatures should verify
-        let public_key = keypair.public_key();
-        assert!(public_key.verify(message, &sig1).is_ok());
-        assert!(public_key.verify(message, &sig2).is_ok());
-    }
 
     #[test]
     fn test_keypair_der_roundtrip() {

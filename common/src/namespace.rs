@@ -206,4 +206,84 @@ mod tests {
         assert!(!ns.is_top_level());
         assert!(Namespace::new().is_ancestor_of(&Namespace::from("a.b.c.d")));
     }
+
+    #[test]
+    fn test_namespace_check() {
+        assert!(Namespace::from("valid.token").check());
+        assert!(Namespace::from("").check());
+        // From<&str> trims tokens, so spaced inputs become valid
+        assert!(Namespace::from(" spaced ").check());
+        assert!(Namespace::from("a. b").check());
+
+        // Direct construction with empty token fails check
+        let mut bad = Namespace::new();
+        bad.0.push("".to_string());
+        assert!(!bad.check());
+
+        // Direct construction with leading/trailing spaces fails check
+        let mut bad2 = Namespace::new();
+        bad2.0.push(" spaced ".to_string());
+        assert!(!bad2.check());
+
+        // Very long token fails check
+        let mut bad3 = Namespace::new();
+        bad3.0.push("x".repeat(101));
+        assert!(!bad3.check());
+    }
+
+    #[test]
+    fn test_namespace_add() {
+        let mut ns = Namespace::new();
+        ns.add("a");
+        assert_eq!(ns.to_string(), "a");
+        ns.add("  b  ");
+        assert_eq!(ns.to_string(), "a.b");
+        ns.add("");
+        assert_eq!(ns.to_string(), "a.b");
+    }
+
+    #[test]
+    fn test_namespace_edge_cases() {
+        let empty = Namespace::new();
+        assert_eq!(empty.level(), 0);
+        assert_eq!(empty.key(), "");
+        assert!(empty.is_empty());
+        assert!(empty.is_top_level() == false);
+        assert!(empty.is_ancestor_or_equal_of(&Namespace::from("a")));
+        assert!(empty.is_ancestor_or_equal_of(&Namespace::new()));
+
+        let top = Namespace::from("a");
+        assert!(top.is_top_level());
+        assert_eq!(top.parent().to_string(), "");
+        assert_eq!(top.root().to_string(), "a");
+        assert!(top.is_ancestor_or_equal_of(&Namespace::from("a")));
+        assert!(top.is_ancestor_or_equal_of(&Namespace::from("a.b")));
+        assert!(!top.is_descendant_of(&Namespace::from("a")));
+        assert!(!top.is_descendant_of(&Namespace::from("")));
+
+        let ns = Namespace::from("a.b.c");
+        assert_eq!(ns.at_level(0).to_string(), "a.b.c");
+        assert_eq!(ns.at_level(10).to_string(), "a.b.c");
+    }
+
+    #[test]
+    fn test_namespace_from_str_filters_empty() {
+        let ns = Namespace::from("a..b...c");
+        assert_eq!(ns.to_string(), "a.b.c");
+    }
+
+    #[test]
+    fn test_namespace_relationships_deep_hierarchy() {
+        let root = Namespace::from("a");
+        let mid = Namespace::from("a.b");
+        let leaf = Namespace::from("a.b.c");
+
+        assert!(root.is_ancestor_of(&leaf));
+        assert!(mid.is_ancestor_of(&leaf));
+        assert!(leaf.is_descendant_of(&root));
+        assert!(leaf.is_descendant_of(&mid));
+        assert!(mid.is_parent_of(&leaf));
+        assert!(leaf.is_child_of(&mid));
+        assert!(!root.is_parent_of(&leaf)); // not direct
+    }
 }

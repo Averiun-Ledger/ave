@@ -1961,6 +1961,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 mod tests {
 
     use crate::routing::RoutingNode;
+    use crate::behaviour::{ReqresFailureDirection, ReqresFailureKind};
 
     use super::*;
     use libp2p::core::{ConnectedPoint, Endpoint, transport::PortUse};
@@ -2646,5 +2647,459 @@ mod tests {
 
         // Wait for connection.
         node.run_connection().await.unwrap();
+        assert!(node.successful_dials > 0);
+        assert!(node.boot_nodes.is_empty());
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn test_run_connection_safe_mode() {
+        let mut node = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3500".to_owned(),
+        );
+        node.safe_mode = true;
+        node.run_connection().await.unwrap();
+        assert_eq!(node.state, NetworkState::Running);
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn test_run_connection_bootstrap_without_boot_nodes() {
+        let mut node = build_worker(
+            vec![],
+            false,
+            NodeType::Bootstrap,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3501".to_owned(),
+        );
+        node.run_connection().await.unwrap();
+        assert_eq!(node.state, NetworkState::Running);
+    }
+
+    #[test]
+    fn handle_dial_error_variants_bootstrap() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3400".to_owned(),
+        );
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+
+        // LocalPeerId in bootstrap flow
+        let result = worker.handle_dial_error(
+            DialError::LocalPeerId { address: addr.clone() },
+            &peer,
+            true,
+        );
+        assert_eq!(result, Some((false, vec![])));
+
+        // NoAddresses
+        let result = worker.handle_dial_error(DialError::NoAddresses, &peer, true);
+        assert_eq!(result, Some((false, vec![])));
+
+        // DialPeerConditionFalse
+        let result = worker.handle_dial_error(
+            DialError::DialPeerConditionFalse(libp2p::swarm::dial_opts::PeerCondition::Disconnected),
+            &peer,
+            true,
+        );
+        assert_eq!(result, Some((false, vec![])));
+
+        // Denied
+        let result = worker.handle_dial_error(
+            DialError::Denied {
+                cause: libp2p::swarm::ConnectionDenied::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "test",
+                )),
+            },
+            &peer,
+            true,
+        );
+        assert_eq!(result, Some((false, vec![])));
+
+        // Aborted
+        let result = worker.handle_dial_error(DialError::Aborted, &peer, true);
+        assert_eq!(result, Some((true, vec![])));
+
+        // WrongPeerId
+        let obtained = PeerId::random();
+        let result = worker.handle_dial_error(
+            DialError::WrongPeerId {
+                obtained,
+                address: addr.clone(),
+            },
+            &peer,
+            true,
+        );
+        assert_eq!(result, Some((false, vec![])));
+
+        // Transport with empty items
+        let result = worker.handle_dial_error(
+            DialError::Transport(vec![]),
+            &peer,
+            true,
+        );
+        assert_eq!(result, Some((false, vec![])));
+    }
+
+    #[test]
+    fn handle_dial_error_variants_runtime() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3401".to_owned(),
+        );
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+
+        // LocalPeerId in runtime flow clears state
+        worker.retry_by_peer.insert(peer, RetryState {
+            attempts: 1,
+            when: Instant::now(),
+            kind: RetryKind::Dial,
+            addrs: vec![addr.clone()],
+        });
+        let result = worker.handle_dial_error(
+            DialError::LocalPeerId { address: addr.clone() },
+            &peer,
+            false,
+        );
+        assert_eq!(result, None);
+        assert!(!worker.retry_by_peer.contains_key(&peer));
+
+        // DialPeerConditionFalse in runtime returns None
+        let result = worker.handle_dial_error(
+            DialError::DialPeerConditionFalse(libp2p::swarm::dial_opts::PeerCondition::NotDialing),
+            &peer,
+            false,
+        );
+        assert_eq!(result, None);
+
+        // WrongPeerId in runtime clears state
+        worker.retry_by_peer.insert(peer, RetryState {
+            attempts: 1,
+            when: Instant::now(),
+            kind: RetryKind::Dial,
+            addrs: vec![addr.clone()],
+        });
+        let result = worker.handle_dial_error(
+            DialError::WrongPeerId {
+                obtained: PeerId::random(),
+                address: addr.clone(),
+            },
+            &peer,
+            false,
+        );
+        assert_eq!(result, None);
+        assert!(!worker.retry_by_peer.contains_key(&peer));
+    }
+
+    #[test]
+    fn send_message_safe_mode_and_too_large() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3402".to_owned(),
+        );
+        let peer = PeerId::random();
+
+        // safe_mode: should return Ok without sending
+        worker.safe_mode = true;
+        let result = worker.send_message(peer, Bytes::from_static(b"hello"));
+        assert!(result.is_ok());
+
+        // too large
+        worker.safe_mode = false;
+        let big_msg = Bytes::from(vec![0u8; worker.max_app_message_bytes + 1]);
+        let result = worker.send_message(peer, big_msg);
+        assert!(matches!(result, Err(Error::MessageTooLarge { .. })));
+    }
+
+    #[tokio::test]
+    async fn send_message_to_unknown_peer() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3403".to_owned(),
+        );
+        let peer = PeerId::random();
+        let result = worker.send_message(peer, Bytes::from_static(b"hello"));
+        assert!(result.is_ok());
+        assert!(matches!(
+            worker.peer_action.get(&peer),
+            Some(Action::Discover)
+        ));
+    }
+
+    #[test]
+    fn add_pending_inbound_message_duplicate_and_limits() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3404".to_owned(),
+        );
+        let peer = PeerId::random();
+        let msg = Bytes::from_static(b"duplicate");
+
+        worker.add_pending_inbound_message(peer, msg.clone());
+        assert_eq!(
+            worker.pending_inbound_messages.get(&peer).unwrap().len(),
+            1
+        );
+
+        // Duplicate should be ignored
+        worker.add_pending_inbound_message(peer, msg.clone());
+        assert_eq!(
+            worker.pending_inbound_messages.get(&peer).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn add_pending_inbound_message_count_limit() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3405".to_owned(),
+        );
+        let peer = PeerId::random();
+        // MAX_PENDING_MESSAGES_PER_PEER is typically 1024
+        for i in 0..1030u16 {
+            worker.add_pending_inbound_message(peer, Bytes::from(i.to_le_bytes().to_vec()));
+        }
+        let queue = worker.pending_inbound_messages.get(&peer).unwrap();
+        assert!(queue.len() <= 1024, "queue len was {}", queue.len());
+    }
+
+    #[test]
+    fn add_pending_inbound_message_bytes_limit_per_peer() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3406".to_owned(),
+        );
+        worker.max_pending_inbound_bytes_per_peer = 20;
+        let peer = PeerId::random();
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"aaaaaaaaaa")); // 10
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"bbbbbbbbbb")); // 10
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"cccccccccc")); // 10 -> evicts oldest
+        let queue = worker.pending_inbound_messages.get(&peer).unwrap();
+        assert!(queue.bytes_len() <= 20, "bytes len was {}", queue.bytes_len());
+    }
+
+    #[test]
+    fn add_pending_outbound_message_count_limit() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3510".to_owned(),
+        );
+        let peer = PeerId::random();
+        for i in 0..105u8 {
+            worker.add_pending_outbound_message(peer, Bytes::from(vec![i]));
+        }
+        let queue = worker.pending_outbound_messages.get(&peer).unwrap();
+        assert!(queue.len() <= 100, "queue len was {}", queue.len());
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn handle_connection_events_connection_closed() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3511".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker.boot_nodes.insert(peer, vec!["/memory/1".parse().unwrap()]);
+        worker
+            .handle_connection_events(SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: ConnectionId::new_unchecked(1),
+                endpoint: test_endpoint(),
+                num_established: 0,
+                cause: None,
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn run_with_fake_boot_node_records_failure() {
+        let mut boot_nodes = vec![];
+        let fake_boot_peer = PeerId::random();
+        let fake_node = RoutingNode {
+            peer_id: fake_boot_peer.to_string(),
+            address: vec!["/memory/3502".to_owned()],
+        };
+        boot_nodes.push(fake_node);
+
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut node: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            create_config(boot_nodes, false, NodeType::Addressable, vec!["/memory/3503".to_owned()]),
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .unwrap();
+        // run_connection fails, run should observe bootstrap failure metrics and cancel
+        node.run().await;
+        assert_eq!(node.state, NetworkState::Disconnected);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_bootstrap_duration_seconds_count{result=\"failure\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn handle_event_reqres_failure() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3512".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker
+            .handle_event(SwarmEvent::Behaviour(BehaviourEvent::ReqresFailure {
+                peer_id: peer,
+                direction: ReqresFailureDirection::Inbound,
+                kind: ReqresFailureKind::Timeout,
+            }))
+            .await;
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn handle_event_closest_peer_with_discover() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3513".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker.peer_action.insert(peer, Action::Discover);
+        worker
+            .handle_event(SwarmEvent::Behaviour(BehaviourEvent::ClosestPeer {
+                peer_id: peer,
+                info: Some(libp2p::kad::PeerInfo {
+                    peer_id: peer,
+                    addrs: vec!["/memory/1".parse().unwrap()],
+                }),
+            }))
+            .await;
+        assert!(matches!(worker.peer_action.get(&peer), Some(Action::Dial)));
+        assert!(worker.retry_by_peer.contains_key(&peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn handle_event_closest_peer_empty_addrs() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3514".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker.peer_action.insert(peer, Action::Discover);
+        worker
+            .handle_event(SwarmEvent::Behaviour(BehaviourEvent::ClosestPeer {
+                peer_id: peer,
+                info: Some(libp2p::kad::PeerInfo {
+                    peer_id: peer,
+                    addrs: vec![],
+                }),
+            }))
+            .await;
+        assert!(worker.retry_by_peer.contains_key(&peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn handle_event_identify_error_hard_failure() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3421".to_owned(),
+        );
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        worker.boot_nodes.insert(peer, vec![addr]);
+        worker
+            .handle_connection_events(SwarmEvent::Behaviour(
+                BehaviourEvent::IdentifyError {
+                    peer_id: peer,
+                    error: swarm::StreamUpgradeError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "test",
+                    )),
+                },
+            ))
+            .await;
+        // Hard failure should move boot_node to retry_boot_nodes
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
     }
 }

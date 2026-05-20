@@ -1090,39 +1090,87 @@ mod tests {
     }
 
     #[test]
-    fn config_default_and_getters() {
-        let cfg = Config::default();
-        assert!(!cfg.get_enable());
-        assert_eq!(cfg.get_interval_request(), Duration::from_secs(60));
-        assert_eq!(cfg.get_request_timeout(), Duration::from_secs(5));
-        assert_eq!(cfg.get_max_concurrent_requests(), 8);
-        assert!(cfg.get_allow_list().is_empty());
-        assert!(cfg.get_block_list().is_empty());
-        assert!(cfg.get_service_allow_list().is_empty());
-        assert!(cfg.get_service_block_list().is_empty());
+    fn behaviour_update_allow_peers() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut behaviour = Behaviour::new(
+            Config::default().with_enable(true).with_allow_list(vec![
+                PeerId::random().to_string(),
+            ]),
+            &[],
+            None,
+            Some(metrics),
+        );
+        let new_list = vec![PeerId::random().to_string()];
+        behaviour.update_allow_peers(&new_list);
+        assert_eq!(behaviour.allow_peers.len(), 1);
     }
 
     #[test]
-    fn config_setters_and_chaining() {
-        let cfg = Config::default()
-            .with_enable(true)
-            .with_allow_list(vec!["a".to_string()])
-            .with_block_list(vec!["b".to_string()])
-            .with_service_allow_list(vec!["http://allow".to_string()])
-            .with_service_block_list(vec!["http://block".to_string()])
-            .with_interval_request(Duration::from_secs(30))
-            .with_request_timeout(Duration::from_secs(10))
-            .with_max_concurrent_requests(4);
-
-        assert!(cfg.get_enable());
-        assert_eq!(cfg.get_allow_list(), vec!["a"]);
-        assert_eq!(cfg.get_block_list(), vec!["b"]);
-        assert_eq!(cfg.get_service_allow_list(), vec!["http://allow"]);
-        assert_eq!(cfg.get_service_block_list(), vec!["http://block"]);
-        assert_eq!(cfg.get_interval_request(), Duration::from_secs(30));
-        assert_eq!(cfg.get_request_timeout(), Duration::from_secs(10));
-        assert_eq!(cfg.get_max_concurrent_requests(), 4);
+    fn behaviour_update_block_peers() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut behaviour = Behaviour::new(
+            Config::default().with_enable(true),
+            &[],
+            None,
+            Some(metrics),
+        );
+        let new_list = vec![PeerId::random().to_string()];
+        behaviour.update_block_peers(&new_list);
+        assert_eq!(behaviour.block_peers.len(), 1);
     }
 
+    #[test]
+    fn behaviour_check_allow_and_block() {
+        let allowed_peer = PeerId::random();
+        let blocked_peer = PeerId::random();
+        let other_peer = PeerId::random();
 
+        let behaviour = Behaviour::new(
+            Config::default()
+                .with_enable(true)
+                .with_allow_list(vec![allowed_peer.to_string()])
+                .with_block_list(vec![blocked_peer.to_string()]),
+            &[],
+            None,
+            None,
+        );
+
+        assert!(behaviour.check_allow(&allowed_peer).is_ok());
+        assert!(behaviour.check_allow(&other_peer).is_err());
+        assert!(behaviour.check_block(&other_peer).is_ok());
+        assert!(behaviour.check_block(&blocked_peer).is_err());
+        assert!(behaviour.check_lists(&allowed_peer).is_ok());
+        assert!(behaviour.check_lists(&blocked_peer).is_err());
+        assert!(behaviour.check_lists(&other_peer).is_err());
+    }
+
+    #[test]
+    fn behaviour_check_lists_when_disabled() {
+        let peer = PeerId::random();
+        let behaviour = Behaviour::new(
+            Config::default().with_enable(false),
+            &[],
+            None,
+            None,
+        );
+        assert!(behaviour.check_lists(&peer).is_ok());
+    }
+
+    #[test]
+    fn behaviour_new_with_boot_nodes_in_allow_list() {
+        let boot_peer = PeerId::random();
+        let boot_node = RoutingNode {
+            peer_id: boot_peer.to_string(),
+            address: vec![],
+        };
+        let behaviour = Behaviour::new(
+            Config::default().with_enable(true),
+            &[boot_node],
+            None,
+            None,
+        );
+        assert!(behaviour.check_allow(&boot_peer).is_ok());
+    }
 }

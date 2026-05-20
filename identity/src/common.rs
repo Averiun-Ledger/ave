@@ -141,3 +141,97 @@ impl<A: fmt::Debug> fmt::Debug for AlgorithmIdentifiedBytes<A> {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn new_with_invalid_length() {
+        let err = AlgorithmIdentifiedBytes::new(1u8, vec![1, 2], 3).unwrap_err();
+        match err {
+            crate::error::CryptoError::InvalidDataLength { expected, actual } => {
+                assert_eq!(expected, 3);
+                assert_eq!(actual, 2);
+            }
+            other => panic!("expected InvalidDataLength, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_bytes_with_prefix_empty() {
+        let err = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
+            &[],
+            |id| Ok::<_, std::convert::Infallible>(id),
+            32,
+            "test",
+        )
+        .unwrap_err();
+        match err {
+            crate::error::CryptoError::InvalidDataLength { expected, actual } => {
+                assert_eq!(expected, 33);
+                assert_eq!(actual, 0);
+            }
+            other => panic!("expected InvalidDataLength, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_bytes_with_prefix_unknown_algorithm() {
+        let err = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
+            &[0xAB, 0x01, 0x02],
+            |_id| Err::<u8, &str>("bad algo"),
+            2,
+            "test",
+        )
+        .unwrap_err();
+        match err {
+            crate::error::CryptoError::UnknownAlgorithm(msg) => {
+                assert!(msg.contains("test: bad algo"));
+            }
+            other => panic!("expected UnknownAlgorithm, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_bytes_with_prefix_invalid_length() {
+        let err = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
+            &[0x01, 0x02],
+            |id| Ok::<_, std::convert::Infallible>(id),
+            10,
+            "test",
+        )
+        .unwrap_err();
+        match err {
+            crate::error::CryptoError::InvalidDataLength { expected, actual } => {
+                assert_eq!(expected, 11);
+                assert_eq!(actual, 2);
+            }
+            other => panic!("expected InvalidDataLength, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_bytes_with_prefix_ok() {
+        let result = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
+            &[0x01, 0x02, 0x03],
+            |id| Ok::<_, std::convert::Infallible>(id),
+            2,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(result.algorithm, 1);
+        assert_eq!(result.bytes, vec![0x02, 0x03]);
+    }
+
+    #[test]
+    fn test_to_bytes_with_prefix() {
+        let a = AlgorithmIdentifiedBytes {
+            algorithm: 1u8,
+            bytes: vec![2, 3, 4],
+        };
+        let bytes = a.to_bytes_with_prefix(0xAB);
+        assert_eq!(bytes, vec![0xAB, 2, 3, 4]);
+    }
+}

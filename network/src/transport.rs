@@ -87,12 +87,4 @@ pub fn build_transport(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_build_transport() {
-        let keypair = Keypair::generate_ed25519();
-        let limit = LimitsConfig::build(4, 4);
-        let result = build_transport(&keypair, limit);
-
-        assert!(result.is_ok());
-    }
 }

@@ -119,4 +119,14 @@ mod tests {
         assert_eq!(ED25519_SECRET_KEY_LENGTH, SECRET_KEY_LENGTH);
         assert_eq!(ED25519_SIGNATURE_LENGTH, SIGNATURE_LENGTH);
     }
+
+    #[test]
+    fn test_dsa_from_identifier_rejects_unknown() {
+        let err = DSAlgorithm::from_identifier(0xFF).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::UnknownAlgorithm(_)),
+            "expected UnknownAlgorithm, got {:?}",
+            err
+        );
+    }
 }

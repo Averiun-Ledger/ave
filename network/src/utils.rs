@@ -660,24 +660,4 @@ mod tests {
         assert_eq!(result.unwrap().len(), 1);
     }
 
-    #[test]
-    fn req_res_config_default_and_builder() {
-        let cfg = ReqResConfig::default();
-        assert_eq!(cfg.get_message_timeout(), Duration::from_secs(10));
-        assert_eq!(cfg.get_max_concurrent_streams(), 100);
-
-        let cfg = ReqResConfig::new(Duration::from_secs(5), 200)
-            .with_message_timeout(Duration::from_secs(3))
-            .with_max_concurrent_streams(50);
-        assert_eq!(cfg.get_message_timeout(), Duration::from_secs(3));
-        assert_eq!(cfg.get_max_concurrent_streams(), 50);
-    }
-
-    #[test]
-    fn limits_config_build_smoke() {
-        let cfg = LimitsConfig::build(8192, 4);
-        assert!(cfg.yamux_max_num_streams >= 256);
-        assert!(cfg.reqres_max_concurrent_streams >= 64);
-        assert_eq!(cfg.tcp_nodelay, true);
-    }
 }

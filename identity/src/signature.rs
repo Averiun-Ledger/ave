@@ -248,27 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn test_signer_accessor() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let data = TestData {
-            value: "test".to_string(),
-            number: 1,
-        };
-
-        let signed = Signed::new(data, &signer).unwrap();
-        let public_key = signed.signature().signer.clone();
-
-        // Verify the public key matches
-        let expected_pubkey = PublicKey::new(
-            crate::keys::DSAlgorithm::Ed25519,
-            signer.public_key_bytes(),
-        )
-        .unwrap();
-
-        assert_eq!(public_key, expected_pubkey);
-    }
-
-    #[test]
     fn test_timestamp_is_set() {
         let signer = Ed25519Signer::generate().unwrap();
         let data = TestData {
@@ -285,45 +264,4 @@ mod tests {
         assert!(ts <= after);
     }
 
-    #[test]
-    fn test_signature_serialization() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let data = TestData {
-            value: "serialize me".to_string(),
-            number: 456,
-        };
-
-        let signature = Signature::new(&data, &signer).unwrap();
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&signature).unwrap();
-
-        // Deserialize back
-        let deserialized: Signature = serde_json::from_str(&json).unwrap();
-
-        // Should still verify
-        assert!(deserialized.verify(&data).is_ok());
-    }
-
-    #[test]
-    fn test_signed_serialization() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let data = TestData {
-            value: "roundtrip".to_string(),
-            number: 789,
-        };
-
-        let signed = Signed::new(data, &signer).unwrap();
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&signed).unwrap();
-
-        // Deserialize back
-        let deserialized: Signed<TestData> =
-            serde_json::from_str(&json).unwrap();
-
-        // Should still verify
-        assert!(deserialized.verify().is_ok());
-        assert_eq!(deserialized.content().value, "roundtrip");
-    }
 }

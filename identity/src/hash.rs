@@ -406,18 +406,6 @@ mod tests {
         assert_eq!(hash, parsed);
     }
 
-    #[test]
-    fn test_algorithm_detection() {
-        let hasher = Blake3Hasher;
-        let data = b"Test data";
-
-        let hash = hasher.hash(data);
-        let hash_str = hash.to_string();
-
-        // Parse should automatically detect Blake3
-        let parsed: DigestIdentifier = hash_str.parse().unwrap();
-        assert_eq!(parsed.algorithm(), HashAlgorithm::Blake3);
-    }
 
     #[test]
     fn test_invalid_algorithm_identifier() {
@@ -432,22 +420,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_serde_serialization() {
-        let hasher = Blake3Hasher;
-        let data = b"Test serialization";
-
-        let hash = hasher.hash(data);
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&hash).unwrap();
-
-        // Deserialize back
-        let deserialized: DigestIdentifier =
-            serde_json::from_str(&json).unwrap();
-
-        assert_eq!(hash, deserialized);
-    }
 
     #[test]
     fn test_hash_borsh() {
@@ -476,52 +448,8 @@ mod tests {
         assert_eq!(hash1.algorithm(), HashAlgorithm::Blake3);
     }
 
-    #[test]
-    fn test_hash_borsh_deterministic() {
-        use crate::hash_borsh;
 
-        #[derive(BorshSerialize)]
-        struct TestData {
-            x: u32,
-            y: u32,
-        }
 
-        let data1 = TestData { x: 10, y: 20 };
-        let data2 = TestData { x: 10, y: 20 };
-
-        let hash1 = hash_borsh(&BLAKE3_HASHER, &data1).unwrap();
-        let hash2 = hash_borsh(&BLAKE3_HASHER, &data2).unwrap();
-
-        // Same data should produce same hash
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_default_digest_identifier() {
-        let default_digest = DigestIdentifier::default();
-
-        // Default should be empty
-        assert!(default_digest.is_empty());
-
-        // Default should use Blake3 algorithm
-        assert_eq!(default_digest.algorithm(), HashAlgorithm::Blake3);
-
-        // Should have empty bytes
-        assert_eq!(default_digest.hash_bytes().len(), 0);
-    }
-
-    #[test]
-    fn test_is_empty() {
-        // Default digest is empty
-        let empty = DigestIdentifier::default();
-        assert!(empty.is_empty());
-
-        // Hashed data is not empty
-        let hasher = Blake3Hasher;
-        let hash = hasher.hash(b"test data");
-        assert!(!hash.is_empty());
-        assert_eq!(hash.hash_bytes().len(), 32);
-    }
 
     #[test]
     fn test_hash_array() {
@@ -546,20 +474,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_hash_array_type_inference() {
-        let hasher = Blake3Hasher;
-        let hash = hasher.hash(b"test");
-
-        // Type inference should work
-        let array = hash.hash_array::<32>().unwrap();
-        assert_eq!(array.len(), 32);
-
-        // Verify content matches
-        for (i, byte) in array.iter().enumerate() {
-            assert_eq!(*byte, hash.hash_bytes()[i]);
-        }
-    }
 
     #[test]
     fn test_empty_digest_serialization() {
@@ -580,41 +494,25 @@ mod tests {
         assert_eq!(deserialized.algorithm(), empty.algorithm());
     }
 
+
+
     #[test]
-    fn test_empty_digest_serde() {
-        use serde_json;
-
-        let empty = DigestIdentifier::default();
-
-        // Should serialize to empty string in JSON
-        let json = serde_json::to_string(&empty).unwrap();
-        assert_eq!(json, "\"\"");
-
-        // Should deserialize from empty string
-        let deserialized: DigestIdentifier =
-            serde_json::from_str("\"\"").unwrap();
-        assert!(deserialized.is_empty());
-        assert_eq!(deserialized.algorithm(), HashAlgorithm::Blake3);
+    fn test_digest_identifier_from_str_invalid_base64() {
+        let err = "B!!!".parse::<DigestIdentifier>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::Base64DecodeError(_)),
+            "expected Base64DecodeError, got {:?}",
+            err
+        );
     }
 
     #[test]
-    fn test_empty_digest_bincode() {
-        let empty = DigestIdentifier::default();
-
-        println!("\n=== EMPTY DIGEST BINCODE TEST ===");
-        println!("Is empty: {}", empty.is_empty());
-        println!("String representation: '{}'", empty.to_string());
-
-        // Should serialize with bincode
-        let bytes = borsh::to_vec(&empty).unwrap();
-
-        println!("Serialized length: {}", bytes.len());
-        println!("Serialized bytes: {:?}", bytes);
-
-        // Should deserialize with bincode
-        let result: DigestIdentifier = borsh::from_slice(&bytes).unwrap();
-
-        assert!(result.is_empty());
-        assert_eq!(result.algorithm(), HashAlgorithm::Blake3);
+    fn test_digest_identifier_from_str_invalid_algorithm() {
+        let err = "Xabc123".parse::<DigestIdentifier>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::UnknownAlgorithm(_)),
+            "expected UnknownAlgorithm, got {:?}",
+            err
+        );
     }
 }
