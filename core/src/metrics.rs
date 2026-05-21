@@ -63,6 +63,11 @@ pub struct CoreMetrics {
     contract_executions: Family<ContractExecutionLabels, Counter>,
     contract_execution_seconds:
         Family<ContractExecutionLabels, Histogram, fn() -> Histogram>,
+    contract_fuel_consumed:
+        Family<ContractExecutionLabels, Histogram, fn() -> Histogram>,
+    contract_fuel_exhausted_total: Family<ContractExecutionLabels, Counter>,
+    contract_memory_peak_bytes:
+        Family<ContractExecutionLabels, Histogram, fn() -> Histogram>,
     tracker_sync_rounds: Family<TrackerSyncRoundLabels, Counter>,
     tracker_sync_updates: Family<TrackerSyncUpdateLabels, Counter>,
     protocol_events: Family<ProtocolEventLabels, Counter>,
@@ -101,6 +106,31 @@ impl CoreMetrics {
                 Histogram::new(vec![
                     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
                     0.5, 1.0, 2.0, 5.0,
+                ])
+            }),
+            contract_fuel_consumed: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    1_000.0,
+                    10_000.0,
+                    100_000.0,
+                    500_000.0,
+                    1_000_000.0,
+                    2_500_000.0,
+                    5_000_000.0,
+                    7_500_000.0,
+                    10_000_000.0,
+                ])
+            }),
+            contract_fuel_exhausted_total: Family::default(),
+            contract_memory_peak_bytes: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    4_096.0,
+                    16_384.0,
+                    65_536.0,
+                    262_144.0,
+                    1_048_576.0,
+                    4_194_304.0,
+                    16_777_216.0,
                 ])
             }),
             tracker_sync_rounds: Family::default(),
@@ -145,6 +175,21 @@ impl CoreMetrics {
             "core_contract_execution_seconds",
             "Contract execution duration labeled by result.",
             self.contract_execution_seconds.clone(),
+        );
+        registry.register(
+            "core_contract_fuel_consumed",
+            "Contract fuel consumed per execution labeled by result.",
+            self.contract_fuel_consumed.clone(),
+        );
+        registry.register(
+            "core_contract_fuel_exhausted",
+            "Total number of contract executions that ran out of fuel.",
+            self.contract_fuel_exhausted_total.clone(),
+        );
+        registry.register(
+            "core_contract_memory_peak_bytes",
+            "Peak WASM linear memory used per contract execution labeled by result.",
+            self.contract_memory_peak_bytes.clone(),
         );
         registry.register(
             "core_tracker_sync_rounds",
@@ -230,6 +275,34 @@ impl CoreMetrics {
         self.contract_execution_seconds
             .get_or_create(&labels)
             .observe(Self::seconds(duration));
+    }
+
+    pub fn observe_contract_fuel_consumed(
+        &self,
+        result: &'static str,
+        fuel: u64,
+    ) {
+        let labels = ContractExecutionLabels { result };
+        self.contract_fuel_consumed
+            .get_or_create(&labels)
+            .observe(fuel as f64);
+    }
+
+    pub fn observe_contract_fuel_exhausted(&self) {
+        self.contract_fuel_exhausted_total
+            .get_or_create(&ContractExecutionLabels { result: "error" })
+            .inc();
+    }
+
+    pub fn observe_contract_memory_peak(
+        &self,
+        result: &'static str,
+        bytes: u64,
+    ) {
+        let labels = ContractExecutionLabels { result };
+        self.contract_memory_peak_bytes
+            .get_or_create(&labels)
+            .observe(bytes as f64);
     }
 
     pub fn observe_tracker_sync_round(&self, result: &'static str) {
@@ -434,6 +507,60 @@ mod tests {
             metric_value(
                 &text,
                 "core_contract_execution_seconds_count{result=\"error\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn core_metrics_expose_contract_fuel_and_memory_series() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        metrics.observe_contract_fuel_consumed("success", 1_000_000);
+        metrics.observe_contract_fuel_consumed("success", 2_500_000);
+        metrics.observe_contract_fuel_consumed("error", 5_000_000);
+        metrics.observe_contract_fuel_exhausted();
+        metrics.observe_contract_fuel_exhausted();
+        metrics.observe_contract_memory_peak("success", 64 * 1024);
+        metrics.observe_contract_memory_peak("error", 128 * 1024);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fuel_consumed_count{result=\"success\"}"
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fuel_consumed_count{result=\"error\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fuel_exhausted_total{result=\"error\"}"
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_memory_peak_bytes_count{result=\"success\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_memory_peak_bytes_count{result=\"error\"}"
             ),
             1.0
         );

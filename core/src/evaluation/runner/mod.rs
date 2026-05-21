@@ -19,7 +19,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{Span, debug, error, info_span};
 use types::{ContractResult, RunnerResult};
-use wasmtime::{Module, Store};
+use wasmtime::{Module, Store, Trap};
 
 use crate::{
     evaluation::runner::{error::RunnerError, types::EvaluateInfo},
@@ -467,29 +467,56 @@ impl Runner {
                 details: e.to_string(),
             })?;
 
-        let result_ptr = contract_entrypoint
-            .call(
-                &mut store,
-                (
-                    state_ptr,
-                    init_state_ptr,
-                    event_ptr,
-                    if is_owner { 1 } else { 0 },
-                ),
-            )
-            .map_err(|e| RunnerError::WasmError {
-                operation: "call entrypoint",
-                details: e.to_string(),
-            })?;
+        let call_result = contract_entrypoint.call(
+            &mut store,
+            (
+                state_ptr,
+                init_state_ptr,
+                event_ptr,
+                if is_owner { 1 } else { 0 },
+            ),
+        );
 
-        let result = Self::get_result(&store, result_ptr)?;
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: result.final_state,
-            },
-            vec![],
-        ))
+        // Collect resource metrics regardless of success or failure.
+        let remaining = store.get_fuel().unwrap_or(0);
+        let fuel_consumed = MAX_FUEL.saturating_sub(remaining);
+        let memory_bytes = instance
+            .get_memory(&mut store, "memory")
+            .map(|m| m.size(&store) * 64 * 1024)
+            .unwrap_or(0);
+
+        match call_result {
+            Ok(result_ptr) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_fuel_consumed("success", fuel_consumed);
+                    metrics.observe_contract_memory_peak("success", memory_bytes);
+                }
+
+                let result = Self::get_result(&store, result_ptr)?;
+                Ok((
+                    RunnerResult {
+                        approval_required: false,
+                        final_state: result.final_state,
+                    },
+                    vec![],
+                ))
+            }
+            Err(e) => {
+                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_contract_fuel_exhausted();
+                    }
+                }
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_fuel_consumed("error", fuel_consumed);
+                    metrics.observe_contract_memory_peak("error", memory_bytes);
+                }
+                Err(RunnerError::WasmError {
+                    operation: "call entrypoint",
+                    details: e.to_string(),
+                })
+            }
+        }
     }
 
     async fn execute_fact_gov(
