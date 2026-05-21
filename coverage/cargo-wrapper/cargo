@@ -1,0 +1,22 @@
+#!/bin/bash
+# Wrapper de cargo para medir coverage con cargo-llvm-cov en workspaces
+# que compilan contratos WASM anidados (ave-core, ave-http).
+#
+# Uso:
+#   PATH="/ruta/a/este/wrapper:$PATH" cargo llvm-cov ...
+#
+# Problema: cargo-llvm-cov inyecta RUSTC_WRAPPER=cargo-llvm-cov, que se
+# propaga a las compilaciones WASM anidadas (contratos temporales) y
+# rompe la compilación porque el target wasm32 no tiene profiler_builtins.
+# Solución: este wrapper detecta compilaciones wasm32 y limpia las
+# variables de entorno de coverage antes de invocar cargo real.
+
+if [[ "$*" == *"wasm32-unknown-unknown"* ]]; then
+    unset RUSTFLAGS
+    unset CARGO_ENCODED_RUSTFLAGS
+    unset CARGO_TARGET_DIR
+    unset LLVM_PROFILE_FILE
+    unset RUSTC_WRAPPER
+fi
+
+exec /home/ale/.cargo/bin/cargo "$@"

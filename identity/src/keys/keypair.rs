@@ -70,10 +70,10 @@ impl KeyPair {
     ///
     /// The algorithm is detected from the OID stored in the DER structure.
     pub fn from_secret_der(der: &[u8]) -> Result<Self, CryptoError> {
-        use pkcs8::{ObjectIdentifier, PrivateKeyInfo};
+        use pkcs8::{ObjectIdentifier, PrivateKeyInfoRef};
 
         // Parse the DER structure
-        let private_key_info = PrivateKeyInfo::try_from(der)
+        let private_key_info = PrivateKeyInfoRef::try_from(der)
             .map_err(|e| CryptoError::InvalidDerFormat(e.to_string()))?;
 
         // Get the algorithm OID
@@ -86,7 +86,7 @@ impl KeyPair {
         // Match OID to algorithm
         if oid == ED25519_OID {
             // Extract the secret key bytes from the OCTET STRING
-            let secret_key = private_key_info.private_key;
+            let secret_key = private_key_info.private_key.as_bytes();
 
             // Ed25519 keys in PKCS#8 are wrapped in an OCTET STRING
             // The first byte should be 0x04 (OCTET STRING tag), followed by length
@@ -252,7 +252,7 @@ impl KeyPair {
 
     /// Exports the secret key as PKCS#8 DER.
     pub fn to_secret_der(&self) -> Result<Vec<u8>, CryptoError> {
-        use pkcs8::{ObjectIdentifier, PrivateKeyInfo, der::Encode};
+        use pkcs8::{ObjectIdentifier, PrivateKeyInfoRef, der::Encode};
 
         const ED25519_OID: ObjectIdentifier =
             ObjectIdentifier::new_unwrap("1.3.101.112");
@@ -265,16 +265,15 @@ impl KeyPair {
         wrapped_key.push(secret_key_bytes.len() as u8); // length
         wrapped_key.extend_from_slice(&secret_key_bytes);
 
+        let octet_key = pkcs8::der::asn1::OctetStringRef::new(&wrapped_key)
+            .map_err(|e| CryptoError::InvalidSecretKey(format!("DER encoding failed: {}", e)))?;
+
         let algorithm_identifier = pkcs8::AlgorithmIdentifierRef {
             oid: ED25519_OID,
             parameters: None,
         };
 
-        let private_key_info = PrivateKeyInfo {
-            algorithm: algorithm_identifier,
-            private_key: &wrapped_key,
-            public_key: None,
-        };
+        let private_key_info = PrivateKeyInfoRef::new(algorithm_identifier, octet_key);
 
         private_key_info.to_der().map_err(|e| {
             CryptoError::InvalidSecretKey(format!("DER encoding failed: {}", e))
@@ -488,24 +487,23 @@ mod tests {
     #[test]
     fn test_keypair_from_der_unsupported_algorithm() {
         // Create a valid DER structure but with an unsupported OID
-        use pkcs8::{ObjectIdentifier, PrivateKeyInfo, der::Encode};
+        use pkcs8::{ObjectIdentifier, PrivateKeyInfoRef, der::Encode};
 
         // Use a different OID (e.g., secp256k1: 1.3.132.0.10)
         let unsupported_oid = ObjectIdentifier::new_unwrap("1.3.132.0.10");
 
-        let fake_key = vec![0x04, 0x20]; // OCTET STRING tag + length
-        let fake_key = [&fake_key[..], &[0u8; 32]].concat();
+        let mut fake_key = Vec::with_capacity(34);
+        fake_key.extend_from_slice(&[0x04, 0x20]); // OCTET STRING tag + length
+        fake_key.extend_from_slice(&[0u8; 32]);
+
+        let octet_key = pkcs8::der::asn1::OctetStringRef::new(&fake_key).unwrap();
 
         let algorithm_identifier = pkcs8::AlgorithmIdentifierRef {
             oid: unsupported_oid,
             parameters: None,
         };
 
-        let private_key_info = PrivateKeyInfo {
-            algorithm: algorithm_identifier,
-            private_key: &fake_key,
-            public_key: None,
-        };
+        let private_key_info = PrivateKeyInfoRef::new(algorithm_identifier, octet_key);
 
         let der_bytes = private_key_info.to_der().unwrap();
 
