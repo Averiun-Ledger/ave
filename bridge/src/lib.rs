@@ -93,6 +93,9 @@ impl Bridge {
         graceful_token: Option<CancellationToken>,
         crash_token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
+        utils::validate_keys_path(&settings.keys_path)
+            .map_err(BridgeError::KeyPathInvalid)?;
+
         let keys = key_pair(settings, password)?;
 
         // Skip bearer token acquisition when using api_key mode

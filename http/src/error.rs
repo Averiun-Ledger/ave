@@ -65,7 +65,8 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
         | BridgeError::KeyRestore(_)
         | BridgeError::KeyGeneration(_)
         | BridgeError::KeyEncrypt(_)
-        | BridgeError::KeyWrite(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        | BridgeError::KeyWrite(_)
+        | BridgeError::KeyPathInvalid(_) => StatusCode::INTERNAL_SERVER_ERROR,
 
         // ── Configuration → 500 ────────────────────────────────
         BridgeError::ConfigBuild(_) | BridgeError::ConfigDeserialize(_) => {

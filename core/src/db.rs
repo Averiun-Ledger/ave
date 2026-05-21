@@ -26,6 +26,20 @@ impl Database {
         config: &AveInternalDBConfig,
         spec: Option<MachineSpec>,
     ) -> Result<Self, StoreError> {
+        // Passive permission check before opening the database
+        #[cfg(feature = "rocksdb")]
+        #[allow(irrefutable_let_patterns)]
+        if let AveInternalDBFeatureConfig::Rocksdb { path } = &config.db {
+            check_dir_writable(path)
+                .map_err(|e| StoreError::CreateStore { reason: e })?;
+        }
+        #[cfg(feature = "sqlite")]
+        #[allow(irrefutable_let_patterns)]
+        if let AveInternalDBFeatureConfig::Sqlite { path } = &config.db {
+            check_dir_writable(path)
+                .map_err(|e| StoreError::CreateStore { reason: e })?;
+        }
+
         match &config.db {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { path } => {
@@ -41,6 +55,52 @@ impl Database {
             }
         }
     }
+}
+
+/// Check that a directory exists and is writable.
+/// If it does not exist, check the nearest existing ancestor.
+fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
+    let target = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!(
+                "'{}' exists but is not a directory",
+                path.display()
+            ));
+        }
+        path
+    } else {
+        let mut ancestor = path;
+        while !ancestor.exists() {
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => {
+                    return Err(format!(
+                        "'{}' does not exist and has no existing parent",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if !ancestor.is_dir() {
+            return Err(format!(
+                "ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            ));
+        }
+        ancestor
+    };
+
+    let test_file = target.join(".ave_write_test");
+    match std::fs::File::create(&test_file) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(e) => {
+            return Err(format!("'{}' is not writable: {e}", target.display()));
+        }
+    }
+
+    Ok(())
 }
 
 impl DbManager<DbCollection, DbCollection> for Database {

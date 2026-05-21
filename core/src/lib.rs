@@ -353,10 +353,6 @@ impl Api {
 
         system.add_helper("network", service.clone()).await;
 
-        let worker_runner = tokio::spawn(async move {
-            let _ = worker.run().await;
-        });
-
         let public_key = Arc::new(keys.public_key());
         let node_actor = system
             .create_root_actor(
@@ -455,6 +451,10 @@ impl Api {
         };
 
         ext_db.register_prometheus_metrics(registry);
+
+        let worker_runner = tokio::spawn(async move {
+            let _ = worker.run().await;
+        });
 
         let tasks = Vec::from([runner, worker_runner]);
 

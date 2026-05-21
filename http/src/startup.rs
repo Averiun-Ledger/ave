@@ -102,6 +102,9 @@ pub enum StartupError {
 
     #[error("HTTP to HTTPS redirect server failed: {0}")]
     RedirectServer(String),
+
+    #[error("directory or permission validation failed: {0}")]
+    DirectoryValidation(String),
 }
 
 struct ResolvedSecret {
@@ -788,7 +791,22 @@ pub async fn run() -> Result<(), StartupError> {
     auth::request_meta::validate_proxy_config(&config.http.proxy)
         .map_err(StartupError::ProxyConfig)?;
 
+    // Validate logging directory before init_logging so we can still
+    // emit the error to stderr if the log directory is not writable.
+    if let Err(e) = crate::directory_validation::validate_logging_path(&config)
+    {
+        eprintln!("ERROR: cannot start logging — log directory is not accessible: {e}");
+        return Err(StartupError::DirectoryValidation(e));
+    }
+
     let _log_handle = logging::init_logging(&config.logging).await;
+
+    // Validate the remaining HTTP-managed paths after logging is ready
+    // so permission errors appear in the application logs.
+    if let Err(e) = crate::directory_validation::validate_http_paths(&config) {
+        error!(target: TARGET, error = %e, "directory validation failed");
+        return Err(StartupError::DirectoryValidation(e));
+    }
     let secrets = StartupSecrets {
         auth_password: resolve_secret(args.auth_password, build_auth_password),
         key_password: resolve_secret(args.key_password, build_key_password),

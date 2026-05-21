@@ -26,6 +26,10 @@ pub enum DatabaseError {
     #[error("failed to create database directory: {0}")]
     DirectoryCreation(String),
 
+    /// Directory or file is not writable.
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     /// SQL query execution failed.
     #[error("query failed: {0}")]
     Query(String),

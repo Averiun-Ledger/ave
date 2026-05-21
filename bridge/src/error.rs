@@ -66,6 +66,10 @@ pub enum BridgeError {
     #[error("Failed to store private key: {0}")]
     KeyWrite(String),
 
+    /// The configured keys path is not accessible or not writable.
+    #[error("Keys path validation failed: {0}")]
+    KeyPathInvalid(String),
+
     // ========================================
     // Configuration Errors
     // ========================================

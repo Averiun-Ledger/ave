@@ -9,6 +9,54 @@ use crate::error::BridgeError;
 
 const PBKDF2_ITERATIONS: u32 = 200_000;
 
+/// Validate that the keys path (or its nearest existing ancestor) is writable.
+pub fn validate_keys_path(path: &std::path::Path) -> Result<(), String> {
+    let target = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!(
+                "'{}' exists but is not a directory",
+                path.display()
+            ));
+        }
+        path
+    } else {
+        let mut ancestor = path;
+        while !ancestor.exists() {
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => {
+                    return Err(format!(
+                        "'{}' does not exist and has no existing parent",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if !ancestor.is_dir() {
+            return Err(format!(
+                "ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            ));
+        }
+        ancestor
+    };
+
+    let test_file = target.join(".ave_write_test");
+    match std::fs::File::create(&test_file) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(e) => {
+            return Err(format!(
+                "'{}' is not writable: {e}",
+                target.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn key_pair(
     config: &Config,
     password: &str,
