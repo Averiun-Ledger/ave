@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
+use auth::{AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor};
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
@@ -66,6 +66,7 @@ use crate::helpers::db::{
     DatabaseError as ExternalDatabaseError, ExternalDB, ReadStore,
 };
 use crate::model::common::node::SignTypesNode;
+
 use crate::node::InitParamsNode;
 use crate::node::subject_manager::{
     SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
@@ -98,7 +99,7 @@ pub struct Api {
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
     subject_manager: ActorRef<SubjectManager>,
-    auth: ActorRef<Auth>,
+    subject_access: ActorRef<SubjectAccess>,
     monitor: ActorRef<Monitor>,
     manual_dis: Option<ActorRef<ManualDistribution>>,
     tracking: Option<ActorRef<RequestTracking>>,
@@ -245,17 +246,18 @@ impl Api {
             Err(err) => cleanup_errors.push(format!("request: {err}")),
         }
 
+        // Clear all subject access state for this subject
         match self
-            .auth
-            .ask(AuthMessage::DeleteAuth {
+            .subject_access
+            .ask(SubjectAccessMessage::ClearSubject {
                 subject_id: subject_id.clone(),
             })
             .await
         {
-            Ok(AuthResponse::None) => {}
+            Ok(SubjectAccessResponse::None) => {}
             Ok(other) => cleanup_errors
-                .push(format!("auth: unexpected response {other:?}")),
-            Err(err) => cleanup_errors.push(format!("auth: {err}")),
+                .push(format!("subject_access clear: unexpected response {other:?}")),
+            Err(err) => cleanup_errors.push(format!("subject_access clear: {err}")),
         }
 
         if let Err(err) = self.db.delete_subject(&subject_id.to_string()).await
@@ -394,11 +396,11 @@ impl Api {
             )
         };
 
-        let auth_actor: ActorRef<Auth> = system
+        let subject_access_actor: ActorRef<SubjectAccess> = system
             .get_actor(&ActorPath::from("/user/node/auth"))
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to get auth actor");
+                error!(error = %e, "Failed to get subject_access actor");
                 e
             })?;
 
@@ -466,7 +468,7 @@ impl Api {
                 deleting_subject: Arc::new(tokio::sync::Mutex::new(None)),
                 db: ext_db,
                 request: request_actor,
-                auth: auth_actor,
+                subject_access: subject_access_actor,
                 node: node_actor,
                 subject_manager: subject_manager_actor,
                 monitor: newtork_monitor_actor,
@@ -854,23 +856,23 @@ impl Api {
         Ok(pending)
     }
 
-    ///////// Auth
+    ///////// Subject Access
     ////////////////////////////
 
-    pub async fn auth_subject(
+    pub async fn authorize_governance(
         &self,
         subject_id: DigestIdentifier,
         witnesses: AuthWitness,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
-        self.auth
-            .tell(AuthMessage::NewAuth {
+        self.subject_access
+            .tell(SubjectAccessMessage::AuthorizeGov {
                 subject_id,
-                witness: witnesses,
+                witnesses,
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Authentication operation failed");
+                warn!(error = %e, "Authorize governance operation failed");
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -879,72 +881,249 @@ impl Api {
         Ok("Ok".to_owned())
     }
 
-    pub async fn all_auth_subjects(
-        &self,
-    ) -> Result<Vec<DigestIdentifier>, Error> {
-        let response =
-            self.auth.ask(AuthMessage::GetAuths).await.map_err(|e| {
-                error!(error = %e, "Failed to get auth subjects");
-                actor_communication_error("auth", e)
-            })?;
-
-        match response {
-            AuthResponse::Auths { subjects } => Ok(subjects),
-            _ => {
-                warn!("Unexpected response from auth");
-                Err(Error::UnexpectedResponse {
-                    actor: "auth".to_string(),
-                    expected: "Auths".to_string(),
-                    received: "other".to_string(),
-                })
-            }
-        }
-    }
-
-    pub async fn witnesses_subject(
-        &self,
-        subject_id: DigestIdentifier,
-    ) -> Result<HashSet<PublicKey>, Error> {
-        let response = self
-            .auth
-            .ask(AuthMessage::GetAuth {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get witnesses for subject");
-                actor_communication_error("auth", e)
-            })?;
-
-        match response {
-            AuthResponse::Witnesses(witnesses) => Ok(witnesses),
-            _ => {
-                warn!("Unexpected response from auth");
-                Err(Error::UnexpectedResponse {
-                    actor: "auth".to_string(),
-                    expected: "Witnesses".to_string(),
-                    received: "other".to_string(),
-                })
-            }
-        }
-    }
-
-    pub async fn delete_auth_subject(
+    pub async fn disauthorize_governance(
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
-        self.auth
-            .tell(AuthMessage::DeleteAuth { subject_id })
+        self.subject_access
+            .tell(SubjectAccessMessage::DisauthorizeGov { subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to delete auth subject");
+                warn!(error = %e, "Disauthorize governance operation failed");
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
             })?;
 
         Ok("Ok".to_owned())
+    }
+
+    pub async fn authorized_governances(
+        &self,
+    ) -> Result<Vec<DigestIdentifier>, Error> {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::GetAuthorizedGovs)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get authorized governances");
+                actor_communication_error("subject_access", e)
+            })?;
+
+        match response {
+            SubjectAccessResponse::Subjects(subjects) => Ok(subjects),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "Subjects".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn is_governance_authorized(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::IsGovAuthorized { subject_id })
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to check governance authorization");
+                actor_communication_error("subject_access", e)
+            })?;
+
+        match response {
+            SubjectAccessResponse::Bool(v) => Ok(v),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "Bool".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn ban_tracker(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
+        self.subject_access
+            .tell(SubjectAccessMessage::BanTracker { subject_id })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Ban tracker operation failed");
+                preserve_functional_actor_error(e, |e| {
+                    Error::AuthOperation(e.to_string())
+                })
+            })?;
+
+        Ok("Ok".to_owned())
+    }
+
+    pub async fn unban_tracker(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
+        self.subject_access
+            .tell(SubjectAccessMessage::UnbanTracker { subject_id })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Unban tracker operation failed");
+                preserve_functional_actor_error(e, |e| {
+                    Error::AuthOperation(e.to_string())
+                })
+            })?;
+
+        Ok("Ok".to_owned())
+    }
+
+    pub async fn banned_trackers(
+        &self,
+    ) -> Result<Vec<DigestIdentifier>, Error> {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::GetBannedTrackers)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get banned trackers");
+                actor_communication_error("subject_access", e)
+            })?;
+
+        match response {
+            SubjectAccessResponse::Subjects(subjects) => Ok(subjects),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "Subjects".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn is_tracker_banned(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::IsTrackerBanned { subject_id })
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to check tracker ban status");
+                actor_communication_error("subject_access", e)
+            })?;
+
+        match response {
+            SubjectAccessResponse::Bool(v) => Ok(v),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "Bool".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn add_sync_peer(
+        &self,
+        subject_id: DigestIdentifier,
+        peers: Vec<PublicKey>,
+    ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
+        self.subject_access
+            .tell(SubjectAccessMessage::AddSyncPeers { subject_id, peers })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Add sync peer operation failed");
+                preserve_functional_actor_error(e, |e| {
+                    Error::AuthOperation(e.to_string())
+                })
+            })?;
+
+        Ok("Ok".to_owned())
+    }
+
+    pub async fn remove_sync_peer(
+        &self,
+        subject_id: DigestIdentifier,
+        peers: Vec<PublicKey>,
+    ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
+        self.subject_access
+            .tell(SubjectAccessMessage::RemoveSyncPeers { subject_id, peers })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Remove sync peer operation failed");
+                preserve_functional_actor_error(e, |e| {
+                    Error::AuthOperation(e.to_string())
+                })
+            })?;
+
+        Ok("Ok".to_owned())
+    }
+
+    pub async fn sync_peers(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<HashSet<PublicKey>, Error> {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::GetSyncPeers { subject_id })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get sync peers");
+                actor_communication_error("subject_access", e)
+            })?;
+
+        match response {
+            SubjectAccessResponse::Peers(peers) => Ok(peers),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "Peers".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn subjects_with_sync_peers(
+        &self,
+    ) -> Result<Vec<DigestIdentifier>, Error> {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::GetSubjectsWithSyncPeers)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get subjects with sync peers");
+                actor_communication_error("subject_access", e)
+            })?;
+
+        match response {
+            SubjectAccessResponse::Subjects(subjects) => Ok(subjects),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "Subjects".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
     }
 
     pub async fn update_subject(
@@ -961,8 +1140,8 @@ impl Api {
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         let response = self
-            .auth
-            .ask(AuthMessage::Update {
+            .subject_access
+            .ask(SubjectAccessMessage::Update {
                 subject_id: subject_id.clone(),
                 objective: None,
                 strict,
@@ -976,11 +1155,11 @@ impl Api {
             })?;
 
         match response {
-            AuthResponse::None => Ok("Update in progress".to_owned()),
+            SubjectAccessResponse::None => Ok("Update in progress".to_owned()),
             _ => {
-                warn!("Unexpected response from auth");
+                warn!("Unexpected response from subject_access");
                 Err(Error::UnexpectedResponse {
-                    actor: "auth".to_string(),
+                    actor: "subject_access".to_string(),
                     expected: "None".to_string(),
                     received: "other".to_string(),
                 })

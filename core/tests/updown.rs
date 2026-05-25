@@ -288,7 +288,7 @@ async fn gov_life() {
     node_running(&bootstrap).await.unwrap();
 
     owner
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&bootstrap.public_key()).unwrap(),

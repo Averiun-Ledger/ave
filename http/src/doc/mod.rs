@@ -36,9 +36,7 @@ use crate::{
         UpdateSyncConfigHttp,
     },
 };
-use ave_bridge::MonitorNetworkState;
 use ave_bridge::ave_common::{
-    Namespace, SchemaType,
     bridge::{
         request::{
             AbortsQuery, ApprovalQuery, ApprovalState, ApprovalStateRes,
@@ -57,7 +55,9 @@ use ave_bridge::ave_common::{
         RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SubjectDB,
         SubjsData, TimeRange, TransferSubject,
     },
+    Namespace, SchemaType,
 };
+use ave_bridge::MonitorNetworkState;
 
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{Modify, OpenApi};
@@ -125,11 +125,19 @@ impl Modify for SecurityAddon {
         // ── Transfer ────────────────────────────────────────────
         server::get_pending_transfers,
 
-        // ── Authorization ───────────────────────────────────────
-        server::put_auth_subject,
-        server::get_all_auth_subjects,
-        server::get_witnesses_subject,
-        server::delete_auth_subject,
+        // ── SubjectAccess ──────────────────────────────────────
+        server::authorize_governance,
+        server::disauthorize_governance,
+        server::authorized_governances,
+        server::is_governance_authorized,
+        server::ban_tracker,
+        server::unban_tracker,
+        server::banned_trackers,
+        server::is_tracker_banned,
+        server::get_sync_peers,
+        server::add_sync_peer,
+        server::remove_sync_peer,
+        server::subjects_with_sync_peers,
         server::post_update_subject,
 
         // ── Distribution ────────────────────────────────────────
@@ -361,7 +369,7 @@ impl Modify for SecurityAddon {
         (name = "Approval", description = "Manage approval workflows for governance events."),
         (name = "Tracking", description = "Track the lifecycle state of submitted requests."),
         (name = "Transfer", description = "Manage subject ownership transfers between parties."),
-        (name = "Authorization", description = "Configure witness authorization rules for subjects."),
+        (name = "SubjectAccess", description = "Governance allowlisting, tracker banning, and sync peer management."),
         (name = "Distribution", description = "Trigger manual event distribution to network peers."),
         (name = "Register", description = "Query governances and subjects in the ledger registry."),
         (name = "Ledger", description = "Query event history, aborts, and subject state from the ledger."),

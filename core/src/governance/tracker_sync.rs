@@ -14,7 +14,7 @@ use ave_network::ComunicateInfo;
 use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
-use crate::auth::{Auth, AuthMessage, AuthResponse};
+use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::governance::witnesses_register::{
     CurrentWitnessSubject, WitnessesRegister, WitnessesRegisterMessage,
     WitnessesRegisterResponse,
@@ -267,21 +267,21 @@ impl TrackerSync {
         })
     }
 
-    async fn get_auth_peers(
+    async fn get_sync_peers(
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<HashSet<PublicKey>, ActorError> {
-        let auth_path = ActorPath::from("/user/node/auth");
-        let auth = ctx.system().get_actor::<Auth>(&auth_path).await?;
-        match auth
-            .ask(AuthMessage::GetAuth {
+        let access_path = ActorPath::from("/user/node/auth");
+        let access = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
+        match access
+            .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: self.governance_id.clone(),
             })
             .await
         {
-            Ok(AuthResponse::Witnesses(mut witnesses)) => {
-                witnesses.remove(&*self.our_key);
-                Ok(witnesses)
+            Ok(SubjectAccessResponse::Peers(mut peers)) => {
+                peers.remove(&*self.our_key);
+                Ok(peers)
             }
             Ok(_) => Ok(HashSet::new()),
             Err(ActorError::Functional { .. }) => Ok(HashSet::new()),
@@ -293,8 +293,12 @@ impl TrackerSync {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<Option<PublicKey>, ActorError> {
-        let mut peers = self.get_governance_peers(ctx).await?;
-        peers.extend(self.get_auth_peers(ctx).await?);
+        let (gov_peers, sync_peers) = tokio::try_join!(
+            self.get_governance_peers(ctx),
+            self.get_sync_peers(ctx)
+        )?;
+        let mut peers = gov_peers;
+        peers.extend(sync_peers);
         peers.remove(&*self.our_key);
 
         let mut rng = rand::rng();
@@ -402,9 +406,32 @@ impl TrackerSync {
         ctx: &mut ActorContext<Self>,
         items: Vec<CurrentWitnessSubject>,
     ) -> Result<VecDeque<CurrentWitnessSubject>, ActorError> {
+        let banned_set: HashSet<DigestIdentifier> = {
+            let access_path = ActorPath::from("/user/node/auth");
+            let access = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
+            match access
+                .ask(SubjectAccessMessage::GetBannedTrackers)
+                .await
+            {
+                Ok(SubjectAccessResponse::Subjects(list)) => {
+                    list.into_iter().collect()
+                }
+                _ => HashSet::new(),
+            }
+        };
+
         let mut pending_items = VecDeque::new();
 
         for item in items {
+            if banned_set.contains(&item.subject_id) {
+                debug!(
+                    governance_id = %self.governance_id,
+                    subject_id = %item.subject_id,
+                    "Skipping banned tracker in sync"
+                );
+                continue;
+            }
+
             let local_sn =
                 self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             if local_sn.is_none_or(|local_sn| local_sn < item.target_sn) {

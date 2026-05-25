@@ -144,7 +144,7 @@ async fn test_update_protocol() {
         .unwrap();
 
     node2
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
         )
@@ -158,7 +158,7 @@ async fn test_update_protocol() {
         .unwrap();
 
     node3
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
         )
@@ -295,7 +295,7 @@ async fn test_approve_invalid_gov_version() {
     .unwrap();
 
     node1
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node2.public_key()).unwrap()),
         )
@@ -309,7 +309,7 @@ async fn test_approve_invalid_gov_version() {
         .unwrap();
 
     node3
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node2.public_key()).unwrap()),
         )
@@ -405,7 +405,7 @@ async fn test_approve_invalid_gov_version() {
     );
 
     new_node2
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
         )
@@ -465,7 +465,7 @@ async fn test_approve_invalid_gov_version() {
     );
 
     new_node2
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node3.public_key()).unwrap()),
         )
@@ -1375,7 +1375,7 @@ async fn test_transfer_event_governance_2() {
 
     // Auth governance in old owner, in future he will be a normal member and need auth governance for receive a ledger copy.
     owner_governance
-        .auth_subject(governance_id.clone(), AuthWitness::None)
+        .authorize_governance(governance_id.clone(), AuthWitness::None)
         .await
         .unwrap();
     // add member to governance
@@ -3923,7 +3923,7 @@ async fn test_sink_replay_and_external_db_battery() {
         .unwrap();
 
     owner
-        .auth_subject(governance_id.clone(), AuthWitness::One(bob_pk.clone()))
+        .authorize_governance(governance_id.clone(), AuthWitness::One(bob_pk.clone()))
         .await
         .unwrap();
     owner.update_subject(governance_id.clone()).await.unwrap();
@@ -4328,7 +4328,7 @@ async fn test_build_batch_gov() {
 
     // Witness se autoriza con owner como fuente
     witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -4397,7 +4397,7 @@ async fn test_update_offer_gov() {
 
     // Witness se autoriza y obtiene SN=1
     witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )

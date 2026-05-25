@@ -54,7 +54,7 @@ use crate::validation::worker::CurrentRequestRoles;
 use crate::{
     ActorMessage, NetworkMessage, Validation, ValidationMessage,
     approval::{Approval, ApprovalMessage},
-    auth::{Auth, AuthMessage, AuthResponse},
+    auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
     db::Storable,
     evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
     model::common::emit_fail,
@@ -1396,7 +1396,7 @@ impl RequestManager {
                 get_witnesses(ctx, governance_id, WitnessesData::Gov).await?;
 
             let auth_witnesses =
-                Self::get_witnesses_auth(ctx, governance_id.clone())
+                Self::get_sync_peers(ctx, governance_id.clone())
                     .await
                     .unwrap_or_default();
 
@@ -1515,25 +1515,25 @@ impl RequestManager {
         Ok(())
     }
 
-    async fn get_witnesses_auth(
+    async fn get_sync_peers(
         ctx: &ActorContext<Self>,
         governance_id: DigestIdentifier,
     ) -> Result<HashSet<PublicKey>, RequestManagerError> {
         let path = ActorPath::from("/user/node/auth");
-        let actor = ctx.system().get_actor::<Auth>(&path).await?;
+        let actor = ctx.system().get_actor::<SubjectAccess>(&path).await?;
 
         let response = actor
-            .ask(AuthMessage::GetAuth {
+            .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: governance_id,
             })
             .await?;
 
         match response {
-            AuthResponse::Witnesses(witnesses) => Ok(witnesses),
+            SubjectAccessResponse::Peers(peers) => Ok(peers),
             _ => Err(RequestManagerError::ActorError(
                 ActorError::UnexpectedResponse {
                     path,
-                    expected: "AuthResponse::Witnesses".to_owned(),
+                    expected: "SubjectAccessResponse::Peers".to_owned(),
                 },
             )),
         }

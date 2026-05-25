@@ -13,7 +13,7 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{Auth, AuthInitParams, AuthMessage, AuthResponse},
+    auth::{SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage, SubjectAccessResponse},
     db::Storable,
     distribution::worker::DistriWorker,
     governance::{
@@ -755,7 +755,7 @@ pub enum NodeMessage {
     DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
-    AuthData(DigestIdentifier),
+    SubjectAccessData(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
@@ -791,8 +791,9 @@ pub enum NodeResponse {
         i_owner: bool,
         i_new_owner: Option<bool>,
     },
-    AuthData {
-        auth: bool,
+    SubjectAccessData {
+        is_gov_authorized: bool,
+        is_tracker_banned: bool,
         subject_data: Option<SubjectData>,
     },
     Ok,
@@ -962,7 +963,7 @@ impl Actor for Node {
         if let Err(e) = ctx
             .create_child(
                 "auth",
-                Auth::initial(AuthInitParams {
+                SubjectAccess::initial(SubjectAccessInitParams {
                     network: network.clone(),
                     our_key: self.our_key.clone(),
                     round_retry_interval_secs: config
@@ -979,7 +980,7 @@ impl Actor for Node {
         {
             error!(
                 error = %e,
-                "Failed to create auth child"
+                "Failed to create subject_access child"
             );
             return Err(e);
         }
@@ -1318,53 +1319,57 @@ impl Handler<Self> for Node {
                     i_new_owner,
                 })
             }
-            NodeMessage::AuthData(subject_id) => {
-                let authorized_subjects = match ctx
-                    .get_child::<Auth>("auth")
+            NodeMessage::SubjectAccessData(subject_id) => {
+                let access = match ctx
+                    .get_child::<SubjectAccess>("auth")
                     .await
                 {
-                    Ok(auth) => {
-                        let res = match auth.ask(AuthMessage::GetAuths).await {
-                            Ok(res) => res,
-                            Err(e) => {
-                                error!(
-                                    msg_type = "AuthData",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to get authorizations from auth actor"
-                                );
-                                ctx.system().crash_system();
-                                return Err(e);
-                            }
-                        };
-                        let AuthResponse::Auths { subjects } = res else {
-                            error!(
-                                msg_type = "AuthData",
-                                subject_id = %subject_id,
-                                "Unexpected response from auth actor"
-                            );
-                            ctx.system().crash_system();
-                            return Err(ActorError::UnexpectedResponse {
-                                expected: "AuthResponse::Auths".to_owned(),
-                                path: ctx.path().clone() / "auth",
-                            });
-                        };
-                        subjects
-                    }
+                    Ok(access) => access,
                     Err(e) => {
                         error!(
-                            msg_type = "AuthData",
+                            msg_type = "SubjectAccessData",
                             subject_id = %subject_id,
                             error = %e,
-                            "Auth actor not found"
+                            "SubjectAccess actor not found"
                         );
                         ctx.system().crash_system();
                         return Err(e);
                     }
                 };
 
-                let auth_subj =
-                    authorized_subjects.iter().any(|x| x.clone() == subject_id);
+                let (is_gov_authorized, is_tracker_banned) = match access
+                    .ask(SubjectAccessMessage::GetAccessInfo {
+                        subject_id: subject_id.clone(),
+                    })
+                    .await
+                {
+                    Ok(SubjectAccessResponse::AccessInfo { is_gov_authorized, is_tracker_banned }) => {
+                        (is_gov_authorized, is_tracker_banned)
+                    }
+                    Ok(other) => {
+                        error!(
+                            msg_type = "SubjectAccessData",
+                            subject_id = %subject_id,
+                            ?other,
+                            "Unexpected response from subject_access actor for GetAccessInfo"
+                        );
+                        ctx.system().crash_system();
+                        return Err(ActorError::UnexpectedResponse {
+                            expected: "SubjectAccessResponse::AccessInfo".to_owned(),
+                            path: ctx.path().clone() / "auth",
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "SubjectAccessData",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to get access info from subject_access actor"
+                        );
+                        ctx.system().crash_system();
+                        return Err(e);
+                    }
+                };
 
                 let subj_data = self
                     .known_subjects
@@ -1373,15 +1378,17 @@ impl Handler<Self> for Node {
                     .cloned();
 
                 debug!(
-                    msg_type = "AuthData",
+                    msg_type = "SubjectAccessData",
                     subject_id = %subject_id,
-                    authorized = auth_subj,
+                    is_gov_authorized = is_gov_authorized,
+                    is_tracker_banned = is_tracker_banned,
                     subject_data = ?subj_data,
-                    "Checked subject authorization status"
+                    "Checked subject access status"
                 );
 
-                Ok(NodeResponse::AuthData {
-                    auth: auth_subj,
+                Ok(NodeResponse::SubjectAccessData {
+                    is_gov_authorized,
+                    is_tracker_banned,
                     subject_data: subj_data,
                 })
             }

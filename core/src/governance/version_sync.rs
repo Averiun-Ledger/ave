@@ -11,7 +11,7 @@ use ave_common::identity::{DigestIdentifier, PublicKey};
 use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
-use crate::auth::{Auth, AuthMessage, AuthResponse};
+use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
 };
@@ -167,21 +167,21 @@ impl GovernanceVersionSync {
             .await
     }
 
-    async fn get_auth_peers(
+    async fn get_sync_peers(
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<HashSet<PublicKey>, ActorError> {
-        let auth_path = ActorPath::from("/user/node/auth");
-        let auth = ctx.system().get_actor::<Auth>(&auth_path).await?;
-        match auth
-            .ask(AuthMessage::GetAuth {
+        let access_path = ActorPath::from("/user/node/auth");
+        let access = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
+        match access
+            .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: self.governance_id.clone(),
             })
             .await
         {
-            Ok(AuthResponse::Witnesses(mut witnesses)) => {
-                witnesses.remove(&*self.our_key);
-                Ok(witnesses)
+            Ok(SubjectAccessResponse::Peers(mut peers)) => {
+                peers.remove(&*self.our_key);
+                Ok(peers)
             }
             Ok(_) => Ok(HashSet::new()),
             Err(ActorError::Functional { .. }) => Ok(HashSet::new()),
@@ -189,9 +189,9 @@ impl GovernanceVersionSync {
         }
     }
 
-    fn select_peers(&self, auth_peers: HashSet<PublicKey>) -> Vec<PublicKey> {
+    fn select_peers(&self, sync_peers: HashSet<PublicKey>) -> Vec<PublicKey> {
         let mut peers = self.governance_peers.clone();
-        peers.extend(auth_peers);
+        peers.extend(sync_peers);
         peers.remove(&*self.our_key);
 
         if peers.is_empty() {
@@ -234,8 +234,8 @@ impl GovernanceVersionSync {
             return Ok(());
         }
 
-        let auth_peers = self.get_auth_peers(ctx).await?;
-        let peers = self.select_peers(auth_peers);
+        let sync_peers = self.get_sync_peers(ctx).await?;
+        let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
             self.schedule_tick(ctx).await?;

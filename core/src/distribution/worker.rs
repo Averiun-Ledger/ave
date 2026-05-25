@@ -281,20 +281,19 @@ impl DistriWorker {
         &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
-    ) -> Result<(bool, Option<SubjectData>), ActorError> {
+    ) -> Result<(bool, bool, Option<SubjectData>), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
 
         let response = node_actor
-            .ask(NodeMessage::AuthData(subject_id.to_owned()))
+            .ask(NodeMessage::SubjectAccessData(subject_id.to_owned()))
             .await?;
         match response {
-            NodeResponse::AuthData { auth, subject_data } => {
-
-                Ok((auth, subject_data))
+            NodeResponse::SubjectAccessData { is_gov_authorized, is_tracker_banned, subject_data } => {
+                Ok((is_gov_authorized, is_tracker_banned, subject_data))
             }
             _ => Err(ActorError::UnexpectedResponse {
-                expected: "NodeResponse::AuthData".to_owned(),
+                expected: "NodeResponse::SubjectAccessData".to_owned(),
                 path: node_path,
             }),
         }
@@ -310,8 +309,12 @@ impl DistriWorker {
         let first_ledger =
             ledger.first().ok_or(DistributorError::EmptyEvents)?;
         let subject_id = first_ledger.get_subject_id();
-        let (auth, subject_data) =
+        let (is_gov_authorized, is_tracker_banned, subject_data) =
             self.authorized_subj(ctx, &subject_id).await?;
+
+        if is_tracker_banned {
+            return Err(DistributorError::TrackerBanned.into());
+        }
 
         let (schema_id, governance_id, namespace) = if let Some(ref data) =
             subject_data
@@ -366,7 +369,7 @@ impl DistriWorker {
 
         let is_gov = schema_id.is_gov();
         if is_gov {
-            if !auth {
+            if !is_gov_authorized {
                 return Err(DistributorError::GovernanceNotAuthorized.into());
             }
             return Ok(CheckAuthCommon {

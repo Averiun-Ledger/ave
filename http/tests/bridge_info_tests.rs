@@ -529,13 +529,13 @@ async fn test_approval_deserialization() {
     assert_eq!(approvals[0].request.subject_id, request_data.subject_id);
 }
 
-// --- Authorization Endpoints ---
+// --- SubjectAccess Endpoints ---
 #[test(tokio::test)]
-async fn test_auth_endpoints_deserialization() {
-    // GET /auth -> Vec<String>
-    // PUT /auth/{subject_id} + Json<Vec<String>> -> String
-    // GET /auth/{subject_id} -> HashSet<String>
-    // DELETE /auth/{subject_id} -> String
+async fn test_subject_access_endpoints_deserialization() {
+    // GET /governances/authorized -> Vec<String>
+    // PUT /governances/{subject_id}/authorize + Json<Vec<String>> -> String
+    // GET /subjects/{subject_id}/sync-peers -> HashSet<String>
+    // DELETE /governances/{subject_id}/authorize -> String
 
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
@@ -545,7 +545,7 @@ async fn test_auth_endpoints_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/auth/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGY"),
+        &server.url("/governances/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGY/authorize"),
         "PUT",
         None,
         Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
@@ -555,7 +555,7 @@ async fn test_auth_endpoints_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/auth/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA"),
+        &server.url("/governances/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA/authorize"),
         "PUT",
         None,
         Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
@@ -564,7 +564,7 @@ async fn test_auth_endpoints_deserialization() {
     assert!(status.is_success());
 
     let (status, body) =
-        make_request(&client, &server.url("/auth"), "GET", None, None).await;
+        make_request(&client, &server.url("/governances/authorized"), "GET", None, None).await;
     assert!(status.is_success());
 
     let subjects: Vec<String> = serde_json::from_value(body).unwrap();
@@ -578,7 +578,7 @@ async fn test_auth_endpoints_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/auth/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA"),
+        &server.url("/subjects/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA/sync-peers"),
         "GET",
         None,
         None,
@@ -596,7 +596,7 @@ async fn test_auth_endpoints_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/auth/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA"),
+        &server.url("/governances/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA/authorize"),
         "DELETE",
         None,
         None,
@@ -605,7 +605,7 @@ async fn test_auth_endpoints_deserialization() {
     assert!(status.is_success());
 
     let (status, body) =
-        make_request(&client, &server.url("/auth"), "GET", None, None).await;
+        make_request(&client, &server.url("/governances/authorized"), "GET", None, None).await;
     assert!(status.is_success());
 
     let subjects: Vec<String> = serde_json::from_value(body).unwrap();
@@ -633,7 +633,7 @@ async fn test_update_and_transfer_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url(&format!("/auth/{}", request_data.subject_id)),
+        &server.url(&format!("/governances/{}/authorize", request_data.subject_id)),
         "PUT",
         None,
         Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
@@ -1189,7 +1189,7 @@ async fn test_subject_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server2.url(&format!("/auth/{}", governance_id)),
+        &server2.url(&format!("/governances/{}/authorize", governance_id)),
         "PUT",
         None,
         Some(json!([public_key_1])),
@@ -1199,7 +1199,7 @@ async fn test_subject_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server1.url(&format!("/auth/{}", governance_id)),
+        &server1.url(&format!("/governances/{}/authorize", governance_id)),
         "PUT",
         None,
         Some(json!([public_key_2])),
@@ -1703,7 +1703,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/auth/{}", governance_id)),
+        &server2.url(&format!("/governances/{}/authorize", governance_id)),
         "PUT",
         None,
         Some(json!([public_key_1])),
@@ -1713,7 +1713,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/auth/{}", governance_id)),
+        &server1.url(&format!("/governances/{}/authorize", governance_id)),
         "PUT",
         None,
         Some(json!([public_key_2.clone()])),

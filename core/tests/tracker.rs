@@ -293,7 +293,7 @@ async fn manual_distribution() {
     );
 
     new_other_witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -1586,7 +1586,7 @@ async fn test_subject_transfer_event_1() {
 
     // autorizar para recibir copias del nuevo sujeto
     future_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -1838,7 +1838,7 @@ async fn test_subject_transfer_event_2() {
 
     // autorizar para recibir copias del nuevo sujeto
     future_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -1908,7 +1908,7 @@ async fn test_subject_transfer_event_2() {
     );
 
     old_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -2186,7 +2186,7 @@ async fn test_subject_transfer_event_3() {
 
     // autorizar para recibir copias del nuevo sujeto
     future_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -2315,7 +2315,7 @@ async fn test_subject_transfer_event_3() {
         .unwrap();
 
     old_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -2571,7 +2571,7 @@ async fn test_dynamic_witnesses_1() {
     }});
 
     witness
-        .auth_subject(governance_id.clone(), AuthWitness::None)
+        .authorize_governance(governance_id.clone(), AuthWitness::None)
         .await
         .unwrap();
 
@@ -2819,7 +2819,7 @@ async fn test_dynamic_witnesses_2() {
     }});
 
     new_witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness.public_key()).unwrap(),
@@ -2829,7 +2829,7 @@ async fn test_dynamic_witnesses_2() {
         .unwrap();
 
     new_witness
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness.public_key()).unwrap(),
@@ -3110,7 +3110,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         .unwrap();
 
     owner_governance
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&creator.public_key()).unwrap(),
@@ -5421,7 +5421,7 @@ async fn test_emisor_actual_sn_bigger_than_witness_tracker() {
 
     // W authenticates with owner for the subject
     restarted_api
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(owner_pk),
         )
@@ -5576,7 +5576,7 @@ async fn test_emisor_actual_sn_bigger_than_witness_gov() {
 
     // W authenticates with owner for the governance
     witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(owner_pk),
         )
@@ -5734,7 +5734,7 @@ async fn test_emisor_sender_no_access() {
     // W se autentica con owner para el subject
     let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
     witness_spain
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(owner_pk),
         )

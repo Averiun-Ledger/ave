@@ -8,6 +8,9 @@ pub enum DistributorError {
     #[error("governance is not authorized")]
     GovernanceNotAuthorized,
 
+    #[error("tracker is banned")]
+    TrackerBanned,
+
     #[error("we are not witness for this subject")]
     NotWitness,
 
@@ -87,7 +90,8 @@ impl From<DistributorError> for ActorError {
             | DistributorError::MissingCreateEventInCreateLedger { .. }
             | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. }
-            | DistributorError::TransferEventInvalid { .. } => {
+            | DistributorError::TransferEventInvalid { .. }
+            | DistributorError::TrackerBanned => {
                 Self::Functional {
                     description: error.to_string(),
                 }

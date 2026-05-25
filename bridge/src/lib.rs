@@ -328,18 +328,20 @@ impl Bridge {
             .collect())
     }
 
-    ///////// Auth
+    ///////// SubjectAccess
     ////////////////////////////
-    pub async fn put_auth_subject(
+    pub async fn authorize_governance(
         &self,
         subject_id: String,
         witnesses: Vec<String>,
     ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
         let mut witnesses_key = vec![];
-
         for witness in witnesses {
             witnesses_key.push(
                 PublicKey::from_str(&witness).map_err(|e| {
@@ -356,37 +358,157 @@ impl Bridge {
             AuthWitness::Many(witnesses_key)
         };
 
-        Ok(self.api.auth_subject(subject_id, auh_witness).await?)
+        Ok(self.api.authorize_governance(subject_id, auh_witness).await?)
     }
 
-    pub async fn get_all_auth_subjects(
-        &self,
-    ) -> Result<Vec<String>, BridgeError> {
-        let res = self.api.all_auth_subjects().await?;
-
-        Ok(res.iter().map(|x| x.to_string()).collect())
-    }
-
-    pub async fn get_witnesses_subject(
-        &self,
-        subject_id: String,
-    ) -> Result<HashSet<String>, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
-
-        let res = self.api.witnesses_subject(subject_id).await?;
-
-        Ok(res.iter().map(|x| x.to_string()).collect())
-    }
-
-    pub async fn delete_auth_subject(
+    pub async fn disauthorize_governance(
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(self.api.delete_auth_subject(subject_id).await?)
+        Ok(self.api.disauthorize_governance(subject_id).await?)
+    }
+
+    pub async fn authorized_governances(
+        &self,
+    ) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.authorized_governances().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
+    }
+
+    pub async fn is_governance_authorized(
+        &self,
+        subject_id: String,
+    ) -> Result<bool, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.is_governance_authorized(subject_id).await?)
+    }
+
+    pub async fn ban_tracker(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.ban_tracker(subject_id).await?)
+    }
+
+    pub async fn unban_tracker(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.unban_tracker(subject_id).await?)
+    }
+
+    pub async fn is_tracker_banned(
+        &self,
+        subject_id: String,
+    ) -> Result<bool, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.is_tracker_banned(subject_id).await?)
+    }
+
+    pub async fn banned_trackers(&self) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.banned_trackers().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
+    }
+
+    pub async fn add_sync_peer(
+        &self,
+        subject_id: String,
+        peers: Vec<String>,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        if peers.is_empty() {
+            return Err(BridgeError::InvalidPublicKey("empty peers list".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let mut peers_key = vec![];
+        for peer in peers {
+            peers_key.push(PublicKey::from_str(&peer).map_err(|e| {
+                BridgeError::InvalidPublicKey(e.to_string())
+            })?);
+        }
+
+        Ok(self.api.add_sync_peer(subject_id, peers_key).await?)
+    }
+
+    pub async fn remove_sync_peer(
+        &self,
+        subject_id: String,
+        peers: Vec<String>,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        if peers.is_empty() {
+            return Err(BridgeError::InvalidPublicKey("empty peers list".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let mut peers_key = vec![];
+        for peer in peers {
+            peers_key.push(PublicKey::from_str(&peer).map_err(|e| {
+                BridgeError::InvalidPublicKey(e.to_string())
+            })?);
+        }
+
+        Ok(self.api.remove_sync_peer(subject_id, peers_key).await?)
+    }
+
+    pub async fn get_sync_peers(
+        &self,
+        subject_id: String,
+    ) -> Result<HashSet<String>, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let res = self.api.sync_peers(subject_id).await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
+    }
+
+    pub async fn subjects_with_sync_peers(
+        &self,
+    ) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.subjects_with_sync_peers().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
     }
 
     pub async fn post_update_subject(

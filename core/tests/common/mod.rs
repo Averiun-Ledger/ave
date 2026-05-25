@@ -335,7 +335,7 @@ pub async fn create_and_authorize_governance(
     wait_request(owner_node, data.request_id).await.unwrap();
 
     for node in other_nodes {
-        node.auth_subject(
+        node.authorize_governance(
             governance_id.clone(),
             ave_core::auth::AuthWitness::One(
                 PublicKey::from_str(&owner_node.public_key()).unwrap(),

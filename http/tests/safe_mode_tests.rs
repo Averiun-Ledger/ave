@@ -27,8 +27,12 @@ fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
             | ("post", "/request-abort/{subject_id}")
             | ("post", "/update/{subject_id}")
             | ("post", "/manual-distribution/{subject_id}")
-            | ("put", "/auth/{subject_id}")
-            | ("delete", "/auth/{subject_id}")
+            | ("put", "/governances/{subject_id}/authorize")
+            | ("delete", "/governances/{subject_id}/authorize")
+            | ("put", "/trackers/{subject_id}/ban")
+            | ("put", "/trackers/{subject_id}/unban")
+            | ("put", "/subjects/{subject_id}/sync-peers")
+            | ("delete", "/subjects/{subject_id}/sync-peers")
             | ("delete", "/maintenance/subjects/{subject_id}")
             | ("patch", "/approval/{subject_id}")
     )
@@ -240,7 +244,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
 
     let (status, _) = make_request(
         &client,
-        &server.url(&format!("/auth/{governance_id}")),
+        &server.url(&format!("/governances/{governance_id}/authorize")),
         "PUT",
         None,
         Some(json!([MEMBER_PUBLIC_KEY])),
@@ -546,15 +550,15 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     assert_eq!(body, json!([]));
 
     let (status, body) =
-        make_request(&client, &env.server.url("/auth"), "GET", None, None)
+        make_request(&client, &env.server.url("/governances/authorized"), "GET", None, None)
             .await;
     assert_eq!(status, StatusCode::OK);
-    let auth_subjects = body.as_array().cloned().unwrap_or_default();
-    assert_eq!(auth_subjects, vec![json!(fixture.governance_id)]);
+    let authorized_govs = body.as_array().cloned().unwrap_or_default();
+    assert_eq!(authorized_govs, vec![json!(fixture.governance_id)]);
 
     let (status, body) = make_request(
         &client,
-        &env.server.url(&format!("/auth/{}", fixture.governance_id)),
+        &env.server.url(&format!("/subjects/{}/sync-peers", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -836,7 +840,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "PUT",
-        &format!("/auth/{}", fixture.governance_id),
+        &format!("/governances/{}/authorize", fixture.governance_id),
         Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
     )
     .await;
@@ -845,7 +849,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "DELETE",
-        &format!("/auth/{}", fixture.governance_id),
+        &format!("/governances/{}/authorize", fixture.governance_id),
         None,
     )
     .await;
