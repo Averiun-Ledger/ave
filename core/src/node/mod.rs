@@ -897,9 +897,9 @@ impl Actor for Node {
                 });
             };
 
-            let sink =
-                Sink::new(register_actor.subscribe(), ext_db.get_register());
-            ctx.system().run_sink(sink).await;
+            let mut sink = Sink::new("internal");
+            sink.add("ext_db", ext_db.get_register());
+            register_actor.register_sink(sink);
 
             if let Err(e) = ctx
                 .create_child(

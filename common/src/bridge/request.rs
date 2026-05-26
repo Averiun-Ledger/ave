@@ -323,8 +323,6 @@ pub struct BridgeConfirmRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::{ConfirmRequest, CreateRequest, EventRequest, EOLRequest, FactRequest, RejectRequest, TransferRequest};
-    use ave_identity::{DigestIdentifier, PublicKey};
 
     #[test]
     fn test_subject_query_deserialize_missing_fields() {

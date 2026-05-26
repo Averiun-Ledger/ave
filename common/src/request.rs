@@ -229,7 +229,6 @@ mod tests {
     use ave_identity::{DigestIdentifier, PublicKey};
     use serde_json::json;
     use std::collections::BTreeSet;
-    use std::str::FromStr;
 
     #[test]
     fn test_fact_request_defaults_missing_viewpoints_to_empty() {

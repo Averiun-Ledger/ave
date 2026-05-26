@@ -130,8 +130,9 @@ impl SubjectManager {
                     });
                 };
 
-                let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-                ctx.system().run_sink(sink).await;
+                let mut sink = Sink::new("internal");
+                sink.add("ext_db", ext_db.get_subject());
+                actor.register_sink(sink);
             }
         }
 
@@ -574,8 +575,9 @@ impl SubjectManager {
             });
         };
 
-        let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-        ctx.system().run_sink(sink).await;
+        let mut sink = Sink::new("internal");
+        sink.add("ext_db", ext_db.get_subject());
+        actor.register_sink(sink);
         Ok(())
     }
 
@@ -610,8 +612,9 @@ impl SubjectManager {
             });
         };
 
-        let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-        ctx.system().run_sink(sink).await;
+        let mut sink = Sink::new("internal");
+        sink.add("ext_db", ext_db.get_subject());
+        actor.register_sink(sink);
         Ok(())
     }
 

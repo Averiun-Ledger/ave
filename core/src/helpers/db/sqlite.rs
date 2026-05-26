@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ave_actors::rusqlite;
 use ave_actors::rusqlite::types::Type;
-use ave_actors::{ActorRef, Subscriber};
+use ave_actors::{ActorRef, ActorError, Subscriber};
 use ave_common::SchemaType;
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
@@ -3603,7 +3603,7 @@ fn delete_by_subject_with_stmt(
 
 #[async_trait]
 impl Subscriber<Ledger> for SqliteWriteStore {
-    async fn notify(&self, event: Ledger) {
+    async fn notify(&self, event: Ledger) -> Result<(), ActorError> {
         let subject_id = event.get_subject_id().to_string();
         let sn = event.sn;
 
@@ -3631,14 +3631,15 @@ impl Subscriber<Ledger> for SqliteWriteStore {
                 "Signed ledger saved to SQLite successfully"
             );
         }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Subscriber<SinkDataEvent> for SqliteWriteStore {
-    async fn notify(&self, event: SinkDataEvent) {
+    async fn notify(&self, event: SinkDataEvent) -> Result<(), ActorError> {
         let SinkDataEvent::State(metadata) = event else {
-            return;
+            return Ok(());
         };
 
         let subject_id = metadata.subject_id.clone();
@@ -3668,12 +3669,13 @@ impl Subscriber<SinkDataEvent> for SqliteWriteStore {
                 "Subject state saved to SQLite successfully"
             );
         }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
-    async fn notify(&self, event: RequestTrackingEvent) {
+    async fn notify(&self, event: RequestTrackingEvent) -> Result<(), ActorError> {
         let request_id = event.request_id.clone();
         let subject_id = event.subject_id.clone();
         let sn = event.sn;
@@ -3707,12 +3709,13 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 "Abort record saved to SQLite successfully"
             );
         }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Subscriber<RegisterEvent> for SqliteWriteStore {
-    async fn notify(&self, event: RegisterEvent) {
+    async fn notify(&self, event: RegisterEvent) -> Result<(), ActorError> {
         if let Err(e) = self.persist_register(event.clone()).await {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
             if let Err(e) =
@@ -3726,6 +3729,7 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         } else {
             debug!(event = ?event, "Register event saved to SQLite successfully");
         }
+        Ok(())
     }
 }
 

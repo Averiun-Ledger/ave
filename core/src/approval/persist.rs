@@ -789,11 +789,6 @@ impl Handler<Self> for ApprPersist {
             error!(error = %e, "Failed to persist event");
             emit_fail(ctx, e).await;
         };
-
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(error = %e, "Failed to publish event");
-            emit_fail(ctx, e).await;
-        };
     }
 }
 

@@ -196,7 +196,7 @@ impl Handler<Self> for SinkData {
                 (metadata.subject_id.to_string(), metadata.schema_id.clone())
             }
         };
-        if let Err(e) = ctx.publish_event(event.clone()).await {
+        if let Err(e) = ctx.publish_all(event.clone()).await {
             error!(
                 error = %e,
                 subject_id = %subject_id,

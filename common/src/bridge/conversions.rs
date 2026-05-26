@@ -267,7 +267,6 @@ impl TryFrom<BridgeRejectRequest> for RejectRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ave_identity::DSA;
     use serde_json::json;
 
     #[test]

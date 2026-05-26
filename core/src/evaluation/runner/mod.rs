@@ -502,11 +502,11 @@ impl Runner {
                 ))
             }
             Err(e) => {
-                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) {
-                    if let Some(metrics) = try_core_metrics() {
+                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) &&
+                    let Some(metrics) = try_core_metrics() {
                         metrics.observe_contract_fuel_exhausted();
                     }
-                }
+                
                 if let Some(metrics) = try_core_metrics() {
                     metrics.observe_contract_fuel_consumed("error", fuel_consumed);
                     metrics.observe_contract_memory_peak("error", memory_bytes);

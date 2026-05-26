@@ -82,9 +82,3 @@ pub fn build_transport(
 
     Ok(transport.boxed())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-}

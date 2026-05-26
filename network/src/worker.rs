@@ -3523,7 +3523,7 @@ mod tests {
     #[test(tokio::test)]
     #[serial]
     async fn test_change_state_with_metrics() {
-        let mut config = create_config(
+        let config = create_config(
             vec![],
             false,
             NodeType::Addressable,

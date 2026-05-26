@@ -574,9 +574,3 @@ pub fn register(registry: &mut Registry) -> Arc<NetworkMetrics> {
     metrics.register_into(registry);
     metrics
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-}

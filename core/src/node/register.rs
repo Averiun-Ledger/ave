@@ -186,7 +186,7 @@ impl Handler<Self> for Register {
         event: RegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = ctx.publish_event(event.clone()).await {
+        if let Err(e) = ctx.publish_all(event.clone()).await {
             error!(error = %e, event = ?event, "Failed to publish register event");
             emit_fail(ctx, e).await;
         } else {

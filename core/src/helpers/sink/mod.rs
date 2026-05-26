@@ -11,7 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ave_actors::Subscriber;
+use ave_actors::{ActorError, Subscriber};
 use ave_common::DataToSink;
 use rand::{RngExt, rng};
 use reqwest::Client;
@@ -1279,10 +1279,10 @@ impl AveSink {
 
 #[async_trait]
 impl Subscriber<SinkDataEvent> for AveSink {
-    async fn notify(&self, event: SinkDataEvent) {
+    async fn notify(&self, event: SinkDataEvent) -> Result<(), ActorError> {
         let data: Arc<DataToSink> = match event {
             SinkDataEvent::Event(data_to_sink) => Arc::from(data_to_sink),
-            SinkDataEvent::State(..) => return,
+            SinkDataEvent::State(..) => return Ok(()),
         };
 
         let (subject_id, schema_id) = data.payload.get_subject_schema();
@@ -1292,10 +1292,10 @@ impl Subscriber<SinkDataEvent> for AveSink {
                 schema_id = %schema_id,
                 "No sink servers configured for schema"
             );
-            return;
+            return Ok(());
         };
         if servers.is_empty() {
-            return;
+            return Ok(());
         }
 
         debug!(
@@ -1353,6 +1353,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -1822,7 +1823,7 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
         ))))
-        .await;
+        .await.unwrap();
 
         sink_calls
             .wait_for_at_least(
@@ -1884,7 +1885,7 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
         ))))
-        .await;
+        .await.unwrap();
 
         let attempts = sink_calls
             .wait_for_at_least(
@@ -1982,8 +1983,8 @@ mod tests {
             *sn = 2;
         }
 
-        sink.notify(SinkDataEvent::Event(Box::new(first))).await;
-        sink.notify(SinkDataEvent::Event(Box::new(second))).await;
+        sink.notify(SinkDataEvent::Event(Box::new(first))).await.unwrap();
+        sink.notify(SinkDataEvent::Event(Box::new(second))).await.unwrap();
 
         handlers_ready.wait().await;
         assert_eq!(sink_calls.load(), 2);
@@ -2065,7 +2066,7 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
         ))))
-        .await;
+        .await.unwrap();
 
         let auth_attempts = auth_calls
             .wait_for_at_least(1, "auth bootstrap call did not complete")
@@ -2152,7 +2153,7 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
         ))))
-        .await;
+        .await.unwrap();
 
         let auth_attempts = auth_calls
             .wait_for_at_least(1, "token refresh did not complete")
@@ -2246,7 +2247,7 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
         ))))
-        .await;
+        .await.unwrap();
 
         let auth_attempts = auth_calls
             .wait_for_at_least(1, "401 token refresh did not complete")
@@ -2330,7 +2331,7 @@ mod tests {
             event_ledger_timestamp: 2,
             sink_timestamp: 3,
         })))
-        .await;
+        .await.unwrap();
 
         sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
             payload: DataToSinkEvent::Transfer {
@@ -2349,7 +2350,7 @@ mod tests {
             event_ledger_timestamp: 5,
             sink_timestamp: 6,
         })))
-        .await;
+        .await.unwrap();
 
         sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
             payload: DataToSinkEvent::Confirm {
@@ -2368,7 +2369,7 @@ mod tests {
             event_ledger_timestamp: 8,
             sink_timestamp: 9,
         })))
-        .await;
+        .await.unwrap();
 
         let attempts = sink_calls
             .wait_for_at_least(
@@ -2454,7 +2455,7 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
         ))))
-        .await;
+        .await.unwrap();
 
         sink_calls
             .wait_for_at_least(

@@ -231,7 +231,7 @@ impl Handler<Self> for RequestTracking {
         event: RequestTrackingEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = ctx.publish_event(event).await {
+        if let Err(e) = ctx.publish_all(event).await {
             error!(
                 error = %e,
                 "Failed to publish event"

@@ -145,7 +145,6 @@ impl<A: fmt::Debug> fmt::Debug for AlgorithmIdentifiedBytes<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn new_with_invalid_length() {

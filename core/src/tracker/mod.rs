@@ -979,12 +979,13 @@ impl Actor for Tracker {
                     return Err(e);
                 }
             };
-            let sink =
-                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-            ctx.system().run_sink(sink).await;
+            let mut sink = Sink::new("internal");
+            sink.add("ext_db", ext_db.get_sink_data());
+            sink_actor.register_sink(sink);
 
-            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-            ctx.system().run_sink(sink).await;
+            let mut sink = Sink::new("external");
+            sink.add("ave_sink", ave_sink.clone());
+            sink_actor.register_sink(sink);
         }
 
         Ok(())
@@ -1068,7 +1069,7 @@ impl Handler<Self> for Tracker {
             emit_fail(ctx, e).await;
         };
 
-        if let Err(e) = ctx.publish_event(event.clone()).await {
+        if let Err(e) = ctx.publish_all(event.clone()).await {
             error!(
                 error = %e,
                 subject_id = %self.subject_metadata.subject_id,

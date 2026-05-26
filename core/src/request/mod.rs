@@ -1070,10 +1070,9 @@ impl Actor for RequestHandler {
                 }
             };
 
-            let sink =
-                Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
-
-            ctx.system().run_sink(sink).await;
+            let mut sink = Sink::new("internal");
+            sink.add("ext_db", ext_db.get_request_tracking());
+            tracking.register_sink(sink);
         }
 
         let Some((hash, network)) = self.helpers.clone() else {
