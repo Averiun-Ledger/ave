@@ -5,9 +5,7 @@ use ave_actors::{
 };
 use ave_common::SchemaType;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span};
-
-use crate::model::common::emit_fail;
+use tracing::{Span, debug, info_span};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterDataSubj {
@@ -186,11 +184,7 @@ impl Handler<Self> for Register {
         event: RegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = ctx.publish_all(event.clone()).await {
-            error!(error = %e, event = ?event, "Failed to publish register event");
-            emit_fail(ctx, e).await;
-        } else {
-            debug!(event = ?event, "Register event published successfully");
-        }
+        ctx.publish_all(event.clone());
+        debug!(event = ?event, "Register event published successfully");
     }
 }

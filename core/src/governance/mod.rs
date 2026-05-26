@@ -3672,21 +3672,12 @@ impl Handler<Self> for Governance {
             emit_fail(ctx, e).await;
         };
 
-        if let Err(e) = ctx.publish_all(event).await {
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                sn = self.subject_metadata.sn,
-                "Failed to publish event"
-            );
-            emit_fail(ctx, e).await;
-        } else {
-            debug!(
-                subject_id = %self.subject_metadata.subject_id,
-                sn = self.subject_metadata.sn,
-                "Event persisted and published successfully"
-            );
-        }
+        ctx.publish_all(event);
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            sn = self.subject_metadata.sn,
+            "Event persisted and published successfully"
+        );
     }
 
     async fn on_child_fault(

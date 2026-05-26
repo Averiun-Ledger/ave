@@ -1279,9 +1279,9 @@ impl AveSink {
 
 #[async_trait]
 impl Subscriber<SinkDataEvent> for AveSink {
-    async fn notify(&self, event: SinkDataEvent) -> Result<(), ActorError> {
-        let data: Arc<DataToSink> = match event {
-            SinkDataEvent::Event(data_to_sink) => Arc::from(data_to_sink),
+    async fn notify(&self, event: Arc<SinkDataEvent>) -> Result<(), ActorError> {
+        let data: Arc<DataToSink> = match event.as_ref() {
+            SinkDataEvent::Event(data_to_sink) => Arc::from(Box::clone(data_to_sink)),
             SinkDataEvent::State(..) => return Ok(()),
         };
 
@@ -1820,9 +1820,9 @@ mod tests {
             None,
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(sample_data(
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
-        ))))
+        )))))
         .await.unwrap();
 
         sink_calls
@@ -1882,9 +1882,9 @@ mod tests {
             None,
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(sample_data(
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
-        ))))
+        )))))
         .await.unwrap();
 
         let attempts = sink_calls
@@ -1983,8 +1983,8 @@ mod tests {
             *sn = 2;
         }
 
-        sink.notify(SinkDataEvent::Event(Box::new(first))).await.unwrap();
-        sink.notify(SinkDataEvent::Event(Box::new(second))).await.unwrap();
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(first)))).await.unwrap();
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(second)))).await.unwrap();
 
         handlers_ready.wait().await;
         assert_eq!(sink_calls.load(), 2);
@@ -2063,9 +2063,9 @@ mod tests {
             [SinkTypes::Create],
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(sample_data(
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
-        ))))
+        )))))
         .await.unwrap();
 
         let auth_attempts = auth_calls
@@ -2150,9 +2150,9 @@ mod tests {
             [SinkTypes::Create],
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(sample_data(
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
-        ))))
+        )))))
         .await.unwrap();
 
         let auth_attempts = auth_calls
@@ -2244,9 +2244,9 @@ mod tests {
             [SinkTypes::Create],
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(sample_data(
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
-        ))))
+        )))))
         .await.unwrap();
 
         let auth_attempts = auth_calls
@@ -2311,7 +2311,7 @@ mod tests {
             None,
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(DataToSink {
             payload: DataToSinkEvent::FactFull {
                 governance_id: Some("gov-1".to_owned()),
                 subject_id: "subject-1".to_owned(),
@@ -2330,10 +2330,10 @@ mod tests {
             event_request_timestamp: 1,
             event_ledger_timestamp: 2,
             sink_timestamp: 3,
-        })))
+        }))))
         .await.unwrap();
 
-        sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(DataToSink {
             payload: DataToSinkEvent::Transfer {
                 governance_id: Some("gov-1".to_owned()),
                 subject_id: "subject-1".to_owned(),
@@ -2349,10 +2349,10 @@ mod tests {
             event_request_timestamp: 4,
             event_ledger_timestamp: 5,
             sink_timestamp: 6,
-        })))
+        }))))
         .await.unwrap();
 
-        sink.notify(SinkDataEvent::Event(Box::new(DataToSink {
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(DataToSink {
             payload: DataToSinkEvent::Confirm {
                 governance_id: Some("gov-1".to_owned()),
                 subject_id: "subject-1".to_owned(),
@@ -2368,7 +2368,7 @@ mod tests {
             event_request_timestamp: 7,
             event_ledger_timestamp: 8,
             sink_timestamp: 9,
-        })))
+        }))))
         .await.unwrap();
 
         let attempts = sink_calls
@@ -2452,9 +2452,9 @@ mod tests {
             [SinkTypes::Create],
         );
 
-        sink.notify(SinkDataEvent::Event(Box::new(sample_data(
+        sink.notify(Arc::new(SinkDataEvent::Event(Box::new(sample_data(
             SchemaType::Type("schema-a".to_owned()),
-        ))))
+        )))))
         .await.unwrap();
 
         sink_calls

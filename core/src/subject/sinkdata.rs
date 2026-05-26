@@ -9,9 +9,7 @@ use ave_common::{
     DataToSink, DataToSinkEvent, identity::{PublicKey, TimeStamp}, response::SubjectDB,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span};
-
-use crate::model::common::emit_fail;
+use tracing::{Span, debug, info_span};
 
 #[derive(Clone, Debug)]
 pub struct SinkData {
@@ -196,21 +194,11 @@ impl Handler<Self> for SinkData {
                 (metadata.subject_id.to_string(), metadata.schema_id.clone())
             }
         };
-        if let Err(e) = ctx.publish_all(event.clone()).await {
-            error!(
-                error = %e,
-                subject_id = %subject_id,
-                schema_id = %schema_id,
-                public_key = %self.public_key,
-                "Failed to publish sink data event"
-            );
-            emit_fail(ctx, e).await;
-        } else {
-            debug!(
-                subject_id = %subject_id,
-                schema_id = %schema_id,
-                "Sink data event published successfully"
-            );
-        }
+        ctx.publish_all(event.clone());
+        debug!(
+            subject_id = %subject_id,
+            schema_id = %schema_id,
+            "Sink data event published successfully"
+        );
     }
 }

@@ -3603,7 +3603,8 @@ fn delete_by_subject_with_stmt(
 
 #[async_trait]
 impl Subscriber<Ledger> for SqliteWriteStore {
-    async fn notify(&self, event: Ledger) -> Result<(), ActorError> {
+    async fn notify(&self, event: Arc<Ledger>) -> Result<(), ActorError> {
+        let event = (*event).clone();
         let subject_id = event.get_subject_id().to_string();
         let sn = event.sn;
 
@@ -3637,9 +3638,10 @@ impl Subscriber<Ledger> for SqliteWriteStore {
 
 #[async_trait]
 impl Subscriber<SinkDataEvent> for SqliteWriteStore {
-    async fn notify(&self, event: SinkDataEvent) -> Result<(), ActorError> {
-        let SinkDataEvent::State(metadata) = event else {
-            return Ok(());
+    async fn notify(&self, event: Arc<SinkDataEvent>) -> Result<(), ActorError> {
+        let metadata = match event.as_ref() {
+            SinkDataEvent::State(metadata) => metadata.clone(),
+            _ => return Ok(()),
         };
 
         let subject_id = metadata.subject_id.clone();
@@ -3675,7 +3677,8 @@ impl Subscriber<SinkDataEvent> for SqliteWriteStore {
 
 #[async_trait]
 impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
-    async fn notify(&self, event: RequestTrackingEvent) -> Result<(), ActorError> {
+    async fn notify(&self, event: Arc<RequestTrackingEvent>) -> Result<(), ActorError> {
+        let event = (*event).clone();
         let request_id = event.request_id.clone();
         let subject_id = event.subject_id.clone();
         let sn = event.sn;
@@ -3715,8 +3718,8 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
 
 #[async_trait]
 impl Subscriber<RegisterEvent> for SqliteWriteStore {
-    async fn notify(&self, event: RegisterEvent) -> Result<(), ActorError> {
-        if let Err(e) = self.persist_register(event.clone()).await {
+    async fn notify(&self, event: Arc<RegisterEvent>) -> Result<(), ActorError> {
+        if let Err(e) = self.persist_register((*event).clone()).await {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
             if let Err(e) =
                 self.inner.manager.tell(DBManagerMessage::Error(e)).await

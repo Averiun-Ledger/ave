@@ -12,7 +12,7 @@ use ave_common::{
 use borsh::{BorshDeserialize, BorshSerialize};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span, warn};
+use tracing::{Span, debug, info_span, warn};
 
 #[derive(Clone, Debug)]
 pub struct RequestTracking {
@@ -231,12 +231,6 @@ impl Handler<Self> for RequestTracking {
         event: RequestTrackingEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = ctx.publish_all(event).await {
-            error!(
-                error = %e,
-                "Failed to publish event"
-            );
-            ctx.system().crash_system();
-        };
+        ctx.publish_all(event);
     }
 }
