@@ -690,9 +690,8 @@ impl Handler<Self> for SubjectAccess {
         event: SubjectAccessEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist subject_access event"
             );
@@ -718,12 +717,7 @@ impl Handler<Self> for SubjectAccess {
 impl PersistentActor for SubjectAccess {
     type Persistence = LightPersistence;
     type InitParams = SubjectAccessInitParams;
-
-    fn update(&mut self, state: Self) {
-        self.gov_allowlist = state.gov_allowlist;
-        self.tracker_banlist = state.tracker_banlist;
-        self.sync_peers = state.sync_peers;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -739,16 +733,21 @@ impl PersistentActor for SubjectAccess {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             SubjectAccessEvent::GovAuthorized {
                 subject_id,
                 witnesses,
             } => {
-                self.gov_allowlist.insert(subject_id.clone());
+                inner.gov_allowlist.insert(subject_id.clone());
                 let peers = Self::witness_to_set(witnesses);
                 if !peers.is_empty() {
-                    self.sync_peers.insert(subject_id.clone(), peers);
+                    inner.sync_peers.insert(subject_id.clone(), peers);
                 }
                 debug!(
                     event_type = "GovAuthorized",
@@ -757,8 +756,8 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::GovDisauthorized { subject_id } => {
-                self.gov_allowlist.remove(subject_id);
-                self.sync_peers.remove(subject_id);
+                inner.gov_allowlist.remove(subject_id);
+                inner.sync_peers.remove(subject_id);
                 debug!(
                     event_type = "GovDisauthorized",
                     subject_id = %subject_id,
@@ -766,8 +765,8 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::TrackerBanned { subject_id } => {
-                self.tracker_banlist.insert(subject_id.clone());
-                self.sync_peers.remove(subject_id);
+                inner.tracker_banlist.insert(subject_id.clone());
+                inner.sync_peers.remove(subject_id);
                 debug!(
                     event_type = "TrackerBanned",
                     subject_id = %subject_id,
@@ -775,7 +774,7 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::TrackerUnbanned { subject_id } => {
-                self.tracker_banlist.remove(subject_id);
+                inner.tracker_banlist.remove(subject_id);
                 debug!(
                     event_type = "TrackerUnbanned",
                     subject_id = %subject_id,
@@ -783,7 +782,7 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::SyncPeersAdded { subject_id, peers } => {
-                self.sync_peers
+                inner.sync_peers
                     .entry(subject_id.clone())
                     .or_default()
                     .extend(peers.iter().cloned());
@@ -794,12 +793,12 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::SyncPeersRemoved { subject_id, peers } => {
-                if let Some(set) = self.sync_peers.get_mut(subject_id) {
+                if let Some(set) = inner.sync_peers.get_mut(subject_id) {
                     for p in peers {
                         set.remove(p);
                     }
                     if set.is_empty() {
-                        self.sync_peers.remove(subject_id);
+                        inner.sync_peers.remove(subject_id);
                     }
                 }
                 debug!(
@@ -809,9 +808,9 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::SubjectCleared { subject_id } => {
-                self.gov_allowlist.remove(subject_id);
-                self.tracker_banlist.remove(subject_id);
-                self.sync_peers.remove(subject_id);
+                inner.gov_allowlist.remove(subject_id);
+                inner.tracker_banlist.remove(subject_id);
+                inner.sync_peers.remove(subject_id);
                 debug!(
                     event_type = "SubjectCleared",
                     subject_id = %subject_id,
@@ -820,7 +819,18 @@ impl PersistentActor for SubjectAccess {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.gov_allowlist.clone_from(&state.gov_allowlist);
+        self.tracker_banlist.clone_from(&state.tracker_banlist);
+        self.sync_peers.clone_from(&state.sync_peers);
     }
 }
 

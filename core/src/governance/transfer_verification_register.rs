@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -207,9 +208,8 @@ impl Handler<Self> for TransferVerificationRegister {
         event: TransferVerificationRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist transfer verification register event"
             );
@@ -222,20 +222,23 @@ impl Handler<Self> for TransferVerificationRegister {
 impl PersistentActor for TransferVerificationRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
     }
 
     fn apply(
-        &mut self,
+        state: Arc<Self::State>,
         event: &Self::Event,
-    ) -> Result<(), ActorError> {
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             TransferVerificationRegisterEvent::Remove {
                 subject_id,
             } => {
-                self.register.remove(subject_id);
+                inner.register.remove(subject_id);
 
                 debug!(
                     event_type = "Remove",
@@ -248,7 +251,7 @@ impl PersistentActor for TransferVerificationRegister {
                 transfer_sn,
                 sender,
             } => {
-                self.register
+                inner.register
                     .entry(subject_id.to_owned())
                     .and_modify(|(existing_sn, existing_sender)| {
                         if *transfer_sn > *existing_sn {
@@ -268,7 +271,15 @@ impl PersistentActor for TransferVerificationRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

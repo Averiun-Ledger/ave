@@ -1413,9 +1413,8 @@ impl Handler<Self> for Node {
         event: NodeEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist node event"
             );
@@ -1437,13 +1436,7 @@ pub struct InitParamsNode {
 impl PersistentActor for Node {
     type Persistence = LightPersistence;
     type InitParams = InitParamsNode;
-
-    fn update(&mut self, state: Self) {
-        self.owned_subjects = state.owned_subjects;
-        self.known_subjects = state.known_subjects;
-        self.transfer_subjects = state.transfer_subjects;
-        self.reject_subjects = state.reject_subjects
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -1461,13 +1454,18 @@ impl PersistentActor for Node {
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             NodeEvent::EOLSubject {
                 subject_id,
                 i_owner,
             } => {
-                self.eol(subject_id.clone(), *i_owner);
+                inner.eol(subject_id.clone(), *i_owner);
                 debug!(
                     event_type = "EOLSubject",
                     subject_id = %subject_id,
@@ -1476,7 +1474,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::ConfirmTransfer(subject_id) => {
-                self.confirm_transfer(subject_id.clone());
+                inner.confirm_transfer(subject_id.clone());
                 debug!(
                     event_type = "ConfirmTransfer",
                     subject_id = %subject_id,
@@ -1488,7 +1486,7 @@ impl PersistentActor for Node {
                 data,
                 owner,
             } => {
-                self.register_subject(
+                inner.register_subject(
                     subject_id.clone(),
                     owner.clone(),
                     data.clone(),
@@ -1501,7 +1499,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::DeleteSubject(subject_id) => {
-                self.delete_subject(subject_id);
+                inner.delete_subject(subject_id);
                 debug!(
                     event_type = "DeleteSubject",
                     subject_id = %subject_id,
@@ -1509,7 +1507,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::RejectTransfer(subject_id) => {
-                self.delete_transfer(subject_id);
+                inner.delete_transfer(subject_id);
                 debug!(
                     event_type = "RejectTransfer",
                     subject_id = %subject_id,
@@ -1517,7 +1515,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::TransferSubject(transfer) => {
-                self.transfer_subject(transfer.clone());
+                inner.transfer_subject(transfer.clone());
                 debug!(
                     event_type = "TransferSubject",
                     subject_id = %transfer.subject_id,
@@ -1527,7 +1525,19 @@ impl PersistentActor for Node {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.owned_subjects.clone_from(&state.owned_subjects);
+        self.known_subjects.clone_from(&state.known_subjects);
+        self.transfer_subjects.clone_from(&state.transfer_subjects);
+        self.reject_subjects.clone_from(&state.reject_subjects);
     }
 }
 

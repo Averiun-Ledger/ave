@@ -3662,7 +3662,8 @@ impl Handler<Self> for Governance {
     }
 
     async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        let event_for_publish = event.clone();
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 error = %e,
                 subject_id = %self.subject_metadata.subject_id,
@@ -3672,7 +3673,7 @@ impl Handler<Self> for Governance {
             emit_fail(ctx, e).await;
         };
 
-        ctx.publish_all(event);
+        ctx.publish_all(event_for_publish);
         debug!(
             subject_id = %self.subject_metadata.subject_id,
             sn = self.subject_metadata.sn,
@@ -3704,11 +3705,7 @@ impl PersistentActor for Governance {
         HashAlgorithm,
         bool,
     );
-
-    fn update(&mut self, state: Self) {
-        self.properties = state.properties;
-        self.subject_metadata = state.subject_metadata;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let (subject_metadata, properties) =
@@ -3726,7 +3723,12 @@ impl PersistentActor for Governance {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match &event.protocols {
             Protocols::Create {
                 validation,
@@ -3736,7 +3738,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance create apply"
                     );
@@ -3750,14 +3752,14 @@ impl PersistentActor for Governance {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
-                    self.subject_metadata = SubjectMetadata::new(metadata);
-                    self.properties = serde_json::from_value::<GovernanceData>(
+                    inner.subject_metadata = SubjectMetadata::new(metadata);
+                    inner.properties = serde_json::from_value::<GovernanceData>(
                         metadata.properties.0.clone(),
                     )
                     .map_err(|e| {
                         error!(
                             event_type = "Create",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             error = %e,
                             "Failed to convert properties into GovernanceData"
                         );
@@ -3766,8 +3768,8 @@ impl PersistentActor for Governance {
 
                     debug!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
-                        sn = self.subject_metadata.sn,
+                        subject_id = %inner.subject_metadata.subject_id,
+                        sn = inner.subject_metadata.sn,
                         "Applied create event"
                     );
                 } else {
@@ -3778,7 +3780,7 @@ impl PersistentActor for Governance {
                     return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
                 }
 
-                return Ok(());
+                return Ok(state);
             }
             Protocols::GovFact {
                 evaluation,
@@ -3790,7 +3792,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Fact",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance fact apply"
                     );
@@ -3804,17 +3806,17 @@ impl PersistentActor for Governance {
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
-                            self.apply_patch(eval_res.patch)?;
+                            inner.apply_patch(eval_res.patch)?;
                             debug!(
                                 event_type = "Fact",
-                                subject_id = %self.subject_metadata.subject_id,
+                                subject_id = %inner.subject_metadata.subject_id,
                                 approved = true,
                                 "Applied fact event with patch"
                             );
                         } else {
                             debug!(
                                 event_type = "Fact",
-                                subject_id = %self.subject_metadata.subject_id,
+                                subject_id = %inner.subject_metadata.subject_id,
                                 approved = false,
                                 "Fact event not approved, patch not applied"
                             );
@@ -3822,7 +3824,7 @@ impl PersistentActor for Governance {
                     } else {
                         error!(
                             event_type = "Fact",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Evaluation successful but no approval present"
                         );
                         return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval".to_owned() });
@@ -3840,7 +3842,7 @@ impl PersistentActor for Governance {
                 else {
                     error!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance transfer apply"
                     );
@@ -3852,11 +3854,11 @@ impl PersistentActor for Governance {
                 };
 
                 if evaluation.evaluator_response_ok().is_some() {
-                    self.subject_metadata.new_owner =
+                    inner.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         new_owner = %transfer_request.new_owner,
                         "Applied transfer event"
                     );
@@ -3872,7 +3874,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance confirm apply"
                     );
@@ -3885,20 +3887,20 @@ impl PersistentActor for Governance {
 
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(new_owner) =
-                        self.subject_metadata.new_owner.take()
+                        inner.subject_metadata.new_owner.take()
                     {
-                        self.subject_metadata.owner = new_owner.clone();
-                        self.apply_patch(eval_res.patch)?;
+                        inner.subject_metadata.owner = new_owner.clone();
+                        inner.apply_patch(eval_res.patch)?;
                         debug!(
                             event_type = "Confirm",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             new_owner = %new_owner,
                             "Applied confirm event with patch"
                         );
                     } else {
                         error!(
                             event_type = "Confirm",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "New owner is None in confirm event"
                         );
                         return Err(ActorError::Functional {
@@ -3913,7 +3915,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Reject",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance reject apply"
                     );
@@ -3924,10 +3926,10 @@ impl PersistentActor for Governance {
                     });
                 };
 
-                self.subject_metadata.new_owner = None;
+                inner.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied reject event"
                 );
             }
@@ -3936,7 +3938,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "EOL",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance eol apply"
                     );
@@ -3946,16 +3948,16 @@ impl PersistentActor for Governance {
                     });
                 };
 
-                self.subject_metadata.active = false;
+                inner.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied EOL event"
                 );
             }
             _ => {
                 error!(
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Invalid protocol data for Governance"
                 );
                 return Err(ActorError::Functional {
@@ -3966,14 +3968,24 @@ impl PersistentActor for Governance {
         }
 
         if event.protocols.is_success() {
-            self.properties.version += 1;
+            inner.properties.version += 1;
         }
 
-        self.subject_metadata.sn += 1;
-        self.subject_metadata.prev_ledger_event_hash =
+        inner.subject_metadata.sn += 1;
+        inner.subject_metadata.prev_ledger_event_hash =
             event.prev_ledger_event_hash.clone();
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.properties.clone_from(&state.properties);
+        self.subject_metadata.clone_from(&state.subject_metadata);
     }
 }
 

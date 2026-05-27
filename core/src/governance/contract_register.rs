@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -163,9 +164,8 @@ impl Handler<Self> for ContractRegister {
         event: ContractRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist contract register event"
             );
@@ -178,26 +178,40 @@ impl Handler<Self> for ContractRegister {
 impl PersistentActor for ContractRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::new()
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             ContractRegisterEvent::DeleteMetadata { contract_name } => {
-                self.contracts.remove(contract_name);
+                inner.contracts.remove(contract_name);
             }
             ContractRegisterEvent::SetMetadata {
                 contract_name,
                 metadata,
             } => {
-                self.contracts
+                inner.contracts
                     .insert(contract_name.clone(), metadata.clone());
             }
         }
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

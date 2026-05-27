@@ -2966,7 +2966,7 @@ impl Handler<Self> for RequestManager {
             RequestManagerEvent::SafeState { .. } => "SafeState",
         };
 
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 event_type = event_type,
                 request_id = %self.id,
@@ -2998,13 +2998,7 @@ impl Handler<Self> for RequestManager {
 impl PersistentActor for RequestManager {
     type Persistence = LightPersistence;
     type InitParams = InitRequestManager;
-
-    fn update(&mut self, state: Self) {
-        self.command = state.command;
-        self.request = state.request;
-        self.state = state.state;
-        self.version = state.version;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -3026,56 +3020,73 @@ impl PersistentActor for RequestManager {
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             RequestManagerEvent::Finish => {
                 debug!(
                     event_type = "Finish",
-                    request_id = %self.id,
+                    request_id = %inner.id,
                     "Applying finish event"
                 );
-                self.state = RequestManagerState::End;
-                self.request = None;
-                self.id = DigestIdentifier::default();
+                inner.state = RequestManagerState::End;
+                inner.request = None;
+                inner.id = DigestIdentifier::default();
             }
             RequestManagerEvent::UpdateState { state } => {
                 debug!(
                     event_type = "UpdateState",
-                    request_id = %self.id,
-                    old_state = ?self.state,
+                    request_id = %inner.id,
+                    old_state = ?inner.state,
                     new_state = ?state,
                     "Applying state update"
                 );
-                self.state = *state.clone()
+                inner.state = *state.clone()
             }
             RequestManagerEvent::UpdateVersion { version } => {
                 debug!(
                     event_type = "UpdateVersion",
-                    request_id = %self.id,
-                    old_version = self.version,
+                    request_id = %inner.id,
+                    old_version = inner.version,
                     new_version = version,
                     "Applying version update"
                 );
-                self.state = RequestManagerState::Starting;
-                self.version = *version
+                inner.state = RequestManagerState::Starting;
+                inner.version = *version
             }
             RequestManagerEvent::SafeState { command, request } => {
                 debug!(
                     event_type = "SafeState",
-                    request_id = %self.id,
+                    request_id = %inner.id,
                     command = ?command,
                     "Applying safe state"
                 );
-                self.version = 0;
-                self.retry_diff = 0;
-                self.retry_timeout = 0;
-                self.state = RequestManagerState::Starting;
-                self.request = Some(request.clone());
-                self.command = command.clone();
+                inner.version = 0;
+                inner.retry_diff = 0;
+                inner.retry_timeout = 0;
+                inner.state = RequestManagerState::Starting;
+                inner.request = Some(request.clone());
+                inner.command = command.clone();
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.command.clone_from(&state.command);
+        self.request.clone_from(&state.request);
+        self.state.clone_from(&state.state);
+        self.version = state.version;
     }
 }
 

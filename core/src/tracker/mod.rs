@@ -1059,7 +1059,8 @@ impl Handler<Self> for Tracker {
     }
 
     async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        let event_for_publish = event.clone();
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 error = %e,
                 subject_id = %self.subject_metadata.subject_id,
@@ -1069,7 +1070,7 @@ impl Handler<Self> for Tracker {
             emit_fail(ctx, e).await;
         };
 
-        ctx.publish_all(event.clone());
+        ctx.publish_all(event_for_publish);
         debug!(
             subject_id = %self.subject_metadata.subject_id,
             sn = self.subject_metadata.sn,
@@ -1105,15 +1106,7 @@ pub struct InitParamsTracker {
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
     type InitParams = InitParamsTracker;
-
-    fn update(&mut self, state: Self) {
-        self.properties = state.properties;
-        self.visibility_mode = state.visibility_mode;
-        self.governance_id = state.governance_id;
-        self.namespace = state.namespace;
-        self.genesis_gov_version = state.genesis_gov_version;
-        self.subject_metadata = state.subject_metadata;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let init = params.data.unwrap_or_default();
@@ -1132,7 +1125,12 @@ impl PersistentActor for Tracker {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match &event.protocols {
             Protocols::Create {
                 validation,
@@ -1142,7 +1140,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker create apply"
                     );
@@ -1156,14 +1154,14 @@ impl PersistentActor for Tracker {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
-                    self.subject_metadata = SubjectMetadata::new(metadata);
-                    self.properties = metadata.properties.clone();
-                    self.visibility_mode = TrackerVisibilityMode::Full;
+                    inner.subject_metadata = SubjectMetadata::new(metadata);
+                    inner.properties = metadata.properties.clone();
+                    inner.visibility_mode = TrackerVisibilityMode::Full;
 
                     debug!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
-                        sn = self.subject_metadata.sn,
+                        subject_id = %inner.subject_metadata.subject_id,
+                        sn = inner.subject_metadata.sn,
                         "Applied create event"
                     );
                 } else {
@@ -1174,7 +1172,7 @@ impl PersistentActor for Tracker {
                     return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
                 }
 
-                return Ok(());
+                return Ok(state);
             }
             Protocols::TrackerFactFull {
                 evaluation,
@@ -1185,7 +1183,7 @@ impl PersistentActor for Tracker {
                 else {
                     error!(
                         event_type = "Fact",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker fact apply"
                     );
@@ -1197,17 +1195,17 @@ impl PersistentActor for Tracker {
                 };
 
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
-                    if self.is_full() {
-                        self.apply_patch(eval_res.patch)?;
+                    if inner.is_full() {
+                        inner.apply_patch(eval_res.patch)?;
                         debug!(
                             event_type = "Fact",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Applied fact event with patch"
                         );
                     } else {
                         debug!(
                             event_type = "Fact",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Tracker is not in full mode, fact patch not applied"
                         );
                     }
@@ -1215,11 +1213,11 @@ impl PersistentActor for Tracker {
             }
             Protocols::TrackerFactOpaque { evaluation, .. } => {
                 if evaluation.is_ok() {
-                    self.visibility_mode = TrackerVisibilityMode::Opaque;
+                    inner.visibility_mode = TrackerVisibilityMode::Opaque;
                 }
                 debug!(
                     event_type = "FactOpaque",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied tracker opaque fact event"
                 );
             }
@@ -1233,7 +1231,7 @@ impl PersistentActor for Tracker {
                 else {
                     error!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker transfer apply"
                     );
@@ -1245,23 +1243,23 @@ impl PersistentActor for Tracker {
                 };
 
                 if evaluation.evaluator_response_ok().is_some() {
-                    if self.is_full()
+                    if inner.is_full()
                         && let Some(eval_res) =
                             evaluation.evaluator_response_ok()
                     {
-                        self.apply_patch(eval_res.patch)?;
-                    } else if !self.is_full() {
+                        inner.apply_patch(eval_res.patch)?;
+                    } else if !inner.is_full() {
                         debug!(
                             event_type = "Transfer",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Tracker is not in full mode, transfer patch not applied"
                         );
                     }
-                    self.subject_metadata.new_owner =
+                    inner.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         new_owner = %transfer_request.new_owner,
                         "Applied transfer event"
                     );
@@ -1272,7 +1270,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker confirm apply"
                     );
@@ -1283,19 +1281,19 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                if let Some(new_owner) = self.subject_metadata.new_owner.take()
+                if let Some(new_owner) = inner.subject_metadata.new_owner.take()
                 {
-                    self.subject_metadata.owner = new_owner.clone();
+                    inner.subject_metadata.owner = new_owner.clone();
                     debug!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         new_owner = %new_owner,
                         "Applied confirm event"
                     );
                 } else {
                     error!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         "New owner is None in confirm event"
                     );
                     return Err(ActorError::Functional {
@@ -1309,7 +1307,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "Reject",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker reject apply"
                     );
@@ -1320,10 +1318,10 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                self.subject_metadata.new_owner = None;
+                inner.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied reject event"
                 );
             }
@@ -1332,7 +1330,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "EOL",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker eol apply"
                     );
@@ -1342,16 +1340,16 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                self.subject_metadata.active = false;
+                inner.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied EOL event"
                 );
             }
             _ => {
                 error!(
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Invalid protocol data for Tracker"
                 );
                 return Err(ActorError::Functional {
@@ -1362,11 +1360,25 @@ impl PersistentActor for Tracker {
             }
         }
 
-        self.subject_metadata.sn += 1;
-        self.subject_metadata.prev_ledger_event_hash =
+        inner.subject_metadata.sn += 1;
+        inner.subject_metadata.prev_ledger_event_hash =
             event.prev_ledger_event_hash.clone();
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.properties.clone_from(&state.properties);
+        self.visibility_mode.clone_from(&state.visibility_mode);
+        self.governance_id.clone_from(&state.governance_id);
+        self.namespace.clone_from(&state.namespace);
+        self.genesis_gov_version.clone_from(&state.genesis_gov_version);
+        self.subject_metadata.clone_from(&state.subject_metadata);
     }
 }
 

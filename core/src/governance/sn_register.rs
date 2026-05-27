@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -312,9 +313,8 @@ impl Handler<Self> for SnRegister {
         event: SnRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist sn register event"
             );
@@ -327,16 +327,22 @@ impl Handler<Self> for SnRegister {
 impl PersistentActor for SnRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             SnRegisterEvent::DeleteSubject { subject_id } => {
-                self.register.remove(subject_id);
+                inner.register.remove(subject_id);
 
                 debug!(
                     event_type = "DeleteSubject",
@@ -349,7 +355,7 @@ impl PersistentActor for SnRegister {
                 gov_version,
                 sn,
             } => {
-                self.register
+                inner.register
                     .entry(subject_id.to_owned())
                     .or_default()
                     .insert(*gov_version, *sn);
@@ -364,7 +370,15 @@ impl PersistentActor for SnRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

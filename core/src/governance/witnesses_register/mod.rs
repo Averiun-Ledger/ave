@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::governance::sn_register::{
     SnLimit, SnRegister, SnRegisterMessage, SnRegisterResponse,
@@ -1579,10 +1580,9 @@ impl Handler<Self> for WitnessesRegister {
         event: WitnessesRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 msg_type = "Persist",
-                event = ?event,
                 error = %e,
                 "Failed to persist witnesses register event"
             );
@@ -1595,6 +1595,7 @@ impl Handler<Self> for WitnessesRegister {
 impl PersistentActor for WitnessesRegister {
     type Persistence = LightPersistence;
     type InitParams = usize;
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -1603,10 +1604,15 @@ impl PersistentActor for WitnessesRegister {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             WitnessesRegisterEvent::UpdateSnGov { sn } => {
-                self.gov_sn = *sn;
+                inner.gov_sn = *sn;
 
                 debug!(
                     msg_type = "UpdateSnGov",
@@ -1621,13 +1627,13 @@ impl PersistentActor for WitnessesRegister {
                 remove_witnesses,
             } => {
                 for (schema_id, ns, creator) in remove_creator.iter() {
-                    self.close_creator_registration(
+                    inner.close_creator_registration(
                         schema_id, ns, creator, *version,
                     );
                 }
 
                 for ((schema_id, witness), namespace) in remove_witnesses {
-                    if let Some(witness_namespace) = self
+                    if let Some(witness_namespace) = inner
                         .witnesses
                         .get_mut(&(witness.clone(), schema_id.clone()))
                     {
@@ -1645,7 +1651,7 @@ impl PersistentActor for WitnessesRegister {
                     }
                 }
 
-                self.rebuild_node_creator_index();
+                inner.rebuild_node_creator_index();
 
                 debug!(
                     msg_type = "UpdateCreatorsWitnessesConfirm",
@@ -1667,7 +1673,7 @@ impl PersistentActor for WitnessesRegister {
                 for ((schema_id, ns, creator), registration) in
                     new_creator.iter()
                 {
-                    self.apply_creator_registration(
+                    inner.apply_creator_registration(
                         schema_id,
                         ns,
                         creator,
@@ -1677,7 +1683,7 @@ impl PersistentActor for WitnessesRegister {
                 }
 
                 for (schema_id, ns, creator) in remove_creator.iter() {
-                    self.close_creator_registration(
+                    inner.close_creator_registration(
                         schema_id, ns, creator, *version,
                     );
                 }
@@ -1685,7 +1691,7 @@ impl PersistentActor for WitnessesRegister {
                 for ((schema_id, ns, creator), registration) in
                     update_creator_witnesses.iter()
                 {
-                    self.apply_creator_registration(
+                    inner.apply_creator_registration(
                         schema_id,
                         ns,
                         creator,
@@ -1696,7 +1702,7 @@ impl PersistentActor for WitnessesRegister {
 
                 for ((schema_id, witness), namespace) in new_witnesses {
                     for ns in namespace.iter() {
-                        self.witnesses
+                        inner.witnesses
                             .entry((witness.clone(), schema_id.clone()))
                             .or_default()
                             .entry(ns.clone())
@@ -1706,7 +1712,7 @@ impl PersistentActor for WitnessesRegister {
                 }
 
                 for ((schema_id, witness), namespace) in remove_witnesses {
-                    if let Some(witness_namespace) = self
+                    if let Some(witness_namespace) = inner
                         .witnesses
                         .get_mut(&(witness.clone(), schema_id.clone()))
                     {
@@ -1724,7 +1730,7 @@ impl PersistentActor for WitnessesRegister {
                     }
                 }
 
-                self.rebuild_node_creator_index();
+                inner.rebuild_node_creator_index();
 
                 debug!(
                     msg_type = "UpdateCreatorsWitnessesFact",
@@ -1740,7 +1746,7 @@ impl PersistentActor for WitnessesRegister {
                 );
             }
             WitnessesRegisterEvent::UpdateSn { subject_id, sn } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     data.sn = *sn;
 
                     debug!(
@@ -1766,7 +1772,7 @@ impl PersistentActor for WitnessesRegister {
                 stored_visibility,
                 event_visibility,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     data.visibility_state.set_mode(*mode);
                     data.visibility_state.record_event(
                         *sn,
@@ -1788,7 +1794,7 @@ impl PersistentActor for WitnessesRegister {
                 owner,
                 gov_version,
             } => {
-                let data = self.subjects.entry(subject_id.clone()).or_default();
+                let data = inner.subjects.entry(subject_id.clone()).or_default();
 
                 data.actual_owner = owner.clone();
                 data.gov_version = *gov_version;
@@ -1813,7 +1819,7 @@ impl PersistentActor for WitnessesRegister {
                 new_owner,
                 gov_version,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     data.actual_new_owner_data =
                         Some((new_owner.clone(), *gov_version));
 
@@ -1840,7 +1846,7 @@ impl PersistentActor for WitnessesRegister {
                 sn,
                 gov_version,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
                     if let Some((new_owner, new_owner_gov_version)) = new_owner
@@ -1886,7 +1892,7 @@ impl PersistentActor for WitnessesRegister {
                 };
             }
             WitnessesRegisterEvent::DeleteSubject { subject_id } => {
-                self.subjects.remove(subject_id);
+                inner.subjects.remove(subject_id);
 
                 debug!(
                     msg_type = "DeleteSubject",
@@ -1900,7 +1906,7 @@ impl PersistentActor for WitnessesRegister {
                 sn,
                 gov_version,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
                     if let Some((new_owner, new_owner_gov_version)) = new_owner
@@ -1942,7 +1948,15 @@ impl PersistentActor for WitnessesRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

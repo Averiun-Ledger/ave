@@ -1545,7 +1545,7 @@ impl Handler<Self> for RequestHandler {
         event: RequestHandlerEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 error = %e,
                 "Failed to persist event"
@@ -1562,11 +1562,7 @@ impl Storable for RequestHandler {}
 impl PersistentActor for RequestHandler {
     type Persistence = LightPersistence;
     type InitParams = (Arc<PublicKey>, (HashAlgorithm, Arc<NetworkSender>));
-
-    fn update(&mut self, state: Self) {
-        self.in_queue = state.in_queue;
-        self.handling = state.handling;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -1578,23 +1574,28 @@ impl PersistentActor for RequestHandler {
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             RequestHandlerEvent::EventToQueue {
                 subject_id,
                 event,
                 request_id,
             } => {
-                self.in_queue
+                inner.in_queue
                     .entry(subject_id.clone())
                     .or_default()
                     .push_back((event.clone(), request_id.clone()));
             }
             RequestHandlerEvent::Invalid { subject_id } => {
-                if let Some(vec) = self.in_queue.get_mut(subject_id) {
+                if let Some(vec) = inner.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                     if vec.is_empty() {
-                        self.in_queue.remove(subject_id);
+                        inner.in_queue.remove(subject_id);
                     }
                 }
             }
@@ -1602,23 +1603,33 @@ impl PersistentActor for RequestHandler {
                 subject_id,
                 request_id,
             } => {
-                self.handling.insert(subject_id.clone(), request_id.clone());
-                if let Some(vec) = self.in_queue.get_mut(subject_id) {
+                inner.handling.insert(subject_id.clone(), request_id.clone());
+                if let Some(vec) = inner.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                     if vec.is_empty() {
-                        self.in_queue.remove(subject_id);
+                        inner.in_queue.remove(subject_id);
                     }
                 }
             }
             RequestHandlerEvent::FinishHandling { subject_id } => {
-                self.handling.remove(subject_id);
+                inner.handling.remove(subject_id);
             }
             RequestHandlerEvent::PurgeSubject { subject_id } => {
-                self.handling.remove(subject_id);
-                self.in_queue.remove(subject_id);
+                inner.handling.remove(subject_id);
+                inner.in_queue.remove(subject_id);
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.in_queue.clone_from(&state.in_queue);
+        self.handling.clone_from(&state.handling);
     }
 }

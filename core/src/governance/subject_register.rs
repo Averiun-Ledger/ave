@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -396,9 +397,8 @@ impl Handler<Self> for SubjectRegister {
         event: SubjectRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist subject register event"
             );
@@ -411,17 +411,23 @@ impl Handler<Self> for SubjectRegister {
 impl PersistentActor for SubjectRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             SubjectRegisterEvent::RegisterData { gov_version, data } => {
                 for (creator, schema_id, namespace, quantity) in data.iter() {
-                    self.register
+                    inner.register
                         .entry((
                             creator.to_owned(),
                             schema_id.to_owned(),
@@ -445,7 +451,7 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
-                self.register
+                inner.register
                     .entry((
                         creator.to_owned(),
                         schema_id.to_owned(),
@@ -463,7 +469,7 @@ impl PersistentActor for SubjectRegister {
                 );
             }
             SubjectRegisterEvent::DeleteSubject { subject_id } => {
-                for (_, subjects) in self.register.values_mut() {
+                for (_, subjects) in inner.register.values_mut() {
                     subjects.remove(subject_id);
                 }
 
@@ -480,7 +486,7 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
-                self.register
+                inner.register
                     .entry((
                         new_owner.to_owned(),
                         schema_id.to_owned(),
@@ -490,7 +496,7 @@ impl PersistentActor for SubjectRegister {
                     .1
                     .insert(subject_id.to_owned());
 
-                self.register
+                inner.register
                     .entry((
                         old_owner.to_owned(),
                         schema_id.to_owned(),
@@ -510,7 +516,15 @@ impl PersistentActor for SubjectRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

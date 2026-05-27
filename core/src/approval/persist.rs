@@ -785,7 +785,7 @@ impl Handler<Self> for ApprPersist {
         event: ApprPersistEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(error = %e, "Failed to persist event");
             emit_fail(ctx, e).await;
         };
@@ -797,13 +797,7 @@ impl Handler<Self> for ApprPersist {
 impl PersistentActor for ApprPersist {
     type Persistence = LightPersistence;
     type InitParams = InitApprPersist;
-
-    fn update(&mut self, state: Self) {
-        self.request_id = state.request_id;
-        self.version = state.version;
-        self.state = state.state;
-        self.request = state.request;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let Self::InitParams {
@@ -827,7 +821,12 @@ impl PersistentActor for ApprPersist {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             ApprPersistEvent::ChangeState { state, .. } => {
                 debug!(
@@ -835,7 +834,7 @@ impl PersistentActor for ApprPersist {
                     new_state = ?state,
                     "Approval state changed"
                 );
-                self.state = Some(state.clone());
+                inner.state = Some(state.clone());
             }
             ApprPersistEvent::SafeState {
                 request,
@@ -851,14 +850,26 @@ impl PersistentActor for ApprPersist {
                     new_state = ?state,
                     "Approval state saved"
                 );
-                self.version = *version;
-                self.request_id.clone_from(request_id);
-                self.request = Some(*request.clone());
-                self.state = Some(state.clone());
+                inner.version = *version;
+                inner.request_id.clone_from(request_id);
+                inner.request = Some(*request.clone());
+                inner.state = Some(state.clone());
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.request_id.clone_from(&state.request_id);
+        self.version = state.version;
+        self.state.clone_from(&state.state);
+        self.request.clone_from(&state.request);
     }
 }
 
