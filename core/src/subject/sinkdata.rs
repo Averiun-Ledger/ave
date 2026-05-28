@@ -194,7 +194,7 @@ impl Handler<Self> for SinkData {
                 (metadata.subject_id.to_string(), metadata.schema_id.clone())
             }
         };
-        ctx.publish_all(event.clone());
+        ctx.publish_all(event);
         debug!(
             subject_id = %subject_id,
             schema_id = %schema_id,

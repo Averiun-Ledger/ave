@@ -48,17 +48,8 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Tracker {
-    #[serde(skip)]
-    pub our_key: Arc<PublicKey>,
-    #[serde(skip)]
-    pub service: bool,
-    #[serde(skip)]
-    pub only_clear_events: bool,
-    #[serde(skip)]
-    pub hash: Option<HashAlgorithm>,
-
+#[derive(Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize)]
+pub struct TrackerState {
     pub subject_metadata: SubjectMetadata,
     pub governance_id: DigestIdentifier,
     /// The namespace of the subject.
@@ -68,6 +59,40 @@ pub struct Tracker {
     pub visibility_mode: TrackerVisibilityMode,
     /// The current status of the subject.
     pub properties: ValueWrapper,
+}
+
+#[derive(Debug)]
+pub struct Tracker {
+    pub our_key: Arc<PublicKey>,
+    pub service: bool,
+    pub only_clear_events: bool,
+    pub hash: Option<HashAlgorithm>,
+    pub state: Arc<TrackerState>,
+}
+
+impl Clone for Tracker {
+    fn clone(&self) -> Self {
+        Self {
+            our_key: self.our_key.clone(),
+            service: self.service,
+            only_clear_events: self.only_clear_events,
+            hash: self.hash,
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl std::ops::Deref for Tracker {
+    type Target = TrackerState;
+    fn deref(&self) -> &TrackerState {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for Tracker {
+    fn deref_mut(&mut self) -> &mut TrackerState {
+        Arc::make_mut(&mut self.state)
+    }
 }
 
 #[derive(Default)]
@@ -88,56 +113,6 @@ impl From<&Metadata> for TrackerInit {
             genesis_gov_version: value.genesis_gov_version,
             properties: value.properties.clone(),
         }
-    }
-}
-
-impl BorshSerialize for Tracker {
-    fn serialize<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
-        BorshSerialize::serialize(&self.subject_metadata, writer)?;
-        BorshSerialize::serialize(&self.governance_id, writer)?;
-        BorshSerialize::serialize(&self.namespace, writer)?;
-        BorshSerialize::serialize(&self.genesis_gov_version, writer)?;
-        BorshSerialize::serialize(&self.visibility_mode, writer)?;
-        BorshSerialize::serialize(&self.properties, writer)?;
-
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for Tracker {
-    fn deserialize_reader<R: std::io::Read>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        // Deserialize the persisted fields
-        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
-        let governance_id = DigestIdentifier::deserialize_reader(reader)?;
-        let namespace = Namespace::deserialize_reader(reader)?;
-        let genesis_gov_version = u64::deserialize_reader(reader)?;
-        let visibility_mode =
-            TrackerVisibilityMode::deserialize_reader(reader)?;
-        let properties = ValueWrapper::deserialize_reader(reader)?;
-
-        // Create a default/placeholder KeyPair for 'owner'
-        // This will be replaced by the actual owner during actor initialization
-        let our_key = Arc::new(PublicKey::default());
-        let hash = None;
-
-        Ok(Self {
-            service: false,
-            only_clear_events: false,
-            hash,
-            our_key,
-            subject_metadata,
-            governance_id,
-            namespace,
-            genesis_gov_version,
-            visibility_mode,
-            properties,
-        })
     }
 }
 
@@ -298,41 +273,7 @@ impl Subject for Tracker {
         &mut self,
         json_patch: ValueWrapper,
     ) -> Result<(), ActorError> {
-        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
-            .map_err(|e| {
-                let error = SubjectError::PatchConversionFailed {
-                    details: e.to_string(),
-                };
-                error!(
-                    error = %e,
-                    subject_id = %self.subject_metadata.subject_id,
-                    "Failed to convert patch from JSON"
-                );
-                ActorError::Functional {
-                    description: error.to_string(),
-                }
-            })?;
-
-        patch(&mut self.properties.0, &patch_json).map_err(|e| {
-            let error = SubjectError::PatchApplicationFailed {
-                details: e.to_string(),
-            };
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                "Failed to apply patch to properties"
-            );
-            ActorError::Functional {
-                description: error.to_string(),
-            }
-        })?;
-
-        debug!(
-            subject_id = %self.subject_metadata.subject_id,
-            "Patch applied successfully"
-        );
-
-        Ok(())
+        self.apply_patch_inner(json_patch)
     }
 
     async fn manager_new_ledger_events(
@@ -388,6 +329,53 @@ impl Subject for Tracker {
     }
 }
 
+impl TrackerState {
+    const fn is_full(&self) -> bool {
+        matches!(self.visibility_mode, TrackerVisibilityMode::Full)
+    }
+
+    fn apply_patch_inner(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError> {
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
+                );
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
+
+        patch(&mut self.properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
+
+        Ok(())
+    }
+}
+
 impl Tracker {
     const fn public_visibilities()
     -> (TrackerStoredVisibility, TrackerEventVisibility) {
@@ -412,10 +400,6 @@ impl Tracker {
         };
 
         (stored_visibility, event_visibility)
-    }
-
-    const fn is_full(&self) -> bool {
-        matches!(self.visibility_mode, TrackerVisibilityMode::Full)
     }
 
     async fn record_visibility_event(
@@ -665,7 +649,7 @@ impl Tracker {
                 ctx,
                 &first,
                 hash,
-                Metadata::from(self.clone()),
+                Metadata::from(&*self),
             )
             .await
             {
@@ -748,7 +732,7 @@ impl Tracker {
                 ctx,
                 Self::verify_new_ledger_event_args(
                     &event,
-                    Metadata::from(self.clone()),
+                    Metadata::from(&*self),
                     actual_ledger_hash,
                     last_data,
                     hash,
@@ -1013,7 +997,7 @@ impl Handler<Self> for Tracker {
                 })
             }
             TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
-                Box::new(Metadata::from(self.clone())),
+                Box::new(Metadata::from(&*self)),
             )),
             TrackerMessage::PurgeStorage => {
                 purge_storage(ctx).await?;
@@ -1106,7 +1090,7 @@ pub struct InitParamsTracker {
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
     type InitParams = InitParamsTracker;
-    type State = Self;
+    type State = TrackerState;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let init = params.data.unwrap_or_default();
@@ -1116,12 +1100,14 @@ impl PersistentActor for Tracker {
             only_clear_events: params.only_clear_events,
             hash: Some(params.hash),
             our_key: params.public_key,
-            subject_metadata: init.subject_metadata,
-            properties: init.properties,
-            genesis_gov_version: init.genesis_gov_version,
-            governance_id: init.governance_id,
-            namespace: init.namespace,
-            visibility_mode: TrackerVisibilityMode::Full,
+            state: Arc::new(TrackerState {
+                subject_metadata: init.subject_metadata,
+                properties: init.properties,
+                genesis_gov_version: init.genesis_gov_version,
+                governance_id: init.governance_id,
+                namespace: init.namespace,
+                visibility_mode: TrackerVisibilityMode::Full,
+            }),
         }
     }
 
@@ -1196,7 +1182,7 @@ impl PersistentActor for Tracker {
 
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if inner.is_full() {
-                        inner.apply_patch(eval_res.patch)?;
+                        inner.apply_patch_inner(eval_res.patch)?;
                         debug!(
                             event_type = "Fact",
                             subject_id = %inner.subject_metadata.subject_id,
@@ -1247,7 +1233,7 @@ impl PersistentActor for Tracker {
                         && let Some(eval_res) =
                             evaluation.evaluator_response_ok()
                     {
-                        inner.apply_patch(eval_res.patch)?;
+                        inner.apply_patch_inner(eval_res.patch)?;
                     } else if !inner.is_full() {
                         debug!(
                             event_type = "Transfer",
@@ -1368,17 +1354,11 @@ impl PersistentActor for Tracker {
     }
 
     fn state(&self) -> Arc<Self::State> {
-        Arc::new(self.clone())
+        self.state.clone()
     }
 
     fn set_state(&mut self, state: Arc<Self::State>) {
-        let state = &*state;
-        self.properties.clone_from(&state.properties);
-        self.visibility_mode.clone_from(&state.visibility_mode);
-        self.governance_id.clone_from(&state.governance_id);
-        self.namespace.clone_from(&state.namespace);
-        self.genesis_gov_version.clone_from(&state.genesis_gov_version);
-        self.subject_metadata.clone_from(&state.subject_metadata);
+        self.state = state;
     }
 }
 

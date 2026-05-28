@@ -167,57 +167,59 @@ impl From<Metadata> for MetadataWithoutProperties {
     }
 }
 
-impl From<Governance> for Metadata {
-    fn from(value: Governance) -> Self {
+impl From<&Governance> for Metadata {
+    fn from(value: &Governance) -> Self {
         Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
             subject_id: value.subject_metadata.subject_id.clone(),
-            governance_id: value.subject_metadata.subject_id,
+            governance_id: value.subject_metadata.subject_id.clone(),
             genesis_gov_version: 0,
             prev_ledger_event_hash: value
                 .subject_metadata
-                .prev_ledger_event_hash,
-            schema_id: value.subject_metadata.schema_id,
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
             namespace: Namespace::new(),
             sn: value.subject_metadata.sn,
-            creator: value.subject_metadata.creator,
-            owner: value.subject_metadata.owner,
-            new_owner: value.subject_metadata.new_owner,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
             active: value.subject_metadata.active,
             properties: value.properties.to_value_wrapper(),
         }
     }
 }
 
-impl From<Tracker> for Metadata {
-    fn from(value: Tracker) -> Self {
+impl From<&Tracker> for Metadata {
+    fn from(value: &Tracker) -> Self {
         Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
-            subject_id: value.subject_metadata.subject_id,
-            governance_id: value.governance_id,
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.governance_id.clone(),
             genesis_gov_version: value.genesis_gov_version,
             prev_ledger_event_hash: value
                 .subject_metadata
-                .prev_ledger_event_hash,
-            schema_id: value.subject_metadata.schema_id,
-            namespace: value.namespace,
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
+            namespace: value.namespace.clone(),
             sn: value.subject_metadata.sn,
-            creator: value.subject_metadata.creator,
-            owner: value.subject_metadata.owner,
-            new_owner: value.subject_metadata.new_owner,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
             active: value.subject_metadata.active,
-            properties: value.properties,
+            properties: value.properties.clone(),
         }
     }
 }
 
-impl From<Governance> for SubjectDB {
-    fn from(value: Governance) -> Self {
+impl From<&Governance> for SubjectDB {
+    fn from(value: &Governance) -> Self {
         Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
             subject_id: value.subject_metadata.subject_id.to_string(),
             governance_id: value.subject_metadata.subject_id.to_string(),
             genesis_gov_version: 0,
@@ -238,6 +240,7 @@ impl From<Governance> for SubjectDB {
             new_owner: value
                 .subject_metadata
                 .new_owner
+                .as_ref()
                 .map(|owner| owner.to_string()),
             active: value.subject_metadata.active,
             tracker_visibility: None,

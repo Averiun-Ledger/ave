@@ -182,51 +182,41 @@ pub struct CreatorRoleUpdate {
     pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
-pub struct Governance {
-    #[serde(skip)]
-    pub our_key: Arc<PublicKey>,
-    #[serde(skip)]
-    pub service: bool,
-    #[serde(skip)]
-    pub hash: Option<HashAlgorithm>,
+#[derive(Default, Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize)]
+pub struct GovernanceState {
     pub subject_metadata: SubjectMetadata,
     pub properties: GovernanceData,
 }
 
-impl BorshSerialize for Governance {
-    fn serialize<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
-        BorshSerialize::serialize(&self.subject_metadata, writer)?;
-        BorshSerialize::serialize(&self.properties, writer)?;
+#[derive(Debug)]
+pub struct Governance {
+    pub our_key: Arc<PublicKey>,
+    pub service: bool,
+    pub hash: Option<HashAlgorithm>,
+    pub state: Arc<GovernanceState>,
+}
 
-        Ok(())
+impl Clone for Governance {
+    fn clone(&self) -> Self {
+        Self {
+            our_key: self.our_key.clone(),
+            service: self.service,
+            hash: self.hash,
+            state: self.state.clone(),
+        }
     }
 }
 
-impl BorshDeserialize for Governance {
-    fn deserialize_reader<R: std::io::Read>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        // Deserialize the persisted fields
-        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
-        let properties = GovernanceData::deserialize_reader(reader)?;
+impl std::ops::Deref for Governance {
+    type Target = GovernanceState;
+    fn deref(&self) -> &GovernanceState {
+        &self.state
+    }
+}
 
-        // Create a default/placeholder KeyPair for 'owner'
-        // This will be replaced by the actual owner during actor initialization
-        let our_key = Arc::new(PublicKey::default());
-        let hash = None;
-
-        Ok(Self {
-            hash,
-            our_key,
-            service: false,
-            subject_metadata,
-            properties,
-        })
+impl std::ops::DerefMut for Governance {
+    fn deref_mut(&mut self) -> &mut GovernanceState {
+        Arc::make_mut(&mut self.state)
     }
 }
 
@@ -315,60 +305,7 @@ impl Subject for Governance {
         &mut self,
         json_patch: ValueWrapper,
     ) -> Result<(), ActorError> {
-        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
-            .map_err(|e| {
-                let error = SubjectError::PatchConversionFailed {
-                    details: e.to_string(),
-                };
-                error!(
-                    error = %e,
-                    subject_id = %self.subject_metadata.subject_id,
-                    "Failed to convert patch from JSON"
-                );
-                ActorError::Functional {
-                    description: error.to_string(),
-                }
-            })?;
-
-        let mut properties = self.properties.to_value_wrapper();
-
-        patch(&mut properties.0, &patch_json).map_err(|e| {
-            let error = SubjectError::PatchApplicationFailed {
-                details: e.to_string(),
-            };
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                "Failed to apply patch to properties"
-            );
-            ActorError::Functional {
-                description: error.to_string(),
-            }
-        })?;
-
-        self.properties = serde_json::from_value::<GovernanceData>(
-            properties.0,
-        )
-        .map_err(|e| {
-            let error = SubjectError::GovernanceDataConversionFailed {
-                details: e.to_string(),
-            };
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                "Failed to convert properties to GovernanceData"
-            );
-            ActorError::Functional {
-                description: error.to_string(),
-            }
-        })?;
-
-        debug!(
-            subject_id = %self.subject_metadata.subject_id,
-            "Patch applied successfully"
-        );
-
-        Ok(())
+        self.apply_patch_inner(json_patch)
     }
 
     async fn manager_new_ledger_events(
@@ -525,7 +462,7 @@ impl Subject for Governance {
             Self::publish_sink(
                 ctx,
                 SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
-                    self.clone(),
+                    &*self,
                 ))),
             )
             .await?;
@@ -533,6 +470,68 @@ impl Subject for Governance {
             self.update_sn(ctx).await?;
             self.refresh_version_sync(ctx).await?;
         }
+
+        Ok(())
+    }
+}
+
+impl GovernanceState {
+    fn apply_patch_inner(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError> {
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
+                );
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
+
+        let mut properties = self.properties.to_value_wrapper();
+
+        patch(&mut properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        self.properties = serde_json::from_value::<GovernanceData>(
+            properties.0,
+        )
+        .map_err(|e| {
+            let error = SubjectError::GovernanceDataConversionFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to convert properties to GovernanceData"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
 
         Ok(())
     }
@@ -2257,7 +2256,7 @@ impl Governance {
                 ctx,
                 &first,
                 hash,
-                Metadata::from(self.clone()),
+                Metadata::from(&*self),
             )
             .await
             {
@@ -2331,7 +2330,7 @@ impl Governance {
                 ctx,
                 Self::verify_new_ledger_event_args(
                     &event,
-                    Metadata::from(self.clone()),
+                    Metadata::from(&*self),
                     actual_ledger_hash,
                     last_data,
                     hash,
@@ -3499,7 +3498,7 @@ impl Handler<Self> for Governance {
                 })
             }
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
-                Box::new(Metadata::from(self.clone())),
+                Box::new(Metadata::from(&*self)),
             )),
             GovernanceMessage::DeleteTrackerReferences { subject_id } => {
                 self.delete_tracker_references(ctx, subject_id.clone())
@@ -3705,7 +3704,7 @@ impl PersistentActor for Governance {
         HashAlgorithm,
         bool,
     );
-    type State = Self;
+    type State = GovernanceState;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let (subject_metadata, properties) =
@@ -3718,8 +3717,10 @@ impl PersistentActor for Governance {
             hash: Some(params.2),
             our_key: params.1,
             service: params.3,
-            subject_metadata,
-            properties,
+            state: Arc::new(GovernanceState {
+                subject_metadata,
+                properties,
+            }),
         }
     }
 
@@ -3806,7 +3807,7 @@ impl PersistentActor for Governance {
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
-                            inner.apply_patch(eval_res.patch)?;
+                            inner.apply_patch_inner(eval_res.patch)?;
                             debug!(
                                 event_type = "Fact",
                                 subject_id = %inner.subject_metadata.subject_id,
@@ -3890,7 +3891,7 @@ impl PersistentActor for Governance {
                         inner.subject_metadata.new_owner.take()
                     {
                         inner.subject_metadata.owner = new_owner.clone();
-                        inner.apply_patch(eval_res.patch)?;
+                        inner.apply_patch_inner(eval_res.patch)?;
                         debug!(
                             event_type = "Confirm",
                             subject_id = %inner.subject_metadata.subject_id,
@@ -3979,13 +3980,11 @@ impl PersistentActor for Governance {
     }
 
     fn state(&self) -> Arc<Self::State> {
-        Arc::new(self.clone())
+        self.state.clone()
     }
 
     fn set_state(&mut self, state: Arc<Self::State>) {
-        let state = &*state;
-        self.properties.clone_from(&state.properties);
-        self.subject_metadata.clone_from(&state.subject_metadata);
+        self.state = state;
     }
 }
 
