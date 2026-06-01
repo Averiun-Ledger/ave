@@ -120,6 +120,7 @@ impl Actor for SinkData {
     type Event = SinkDataEvent;
     type Message = SinkDataMessage;
     type Response = SinkDataResponse;
+    type SinkEvent = SinkDataEvent;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

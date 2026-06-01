@@ -341,6 +341,7 @@ impl Actor for ApprPersist {
     type Event = ApprPersistEvent;
     type Message = ApprPersistMessage;
     type Response = ApprPersistResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

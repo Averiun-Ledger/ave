@@ -334,6 +334,7 @@ impl Actor for Evaluation {
     type Event = ();
     type Message = EvaluationMessage;
     type Response = ();
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

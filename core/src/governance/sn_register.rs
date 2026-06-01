@@ -153,6 +153,7 @@ impl Actor for SnRegister {
     type Message = SnRegisterMessage;
     type Event = SnRegisterEvent;
     type Response = SnRegisterResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

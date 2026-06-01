@@ -656,6 +656,7 @@ impl Actor for TrackerSync {
     type Event = ();
     type Message = TrackerSyncMessage;
     type Response = TrackerSyncResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

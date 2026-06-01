@@ -230,6 +230,7 @@ impl Actor for SubjectAccess {
     type Event = SubjectAccessEvent;
     type Message = SubjectAccessMessage;
     type Response = SubjectAccessResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

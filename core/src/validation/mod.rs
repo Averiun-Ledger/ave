@@ -249,6 +249,7 @@ impl Actor for Validation {
     type Event = ();
     type Message = ValidationMessage;
     type Response = ();
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

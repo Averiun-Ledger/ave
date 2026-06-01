@@ -3183,6 +3183,7 @@ impl Actor for Governance {
     type Event = Ledger;
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
+    type SinkEvent = Ledger;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

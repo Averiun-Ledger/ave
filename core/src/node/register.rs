@@ -92,6 +92,7 @@ impl Actor for Register {
     type Event = RegisterEvent;
     type Message = RegisterMessage;
     type Response = RegisterResponse;
+    type SinkEvent = RegisterEvent;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

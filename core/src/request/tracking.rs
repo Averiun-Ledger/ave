@@ -62,6 +62,7 @@ impl Actor for RequestTracking {
     type Message = RequestTrackingMessage;
     type Event = RequestTrackingEvent;
     type Response = RequestTrackingResponse;
+    type SinkEvent = RequestTrackingEvent;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

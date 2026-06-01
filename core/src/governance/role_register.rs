@@ -239,6 +239,7 @@ impl Actor for RoleRegister {
     type Event = RoleRegisterEvent;
     type Message = RoleRegisterMessage;
     type Response = RoleRegisterResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

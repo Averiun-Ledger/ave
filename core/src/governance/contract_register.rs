@@ -91,6 +91,7 @@ impl Actor for ContractRegister {
     type Event = ContractRegisterEvent;
     type Message = ContractRegisterMessage;
     type Response = ContractRegisterResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

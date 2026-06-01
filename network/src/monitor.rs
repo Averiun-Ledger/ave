@@ -60,6 +60,7 @@ impl Actor for Monitor {
     type Message = MonitorMessage;
     type Event = ();
     type Response = MonitorResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

@@ -889,6 +889,7 @@ impl Actor for Tracker {
     type Event = Ledger;
     type Message = TrackerMessage;
     type Response = TrackerResponse;
+    type SinkEvent = Ledger;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

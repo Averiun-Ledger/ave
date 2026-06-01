@@ -46,6 +46,7 @@ impl Actor for TempCompiler {
     type Event = ();
     type Message = TempCompilerMessage;
     type Response = CompilerResponse;
+    type SinkEvent = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

@@ -649,6 +649,7 @@ impl Actor for SubjectManager {
     type Event = ();
     type Message = SubjectManagerMessage;
     type Response = SubjectManagerResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

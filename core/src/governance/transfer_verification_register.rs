@@ -86,6 +86,7 @@ impl Actor for TransferVerificationRegister {
     type Message = TransferVerificationRegisterMessage;
     type Event = TransferVerificationRegisterEvent;
     type Response = TransferVerificationRegisterResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

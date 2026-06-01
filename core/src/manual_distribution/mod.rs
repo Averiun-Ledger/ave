@@ -155,6 +155,7 @@ impl Actor for ManualDistribution {
     type Message = ManualDistributionMessage;
     type Event = ();
     type Response = ();
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

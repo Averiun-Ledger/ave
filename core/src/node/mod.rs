@@ -828,6 +828,7 @@ impl Actor for Node {
     type Event = NodeEvent;
     type Message = NodeMessage;
     type Response = NodeResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

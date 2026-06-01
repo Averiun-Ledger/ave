@@ -299,6 +299,7 @@ impl Actor for GovernanceVersionSync {
     type Event = ();
     type Message = GovernanceVersionSyncMessage;
     type Response = GovernanceVersionSyncResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

@@ -1661,6 +1661,7 @@ impl Actor for Runner {
     type Event = ();
     type Message = RunnerMessage;
     type Response = RunnerResponse;
+    type SinkEvent = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

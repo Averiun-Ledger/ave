@@ -2061,6 +2061,7 @@ impl Actor for RequestManager {
     type Event = RequestManagerEvent;
     type Message = RequestManagerMessage;
     type Response = ();
+    type SinkEvent = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
