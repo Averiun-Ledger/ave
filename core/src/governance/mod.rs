@@ -60,8 +60,8 @@ use crate::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
-        SinkDataEvent, SubjectSinkEvent,
     },
+    model::sink::{SinkDataEvent, SubjectSinkEvent},
     system::ConfigHelper,
     validation::{
         request::LastData,

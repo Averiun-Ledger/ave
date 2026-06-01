@@ -25,8 +25,8 @@ use crate::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
-        SinkDataEvent, SubjectSinkEvent,
     },
+    model::sink::{SinkDataEvent, SubjectSinkEvent},
     validation::request::LastData,
 };
 

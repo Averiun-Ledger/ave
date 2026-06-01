@@ -10,7 +10,7 @@ use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{helpers::sink::TokenResponse, subject::SinkTypes};
+use crate::{helpers::sink::TokenResponse, model::sink::SinkTypes};
 
 /// Node configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]

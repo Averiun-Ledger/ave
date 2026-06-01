@@ -39,7 +39,7 @@ use crate::external_db::{DBManager, DBManagerMessage};
 use crate::model::event::Ledger;
 use crate::node::register::RegisterEvent;
 use crate::request::tracking::RequestTrackingEvent;
-use crate::subject::{SinkDataEvent, SubjectSinkEvent};
+use crate::model::sink::{SinkDataEvent, SubjectSinkEvent};
 
 const WRITE_QUEUE_CAPACITY: usize = 1024;
 const WRITE_BATCH_MAX: usize = 128;

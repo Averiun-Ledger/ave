@@ -18,6 +18,7 @@ use crate::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
         event::{Ledger, LedgerSeal, Protocols, ValidationMetadata},
+        sink::{SinkDataEvent, SubjectSinkEvent},
     },
     node::register::{Register, RegisterMessage},
     tracker::Tracker,
@@ -55,75 +56,6 @@ use serde_json::Value;
 use tracing::{debug, error};
 
 pub mod error;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SinkDataEvent {
-    Event(Box<DataToSink>),
-    State(Box<SubjectDB>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SubjectSinkEvent {
-    Ledger(Box<Ledger>),
-    SinkData(SinkDataEvent),
-}
-
-impl Event for SubjectSinkEvent {}
-
-#[derive(
-    Debug, Clone, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd,
-)]
-pub enum SinkTypes {
-    Create,
-    Fact,
-    Transfer,
-    Confirm,
-    Reject,
-    EOL,
-    All,
-}
-
-impl std::fmt::Display for SinkTypes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Create => write!(f, "Create"),
-            Self::Fact => write!(f, "Fact"),
-            Self::Transfer => write!(f, "Transfer"),
-            Self::Confirm => write!(f, "Confirm"),
-            Self::Reject => write!(f, "Reject"),
-            Self::EOL => write!(f, "EOL"),
-            Self::All => write!(f, "All"),
-        }
-    }
-}
-
-impl From<&DataToSink> for SinkTypes {
-    fn from(value: &DataToSink) -> Self {
-        match value.payload {
-            DataToSinkEvent::Create { .. } => Self::Create,
-            DataToSinkEvent::FactFull { .. }
-            | DataToSinkEvent::FactOpaque { .. } => Self::Fact,
-            DataToSinkEvent::Transfer { .. } => Self::Transfer,
-            DataToSinkEvent::Confirm { .. } => Self::Confirm,
-            DataToSinkEvent::Reject { .. } => Self::Reject,
-            DataToSinkEvent::Eol { .. } => Self::EOL,
-        }
-    }
-}
-
-impl From<String> for SinkTypes {
-    fn from(value: String) -> Self {
-        match value.trim() {
-            "Create" => Self::Create,
-            "Fact" => Self::Fact,
-            "Transfer" => Self::Transfer,
-            "Confirm" => Self::Confirm,
-            "Reject" => Self::Reject,
-            "EOL" => Self::EOL,
-            _ => Self::All,
-        }
-    }
-}
 
 impl Event for Ledger {}
 

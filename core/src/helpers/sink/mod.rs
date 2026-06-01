@@ -36,7 +36,7 @@ pub use error::SinkError;
 
 use crate::{
     config::{SinkQueuePolicy, SinkRoutingStrategy, SinkServer},
-    subject::{SinkDataEvent, SubjectSinkEvent, SinkTypes},
+    model::sink::{SinkDataEvent, SubjectSinkEvent, SinkTypes},
 };
 
 #[derive(Deserialize, Debug, Clone)]

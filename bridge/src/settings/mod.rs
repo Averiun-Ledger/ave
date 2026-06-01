@@ -267,7 +267,7 @@ mod tests {
             LoggingOutput, LoggingRotation, MachineSpec, SinkQueuePolicy,
             SinkRoutingStrategy, SinkServer,
         },
-        subject::SinkTypes,
+        model::sink::SinkTypes,
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;

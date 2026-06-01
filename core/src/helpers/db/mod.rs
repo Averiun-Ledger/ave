@@ -3,7 +3,7 @@ mod error;
 use crate::{
     external_db::DBManager,
     node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
-    subject::SubjectSinkEvent,
+    model::sink::SubjectSinkEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
