@@ -48,7 +48,7 @@ use crate::{
             WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
         },
     },
-    helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
+    helpers::network::service::NetworkSender,
     model::{
         common::{
             emit_fail, get_last_event, purge_storage, subject::make_obsolete,
@@ -60,7 +60,7 @@ use crate::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
-        sinkdata::{SinkData, SinkDataMessage},
+        SinkDataEvent, SubjectSinkEvent,
     },
     system::ConfigHelper,
     validation::{
@@ -72,7 +72,7 @@ use crate::{
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, Response, Sink,
+    Message, Response,
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -459,13 +459,9 @@ impl Subject for Governance {
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
-            Self::publish_sink(
-                ctx,
-                SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
-                    &*self,
-                ))),
-            )
-            .await?;
+            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(Box::new(
+                SubjectDB::from(&*self),
+            ))));
 
             self.update_sn(ctx).await?;
             self.refresh_version_sync(ctx).await?;
@@ -2302,6 +2298,7 @@ impl Governance {
                         &first.protocols,
                         &self.properties.to_value_wrapper().0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 event_request,
             )
@@ -2492,6 +2489,7 @@ impl Governance {
                         &event.protocols,
                         &self.properties.to_value_wrapper().0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 Some(event_request.clone()),
             )
@@ -3183,7 +3181,7 @@ impl Actor for Governance {
     type Event = Ledger;
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
-    type SinkEvent = Ledger;
+    type SinkEvent = SubjectSinkEvent;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -3243,26 +3241,6 @@ impl Actor for Governance {
             error!("Hash algorithm not found");
             return Err(ActorError::FunctionalCritical {
                 description: "Hash algorithm is None".to_string(),
-            });
-        };
-
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!("External database helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
-        let Some(ave_sink): Option<AveSink> =
-            ctx.system().get_helper("sink").await
-        else {
-            error!("Sink helper not found");
-            return Err(ActorError::Helper {
-                name: "sink".to_owned(),
-                reason: "Not found".to_owned(),
             });
         };
 
@@ -3350,41 +3328,15 @@ impl Actor for Governance {
             return Err(e);
         }
 
-        if self.subject_metadata.active {
-            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
+        if self.subject_metadata.active 
+            && let Err(e) = self.build_childs(ctx, &hash, &network).await {
                 error!(
                     error = %e,
                     "Failed to build governance child actors"
                 );
                 return Err(e);
             }
-
-            let sink_actor = match ctx
-                .create_child(
-                    "sink_data",
-                    SinkData {
-                        public_key: self.our_key.clone(),
-                    },
-                )
-                .await
-            {
-                Ok(actor) => actor,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to create sink_data child"
-                    );
-                    return Err(e);
-                }
-            };
-            let mut sink = Sink::new("internal");
-            sink.add("ext_db", ext_db.get_sink_data());
-            sink_actor.register_sink(sink);
-
-            let mut sink = Sink::new("external");
-            sink.add("ave_sink", ave_sink.clone());
-            sink_actor.register_sink(sink);
-        }
+        
 
         if self.service {
             let Some(config): Option<ConfigHelper> =
@@ -3673,7 +3625,7 @@ impl Handler<Self> for Governance {
             emit_fail(ctx, e).await;
         };
 
-        ctx.publish_all(event_for_publish);
+        ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
         debug!(
             subject_id = %self.subject_metadata.subject_id,
             sn = self.subject_metadata.sn,

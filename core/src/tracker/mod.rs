@@ -11,7 +11,7 @@ use crate::{
             WitnessesRegisterResponse,
         },
     },
-    helpers::{db::ExternalDB, sink::AveSink},
+
     model::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
@@ -25,14 +25,14 @@ use crate::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
-        sinkdata::{SinkData, SinkDataMessage},
+        SinkDataEvent, SubjectSinkEvent,
     },
     validation::request::LastData,
 };
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
-    Response, Sink,
+    Response,
 };
 use ave_common::{
     Namespace, ValueWrapper,
@@ -316,11 +316,7 @@ impl Subject for Tracker {
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             let subject_db = self.build_subject_db(ctx).await?;
-            Self::publish_sink(
-                ctx,
-                SinkDataMessage::UpdateState(Box::new(subject_db)),
-            )
-            .await?;
+            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(Box::new(subject_db))));
 
             self.update_sn(ctx).await?;
         }
@@ -700,6 +696,7 @@ impl Tracker {
                         &first.protocols,
                         &self.properties.0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 event_request,
             )
@@ -837,6 +834,7 @@ impl Tracker {
                         &event.protocols,
                         &self.properties.0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 event_request,
             )
@@ -889,7 +887,7 @@ impl Actor for Tracker {
     type Event = Ledger;
     type Message = TrackerMessage;
     type Response = TrackerResponse;
-    type SinkEvent = Ledger;
+    type SinkEvent = SubjectSinkEvent;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -921,56 +919,6 @@ impl Actor for Tracker {
 
         if config.safe_mode {
             return Ok(());
-        }
-
-        let our_key = self.our_key.clone();
-
-        if self.subject_metadata.active {
-            let Some(ext_db): Option<Arc<ExternalDB>> =
-                ctx.system().get_helper("ext_db").await
-            else {
-                error!("External database helper not found");
-                return Err(ActorError::Helper {
-                    name: "ext_db".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
-
-            let Some(ave_sink): Option<AveSink> =
-                ctx.system().get_helper("sink").await
-            else {
-                error!("Sink helper not found");
-                return Err(ActorError::Helper {
-                    name: "sink".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
-
-            let sink_actor = match ctx
-                .create_child(
-                    "sink_data",
-                    SinkData {
-                        public_key: our_key.clone(),
-                    },
-                )
-                .await
-            {
-                Ok(actor) => actor,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to create sink_data child"
-                    );
-                    return Err(e);
-                }
-            };
-            let mut sink = Sink::new("internal");
-            sink.add("ext_db", ext_db.get_sink_data());
-            sink_actor.register_sink(sink);
-
-            let mut sink = Sink::new("external");
-            sink.add("ave_sink", ave_sink.clone());
-            sink_actor.register_sink(sink);
         }
 
         Ok(())
@@ -1055,7 +1003,7 @@ impl Handler<Self> for Tracker {
             emit_fail(ctx, e).await;
         };
 
-        ctx.publish_all(event_for_publish);
+        ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
         debug!(
             subject_id = %self.subject_metadata.subject_id,
             sn = self.subject_metadata.sn,

@@ -35,7 +35,8 @@ use ave_actors::{
 use ave_common::{
     DataToSink, DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
     identity::{
-        DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
+        hash_borsh,
     },
     request::EventRequest,
     response::{
@@ -51,11 +52,78 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sinkdata::{SinkData, SinkDataMessage};
 use tracing::{debug, error};
 
 pub mod error;
-pub mod sinkdata;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SinkDataEvent {
+    Event(Box<DataToSink>),
+    State(Box<SubjectDB>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubjectSinkEvent {
+    Ledger(Box<Ledger>),
+    SinkData(SinkDataEvent),
+}
+
+impl Event for SubjectSinkEvent {}
+
+#[derive(
+    Debug, Clone, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd,
+)]
+pub enum SinkTypes {
+    Create,
+    Fact,
+    Transfer,
+    Confirm,
+    Reject,
+    EOL,
+    All,
+}
+
+impl std::fmt::Display for SinkTypes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Create => write!(f, "Create"),
+            Self::Fact => write!(f, "Fact"),
+            Self::Transfer => write!(f, "Transfer"),
+            Self::Confirm => write!(f, "Confirm"),
+            Self::Reject => write!(f, "Reject"),
+            Self::EOL => write!(f, "EOL"),
+            Self::All => write!(f, "All"),
+        }
+    }
+}
+
+impl From<&DataToSink> for SinkTypes {
+    fn from(value: &DataToSink) -> Self {
+        match value.payload {
+            DataToSinkEvent::Create { .. } => Self::Create,
+            DataToSinkEvent::FactFull { .. }
+            | DataToSinkEvent::FactOpaque { .. } => Self::Fact,
+            DataToSinkEvent::Transfer { .. } => Self::Transfer,
+            DataToSinkEvent::Confirm { .. } => Self::Confirm,
+            DataToSinkEvent::Reject { .. } => Self::Reject,
+            DataToSinkEvent::Eol { .. } => Self::EOL,
+        }
+    }
+}
+
+impl From<String> for SinkTypes {
+    fn from(value: String) -> Self {
+        match value.trim() {
+            "Create" => Self::Create,
+            "Fact" => Self::Fact,
+            "Transfer" => Self::Transfer,
+            "Confirm" => Self::Confirm,
+            "Reject" => Self::Reject,
+            "EOL" => Self::EOL,
+            _ => Self::All,
+        }
+    }
+}
 
 impl Event for Ledger {}
 
@@ -350,6 +418,7 @@ pub struct DataForSink {
     pub event_ledger_timestamp: u64,
     pub gov_version: u64,
     pub event_data_ledger: EventLedgerDataForSink,
+    pub public_key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -382,6 +451,7 @@ impl SinkReplayState {
         &self,
         event: &Ledger,
         event_data_ledger: EventLedgerDataForSink,
+        public_key: String,
     ) -> DataForSink {
         let (issuer, event_request_timestamp) =
             event.get_issuer_event_request_timestamp();
@@ -401,6 +471,7 @@ impl SinkReplayState {
                 .as_nanos(),
             gov_version: event.gov_version,
             event_data_ledger,
+            public_key,
         }
     }
 
@@ -411,12 +482,11 @@ impl SinkReplayState {
         sink_timestamp: u64,
     ) -> Result<DataToSink, ActorError> {
         let replay_parts = SinkReplayEventParts::from_ledger(ledger)?;
-        let data = self.data_for_sink(ledger, replay_parts.event_data_ledger);
+        let data = self.data_for_sink(ledger, replay_parts.event_data_ledger, public_key.to_owned());
 
         Ok(build_data_to_sink(
             data,
             replay_parts.event_request,
-            public_key,
             sink_timestamp,
         ))
     }
@@ -740,12 +810,11 @@ fn data_to_sink_event(
 pub fn build_data_to_sink(
     data: DataForSink,
     event: Option<EventRequest>,
-    public_key: &str,
     sink_timestamp: u64,
 ) -> DataToSink {
     DataToSink {
         payload: data_to_sink_event(data.clone(), event),
-        public_key: public_key.to_owned(),
+        public_key: data.public_key,
         event_request_timestamp: data.event_request_timestamp,
         event_ledger_timestamp: data.event_ledger_timestamp,
         sink_timestamp,
@@ -872,7 +941,7 @@ impl SubjectMetadata {
 pub trait Subject
 where
     <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
-    Self: PersistentActor,
+    Self: Actor<SinkEvent = SubjectSinkEvent> + PersistentActor,
 {
     fn verify_new_ledger_event_args<'a>(
         new_ledger_event: &'a Ledger,
@@ -1797,29 +1866,17 @@ where
         data: DataForSink,
         event: Option<EventRequest>,
     ) -> Result<(), ActorError> {
-        let msg = SinkDataMessage::Event {
-            event: Box::new(data_to_sink_event(data.clone(), event)),
+        let data_to_sink = DataToSink {
+            payload: data_to_sink_event(data.clone(), event),
+            public_key: data.public_key,
             event_request_timestamp: data.event_request_timestamp,
             event_ledger_timestamp: data.event_ledger_timestamp,
+            sink_timestamp: TimeStamp::now().as_nanos(),
         };
 
-        Self::publish_sink(ctx, msg).await
-    }
-
-    async fn publish_sink(
-        ctx: &mut ActorContext<Self>,
-        message: SinkDataMessage,
-    ) -> Result<(), ActorError> {
-        let sink_data = ctx.get_child::<SinkData>("sink_data").await?;
-        let (subject_id, schema_id) = message.get_subject_schema();
-
-        sink_data.tell(message).await?;
-        debug!(
-            subject_id = %subject_id,
-            schema_id = %schema_id,
-            "Message published to sink successfully"
-        );
-
+        ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::Event(
+            Box::new(data_to_sink),
+        )));
         Ok(())
     }
 

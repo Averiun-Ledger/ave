@@ -16,7 +16,7 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData,
     },
-    helpers::db::ExternalDB,
+    helpers::{db::ExternalDB, sink::AveSink},
     model::event::{Ledger, Protocols, ValidationMetadata},
     node::{Node, NodeMessage, NodeResponse, SubjectData},
     subject::SubjectMetadata,
@@ -129,9 +129,18 @@ impl SubjectManager {
                         reason: "Not found".to_owned(),
                     });
                 };
+                let Some(ave_sink): Option<AveSink> =
+                    ctx.system().get_helper("sink").await
+                else {
+                    return Err(ActorError::Helper {
+                        name: "sink".to_owned(),
+                        reason: "Not found".to_owned(),
+                    });
+                };
 
                 let mut sink = Sink::new("internal");
-                sink.add("ext_db", ext_db.get_subject());
+                sink.add("ext_db", ext_db.get_sink_data());
+                sink.add("ave_sink", ave_sink);
                 actor.register_sink(sink);
             }
         }
@@ -575,8 +584,18 @@ impl SubjectManager {
             });
         };
 
+        let Some(ave_sink): Option<AveSink> =
+            ctx.system().get_helper("sink").await
+        else {
+            return Err(ActorError::Helper {
+                name: "sink".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
         let mut sink = Sink::new("internal");
-        sink.add("ext_db", ext_db.get_subject());
+        sink.add("ext_db", ext_db.get_sink_data());
+        sink.add("ave_sink", ave_sink);
         actor.register_sink(sink);
         Ok(())
     }
@@ -612,8 +631,18 @@ impl SubjectManager {
             });
         };
 
+        let Some(ave_sink): Option<AveSink> =
+            ctx.system().get_helper("sink").await
+        else {
+            return Err(ActorError::Helper {
+                name: "sink".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
         let mut sink = Sink::new("internal");
-        sink.add("ext_db", ext_db.get_subject());
+        sink.add("ext_db", ext_db.get_sink_data());
+        sink.add("ave_sink", ave_sink);
         actor.register_sink(sink);
         Ok(())
     }
