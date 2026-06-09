@@ -34,6 +34,10 @@ pub enum SinkError {
     #[error("sink rejected data format: {message}")]
     UnprocessableEntity { message: String },
 
+    /// Sink returned auth expired (401/403).
+    #[error("sink auth expired ({status}): {message}")]
+    AuthExpired { status: u16, message: String },
+
     /// Sink returned an HTTP error.
     #[error("sink returned HTTP {status}: {message}")]
     HttpStatus {
@@ -58,7 +62,18 @@ impl SinkError {
             | Self::TokenParse(_)
             | Self::Unauthorized
             | Self::UnprocessableEntity { .. }
+            | Self::AuthExpired { .. }
             | Self::Shutdown => false,
         }
+    }
+
+    pub const fn is_auth_recoverable(&self) -> bool {
+        matches!(
+            self,
+            Self::AuthExpired { .. }
+                | Self::Unauthorized
+                | Self::HttpStatus { status: 401, .. }
+                | Self::HttpStatus { status: 403, .. }
+        )
     }
 }

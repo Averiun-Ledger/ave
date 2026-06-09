@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     ops::Deref,
+    sync::Arc,
 };
 
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
         event::{Ledger, LedgerSeal, Protocols, ValidationMetadata},
-        sink::{SinkDataEvent, SubjectSinkEvent},
+        sink::SubjectSinkEvent,
     },
     node::register::{Register, RegisterMessage},
     tracker::Tracker,
@@ -872,8 +873,7 @@ impl SubjectMetadata {
 #[async_trait]
 pub trait Subject
 where
-    <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
-    Self: Actor<SinkEvent = SubjectSinkEvent> + PersistentActor,
+    Self: Actor<Event = Ledger, SinkEvent = SubjectSinkEvent> + PersistentActor,
 {
     fn verify_new_ledger_event_args<'a>(
         new_ledger_event: &'a Ledger,
@@ -1794,6 +1794,7 @@ where
     }
 
     async fn event_to_sink(
+        &self,
         ctx: &mut ActorContext<Self>,
         data: DataForSink,
         event: Option<EventRequest>,
@@ -1806,9 +1807,15 @@ where
             sink_timestamp: TimeStamp::now().as_nanos(),
         };
 
-        ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::Event(
-            Box::new(data_to_sink),
-        )));
+        self.notify_reliable_sinks(ctx, data_to_sink).await?;
+        Ok(())
+    }
+
+    async fn notify_reliable_sinks(
+        &self,
+        _ctx: &mut ActorContext<Self>,
+        _data: DataToSink,
+    ) -> Result<(), ActorError> {
         Ok(())
     }
 
@@ -1876,4 +1883,30 @@ where
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<Option<Ledger>, ActorError>;
+
+    fn our_key(&self) -> Arc<PublicKey>;
+
+    async fn get_sink_events(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        from_sn: u64,
+        batch_size: usize,
+    ) -> Result<Vec<DataToSink>, ActorError> {
+        let public_key = self.our_key().to_string();
+        let hi_sn = from_sn + batch_size as u64;
+        let (ledgers, _is_all) = self.get_ledger(ctx, None, hi_sn).await?;
+        let sink_timestamp = TimeStamp::now().as_nanos();
+        let page = replay_sink_events(
+            &ledgers,
+            &public_key,
+            from_sn,
+            None,
+            batch_size as u64,
+            sink_timestamp,
+        )
+        .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+        Ok(page.events)
+    }
 }

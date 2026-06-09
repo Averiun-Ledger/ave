@@ -261,13 +261,13 @@ mod tests {
     };
 
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
+    use ave_common::SinkTypes;
     use ave_core::{
         config::{
             AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-            LoggingOutput, LoggingRotation, MachineSpec, SinkQueuePolicy,
-            SinkRoutingStrategy, SinkServer,
+            LoggingOutput, LoggingRotation, MachineSpec, SinkServer,
         },
-        model::sink::SinkTypes,
+
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
@@ -360,32 +360,19 @@ max_size = 52428800
 max_files = 5
 level = "debug"
 
-[sink]
-auth = "https://auth.service"
-username = "sink-user"
-
-[[sink.sinks.primary]]
+[[sinks.primary]]
 server = "SinkOne"
-events = ["Create", "All"]
+events = ["create", "all"]
 url = "https://sink.one"
-auth = true
-concurrency = 4
-queue_capacity = 2048
-queue_policy = "drop_oldest"
-routing_strategy = "unordered_round_robin"
+auth = { auth_url = "https://auth.service", username = "sink-user" }
 connect_timeout_ms = 5000
 request_timeout_ms = 30000
 max_retries = 5
 
-[[sink.sinks.primary]]
+[[sinks.primary]]
 server = "SinkTwo"
-events = ["Transfer"]
+events = ["transfer"]
 url = "https://sink.two"
-auth = false
-concurrency = 2
-queue_capacity = 512
-queue_policy = "drop_newest"
-routing_strategy = "ordered_by_subject"
 connect_timeout_ms = 3000
 request_timeout_ms = 15000
 max_retries = 1
@@ -531,33 +518,21 @@ logging:
   max_size: 52428800
   max_files: 5
   level: debug
-sink:
-  auth: https://auth.service
-  username: sink-user
-  sinks:
-    primary:
-      - server: SinkOne
-        events: [Create, All]
-        url: https://sink.one
-        auth: true
-        concurrency: 4
-        queue_capacity: 2048
-        queue_policy: drop_oldest
-        routing_strategy: unordered_round_robin
-        connect_timeout_ms: 5000
-        request_timeout_ms: 30000
-        max_retries: 5
-      - server: SinkTwo
-        events: [Transfer]
-        url: https://sink.two
-        auth: false
-        concurrency: 2
-        queue_capacity: 512
-        queue_policy: drop_newest
-        routing_strategy: ordered_by_subject
-        connect_timeout_ms: 3000
-        request_timeout_ms: 15000
-        max_retries: 1
+sinks:
+  primary:
+    - server: SinkOne
+      events: [create, all]
+      url: https://sink.one
+      auth: { auth_url: https://auth.service, username: sink-user }
+      connect_timeout_ms: 5000
+      request_timeout_ms: 30000
+      max_retries: 5
+    - server: SinkTwo
+      events: [transfer]
+      url: https://sink.two
+      connect_timeout_ms: 3000
+      request_timeout_ms: 15000
+      max_retries: 1
 auth:
   enable: true
   database_path: /var/db/auth.db
@@ -714,39 +689,26 @@ http:
     "max_files": 5,
     "level": "debug"
   },
-  "sink": {
-    "auth": "https://auth.service",
-    "username": "sink-user",
-    "sinks": {
-      "primary": [
-        {
-          "server": "SinkOne",
-          "events": ["Create", "All"],
-          "url": "https://sink.one",
-          "auth": true,
-          "concurrency": 4,
-          "queue_capacity": 2048,
-          "queue_policy": "drop_oldest",
-          "routing_strategy": "unordered_round_robin",
-          "connect_timeout_ms": 5000,
-          "request_timeout_ms": 30000,
-          "max_retries": 5
-        },
-        {
-          "server": "SinkTwo",
-          "events": ["Transfer"],
-          "url": "https://sink.two",
-          "auth": false,
-          "concurrency": 2,
-          "queue_capacity": 512,
-          "queue_policy": "drop_newest",
-          "routing_strategy": "ordered_by_subject",
-          "connect_timeout_ms": 3000,
-          "request_timeout_ms": 15000,
-          "max_retries": 1
-        }
-      ]
-    }
+  "sinks": {
+    "primary": [
+      {
+        "server": "SinkOne",
+        "events": ["create", "all"],
+        "url": "https://sink.one",
+        "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
+        "connect_timeout_ms": 5000,
+        "request_timeout_ms": 30000,
+        "max_retries": 5
+      },
+      {
+        "server": "SinkTwo",
+        "events": ["transfer"],
+        "url": "https://sink.two",
+        "connect_timeout_ms": 3000,
+        "request_timeout_ms": 15000,
+        "max_retries": 1
+      }
+    ]
   },
   "auth": {
     "enable": true,
@@ -1028,6 +990,7 @@ http:
         assert_eq!(logging.max_files, 5);
         assert_eq!(logging.level, "debug");
 
+        use ave_core::config::SinkAuthConfig;
         let mut expected_sinks = BTreeMap::new();
         expected_sinks.insert(
             "primary".to_owned(),
@@ -1036,33 +999,49 @@ http:
                     server: "SinkOne".to_owned(),
                     events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
                     url: "https://sink.one".to_owned(),
-                    auth: true,
-                    concurrency: 4,
-                    queue_capacity: 2048,
-                    queue_policy: SinkQueuePolicy::DropOldest,
-                    routing_strategy: SinkRoutingStrategy::UnorderedRoundRobin,
+                    auth: Some(SinkAuthConfig {
+                        auth_url: "https://auth.service".to_owned(),
+                        username: "sink-user".to_owned(),
+                        api_key: String::new(),
+                    }),
                     connect_timeout_ms: 5_000,
                     request_timeout_ms: 30_000,
                     max_retries: 5,
+                    batch_size: 100,
+                    sink_worker_idle_timeout_ms: 10_000,
+                    healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
+                    max_catch_up_concurrency: 2,
+                    retry_base_delay_ms: 500,
+                    health_check_url: None,
+                    sink_subject_worker_idle_timeout_ms: 2_000,
+                    token_refresh_margin_secs: 30,
+
+                    max_recoveries_after_failure: 3,
+                    startup_healthcheck_delay_secs: 1,
                 },
                 SinkServer {
                     server: "SinkTwo".to_owned(),
                     events: BTreeSet::from([SinkTypes::Transfer]),
                     url: "https://sink.two".to_owned(),
-                    auth: false,
-                    concurrency: 2,
-                    queue_capacity: 512,
-                    queue_policy: SinkQueuePolicy::DropNewest,
-                    routing_strategy: SinkRoutingStrategy::OrderedBySubject,
+                    auth: None,
                     connect_timeout_ms: 3_000,
                     request_timeout_ms: 15_000,
                     max_retries: 1,
+                    batch_size: 100,
+                    sink_worker_idle_timeout_ms: 10_000,
+                    healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
+                    max_catch_up_concurrency: 2,
+                    retry_base_delay_ms: 500,
+                    health_check_url: None,
+                    sink_subject_worker_idle_timeout_ms: 2_000,
+                    token_refresh_margin_secs: 30,
+
+                    max_recoveries_after_failure: 3,
+                    startup_healthcheck_delay_secs: 1,
                 },
             ],
         );
-        assert_eq!(config.sink.sinks, expected_sinks);
-        assert_eq!(config.sink.auth, "https://auth.service");
-        assert_eq!(config.sink.username, "sink-user");
+        assert_eq!(config.sinks, expected_sinks);
 
         let auth = &config.auth;
         assert!(auth.enable);
@@ -1133,7 +1112,7 @@ http:
         assert_eq!(config.logging.rotation, LoggingRotation::Size);
         assert_eq!(config.logging.file_path, PathBuf::from("logs"));
         assert_eq!(config.logging.max_files, 3);
-        assert_eq!(config.sink.sinks.len(), 0);
+        assert_eq!(config.sinks.len(), 0);
 
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);

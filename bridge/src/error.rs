@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use ave_core::error::Error as CoreError;
-use ave_core::helpers::sink::SinkError;
+use ave_core::sink::SinkError;
 
 /// Bridge API errors.
 ///
@@ -94,4 +94,11 @@ pub enum BridgeError {
     /// Sink authentication failed during initialization.
     #[error("Sink authentication failed: {0}")]
     SinkAuth(#[from] SinkError),
+
+    // ========================================
+    // API Errors
+    // ========================================
+    /// Generic API error.
+    #[error("API error: {0}")]
+    Api(String),
 }

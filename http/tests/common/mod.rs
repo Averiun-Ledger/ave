@@ -929,7 +929,7 @@ async fn build_test_router_with_options(
             .expect("Failed to parse bridge config");
 
     let (bridge, runners) =
-        Bridge::build(&bridge_config, "test", "", "", None, None)
+        Bridge::build(&bridge_config, "test", None, None)
             .await
             .expect("Failed to create bridge");
     let graceful_token = bridge.graceful_token().clone();

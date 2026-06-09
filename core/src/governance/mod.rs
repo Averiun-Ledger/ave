@@ -56,6 +56,7 @@ use crate::{
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
@@ -75,7 +76,7 @@ use ave_actors::{
     Message, Response,
 };
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper,
+    DataToSink, Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
     response::SubjectDB,
@@ -467,6 +468,33 @@ impl Subject for Governance {
             self.refresh_version_sync(ctx).await?;
         }
 
+        Ok(())
+    }
+
+    fn our_key(&self) -> std::sync::Arc<ave_common::identity::PublicKey> {
+        self.our_key.clone()
+    }
+
+    async fn notify_reliable_sinks(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        data: DataToSink,
+    ) -> Result<(), ActorError> {
+        let node_path = ctx.path().parent().parent();
+        let manager_path = ActorPath::from(format!("{}/node_sink_manager", node_path));
+        match ctx.system().get_actor::<SinkManager>(&manager_path).await {
+            Ok(manager) => {
+                if let Err(e) = manager
+                    .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
+                    .await
+                {
+                    error!(error = %e, "Failed to notify NodeSinkManager");
+                }
+            }
+            Err(e) => {
+                debug!(error = %e, path = %manager_path, "NodeSinkManager not found");
+            }
+        }
         Ok(())
     }
 }
@@ -2278,7 +2306,7 @@ impl Governance {
                 first.get_issuer_event_request_timestamp();
             let event_request = first.get_event_request();
 
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: None,
@@ -2469,7 +2497,7 @@ impl Governance {
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: None,
@@ -3143,6 +3171,10 @@ pub enum GovernanceMessage {
     GetTrackerRoles {
         governance_id: DigestIdentifier,
     },
+    GetSinkEvents {
+        from_sn: u64,
+        batch_size: usize,
+    },
 }
 
 impl Message for GovernanceMessage {}
@@ -3172,6 +3204,7 @@ pub enum GovernanceResponse {
     Members(BTreeMap<MemberName, PublicKey>),
     SchemaRoles(Option<RolesSchema>),
     TrackerRoles(RolesTrackerSchemas),
+    SinkEvents(Vec<DataToSink>),
     Ok,
 }
 impl Response for GovernanceResponse {}
@@ -3199,6 +3232,41 @@ impl Actor for Governance {
                 error = %e,
                 "Failed to initialize governance store"
             );
+            return Err(e);
+        }
+
+        // Create SinkManager for tracker events of this governance.
+        let tracker_sinks = if let Some(config_helper) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
+        {
+            let schema_ids: Vec<String> = self
+                .properties
+                .schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect();
+            config_helper
+                .sinks
+                .iter()
+                .filter(|(schema_id, _)| schema_ids.contains(schema_id))
+                .flat_map(|(_, servers)| servers.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = ctx
+            .create_child(
+                "sink_manager",
+                SinkManager::initial(SinkManagerInitParams {
+                    sinks: tracker_sinks,
+                    is_governance: false,
+                }),
+            )
+            .await
+        {
+            error!(error = %e, "Failed to create SinkManager");
             return Err(e);
         }
 
@@ -3609,6 +3677,13 @@ impl Handler<Self> for Governance {
                 Ok(GovernanceResponse::TrackerRoles(
                     self.properties.roles_tracker_schemas.clone(),
                 ))
+            }
+            GovernanceMessage::GetSinkEvents {
+                from_sn,
+                batch_size,
+            } => {
+                let events = self.get_sink_events(ctx, from_sn, batch_size).await?;
+                Ok(GovernanceResponse::SinkEvents(events))
             }
         }
     }

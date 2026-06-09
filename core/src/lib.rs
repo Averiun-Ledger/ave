@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod model;
 pub mod node;
 pub mod request;
+pub mod sink;
 pub mod subject;
 pub mod system;
 pub mod tracker;
@@ -61,7 +62,6 @@ use tracing::{debug, error, info, warn};
 use validation::{Validation, ValidationMessage};
 
 use crate::approval::request::ApprovalReq;
-use crate::config::SinkAuth;
 use crate::helpers::db::{
     DatabaseError as ExternalDatabaseError, ExternalDB, ReadStore,
 };
@@ -71,6 +71,7 @@ use crate::node::InitParamsNode;
 use crate::node::subject_manager::{
     SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
 };
+use crate::sink::SinkManager;
 use crate::request::tracking::{
     RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
 };
@@ -103,6 +104,7 @@ pub struct Api {
     monitor: ActorRef<Monitor>,
     manual_dis: Option<ActorRef<ManualDistribution>>,
     tracking: Option<ActorRef<RequestTracking>>,
+    node_sink_manager: Option<ActorRef<SinkManager>>,
 }
 
 fn preserve_functional_actor_error<F>(err: ActorError, fallback: F) -> Error
@@ -287,7 +289,6 @@ impl Api {
     pub async fn build(
         keys: KeyPair,
         config: AveBaseConfig,
-        sink_auth: SinkAuth,
         registry: &mut Registry,
         password: &str,
         graceful_token: CancellationToken,
@@ -297,7 +298,6 @@ impl Api {
 
         let (system, runner) = system(
             config.clone(),
-            sink_auth,
             password,
             graceful_token.clone(),
             crash_token.clone(),
@@ -443,6 +443,11 @@ impl Api {
             )
         };
 
+        let node_sink_manager: Option<ActorRef<SinkManager>> = system
+            .get_actor(&ActorPath::from("/user/node/node_sink_manager"))
+            .await
+            .ok();
+
         let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db").await
         else {
             error!("External database helper not found");
@@ -474,6 +479,7 @@ impl Api {
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
                 tracking: tracking_actor,
+                node_sink_manager,
             },
             tasks,
         ))
@@ -1189,6 +1195,27 @@ impl Api {
             })?;
 
         Ok("Manual distribution in progress".to_owned())
+    }
+
+    pub async fn get_sink_status(&self) -> Result<Vec<crate::sink::manager::SinkStatus>, Error> {
+        let manager = self.node_sink_manager.as_ref().ok_or_else(|| Error::Internal("NodeSinkManager not available".to_string()))?;
+        let response = manager.ask(crate::sink::manager::SinkManagerMessage::GetStatus).await
+            .map_err(|e| actor_communication_error("node_sink_manager", e))?;
+        match response {
+            crate::sink::manager::SinkManagerResponse::Status(statuses) => Ok(statuses),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "node_sink_manager".to_string(),
+                expected: "Status".to_string(),
+                received: "other".to_string(),
+            }),
+        }
+    }
+
+    pub async fn unblock_sink(&self, sink_name: String) -> Result<(), Error> {
+        let manager = self.node_sink_manager.as_ref().ok_or_else(|| Error::Internal("NodeSinkManager not available".to_string()))?;
+        manager.tell(crate::sink::manager::SinkManagerMessage::UnblockSink { sink: sink_name }).await
+            .map_err(|e| actor_communication_error("node_sink_manager", e))?;
+        Ok(())
     }
 
     pub async fn delete_subject(

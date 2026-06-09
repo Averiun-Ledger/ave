@@ -56,11 +56,20 @@ impl From<ave_bridge::MachineSpec> for MachineSpecHttp {
 
 impl From<ave_bridge::config::Config> for ConfigHttp {
     fn from(value: ave_bridge::config::Config) -> Self {
+        let sinks = SinkConfigHttp {
+            sinks: value
+                .sinks
+                .into_iter()
+                .map(|(k, v)| {
+                    (k, v.into_iter().map(SinkServerHttp::from).collect())
+                })
+                .collect(),
+        };
         Self {
             node: AveConfigHttp::from(value.node),
             keys_path: value.keys_path.to_string_lossy().to_string(),
             logging: LoggingHttp::from(value.logging),
-            sink: SinkConfigHttp::from(value.sink),
+            sink: sinks,
             auth: AuthConfigHttp::from(value.auth),
             http: HttpConfigHttp::from(value.http),
         }
@@ -655,28 +664,20 @@ impl From<ave_bridge::LoggingOutput> for LoggingOutputHttp {
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkConfigHttp {
-    /// Map of sink configurations by name
+    /// Map of sink configurations by schema_id
     pub sinks: BTreeMap<String, Vec<SinkServerHttp>>,
-    /// Authentication method for sinks
-    pub auth: String,
-    /// Username for sink authentication
-    pub username: String,
 }
 
-impl From<ave_bridge::SinkConfig> for SinkConfigHttp {
-    fn from(value: ave_bridge::SinkConfig) -> Self {
-        Self {
-            sinks: value
-                .sinks
-                .into_iter()
-                .map(|(k, v)| {
-                    (k, v.into_iter().map(SinkServerHttp::from).collect())
-                })
-                .collect(),
-            auth: value.auth,
-            username: value.username,
-        }
-    }
+
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SinkAuthConfigHttp {
+    /// OAuth2 / token endpoint URL
+    pub auth_url: String,
+    /// Username for the token endpoint
+    pub username: String,
+    /// API key for Api-Key header authentication
+    pub api_key: String,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -687,16 +688,8 @@ pub struct SinkServerHttp {
     pub events: Vec<String>,
     /// URL endpoint for the sink
     pub url: String,
-    /// Whether authentication is required for this sink
-    pub auth: bool,
-    /// Parallel sends allowed for this sink
-    pub concurrency: usize,
-    /// Maximum queued events for this sink
-    pub queue_capacity: usize,
-    /// Queue policy when the sink queue is full
-    pub queue_policy: String,
-    /// Routing strategy across sink workers
-    pub routing_strategy: String,
+    /// Per-sink authentication configuration
+    pub auth: Option<SinkAuthConfigHttp>,
     /// TCP connect timeout in milliseconds
     pub connect_timeout_ms: u64,
     /// Request timeout in milliseconds
@@ -711,25 +704,11 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             server: value.server,
             events: value.events.into_iter().map(|e| e.to_string()).collect(),
             url: value.url,
-            auth: value.auth,
-            concurrency: value.concurrency,
-            queue_capacity: value.queue_capacity,
-            queue_policy: match value.queue_policy {
-                ave_bridge::SinkQueuePolicy::DropOldest => {
-                    "drop_oldest".to_owned()
-                }
-                ave_bridge::SinkQueuePolicy::DropNewest => {
-                    "drop_newest".to_owned()
-                }
-            },
-            routing_strategy: match value.routing_strategy {
-                ave_bridge::SinkRoutingStrategy::OrderedBySubject => {
-                    "ordered_by_subject".to_owned()
-                }
-                ave_bridge::SinkRoutingStrategy::UnorderedRoundRobin => {
-                    "unordered_round_robin".to_owned()
-                }
-            },
+            auth: value.auth.map(|a| SinkAuthConfigHttp {
+                auth_url: a.auth_url,
+                username: a.username,
+                api_key: a.api_key,
+            }),
             connect_timeout_ms: value.connect_timeout_ms,
             request_timeout_ms: value.request_timeout_ms,
             max_retries: value.max_retries,

@@ -27,6 +27,7 @@ use crate::{
     manual_distribution::ManualDistribution,
     model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
+    sink::{SinkManager, SinkManagerInitParams},
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
@@ -855,6 +856,34 @@ impl Actor for Node {
                 error = %e,
                 "Failed to initialize node store"
             );
+            return Err(e);
+        }
+
+        // Create NodeSinkManager for governance events.
+        let gov_sinks = if let Some(config_helper) = ctx
+            .system()
+            .get_helper::<ConfigHelper>("config")
+            .await
+        {
+            config_helper
+                .sinks
+                .get("governance")
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = ctx
+            .create_child(
+                "node_sink_manager",
+                SinkManager::initial(SinkManagerInitParams {
+                    sinks: gov_sinks,
+                    is_governance: true,
+                }),
+            )
+            .await
+        {
+            error!(error = %e, "Failed to create NodeSinkManager");
             return Err(e);
         }
 

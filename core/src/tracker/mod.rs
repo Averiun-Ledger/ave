@@ -21,6 +21,7 @@ use crate::{
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    sink::{SinkManager, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
@@ -35,7 +36,7 @@ use ave_actors::{
     Response,
 };
 use ave_common::{
-    Namespace, ValueWrapper,
+    DataToSink, Namespace, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
     response::SubjectDB,
@@ -321,6 +322,36 @@ impl Subject for Tracker {
             self.update_sn(ctx).await?;
         }
 
+        Ok(())
+    }
+
+    fn our_key(&self) -> std::sync::Arc<ave_common::identity::PublicKey> {
+        self.our_key.clone()
+    }
+
+    async fn notify_reliable_sinks(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        data: DataToSink,
+    ) -> Result<(), ActorError> {
+        let gov_id = self.governance_id.to_string();
+        let manager_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/sink_manager",
+            gov_id
+        ));
+        match ctx.system().get_actor::<SinkManager>(&manager_path).await {
+            Ok(manager) => {
+                if let Err(e) = manager
+                    .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
+                    .await
+                {
+                    error!(error = %e, "Failed to notify SinkManager");
+                }
+            }
+            Err(e) => {
+                debug!(error = %e, path = %manager_path, "SinkManager not found");
+            }
+        }
         Ok(())
     }
 }
@@ -676,7 +707,7 @@ impl Tracker {
                 first.get_issuer_event_request_timestamp();
             let event_request = first.get_event_request();
 
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: Some(self.governance_id.to_string()),
@@ -814,7 +845,7 @@ impl Tracker {
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: Some(self.governance_id.to_string()),
@@ -861,6 +892,10 @@ pub enum TrackerMessage {
     GetLastLedger,
     PurgeStorage,
     UpdateLedger { events: Vec<Ledger> },
+    GetSinkEvents {
+        from_sn: u64,
+        batch_size: usize,
+    },
 }
 
 impl Message for TrackerMessage {}
@@ -878,6 +913,7 @@ pub enum TrackerResponse {
         ledger_event: Box<Option<Ledger>>,
     },
     Sn(u64),
+    SinkEvents(Vec<DataToSink>),
     Ok,
 }
 impl Response for TrackerResponse {}
@@ -958,6 +994,13 @@ impl Handler<Self> for Tracker {
                 );
 
                 Ok(TrackerResponse::Ok)
+            }
+            TrackerMessage::GetSinkEvents {
+                from_sn,
+                batch_size,
+            } => {
+                let events = self.get_sink_events(ctx, from_sn, batch_size).await?;
+                Ok(TrackerResponse::SinkEvents(events))
             }
             TrackerMessage::UpdateLedger { events } => {
                 let events_count = events.len();

@@ -78,6 +78,9 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
 
         // ── Core errors → delegate ─────────────────────────────
         BridgeError::Core(core) => status_for_core_error(core),
+
+        // ── Generic API errors → 500 ───────────────────────────
+        BridgeError::Api(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

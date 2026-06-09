@@ -23,12 +23,11 @@ pub use ave_core::{
     config::Config as AveConfig,
     config::{
         AveExternalDBConfig, AveInternalDBConfig, LoggingConfig, LoggingOutput,
-        LoggingRotation, SinkConfig, SinkQueuePolicy, SinkRoutingStrategy,
-        SinkServer,
+        LoggingRotation, SinkServer,
     },
     error::Error,
+    sink::manager::SinkStatus,
 };
-use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 pub use ave_network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
     RoutingConfig, RoutingNode,
@@ -88,8 +87,6 @@ impl Bridge {
     pub async fn build(
         settings: &Config,
         password: &str,
-        password_sink: &str,
-        sink_api_key: &str,
         graceful_token: Option<CancellationToken>,
         crash_token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
@@ -97,21 +94,6 @@ impl Bridge {
             .map_err(BridgeError::KeyPathInvalid)?;
 
         let keys = key_pair(settings, password)?;
-
-        // Skip bearer token acquisition when using api_key mode
-        let auth_token =
-            if sink_api_key.is_empty() && !settings.sink.auth.is_empty() {
-                Some(
-                    obtain_token(
-                        &settings.sink.auth,
-                        &settings.sink.username,
-                        password_sink,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
 
         let mut registry = <Registry>::default();
 
@@ -121,12 +103,6 @@ impl Bridge {
         let (api, runners) = AveApi::build(
             keys,
             settings.node.clone(),
-            SinkAuth {
-                sink: settings.sink.clone(),
-                token: auth_token,
-                password: password_sink.to_owned(),
-                api_key: sink_api_key.to_owned(),
-            },
             &mut registry,
             password,
             graceful_token.clone(),
@@ -326,6 +302,16 @@ impl Bridge {
             .iter()
             .map(|x| core_tranfer_subject_to_common(x.clone()))
             .collect())
+    }
+
+    ///////// Sink
+    ////////////////////////////
+    pub async fn get_sink_status(&self) -> Result<Vec<ave_core::sink::manager::SinkStatus>, BridgeError> {
+        self.api.get_sink_status().await.map_err(|e| BridgeError::Api(e.to_string()))
+    }
+
+    pub async fn unblock_sink(&self, sink_name: String) -> Result<(), BridgeError> {
+        self.api.unblock_sink(sink_name).await.map_err(|e| BridgeError::Api(e.to_string()))
     }
 
     ///////// SubjectAccess

@@ -16,7 +16,7 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData,
     },
-    helpers::{db::ExternalDB, sink::AveSink},
+    helpers::db::ExternalDB,
     model::event::{Ledger, Protocols, ValidationMetadata},
     node::{Node, NodeMessage, NodeResponse, SubjectData},
     subject::SubjectMetadata,
@@ -129,18 +129,8 @@ impl SubjectManager {
                         reason: "Not found".to_owned(),
                     });
                 };
-                let Some(ave_sink): Option<AveSink> =
-                    ctx.system().get_helper("sink").await
-                else {
-                    return Err(ActorError::Helper {
-                        name: "sink".to_owned(),
-                        reason: "Not found".to_owned(),
-                    });
-                };
-
                 let mut sink = Sink::new("internal");
                 sink.add("ext_db", ext_db.get_sink_data());
-                sink.add("ave_sink", ave_sink);
                 actor.register_sink(sink);
             }
         }
@@ -317,6 +307,28 @@ impl SubjectManager {
                             cleanup_errors.push(format!("governance: {error}"))
                         }
                     }
+
+                    // Notify the governance's SinkManager to remove all tracking
+                    // state for this tracker.
+                    let sink_manager_path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/sink_manager",
+                        governance_id
+                    ));
+                    match ctx.system().get_actor::<crate::sink::SinkManager>(&sink_manager_path).await {
+                        Ok(sink_manager) => {
+                            if let Err(error) = sink_manager
+                                .tell(crate::sink::SinkManagerMessage::RemoveSubject {
+                                    subject_id: subject_id.to_string(),
+                                })
+                                .await
+                            {
+                                cleanup_errors.push(format!("sink_manager: {error}"));
+                            }
+                        }
+                        Err(error) => {
+                            cleanup_errors.push(format!("sink_manager lookup: {error}"));
+                        }
+                    }
                 }
                 Err(error) => {
                     cleanup_errors.push(format!("governance lookup: {error}"));
@@ -385,6 +397,24 @@ impl SubjectManager {
 
             if let Err(error) = governance.ask_stop().await {
                 cleanup_errors.push(format!("governance stop: {error}"));
+            }
+        }
+
+        // Notify NodeSinkManager to remove all tracking state for this governance.
+        let node_sink_manager_path = ActorPath::from("/user/node/node_sink_manager");
+        match ctx.system().get_actor::<crate::sink::SinkManager>(&node_sink_manager_path).await {
+            Ok(node_sink_manager) => {
+                if let Err(error) = node_sink_manager
+                    .tell(crate::sink::SinkManagerMessage::RemoveSubject {
+                        subject_id: subject_id.to_string(),
+                    })
+                    .await
+                {
+                    cleanup_errors.push(format!("node_sink_manager: {error}"));
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("node_sink_manager lookup: {error}"));
             }
         }
 
@@ -584,18 +614,8 @@ impl SubjectManager {
             });
         };
 
-        let Some(ave_sink): Option<AveSink> =
-            ctx.system().get_helper("sink").await
-        else {
-            return Err(ActorError::Helper {
-                name: "sink".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
         let mut sink = Sink::new("internal");
         sink.add("ext_db", ext_db.get_sink_data());
-        sink.add("ave_sink", ave_sink);
         actor.register_sink(sink);
         Ok(())
     }
@@ -631,18 +651,8 @@ impl SubjectManager {
             });
         };
 
-        let Some(ave_sink): Option<AveSink> =
-            ctx.system().get_helper("sink").await
-        else {
-            return Err(ActorError::Helper {
-                name: "sink".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
         let mut sink = Sink::new("internal");
         sink.add("ext_db", ext_db.get_sink_data());
-        sink.add("ave_sink", ave_sink);
         actor.register_sink(sink);
         Ok(())
     }

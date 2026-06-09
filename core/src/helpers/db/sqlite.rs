@@ -3665,7 +3665,6 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                     );
                 }
             }
-            _ => {}
         }
         
         Ok(())

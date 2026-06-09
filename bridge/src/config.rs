@@ -1,6 +1,6 @@
-use ave_core::config::{Config as AveConfig, LoggingConfig, SinkConfig};
+use ave_core::config::{Config as AveConfig, LoggingConfig, SinkServer};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{auth::AuthConfig, http::HttpConfig};
 
@@ -13,8 +13,8 @@ pub struct Config {
     pub keys_path: PathBuf,
     /// Logging parameters.
     pub logging: LoggingConfig,
-    /// Sink parameters.
-    pub sink: SinkConfig,
+    /// Sink configuration: schema_id -> list of SinkServer.
+    pub sinks: BTreeMap<String, Vec<SinkServer>>,
     /// Authentication configuration.
     pub auth: AuthConfig,
     /// HTTP server configuration.
@@ -27,7 +27,7 @@ impl Default for Config {
             node: Default::default(),
             keys_path: PathBuf::from("keys"),
             logging: Default::default(),
-            sink: Default::default(),
+            sinks: BTreeMap::new(),
             auth: Default::default(),
             http: Default::default(),
         }

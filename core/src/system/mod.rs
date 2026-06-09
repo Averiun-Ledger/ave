@@ -3,12 +3,12 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     config::{
-        Config, GovernanceSyncConfig, RebootSyncConfig, SinkAuth,
+        Config, GovernanceSyncConfig, RebootSyncConfig,
         TrackerSyncConfig, UpdateSyncConfig,
     },
     db::Database,
     external_db::DBManager,
-    helpers::{db::ExternalDB, sink::AveSink},
+    helpers::db::ExternalDB,
     model::common::contract::WasmRuntime,
 };
 use ave_actors::{
@@ -35,6 +35,8 @@ pub struct ConfigHelper {
     pub sync_tracker: TrackerSyncConfig,
     pub sync_update: UpdateSyncConfig,
     pub sync_reboot: RebootSyncConfig,
+    /// Sink configuration: schema_id -> list of SinkServer.
+    pub sinks: std::collections::BTreeMap<String, Vec<crate::config::SinkServer>>,
 }
 
 impl From<Config> for ConfigHelper {
@@ -50,13 +52,13 @@ impl From<Config> for ConfigHelper {
             sync_tracker: value.sync.tracker,
             sync_update: value.sync.update,
             sync_reboot: value.sync.reboot,
+            sinks: std::collections::BTreeMap::new(),
         }
     }
 }
 
 pub async fn system(
     config: Config,
-    sink_auth: SinkAuth,
     password: &str,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
@@ -65,8 +67,10 @@ pub async fn system(
     let (system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
+    let config_helper = ConfigHelper::from(config.clone());
+    // TODO: populate config_helper.sinks from bridge settings when available
     system
-        .add_helper("config", ConfigHelper::from(config.clone()))
+        .add_helper("config", config_helper)
         .await;
 
     // Build engine + limits together; actors fetch both via a single helper access.
@@ -87,22 +91,6 @@ pub async fn system(
     let mut db = Database::open(&config.internal_db, actor_spec)
         .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
     system.add_helper("store", db.clone()).await;
-
-    // Build sink manager.
-    let api_key = if sink_auth.api_key.is_empty() {
-        None
-    } else {
-        Some(sink_auth.api_key.clone())
-    };
-    let ave_sink = AveSink::new(
-        sink_auth.sink.sinks,
-        sink_auth.token,
-        &sink_auth.sink.auth,
-        &sink_auth.sink.username,
-        &sink_auth.password,
-        api_key,
-    );
-    system.add_helper("sink", ave_sink).await;
 
     let pass_hash =
         hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string())
@@ -259,7 +247,6 @@ pub mod tests {
 
         let (sys, handlers) = system(
             config.clone(),
-            SinkAuth::default(),
             "password",
             CancellationToken::new(),
             CancellationToken::new(),

@@ -668,18 +668,8 @@ fn log_effective_configuration(
     }
 
     info!(target: TARGET, "[sink]");
-    if config.sink.auth.is_empty() {
-        info!(target: TARGET, "  auth url  : none");
-    } else {
-        info!(target: TARGET, "  auth url  : {}", config.sink.auth);
-    }
-    if config.sink.username.is_empty() {
-        info!(target: TARGET, "  username  : none");
-    } else {
-        info!(target: TARGET, "  username  : {}", config.sink.username);
-    }
-    info!(target: TARGET, "  schemas   : {}", config.sink.sinks.len());
-    for (schema, servers) in &config.sink.sinks {
+    info!(target: TARGET, "  schemas   : {}", config.sinks.len());
+    for (schema, servers) in &config.sinks {
         info!(
             target: TARGET,
             "  schema '{}': {} server(s)",
@@ -689,19 +679,16 @@ fn log_effective_configuration(
         for s in servers {
             info!(
                 target: TARGET,
-                "    - {} | {} | auth: {} | events: {:?}",
+                "    - {} | {} | auth: {:?} | events: {:?}",
                 s.server,
                 s.url,
-                s.auth,
+                s.auth.is_some(),
                 s.events
             );
             info!(
                 target: TARGET,
-                "      concurrency: {} | queue: {} ({:?}) | routing: {:?}",
-                s.concurrency,
-                s.queue_capacity,
-                s.queue_policy,
-                s.routing_strategy
+                "      batch_size: {}",
+                s.batch_size
             );
             info!(
                 target: TARGET,
@@ -839,8 +826,6 @@ pub async fn run() -> Result<(), StartupError> {
     let (bridge, runners) = Bridge::build(
         &config,
         &secrets.key_password.value,
-        &secrets.sink_password.value,
-        &secrets.sink_api_key.value,
         Some(graceful_token.clone()),
         Some(crash_token.clone()),
     )

@@ -145,10 +145,141 @@ impl DataToSinkEvent {
     }
 }
 
+/// Categorisation of sink event types used for routing/filtering.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd,
+)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum SinkTypes {
+    Create,
+    Fact,
+    Transfer,
+    Confirm,
+    Reject,
+    EOL,
+    All,
+}
+
+impl std::fmt::Display for SinkTypes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Create => write!(f, "Create"),
+            Self::Fact => write!(f, "Fact"),
+            Self::Transfer => write!(f, "Transfer"),
+            Self::Confirm => write!(f, "Confirm"),
+            Self::Reject => write!(f, "Reject"),
+            Self::EOL => write!(f, "EOL"),
+            Self::All => write!(f, "All"),
+        }
+    }
+}
+
+impl From<&DataToSink> for SinkTypes {
+    fn from(value: &DataToSink) -> Self {
+        match value.payload {
+            DataToSinkEvent::Create { .. } => Self::Create,
+            DataToSinkEvent::FactFull { .. }
+            | DataToSinkEvent::FactOpaque { .. } => Self::Fact,
+            DataToSinkEvent::Transfer { .. } => Self::Transfer,
+            DataToSinkEvent::Confirm { .. } => Self::Confirm,
+            DataToSinkEvent::Reject { .. } => Self::Reject,
+            DataToSinkEvent::Eol { .. } => Self::EOL,
+        }
+    }
+}
+
+impl From<String> for SinkTypes {
+    fn from(value: String) -> Self {
+        match value.trim() {
+            "Create" => Self::Create,
+            "Fact" => Self::Fact,
+            "Transfer" => Self::Transfer,
+            "Confirm" => Self::Confirm,
+            "Reject" => Self::Reject,
+            "EOL" => Self::EOL,
+            _ => Self::All,
+        }
+    }
+}
+
+/// Lightweight event payload sent to sinks when the event type does not match
+/// the sink's full-payload filter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct LightEvent {
+    pub subject_id: String,
+    pub schema_id: String,
+    pub governance_id: Option<String>,
+    pub sn: u64,
+    pub event_type: SinkTypes,
+    pub success: bool,
+}
+
+impl From<&DataToSink> for LightEvent {
+    fn from(data: &DataToSink) -> Self {
+        let (subject_id, schema_id) = data.payload.get_subject_schema();
+        let (governance_id, sn, event_type, success) = match &data.payload {
+            DataToSinkEvent::Create { governance_id, sn, .. } => {
+                (governance_id.clone(), *sn, SinkTypes::Create, true)
+            }
+            DataToSinkEvent::FactFull {
+                governance_id,
+                sn,
+                success,
+                ..
+            } => (governance_id.clone(), *sn, SinkTypes::Fact, *success),
+            DataToSinkEvent::FactOpaque {
+                governance_id,
+                sn,
+                success,
+                ..
+            } => (governance_id.clone(), *sn, SinkTypes::Fact, *success),
+            DataToSinkEvent::Transfer {
+                governance_id,
+                sn,
+                success,
+                ..
+            } => (governance_id.clone(), *sn, SinkTypes::Transfer, *success),
+            DataToSinkEvent::Confirm {
+                governance_id,
+                sn,
+                success,
+                ..
+            } => (governance_id.clone(), *sn, SinkTypes::Confirm, *success),
+            DataToSinkEvent::Reject { governance_id, sn, .. } => {
+                (governance_id.clone(), *sn, SinkTypes::Reject, true)
+            }
+            DataToSinkEvent::Eol { governance_id, sn, .. } => {
+                (governance_id.clone(), *sn, SinkTypes::EOL, true)
+            }
+        };
+
+        Self {
+            subject_id,
+            schema_id,
+            governance_id,
+            sn,
+            event_type,
+            success,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_sink_types_serde_lowercase() {
+        let json = serde_json::to_string(&SinkTypes::Fact).unwrap();
+        assert_eq!(json, "\"fact\"");
+    }
 
     #[test]
     fn test_get_subject_schema_with_custom_type() {

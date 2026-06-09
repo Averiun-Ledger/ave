@@ -17,7 +17,7 @@ borsh = { workspace = true }
 ave-common = { workspace = true }
 json-patch = { version = "4.2.0" }
 ave-actors = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["std", "formatting", "parsing"] }
@@ -29,6 +29,7 @@ wasmtime = {version = "44.0.1"}
 base64 = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
+percent-encoding = "2"
 rand = { workspace = true }
 bytes = { workspace = true }
 lru = { workspace = true }
