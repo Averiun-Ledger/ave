@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
+    IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
 
@@ -155,7 +155,7 @@ impl Handler<Self> for Updater {
                 let target = RetryNetwork::new(self.network.clone());
 
                 let strategy =
-                    Strategy::FixedInterval(FixedIntervalStrategy::new(
+                    Strategy::Interval(IntervalStrategy::new(
                         self.witness_retry_count.max(1),
                         Duration::from_secs(
                             self.witness_retry_interval_secs.max(1),

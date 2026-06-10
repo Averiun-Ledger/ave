@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
+    IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
 use ave_common::identity::PublicKey;
@@ -139,12 +139,12 @@ impl Handler<Self> for DistriCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(any(test, feature = "test"))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(2, Duration::from_secs(2)),
+                let strategy = Strategy::Interval(
+                    IntervalStrategy::new(2, Duration::from_secs(2)),
                 );
                 #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(3, Duration::from_secs(30)),
+                let strategy = Strategy::Interval(
+                    IntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(

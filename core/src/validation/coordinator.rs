@@ -14,7 +14,7 @@ use ave_network::ComunicateInfo;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
+    IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
 
@@ -173,12 +173,12 @@ impl Handler<Self> for ValiCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(any(test, feature = "test"))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(1, Duration::from_secs(10)),
+                let strategy = Strategy::Interval(
+                    IntervalStrategy::new(1, Duration::from_secs(10)),
                 );
                 #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(3, Duration::from_secs(30)),
+                let strategy = Strategy::Interval(
+                    IntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(

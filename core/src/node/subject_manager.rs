@@ -129,7 +129,7 @@ impl SubjectManager {
                         reason: "Not found".to_owned(),
                     });
                 };
-                let mut sink = Sink::new("internal");
+                let mut sink = Sink::new("internal", None);
                 sink.add("ext_db", ext_db.get_sink_data());
                 actor.register_sink(sink);
             }
@@ -614,7 +614,7 @@ impl SubjectManager {
             });
         };
 
-        let mut sink = Sink::new("internal");
+        let mut sink = Sink::new("internal", None);
         sink.add("ext_db", ext_db.get_sink_data());
         actor.register_sink(sink);
         Ok(())
@@ -651,7 +651,7 @@ impl SubjectManager {
             });
         };
 
-        let mut sink = Sink::new("internal");
+        let mut sink = Sink::new("internal", None);
         sink.add("ext_db", ext_db.get_sink_data());
         actor.register_sink(sink);
         Ok(())
