@@ -20,7 +20,7 @@ use ave_common::DataToSink;
 /// Returns a value between `base` and `base * 1.25` (25% jitter).
 pub fn add_jitter(base: u64) -> u64 {
     const JITTER_PCT: f64 = 0.25;
-    let jitter = (base as f64 * JITTER_PCT * rand::random::<f64>()) as u64;
+    let jitter = (base as f64 * JITTER_PCT * fastrand::f64()) as u64;
     base + jitter
 }
 

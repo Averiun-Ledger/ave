@@ -509,13 +509,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 delay = cap;
             }
 
-            // jitter 80–120% determinista por peer (sin RNG externo)
-            // Fold all bytes to avoid the fixed multihash prefix dominating.
-            let hash = peer
-                .to_bytes()
-                .iter()
-                .fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
-            let j = 80 + (hash % 41);
+            // jitter 80–120% con fastrand para evitar sincronización entre peers
+            let j = 80 + fastrand::u32(0..41);
             delay = delay * j / 100;
 
             now + delay

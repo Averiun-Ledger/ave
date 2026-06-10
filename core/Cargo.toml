@@ -31,6 +31,7 @@ tokio-util = { workspace = true }
 reqwest = { workspace = true }
 percent-encoding = "2"
 rand = { workspace = true }
+fastrand = { workspace = true }
 bytes = { workspace = true }
 lru = { workspace = true }
 prometheus-client = { workspace = true }
