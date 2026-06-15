@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 use ave_common::{
@@ -20,7 +20,6 @@ use crate::{
     },
     helpers::network::service::NetworkSender,
     model::common::{
-        crash_system,
         node::i_can_send_last_ledger,
         subject::{acquire_subject, get_last_ledger_event, get_members, get_schema_roles, get_tracker_roles, get_witnesses},
     },

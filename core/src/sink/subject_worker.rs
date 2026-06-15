@@ -10,7 +10,7 @@ use tracing::{error, info_span};
 use crate::config::SinkServer;
 use crate::sink::SinkError;
 use crate::sink::http::SinkHttpClient;
-use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
+use crate::sink::worker::{SinkSubjectWorkerError, SinkWorker, SinkWorkerMessage};
 use crate::sink::extract_sn;
 use ave_common::{DataToSink, LightEvent, SinkTypes};
 
@@ -106,38 +106,104 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                     self.client.send_light_event(light).await
                 };
 
-                let result = match send_result {
-                    Ok(()) => crate::sink::manager::SendResult::Success,
+                match send_result {
+                    Ok(()) => {
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .tell(SinkWorkerMessage::DeliveryResult {
+                                        subject_id,
+                                        sn,
+                                        result: crate::sink::manager::SendResult::Success,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery result");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
+                    }
                     Err(e) if e.is_auth_recoverable() => {
-                        crate::sink::manager::SendResult::AuthFailed(e.to_string())
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::AuthFailed {
+                                        subject_id,
+                                        sn,
+                                        error: e.to_string(),
+                                        from_catch_up: false,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report auth failed");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
                     }
                     Err(SinkError::TokenParse(ref msg)) => {
-                        crate::sink::manager::SendResult::AuthFailed(format!(
-                            "failed to parse token response: {}",
-                            msg
-                        ))
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::AuthFailed {
+                                        subject_id,
+                                        sn,
+                                        error: format!("failed to parse token response: {}", msg),
+                                        from_catch_up: false,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report auth failed");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
                     }
                     Err(e) if !e.is_transient() => {
-                        crate::sink::manager::SendResult::Blocked(e.to_string())
-                    }
-                    Err(e) => crate::sink::manager::SendResult::Failed(e.to_string()),
-                };
-
-                match ctx.get_parent::<SinkWorker>().await {
-                    Ok(parent) => {
-                        if let Err(e) = parent
-                            .tell(SinkWorkerMessage::DeliveryResult {
-                                subject_id,
-                                sn,
-                                result,
-                            })
-                            .await
-                        {
-                            error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery result");
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::Blocked {
+                                        subject_id,
+                                        sn,
+                                        reason: e.to_string(),
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report blocked");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
                         }
                     }
                     Err(e) => {
-                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
+                                        subject_id,
+                                        sn,
+                                        reason: e.to_string(),
+                                        from_catch_up: false,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery failed");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
                     }
                 }
 
@@ -154,10 +220,10 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
-                                    .tell(SinkWorkerMessage::DeliveryResult {
+                                    .emit_error(SinkSubjectWorkerError::SubjectNotFound {
                                         subject_id,
                                         sn: 0,
-                                        result: crate::sink::manager::SendResult::SubjectNotFound,
+                                        from_catch_up: true,
                                     })
                                     .await
                                 {
@@ -218,51 +284,109 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                     self.client.send_light_event(light).await
                 };
 
-                let result = match send_result {
-                    Ok(()) => crate::sink::manager::SendResult::Success,
-                    Err(e) if e.is_auth_recoverable() => {
-                        crate::sink::manager::SendResult::AuthFailed(e.to_string())
-                    }
-                    Err(SinkError::TokenParse(ref msg)) => {
-                        crate::sink::manager::SendResult::AuthFailed(format!(
-                            "failed to parse token response: {}",
-                            msg
-                        ))
-                    }
-                    Err(e) if !e.is_transient() => {
-                        crate::sink::manager::SendResult::Blocked(e.to_string())
-                    }
-                    Err(e) => crate::sink::manager::SendResult::Failed(e.to_string()),
-                };
-
-                match ctx.get_parent::<SinkWorker>().await {
-                    Ok(parent) => {
-                        if let Err(e) = parent
-                            .tell(SinkWorkerMessage::CatchUpProgress {
-                                subject_id: subject_id.clone(),
-                                sn,
-                                result: result.clone(),
-                            })
-                            .await
-                        {
-                            error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
+                match send_result {
+                    Ok(()) => {
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .tell(SinkWorkerMessage::CatchUpProgress {
+                                        subject_id: subject_id.clone(),
+                                        sn,
+                                        result: crate::sink::manager::SendResult::Success,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
                         }
                     }
+                    Err(e) if e.is_auth_recoverable() => {
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::AuthFailed {
+                                        subject_id: subject_id.clone(),
+                                        sn,
+                                        error: e.to_string(),
+                                        from_catch_up: true,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
+                        return Ok(SinkSubjectWorkerResponse::Ok);
+                    }
+                    Err(SinkError::TokenParse(ref msg)) => {
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::AuthFailed {
+                                        subject_id: subject_id.clone(),
+                                        sn,
+                                        error: format!("failed to parse token response: {}", msg),
+                                        from_catch_up: true,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
+                        return Ok(SinkSubjectWorkerResponse::Ok);
+                    }
+                    Err(e) if !e.is_transient() => {
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::Blocked {
+                                        subject_id: subject_id.clone(),
+                                        sn,
+                                        reason: e.to_string(),
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
+                        return Ok(SinkSubjectWorkerResponse::Ok);
+                    }
                     Err(e) => {
-                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                    }
-                }
-
-                match &result {
-                    crate::sink::manager::SendResult::Blocked(_)
-                    | crate::sink::manager::SendResult::Failed(_)
-                    | crate::sink::manager::SendResult::AuthFailed(_) => {
+                        match ctx.get_parent::<SinkWorker>().await {
+                            Ok(parent) => {
+                                if let Err(e) = parent
+                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
+                                        subject_id: subject_id.clone(),
+                                        sn,
+                                        reason: e.to_string(),
+                                        from_catch_up: true,
+                                    })
+                                    .await
+                                {
+                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
+                                }
+                            }
+                            Err(e) => {
+                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                            }
+                        }
                         return Ok(SinkSubjectWorkerResponse::Ok);
                     }
-                    crate::sink::manager::SendResult::SubjectNotFound => {
-                        return Ok(SinkSubjectWorkerResponse::Ok);
-                    }
-                    crate::sink::manager::SendResult::Success => {}
                 }
 
                 if !remaining.is_empty() {

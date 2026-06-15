@@ -72,7 +72,7 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
     Message, Response,
 };
 use ave_common::{

@@ -19,7 +19,7 @@ use tracing::{error, info_span, warn};
 
 use crate::config::SinkServer;
 use crate::sink::http::SinkHttpClient;
-use crate::sink::manager::{SinkManager, SinkManagerMessage, SendResult};
+use crate::sink::manager::{SinkManager, SinkManagerMessage, SendResult, SinkWorkerError};
 use crate::sink::extract_sn;
 use ave_common::DataToSink;
 
@@ -68,6 +68,46 @@ pub enum SinkWorkerResponse {
 }
 
 impl Response for SinkWorkerResponse {}
+
+// ---------------------------------------------------------------------------
+// SinkSubjectWorkerError
+// ---------------------------------------------------------------------------
+
+/// Errors reported by a `SinkSubjectWorker` to its parent `SinkWorker` via
+/// `emit_error`.
+#[derive(Debug, Clone)]
+pub enum SinkSubjectWorkerError {
+    /// Event delivery failed (transient or unhealthy).
+    DeliveryFailed {
+        subject_id: String,
+        sn: u64,
+        reason: String,
+        /// `true` when the failure happened during catch-up, which requires
+        /// removing the subject from `in_catch_up`.
+        from_catch_up: bool,
+    },
+    /// Authentication failed and the event could not be delivered.
+    AuthFailed {
+        subject_id: String,
+        sn: u64,
+        error: String,
+        /// `true` when the failure happened during catch-up.
+        from_catch_up: bool,
+    },
+    /// The sink is blocked due to a permanent error.
+    Blocked {
+        subject_id: String,
+        sn: u64,
+        reason: String,
+    },
+    /// The subject no longer exists (deleted).
+    SubjectNotFound {
+        subject_id: String,
+        sn: u64,
+        /// `true` when the subject was not found during catch-up.
+        from_catch_up: bool,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // Healthcheck state
@@ -140,7 +180,7 @@ impl Actor for SinkWorker {
     type Response = SinkWorkerResponse;
     type Event = ();
     type SinkEvent = ();
-    type ChildError = ActorError;
+    type ChildError = SinkSubjectWorkerError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<tracing::Span>) -> tracing::Span {
@@ -212,11 +252,11 @@ impl Handler<SinkWorker> for SinkWorker {
                     match ctx.get_parent::<SinkManager>().await {
                         Ok(parent) => {
                             if let Err(e) = parent
-                                .tell(SinkManagerMessage::UpdateProgress {
+                                .emit_error(SinkWorkerError::DeliveryFailed {
                                     sink: self.sink_name.clone(),
-                                    subject_id,
+                                    subject_id: subject_id.clone(),
                                     sn,
-                                    result: SendResult::Failed("sink unhealthy".into()),
+                                    reason: "sink unhealthy".into(),
                                 })
                                 .await
                             {
@@ -290,11 +330,11 @@ impl Handler<SinkWorker> for SinkWorker {
                                 match ctx.get_parent::<SinkManager>().await {
                                     Ok(parent) => {
                                         if let Err(e) = parent
-                                            .tell(SinkManagerMessage::UpdateProgress {
+                                            .emit_error(SinkWorkerError::Blocked {
                                                 sink: self.sink_name.clone(),
                                                 subject_id: String::new(),
                                                 sn: 0,
-                                                result: SendResult::Blocked(self.blocked.clone().unwrap()),
+                                                reason: self.blocked.clone().unwrap(),
                                             })
                                             .await
                                         {
@@ -380,39 +420,19 @@ impl Handler<SinkWorker> for SinkWorker {
             } => {
                 self.last_activity = Instant::now();
                 self.cancel_child_shutdown(&subject_id);
-                match result {
-                    SendResult::Success => {
-                        self.recoveries_after_failure = 0;
-                        if matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. }) {
-                            self.healthcheck_state = HealthcheckState::Healthy;
-                            match ctx.get_parent::<SinkManager>().await {
-                                Ok(parent) => {
-                                    if let Err(e) = parent
-                                        .tell(SinkManagerMessage::SinkRecovered {
-                                            sink: self.sink_name.clone(),
-                                        })
-                                        .await
-                                    {
-                                        error!(msg_type = "ReportRecovered", sink = %self.sink_name, error = %e, "Failed to report sink recovered");
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
-                                }
-                            }
-                        }
+                if let SendResult::Success = result {
+                    self.recoveries_after_failure = 0;
+                    if matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. }) {
+                        self.healthcheck_state = HealthcheckState::Healthy;
                         match ctx.get_parent::<SinkManager>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
-                                    .tell(SinkManagerMessage::UpdateProgress {
+                                    .tell(SinkManagerMessage::SinkRecovered {
                                         sink: self.sink_name.clone(),
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        result: SendResult::Success,
                                     })
                                     .await
                                 {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
+                                    error!(msg_type = "ReportRecovered", sink = %self.sink_name, error = %e, "Failed to report sink recovered");
                                 }
                             }
                             Err(e) => {
@@ -420,85 +440,24 @@ impl Handler<SinkWorker> for SinkWorker {
                             }
                         }
                     }
-                    SendResult::AuthFailed(ref err) => {
-                        match ctx.get_parent::<SinkManager>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .tell(SinkManagerMessage::UpdateProgress {
-                                        sink: self.sink_name.clone(),
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        result: SendResult::AuthFailed(err.clone()),
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
-                                }
+                    match ctx.get_parent::<SinkManager>().await {
+                        Ok(parent) => {
+                            if let Err(e) = parent
+                                .tell(SinkManagerMessage::UpdateProgress {
+                                    sink: self.sink_name.clone(),
+                                    subject_id: subject_id.clone(),
+                                    sn,
+                                    result: SendResult::Success,
+                                })
+                                .await
+                            {
+                                error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
                             }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
-                            }
+                        }
+                        Err(e) => {
+                            error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
                         }
                     }
-                    SendResult::Blocked(ref reason) => {
-                        self.blocked = Some(reason.clone());
-                        match ctx.get_parent::<SinkManager>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .tell(SinkManagerMessage::UpdateProgress {
-                                        sink: self.sink_name.clone(),
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        result: SendResult::Blocked(reason.clone()),
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
-                            }
-                        }
-                        self.broadcast_to_children(
-                            crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop,
-                        )
-                        .await;
-                        self.active_subject_workers.clear();
-                        self.in_catch_up.clear();
-                    }
-                    SendResult::Failed(ref reason) => {
-                        if self.blocked.is_none()
-                            && !matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. })
-                        {
-                            self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
-                            let self_ref = ctx.reference().await?;
-                            let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
-                            let delay_secs = crate::sink::add_jitter(delay_secs);
-                            self.schedule_healthcheck(self_ref, delay_secs);
-                        }
-                        match ctx.get_parent::<SinkManager>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .tell(SinkManagerMessage::UpdateProgress {
-                                        sink: self.sink_name.clone(),
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        result: SendResult::Failed(reason.clone()),
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
-                            }
-                        }
-                    }
-                    SendResult::SubjectNotFound => {}
-                }
-                if !matches!(result, SendResult::Blocked(_)) {
                     self.schedule_child_shutdown(subject_id, ctx.reference().await?);
                 }
                 Ok(SinkWorkerResponse::Ok)
@@ -510,53 +469,25 @@ impl Handler<SinkWorker> for SinkWorker {
             } => {
                 self.last_activity = Instant::now();
                 self.cancel_child_shutdown(&subject_id);
-                let result_clone = result.clone();
-                match ctx.get_parent::<SinkManager>().await {
-                    Ok(parent) => {
-                        if let Err(e) = parent
-                            .tell(SinkManagerMessage::UpdateProgress {
-                                sink: self.sink_name.clone(),
-                                subject_id: subject_id.clone(),
-                                sn,
-                                result: result_clone,
-                            })
-                            .await
-                        {
-                            error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
+                if let SendResult::Success = result {
+                    match ctx.get_parent::<SinkManager>().await {
+                        Ok(parent) => {
+                            if let Err(e) = parent
+                                .tell(SinkManagerMessage::UpdateProgress {
+                                    sink: self.sink_name.clone(),
+                                    subject_id: subject_id.clone(),
+                                    sn,
+                                    result: SendResult::Success,
+                                })
+                                .await
+                            {
+                                error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report progress");
+                            }
+                        }
+                        Err(e) => {
+                            error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
                         }
                     }
-                    Err(e) => {
-                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
-                    }
-                }
-                match &result {
-                    SendResult::Blocked(reason) => {
-                        self.blocked = Some(reason.clone());
-                        self.broadcast_to_children(
-                            crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop,
-                        )
-                        .await;
-                        self.active_subject_workers.clear();
-                        self.in_catch_up.clear();
-                    }
-                    SendResult::Failed(_) | SendResult::AuthFailed(_) => {
-                        self.in_catch_up.remove(&subject_id);
-                        if self.blocked.is_none()
-                            && !matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. })
-                        {
-                            self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
-                            let self_ref = ctx.reference().await?;
-                            let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
-                            let delay_secs = crate::sink::add_jitter(delay_secs);
-                            self.schedule_healthcheck(self_ref, delay_secs);
-                        }
-                    }
-                    SendResult::SubjectNotFound => {
-                        self.in_catch_up.remove(&subject_id);
-                    }
-                    SendResult::Success => {}
-                }
-                if !matches!(result, SendResult::Blocked(_)) {
                     self.schedule_child_shutdown(subject_id, ctx.reference().await?);
                 }
                 Ok(SinkWorkerResponse::Ok)
@@ -585,6 +516,151 @@ impl Handler<SinkWorker> for SinkWorker {
             SinkWorkerMessage::Stop => {
                 ctx.stop(None).await;
                 Ok(SinkWorkerResponse::Ok)
+            }
+        }
+    }
+
+    async fn on_child_error(
+        &mut self,
+        error: SinkSubjectWorkerError,
+        ctx: &mut ActorContext<SinkWorker>,
+    ) {
+        let self_ref = match ctx.reference().await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(msg_type = "GetSelfRef", sink = %self.sink_name, error = %e, "Failed to get self reference");
+                return;
+            }
+        };
+
+        match error {
+            SinkSubjectWorkerError::DeliveryFailed {
+                subject_id,
+                sn,
+                reason,
+                from_catch_up,
+            } => {
+                if from_catch_up {
+                    self.in_catch_up.remove(&subject_id);
+                }
+                if self.blocked.is_none()
+                    && !matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. })
+                {
+                    self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
+                    let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
+                    let delay_secs = crate::sink::add_jitter(delay_secs);
+                    self.schedule_healthcheck(self_ref.clone(), delay_secs);
+                }
+                self.schedule_child_shutdown(subject_id.clone(), self_ref);
+                match ctx.get_parent::<SinkManager>().await {
+                    Ok(parent) => {
+                        if let Err(e) = parent
+                            .emit_error(SinkWorkerError::DeliveryFailed {
+                                sink: self.sink_name.clone(),
+                                subject_id: subject_id.clone(),
+                                sn,
+                                reason: reason.clone(),
+                            })
+                            .await
+                        {
+                            error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery failed");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
+                    }
+                }
+            }
+            SinkSubjectWorkerError::AuthFailed {
+                subject_id,
+                sn,
+                error,
+                from_catch_up,
+            } => {
+                if from_catch_up {
+                    self.in_catch_up.remove(&subject_id);
+                    if self.blocked.is_none()
+                        && !matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. })
+                    {
+                        self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
+                        let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
+                        let delay_secs = crate::sink::add_jitter(delay_secs);
+                        self.schedule_healthcheck(self_ref.clone(), delay_secs);
+                    }
+                }
+                self.schedule_child_shutdown(subject_id.clone(), self_ref);
+                match ctx.get_parent::<SinkManager>().await {
+                    Ok(parent) => {
+                        if let Err(e) = parent
+                            .emit_error(SinkWorkerError::AuthFailed {
+                                sink: self.sink_name.clone(),
+                                subject_id: subject_id.clone(),
+                                sn,
+                                error: error.clone(),
+                            })
+                            .await
+                        {
+                            error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report auth failed");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
+                    }
+                }
+            }
+            SinkSubjectWorkerError::Blocked {
+                subject_id,
+                sn,
+                reason,
+            } => {
+                self.blocked = Some(reason.clone());
+                self.broadcast_to_children(
+                    crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop,
+                )
+                .await;
+                self.active_subject_workers.clear();
+                self.in_catch_up.clear();
+                match ctx.get_parent::<SinkManager>().await {
+                    Ok(parent) => {
+                        if let Err(e) = parent
+                            .emit_error(SinkWorkerError::Blocked {
+                                sink: self.sink_name.clone(),
+                                subject_id: subject_id.clone(),
+                                sn,
+                                reason: reason.clone(),
+                            })
+                            .await
+                        {
+                            error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report blocked");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
+                    }
+                }
+            }
+            SinkSubjectWorkerError::SubjectNotFound { subject_id, sn, from_catch_up } => {
+                if from_catch_up {
+                    self.in_catch_up.remove(&subject_id);
+                }
+                self.schedule_child_shutdown(subject_id.clone(), self_ref);
+                match ctx.get_parent::<SinkManager>().await {
+                    Ok(parent) => {
+                        if let Err(e) = parent
+                            .emit_error(SinkWorkerError::SubjectNotFound {
+                                sink: self.sink_name.clone(),
+                                subject_id: subject_id.clone(),
+                                sn,
+                            })
+                            .await
+                        {
+                            error!(msg_type = "ReportSubjectNotFound", sink = %self.sink_name, error = %e, "Failed to report subject not found");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
+                    }
+                }
             }
         }
     }

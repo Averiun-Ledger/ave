@@ -37,7 +37,7 @@ use ave_network::ComunicateInfo;
 use json_patch::diff;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 

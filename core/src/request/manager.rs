@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
     Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};

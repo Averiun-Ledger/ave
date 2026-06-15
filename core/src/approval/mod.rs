@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ave_actors::ActorPath;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, Handler, Message,
     NotPersistentActor,
 };
 

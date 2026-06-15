@@ -43,7 +43,7 @@ use ave_common::{
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
     Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};

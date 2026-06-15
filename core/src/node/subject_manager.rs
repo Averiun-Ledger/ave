@@ -10,7 +10,7 @@ use ave_actors::{
 };
 use ave_common::identity::{DigestIdentifier, HashAlgorithm, PublicKey};
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, debug, info_span};
 
 use crate::{
     governance::{

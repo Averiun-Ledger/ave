@@ -101,11 +101,44 @@ pub struct SinkStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SendResult {
     Success,
-    Failed(String),
-    AuthFailed(String),
-    Blocked(String),
     /// The subject no longer exists (deleted). EOL is a normal event, not SubjectNotFound.
     SubjectNotFound,
+}
+
+// ---------------------------------------------------------------------------
+// SinkWorkerError
+// ---------------------------------------------------------------------------
+
+/// Errors reported by a `SinkWorker` to its parent `SinkManager` via `emit_error`.
+#[derive(Debug, Clone)]
+pub enum SinkWorkerError {
+    /// Event delivery failed (transient or unhealthy).
+    DeliveryFailed {
+        sink: String,
+        subject_id: String,
+        sn: u64,
+        reason: String,
+    },
+    /// Authentication failed and the event could not be delivered.
+    AuthFailed {
+        sink: String,
+        subject_id: String,
+        sn: u64,
+        error: String,
+    },
+    /// The sink is blocked due to a permanent error.
+    Blocked {
+        sink: String,
+        subject_id: String,
+        sn: u64,
+        reason: String,
+    },
+    /// The subject no longer exists (deleted).
+    SubjectNotFound {
+        sink: String,
+        subject_id: String,
+        sn: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +377,7 @@ impl Actor for SinkManager {
     type Response = SinkManagerResponse;
     type Event = SinkManagerEvent;
     type SinkEvent = ();
-    type ChildError = ActorError;
+    type ChildError = SinkWorkerError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<tracing::Span>) -> tracing::Span {
@@ -487,6 +520,102 @@ impl Handler<SinkManager> for SinkManager {
             }
         }
         Ok(SinkManagerResponse::Ok)
+    }
+
+    async fn on_child_error(
+        &mut self,
+        error: SinkWorkerError,
+        ctx: &mut ActorContext<SinkManager>,
+    ) {
+        match error {
+            SinkWorkerError::DeliveryFailed {
+                sink,
+                subject_id,
+                sn,
+                reason,
+            } => {
+                error!(msg_type = "DeliveryFailed", sink = %sink, subject_id = %subject_id, sn = %sn, reason = %reason, "Sink delivery failed");
+                self.try_insert_lagging(&sink, subject_id);
+                // If the sink has lagging subjects, schedule periodic healthchecks
+                // to detect when the sink recovers.  The worker will be idle and
+                // destroyed soon; the healthcheck timer recreates it periodically.
+                if self.lagging.get(&sink).map(|s| !s.is_empty()).unwrap_or(false) {
+                    self.schedule_healthcheck(sink, ctx);
+                }
+            }
+            SinkWorkerError::AuthFailed {
+                sink,
+                subject_id,
+                sn,
+                error,
+            } => {
+                // CR-3: Do NOT advance cursor on auth failure — the event will be
+                // retried once credentials are fixed (via catch-up / lagging).
+                error!(
+                    msg_type = "AuthFailed",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    sn = %sn,
+                    error = %error,
+                    "Auth failure; event kept in lagging for retry"
+                );
+                self.try_insert_lagging(&sink, subject_id.clone());
+                if let Some(subjects) = self.lagging.get(&sink).cloned() {
+                    let subjects: Vec<String> = subjects.into_iter().collect();
+                    if !subjects.is_empty() {
+                        let sink_for_log = sink.clone();
+                        if let Err(e) = self.handle_request_catch_up(sink, subjects, ctx).await {
+                            error!(msg_type = "AuthFailedCatchUp", sink = %sink_for_log, error = %e, "Failed to trigger catch-up after auth failure");
+                        }
+                    }
+                }
+            }
+            SinkWorkerError::Blocked {
+                sink,
+                subject_id,
+                sn,
+                reason,
+            } => {
+                error!(
+                    msg_type = "SinkBlocked",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    sn = %sn,
+                    reason = %reason,
+                    "Sink blocked due to permanent error; operator intervention required"
+                );
+                self.blocked_sinks.insert(sink.clone(), reason.clone());
+                if let Err(e) = self.persist(
+                    SinkManagerEvent::SinkBlocked {
+                        sink: sink.clone(),
+                        reason: self.blocked_sinks[&sink].clone(),
+                    },
+                    ctx,
+                )
+                .await
+                {
+                    error!(msg_type = "PersistBlocked", sink = %sink, error = %e, "Failed to persist blocked sink");
+                }
+            }
+            SinkWorkerError::SubjectNotFound {
+                sink,
+                subject_id,
+                sn,
+            } => {
+                if let Err(e) = self
+                    .handle_update_progress(
+                        sink,
+                        subject_id,
+                        sn,
+                        SendResult::SubjectNotFound,
+                        ctx,
+                    )
+                    .await
+                {
+                    error!(msg_type = "SubjectNotFound", error = %e, "Failed to update progress for deleted subject");
+                }
+            }
+        }
     }
 }
 
@@ -757,54 +886,6 @@ impl SinkManager {
                         sink,
                         subject_id,
                         sn,
-                    },
-                    ctx,
-                )
-                .await?;
-            }
-            SendResult::Failed(reason) => {
-                error!(msg_type = "DeliveryFailed", sink = %sink, subject_id = %subject_id, sn = %sn, reason = %reason, "Sink delivery failed");
-                self.try_insert_lagging(&sink, subject_id);
-                // If the sink has lagging subjects, schedule periodic healthchecks
-                // to detect when the sink recovers.  The worker will be idle and
-                // destroyed soon; the healthcheck timer recreates it periodically.
-                if self.lagging.get(&sink).map(|s| !s.is_empty()).unwrap_or(false) {
-                    self.schedule_healthcheck(sink.clone(), ctx);
-                }
-            }
-            SendResult::AuthFailed(err) => {
-                // CR-3: Do NOT advance cursor on auth failure — the event will be
-                // retried once credentials are fixed (via catch-up / lagging).
-                error!(
-                    msg_type = "AuthFailed",
-                    sink = %sink,
-                    subject_id = %subject_id,
-                    sn = %sn,
-                    error = %err,
-                    "Auth failure; event kept in lagging for retry"
-                );
-                self.try_insert_lagging(&sink, subject_id.clone());
-                if let Some(subjects) = self.lagging.get(&sink).cloned() {
-                    let subjects: Vec<String> = subjects.into_iter().collect();
-                    if !subjects.is_empty() {
-                        self.handle_request_catch_up(sink, subjects, ctx).await?;
-                    }
-                }
-            }
-            SendResult::Blocked(reason) => {
-                error!(
-                    msg_type = "SinkBlocked",
-                    sink = %sink,
-                    subject_id = %subject_id,
-                    sn = %sn,
-                    reason = %reason,
-                    "Sink blocked due to permanent error; operator intervention required"
-                );
-                self.blocked_sinks.insert(sink.clone(), reason);
-                self.persist(
-                    SinkManagerEvent::SinkBlocked {
-                        sink: sink.clone(),
-                        reason: self.blocked_sinks[&sink].clone(),
                     },
                     ctx,
                 )

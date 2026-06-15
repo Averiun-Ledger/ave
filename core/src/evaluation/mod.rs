@@ -19,7 +19,7 @@ use crate::{
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 

@@ -13,7 +13,7 @@ use ave_common::identity::{PublicKey, Signed};
 use ave_network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction,
+    Actor, ActorContext, ActorError, ActorPath,
     IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };

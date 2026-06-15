@@ -11,7 +11,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction,
+    Actor, ActorContext, ActorError, ActorPath,
     CustomIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
