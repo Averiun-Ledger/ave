@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     governance::model::Quorum,
     model::common::{
-        CeilingMap, Interval, IntervalSet, emit_fail, purge_storage,
+        CeilingMap, Interval, IntervalSet, crash_system, purge_storage,
     },
 };
 use async_trait::async_trait;
@@ -240,6 +240,8 @@ impl Actor for RoleRegister {
     type Message = RoleRegisterMessage;
     type Response = RoleRegisterResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -716,7 +718,7 @@ impl Handler<Self> for RoleRegister {
                 error = %e,
                 "Failed to persist role register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }

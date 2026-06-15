@@ -5,7 +5,7 @@ use crate::{
     approval::types::VotationType,
     helpers::network::service::NetworkSender,
     model::{
-        common::emit_fail,
+        common::crash_system,
         network::{RetryNetwork, TimeOut},
     },
 };
@@ -84,6 +84,8 @@ impl Actor for ApprLight {
     type Message = ApprLightMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -126,7 +128,7 @@ impl Handler<Self> for ApprLight {
                                 error = %e,
                                 "Failed to send timeout response to approval actor"
                             );
-                            emit_fail(ctx, e).await;
+                            crash_system(ctx, e).await;
                         }
 
                         debug!(
@@ -142,7 +144,7 @@ impl Handler<Self> for ApprLight {
                             path = %ctx.path().parent(),
                             "Approval actor not found"
                         );
-                        emit_fail(ctx, e).await;
+                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -198,7 +200,7 @@ impl Handler<Self> for ApprLight {
                             error = %e,
                             "Failed to create retry actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -208,7 +210,7 @@ impl Handler<Self> for ApprLight {
                         error = %e,
                         "Failed to send retry message"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 };
 
                 debug!(
@@ -268,7 +270,7 @@ impl Handler<Self> for ApprLight {
                                     error = %e,
                                     "Failed to send response to approval actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
@@ -277,7 +279,7 @@ impl Handler<Self> for ApprLight {
                                 path = %ctx.path().parent(),
                                 "Approval actor not found"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     };
 
@@ -320,22 +322,6 @@ impl Handler<Self> for ApprLight {
             }
         }
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            request_id = %self.request_id,
-            version = self.version,
-            node_key = %self.node_key,
-            error = %error,
-            "Child fault in approval light actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 

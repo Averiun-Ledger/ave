@@ -300,6 +300,8 @@ impl Actor for GovernanceVersionSync {
     type Message = GovernanceVersionSyncMessage;
     type Response = GovernanceVersionSyncResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

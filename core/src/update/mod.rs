@@ -22,7 +22,7 @@ use crate::{
     },
     helpers::network::{ActorMessage, service::NetworkSender},
     model::common::{
-        emit_fail, get_verified_transfer_sn,
+        crash_system, get_verified_transfer_sn,
         node::get_subject_data,
         subject::get_local_subject_sn,
     },
@@ -396,6 +396,8 @@ impl Actor for Update {
     type Message = UpdateMessage;
     type Response = ();
     type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -427,7 +429,7 @@ impl Handler<Self> for Update {
                             error = %e,
                             "Failed to create updates"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -463,7 +465,7 @@ impl Handler<Self> for Update {
                             error = %e,
                             "Failed to continue update round"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -528,7 +530,7 @@ impl Handler<Self> for Update {
                             error = %e,
                             "Failed to restart update round"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -586,7 +588,7 @@ impl Handler<Self> for Update {
                                     node = %better_node,
                                     "Failed to send request to network"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             } else {
                                 debug!(
                                     msg_type = "Response",
@@ -619,7 +621,7 @@ impl Handler<Self> for Update {
                                         error = %e,
                                         "Failed to schedule update retry"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             }
                         }
@@ -659,7 +661,7 @@ impl Handler<Self> for Update {
                                             subject_id = %self.subject_id,
                                             "Failed to send response to request actor"
                                         );
-                                        return Err(emit_fail(ctx, e).await);
+                                        return Err(crash_system(ctx, e).await);
                                     }
                                 }
                                 Err(e) => {
@@ -670,7 +672,7 @@ impl Handler<Self> for Update {
                                         subject_id = %self.subject_id,
                                         "Request actor not found"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             };
                         };
@@ -699,20 +701,5 @@ impl Handler<Self> for Update {
         };
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            subject_id = %self.subject_id,
-            update_type = ?self.update_type,
-            error = %error,
-            "Child fault in update actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

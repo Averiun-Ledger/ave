@@ -20,7 +20,7 @@ use crate::{
     governance::role_register::CurrentSchemaRoles,
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::emit_fail,
+    model::common::crash_system,
     validation::worker::{CurrentWorkerRoles, ValiWorker, ValiWorkerMessage},
 };
 
@@ -66,6 +66,8 @@ impl Actor for ValidationSchema {
     type Message = ValidationSchemaMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -253,7 +255,7 @@ impl Handler<Self> for ValidationSchema {
                                 error = %e,
                                 "Failed to create validator actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                 };
@@ -305,24 +307,5 @@ impl Handler<Self> for ValidationSchema {
             }
         };
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        if let Some(metrics) = try_core_metrics() {
-            metrics.observe_schema_event("validation_schema", "child_fault");
-        }
-        error!(
-            governance_id = %self.governance_id,
-            schema_id = ?self.schema_id,
-            gov_version = self.gov_version,
-            error = %error,
-            "Child fault in validation schema"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

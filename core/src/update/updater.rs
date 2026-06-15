@@ -14,7 +14,7 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::{
     ActorMessage,
     helpers::network::{NetworkMessage, service::NetworkSender},
-    model::{common::emit_fail, network::RetryNetwork},
+    model::{common::crash_system, network::RetryNetwork},
     update::UpdateWitnessOffer,
 };
 
@@ -73,6 +73,8 @@ impl Actor for Updater {
     type Message = UpdaterMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -111,7 +113,7 @@ impl Handler<Self> for Updater {
                                 error = %e,
                                 "Failed to send timeout response to update actor"
                             );
-                            emit_fail(ctx, e).await;
+                            crash_system(ctx, e).await;
                         } else {
                             debug!(
                                 node = %self.node_key,
@@ -125,7 +127,7 @@ impl Handler<Self> for Updater {
                             path = %ctx.path().parent(),
                             "Update actor not found"
                         );
-                        emit_fail(ctx, e).await;
+                        crash_system(ctx, e).await;
                     }
                 };
 
@@ -183,7 +185,7 @@ impl Handler<Self> for Updater {
                             error = %e,
                             "Failed to create retry actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -193,7 +195,7 @@ impl Handler<Self> for Updater {
                         error = %e,
                         "Failed to send retry message to retry actor"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 } else {
                     debug!(
                         msg_type = "NetworkLastSn",
@@ -229,7 +231,7 @@ impl Handler<Self> for Updater {
                                 error = %e,
                                 "Failed to send response to update actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                     Err(e) => {
@@ -239,7 +241,7 @@ impl Handler<Self> for Updater {
                             path = %ctx.path().parent(),
                             "Update actor not found"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -303,7 +305,7 @@ impl Handler<Self> for Updater {
                                 error = %e,
                                 "Failed to send empty response to update actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                     Err(e) => {
@@ -313,7 +315,7 @@ impl Handler<Self> for Updater {
                             path = %ctx.path().parent(),
                             "Update actor not found"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -351,19 +353,5 @@ impl Handler<Self> for Updater {
         };
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            node = %self.node_key,
-            error = %error,
-            "Child fault in updater actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

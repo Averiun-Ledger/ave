@@ -12,7 +12,7 @@ use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::{common::emit_fail, event::Ledger},
+    model::{common::crash_system, event::Ledger},
     request::manager::{RequestManager, RequestManagerMessage},
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
@@ -30,7 +30,7 @@ macro_rules! handle_distri_error {
                         "{}",
                         $message
                     );
-                    Err(emit_fail($ctx, e).await)
+                    Err(crash_system($ctx, e).await)
                 } else {
                     warn!(
                         msg_type = $msg_type,
@@ -57,7 +57,7 @@ macro_rules! handle_distri_error {
                         "{}",
                         $message
                     );
-                    Err(emit_fail($ctx, e).await)
+                    Err(crash_system($ctx, e).await)
                 } else {
                     warn!(
                         msg_type = $msg_type,
@@ -86,7 +86,7 @@ macro_rules! handle_distri_error {
                         "{}",
                         $message
                     );
-                    Err(emit_fail($ctx, e).await)
+                    Err(crash_system($ctx, e).await)
                 } else {
                     warn!(
                         msg_type = $msg_type,
@@ -232,6 +232,8 @@ impl Actor for Distribution {
     type Message = DistributionMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -355,30 +357,12 @@ impl Handler<Self> for Distribution {
                             error = %e,
                             "Failed to end distribution request"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
                 }
             }
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        Self::observe_event("error");
-        error!(
-            msg_type = "ChildFault",
-            subject_id = %self.subject_id,
-            request_id = %self.request_id,
-            distribution_type = ?self.distribution_type,
-            error = %error,
-            "Child fault in distribution actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

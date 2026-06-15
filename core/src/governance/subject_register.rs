@@ -17,7 +17,7 @@ use crate::model::common::CeilingMap;
 use crate::{
     db::Storable,
     governance::model::CreatorQuantity,
-    model::common::{emit_fail, purge_storage},
+    model::common::{crash_system, purge_storage},
 };
 
 #[derive(
@@ -197,6 +197,8 @@ impl Actor for SubjectRegister {
     type Event = SubjectRegisterEvent;
     type Response = SubjectRegisterResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -403,7 +405,7 @@ impl Handler<Self> for SubjectRegister {
                 error = %e,
                 "Failed to persist subject register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }

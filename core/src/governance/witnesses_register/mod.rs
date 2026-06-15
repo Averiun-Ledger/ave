@@ -8,7 +8,7 @@ use crate::governance::sn_register::{
 use crate::model::common::{
     Interval, IntervalSet, OwnerContext, TrackerEventVisibility, TrackerIdentity,
     TrackerParams, TrackerStoredVisibility, TrackerVisibilityMode, TrackerVisibilityState,
-    emit_fail, purge_storage,
+    crash_system, purge_storage,
 };
 use crate::model::event::Ledger;
 use async_trait::async_trait;
@@ -1022,6 +1022,8 @@ impl Actor for WitnessesRegister {
     type Message = WitnessesRegisterMessage;
     type Response = WitnessesRegisterResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1587,7 +1589,7 @@ impl Handler<Self> for WitnessesRegister {
                 error = %e,
                 "Failed to persist witnesses register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }

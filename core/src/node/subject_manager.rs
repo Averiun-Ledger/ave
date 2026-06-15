@@ -689,6 +689,8 @@ impl Actor for SubjectManager {
     type Message = SubjectManagerMessage;
     type Response = SubjectManagerResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -759,15 +761,5 @@ impl Handler<Self> for SubjectManager {
                 Ok(SubjectManagerResponse::DeleteGovernance)
             }
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ave_actors::ChildAction {
-        error!(error = %error, "Child fault in subject manager");
-        ctx.system().crash_system();
-        ave_actors::ChildAction::Stop
     }
 }

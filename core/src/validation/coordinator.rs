@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     helpers::network::{NetworkMessage, service::NetworkSender},
-    model::{common::emit_fail, network::RetryNetwork},
+    model::{common::crash_system, network::RetryNetwork},
 };
 
 use crate::helpers::network::ActorMessage;
@@ -73,6 +73,8 @@ impl Actor for ValiCoordinator {
     type Message = ValiCoordinatorMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -117,7 +119,7 @@ impl Handler<Self> for ValiCoordinator {
                                 error = %e,
                                 "Failed to send timeout response to validation actor"
                             );
-                            emit_fail(ctx, e).await;
+                            crash_system(ctx, e).await;
                         } else {
                             debug!(
                                 request_id = %self.request_id,
@@ -132,7 +134,7 @@ impl Handler<Self> for ValiCoordinator {
                             path = %ctx.path().parent(),
                             "Validation actor not found"
                         );
-                        emit_fail(ctx, e).await;
+                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -202,7 +204,7 @@ impl Handler<Self> for ValiCoordinator {
                             error = %e,
                             "Failed to create retry actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -212,7 +214,7 @@ impl Handler<Self> for ValiCoordinator {
                         error = %e,
                         "Failed to send retry message to retry actor"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 } else {
                     debug!(
                         msg_type = "NetworkValidation",
@@ -280,7 +282,7 @@ impl Handler<Self> for ValiCoordinator {
                                     error = %e,
                                     "Failed to send response to validation actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
@@ -291,7 +293,7 @@ impl Handler<Self> for ValiCoordinator {
                                 "Validation actor not found"
                             );
 
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     };
 
@@ -343,21 +345,5 @@ impl Handler<Self> for ValiCoordinator {
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            node_key = %self.node_key,
-            request_id = %self.request_id,
-            version = self.version,
-            error = %error,
-            "Child fault in validation coordinator"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

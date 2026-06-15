@@ -12,7 +12,7 @@ use crate::{
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
+            abort_req, crash_system, send_reboot_to_req, take_random_signers,
         },
         event::{EvaluationData, EvaluationResponse},
     },
@@ -335,6 +335,8 @@ impl Actor for Evaluation {
     type Message = EvaluationMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -366,7 +368,7 @@ impl Handler<Self> for Evaluation {
                             error = %e,
                             "Failed to create evaluation request hash"
                         );
-                        return Err(emit_fail(
+                        return Err(crash_system(
                             ctx,
                             ActorError::FunctionalCritical {
                                 description: format!(
@@ -457,7 +459,7 @@ impl Handler<Self> for Evaluation {
                                         error = %e,
                                         "Failed to abort request"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 };
 
                                 debug!(
@@ -488,7 +490,7 @@ impl Handler<Self> for Evaluation {
                                         error = %e,
                                         "Failed to send reboot to request actor"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
 
                                 self.reboot = true;
@@ -520,7 +522,7 @@ impl Handler<Self> for Evaluation {
                                     error = %e,
                                     "Failed to send reboot to request actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
@@ -537,7 +539,7 @@ impl Handler<Self> for Evaluation {
                                         error = %e,
                                         "Failed to create evaluation response"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             };
 
@@ -550,7 +552,7 @@ impl Handler<Self> for Evaluation {
                                     error = %e,
                                     "Failed to send evaluation to request actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             };
 
                             if !matches!(summary, ResponseSummary::Reboot) {
@@ -617,7 +619,7 @@ impl Handler<Self> for Evaluation {
                                 error = %e,
                                 "Failed to send reboot to request actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         } else if self.current_evaluators.is_empty() {
                             Self::observe_event("reboot");
                         }
@@ -633,22 +635,6 @@ impl Handler<Self> for Evaluation {
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        Self::observe_event("error");
-        error!(
-            request_id = %self.request_id,
-            version = self.version,
-            error = %error,
-            "Child fault in evaluation actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 

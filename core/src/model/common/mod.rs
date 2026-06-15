@@ -912,17 +912,16 @@ where
     tracking_actor.tell(message).await
 }
 
-pub async fn emit_fail<A>(
+pub async fn crash_system<A>(
     ctx: &mut ActorContext<A>,
     error: ActorError,
 ) -> ActorError
 where
     A: Actor + Handler<A>,
 {
-    error!("Falling, error: {}, actor: {}", error, ctx.path());
-    if let Err(_e) = ctx.emit_fail(error.clone()).await {
-        ctx.system().crash_system();
-    };
+    error!("Crashing system, error: {}, actor: {}", error, ctx.path());
+    ctx.system().crash_system();
+    
     error
 }
 

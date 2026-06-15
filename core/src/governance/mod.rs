@@ -51,7 +51,7 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            emit_fail, get_last_event, purge_storage, subject::make_obsolete,
+            crash_system, get_last_event, purge_storage, subject::make_obsolete,
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
@@ -3215,6 +3215,8 @@ impl Actor for Governance {
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
     type SinkEvent = SubjectSinkEvent;
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -3697,7 +3699,7 @@ impl Handler<Self> for Governance {
                 sn = self.subject_metadata.sn,
                 "Failed to persist event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
 
         ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
@@ -3706,20 +3708,6 @@ impl Handler<Self> for Governance {
             sn = self.subject_metadata.sn,
             "Event persisted and published successfully"
         );
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            subject_id = %self.subject_metadata.subject_id,
-            "Child fault occurred"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 

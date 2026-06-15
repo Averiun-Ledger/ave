@@ -40,7 +40,7 @@ use crate::model::common::subject::{
     get_schema_viewpoints, get_tracker_visibility_state, get_version, has_role,
 };
 use crate::model::common::{
-    check_subject_creation, emit_fail, send_to_tracking,
+    check_subject_creation, crash_system, send_to_tracking,
     viewpoints::validate_fact_viewpoints,
 };
 use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
@@ -1010,6 +1010,8 @@ impl Actor for RequestHandler {
     type Message = RequestHandlerMessage;
     type Response = RequestHandlerResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1250,7 +1252,7 @@ impl Handler<Self> for RequestHandler {
                         error = %err,
                         "Helpers not initialized"
                     );
-                    return Err(emit_fail(ctx, ActorError::from(err)).await);
+                    return Err(crash_system(ctx, ActorError::from(err)).await);
                 };
 
                 if let Err(e) =
@@ -1526,19 +1528,6 @@ impl Handler<Self> for RequestHandler {
                 Ok(RequestHandlerResponse::None)
             }
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child fault in request handler"
-        );
-        ctx.system().crash_system();
-        ChildAction::Stop
     }
 
     async fn on_event(

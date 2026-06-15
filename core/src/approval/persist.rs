@@ -7,7 +7,7 @@ use crate::{
     governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
     model::common::{
-        emit_fail,
+        crash_system,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
         purge_storage,
         subject::get_metadata,
@@ -224,7 +224,7 @@ impl ApprPersist {
                 })
                 .await
             {
-                return Err(emit_fail(ctx, e).await);
+                return Err(crash_system(ctx, e).await);
             };
         }
 
@@ -342,6 +342,8 @@ impl Actor for ApprPersist {
     type Message = ApprPersistMessage;
     type Response = ApprPersistResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -493,7 +495,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to send approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     debug!(
@@ -532,7 +534,7 @@ impl Handler<Self> for ApprPersist {
                                     error = %e,
                                     "Failed to send approval response"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
 
                             ApprovalState::Accepted
@@ -583,7 +585,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to resend approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
 
                     debug!(
@@ -643,7 +645,7 @@ impl Handler<Self> for ApprPersist {
                                 error = %e,
                                 "Failed to check governance"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     };
 
@@ -663,7 +665,7 @@ impl Handler<Self> for ApprPersist {
                                 error = %e,
                                 "Failed to send approval abort response"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
 
                         return Ok(ApprPersistResponse::Ok);
@@ -704,7 +706,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to send approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     debug!(
@@ -725,7 +727,7 @@ impl Handler<Self> for ApprPersist {
                         let e = ActorError::FunctionalCritical {
                             description: "Can not get state".to_owned(),
                         };
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     let response = if ApprovalState::Accepted == state {
@@ -748,7 +750,7 @@ impl Handler<Self> for ApprPersist {
                                 description: "Can not get approve request"
                                     .to_owned(),
                             };
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         };
 
                     if let Err(e) = self
@@ -766,7 +768,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to resend approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     debug!(
@@ -788,7 +790,7 @@ impl Handler<Self> for ApprPersist {
     ) {
         if let Err(e) = self.persist(event, ctx).await {
             error!(error = %e, "Failed to persist event");
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
     }
 }

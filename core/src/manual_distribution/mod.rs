@@ -20,7 +20,7 @@ use crate::{
     },
     helpers::network::service::NetworkSender,
     model::common::{
-        emit_fail,
+        crash_system,
         node::i_can_send_last_ledger,
         subject::{acquire_subject, get_last_ledger_event, get_members, get_schema_roles, get_tracker_roles, get_witnesses},
     },
@@ -156,6 +156,8 @@ impl Actor for ManualDistribution {
     type Event = ();
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -461,18 +463,5 @@ impl Handler<Self> for ManualDistribution {
                 Ok(())
             }
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child actor fault in manual distribution"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

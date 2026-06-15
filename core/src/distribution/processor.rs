@@ -8,7 +8,7 @@ use crate::{
     model::event::Ledger,
 };
 use crate::model::common::{
-    check_subject_creation, emit_fail, record_verified_transfer,
+    check_subject_creation, crash_system, record_verified_transfer,
 };
 use crate::model::common::subject::{
     acquire_subject, create_subject, get_local_subject_sn, update_ledger,
@@ -205,7 +205,7 @@ impl DistriWorker {
                                     details: e.to_string(),
                                 };
                             return Err(
-                                emit_fail(ctx, error.into()).await
+                                crash_system(ctx, error.into()).await
                             );
                         }
                     }
@@ -267,7 +267,7 @@ impl DistriWorker {
                                     error = %e,
                                     "Failed to request more ledger entries"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             };
                         }
                     }
@@ -284,7 +284,7 @@ impl DistriWorker {
                                 error = %e,
                                 "Failed to update subject ledger"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         } else {
                             warn!(
                                 msg_type = "LedgerDistribution",
@@ -334,7 +334,7 @@ impl DistriWorker {
                             error = %e,
                             "Failed to request more ledger entries"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
                 }
             }
@@ -446,7 +446,7 @@ impl DistriWorker {
                                     let error = DistributorError::UpTrackerFailed {
                                         details: e.to_string(),
                                     };
-                                    return Err(emit_fail(ctx, error.into()).await);
+                                    return Err(crash_system(ctx, error.into()).await);
                                 }
                             }
                         } else {
@@ -491,7 +491,7 @@ impl DistriWorker {
                                         error = %e,
                                         "Failed to request ledger from network"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
 
                                 if let Some(lease) = lease.clone() {
@@ -512,7 +512,7 @@ impl DistriWorker {
                                         error = %e,
                                         "Failed to update subject ledger"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 } else {
                                     warn!(
                                         msg_type = "LastEventDistribution",
@@ -537,7 +537,7 @@ impl DistriWorker {
                             error = %e,
                             "Failed to send distribution acknowledgment"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     if let Some(lease) = lease {

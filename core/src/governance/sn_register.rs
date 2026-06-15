@@ -16,7 +16,7 @@ use tracing::{Span, debug, error, info_span};
 use crate::model::common::CeilingMap;
 use crate::{
     db::Storable,
-    model::common::{emit_fail, purge_storage},
+    model::common::{crash_system, purge_storage},
 };
 
 #[derive(
@@ -154,6 +154,8 @@ impl Actor for SnRegister {
     type Event = SnRegisterEvent;
     type Response = SnRegisterResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -319,7 +321,7 @@ impl Handler<Self> for SnRegister {
                 error = %e,
                 "Failed to persist sn register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }

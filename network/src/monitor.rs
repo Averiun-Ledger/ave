@@ -61,6 +61,8 @@ impl Actor for Monitor {
     type Event = ();
     type Response = MonitorResponse;
     type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(

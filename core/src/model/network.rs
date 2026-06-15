@@ -11,7 +11,7 @@ use tracing::{Span, error, info_span};
 
 use crate::{NetworkMessage, helpers::network::service::NetworkSender};
 
-use super::common::emit_fail;
+use super::common::crash_system;
 
 #[derive(
     Debug,
@@ -49,6 +49,8 @@ impl Actor for RetryNetwork {
     type Message = NetworkMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -79,7 +81,7 @@ impl Handler<Self> for RetryNetwork {
                 error = %e,
                 "Failed to send message to network helper"
             );
-            return Err(emit_fail(ctx, e).await);
+            return Err(crash_system(ctx, e).await);
         };
         Ok(())
     }

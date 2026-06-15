@@ -140,11 +140,13 @@ impl Actor for SinkWorker {
     type Response = SinkWorkerResponse;
     type Event = ();
     type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
-    fn get_span(_id: &str, parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(id: &str, parent_span: Option<tracing::Span>) -> tracing::Span {
         parent_span.map_or_else(
-            || info_span!("sink_worker"),
-            |parent_span| info_span!(parent: parent_span, "sink_worker"),
+            || info_span!("sink_worker", id),
+            |parent_span| info_span!(parent: parent_span, "sink_worker", id),
         )
     }
 

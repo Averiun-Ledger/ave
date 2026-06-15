@@ -27,7 +27,7 @@ use crate::{
     model::{
         common::{
             check_witness_status,
-            emit_fail,
+            crash_system,
             get_verified_transfer_sn, node::get_subject_data,
             subject::{
                 acquire_subject, get_gov_sn, get_version, has_role,
@@ -1310,6 +1310,8 @@ impl Actor for DistriWorker {
     type Message = DistriWorkerMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1398,7 +1400,7 @@ impl Handler<Self> for DistriWorker {
                             error = %e,
                             "Witness check failed"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     } else {
                         warn!(
                             msg_type = "GetLastSn",

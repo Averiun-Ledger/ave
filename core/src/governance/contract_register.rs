@@ -13,7 +13,7 @@ use tracing::{Span, error, info_span};
 use crate::{
     db::Storable,
     evaluation::compiler::ContractArtifactRecord,
-    model::common::{emit_fail, purge_storage},
+    model::common::{crash_system, purge_storage},
 };
 
 #[derive(
@@ -92,6 +92,8 @@ impl Actor for ContractRegister {
     type Message = ContractRegisterMessage;
     type Response = ContractRegisterResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -170,7 +172,7 @@ impl Handler<Self> for ContractRegister {
                 error = %e,
                 "Failed to persist contract register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }

@@ -8,7 +8,7 @@ use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
-use crate::model::common::{emit_fail, subject::get_gov_sn};
+use crate::model::common::{crash_system, subject::get_gov_sn};
 
 use super::manager::{RequestManager, RequestManagerMessage};
 
@@ -123,6 +123,8 @@ impl Actor for Reboot {
     type Event = ();
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -161,7 +163,7 @@ impl Handler<Self> for Reboot {
                             error = %e,
                             "Failed to get governance sn"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -173,7 +175,7 @@ impl Handler<Self> for Reboot {
                         error = %e,
                         "Failed to schedule sleep"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 };
             }
             RebootMessage::Update => {
@@ -198,7 +200,7 @@ impl Handler<Self> for Reboot {
                             error = %e,
                             "Failed to get governance sn"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -240,7 +242,7 @@ impl Handler<Self> for Reboot {
                             error = %e,
                             "Failed to finish reboot"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 } else if let Err(e) = self.sleep(ctx).await {
                     error!(
@@ -251,7 +253,7 @@ impl Handler<Self> for Reboot {
                         error = %e,
                         "Failed to schedule sleep"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 };
             }
         };

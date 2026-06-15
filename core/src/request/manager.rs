@@ -57,7 +57,7 @@ use crate::{
     auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
     db::Storable,
     evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
-    model::common::emit_fail,
+    model::common::crash_system,
     update::{Update, UpdateMessage, UpdateNew, UpdateType},
 };
 
@@ -1581,7 +1581,7 @@ impl RequestManager {
                 ..
             } => {
                 if let Err(e) = self.send_reboot(ctx, governance_id).await {
-                    emit_fail(ctx, e).await;
+                    crash_system(ctx, e).await;
                 }
             }
             RequestManagerError::CheckLimit
@@ -1597,7 +1597,7 @@ impl RequestManager {
                     )
                     .await
                 {
-                    emit_fail(
+                    crash_system(
                         ctx,
                         ActorError::FunctionalCritical {
                             description: e.to_string(),
@@ -1607,7 +1607,7 @@ impl RequestManager {
                 }
             }
             _ => {
-                emit_fail(
+                crash_system(
                     ctx,
                     ActorError::FunctionalCritical {
                         description: error.to_string(),
@@ -2062,6 +2062,8 @@ impl Actor for RequestManager {
     type Message = RequestManagerMessage;
     type Response = ();
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -2245,7 +2247,7 @@ impl Handler<Self> for RequestManager {
                             error = %e,
                             "Failed to send version update to tracking"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
 
                     if let Err(e) =
@@ -2745,7 +2747,7 @@ impl Handler<Self> for RequestManager {
                         let e = ActorError::FunctionalCritical {
                             description: "Invalid request state".to_owned(),
                         };
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
                     let (
                         request,
@@ -2974,24 +2976,8 @@ impl Handler<Self> for RequestManager {
                 error = %e,
                 "Failed to persist event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            request_id = %self.id,
-            version = self.version,
-            state = ?self.state,
-            error = %error,
-            "Child fault in request manager"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 

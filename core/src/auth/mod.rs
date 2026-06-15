@@ -24,7 +24,7 @@ use crate::{
     db::Storable,
 
     governance::model::WitnessesData,
-    model::common::emit_fail,
+    model::common::crash_system,
     update::{Update, UpdateMessage, UpdateNew, UpdateSubjectKind},
 };
 
@@ -231,6 +231,8 @@ impl Actor for SubjectAccess {
     type Message = SubjectAccessMessage;
     type Response = SubjectAccessResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -664,7 +666,7 @@ impl Handler<Self> for SubjectAccess {
                                 error = %e,
                                 "Failed to send Run message to update actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
 
                         debug!(
@@ -696,21 +698,8 @@ impl Handler<Self> for SubjectAccess {
                 error = %e,
                 "Failed to persist subject_access event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child actor fault in subject_access"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 

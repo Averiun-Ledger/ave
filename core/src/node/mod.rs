@@ -830,6 +830,8 @@ impl Actor for Node {
     type Message = NodeMessage;
     type Response = NodeResponse;
     type SinkEvent = ();
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1423,19 +1425,6 @@ impl Handler<Self> for Node {
                 })
             }
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child actor fault, stopping system"
-        );
-        ctx.system().crash_system();
-        ChildAction::Stop
     }
 
     async fn on_event(

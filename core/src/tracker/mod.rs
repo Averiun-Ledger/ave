@@ -15,7 +15,7 @@ use crate::{
     model::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
-            TrackerVisibilityMode, TrackerVisibilityState, emit_fail,
+            TrackerVisibilityMode, TrackerVisibilityState, crash_system,
             get_last_event, purge_storage, remove_verified_transfer,
         },
         event::{Ledger, Protocols, ValidationMetadata},
@@ -924,6 +924,8 @@ impl Actor for Tracker {
     type Message = TrackerMessage;
     type Response = TrackerResponse;
     type SinkEvent = SubjectSinkEvent;
+        type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1043,7 +1045,7 @@ impl Handler<Self> for Tracker {
                 sn = self.subject_metadata.sn,
                 "Failed to persist event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
 
         ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
@@ -1052,21 +1054,6 @@ impl Handler<Self> for Tracker {
             sn = self.subject_metadata.sn,
             "Event persisted and published successfully"
         );
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            subject_id = %self.subject_metadata.subject_id,
-            sn = self.subject_metadata.sn,
-            error = %error,
-            "Child fault in tracker"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
