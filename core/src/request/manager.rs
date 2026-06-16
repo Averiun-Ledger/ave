@@ -1664,12 +1664,6 @@ impl RequestManager {
         )
         .await;
 
-        let Ok(actor) = ctx.reference().await else {
-            return Ok(());
-        };
-
-        let request_id = self.id.clone();
-
         match reboot_type {
             RebootType::Normal => {
                 info!("Launching Normal reboot {}", self.id);
@@ -1682,10 +1676,11 @@ impl RequestManager {
                 )
                 .await?;
 
+                let actor = ctx.reference().await?;
                 actor
                     .tell(RequestManagerMessage::RebootUpdate {
-                        request_id,
-                        governance_id,
+                        request_id: self.id.clone(),
+                        governance_id: governance_id.clone(),
                     })
                     .await?;
             }
@@ -1715,15 +1710,13 @@ impl RequestManager {
                 )
                 .await?;
 
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(seconds)).await;
-                    let _ = actor
-                        .tell(RequestManagerMessage::RebootUpdate {
-                            request_id,
-                            governance_id,
-                        })
-                        .await;
-                });
+                ctx.schedule_once(
+                    Duration::from_secs(seconds),
+                    RequestManagerMessage::RebootUpdate {
+                        request_id: self.id.clone(),
+                        governance_id: governance_id.clone(),
+                    },
+                );
             }
             RebootType::TimeOut => {
                 self.retry_timeout += 1;
@@ -1749,15 +1742,13 @@ impl RequestManager {
                 )
                 .await?;
 
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(seconds)).await;
-                    let _ = actor
-                        .tell(RequestManagerMessage::RebootUpdate {
-                            request_id,
-                            governance_id,
-                        })
-                        .await;
-                });
+                ctx.schedule_once(
+                    Duration::from_secs(seconds),
+                    RequestManagerMessage::RebootUpdate {
+                        request_id: self.id.clone(),
+                        governance_id: governance_id.clone(),
+                    },
+                );
             }
         }
 

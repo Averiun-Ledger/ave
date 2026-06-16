@@ -697,14 +697,14 @@ impl SinkManager {
         let system = ctx.system().clone();
         let token = CancellationToken::new();
         let token_for_task = token.clone();
-        let _handle = tokio::spawn(async move {
+        ctx.spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(shutdown_after_ms)) => {
                     // Only send Stop if the token was NOT cancelled.
-                    if !token_for_task.is_cancelled() {
-                        if let Ok(worker) = system.get_actor::<SinkWorker>(&ActorPath::from(child_name)).await {
-                            let _ = worker.tell(SinkWorkerMessage::Stop).await;
-                        }
+                    if !token_for_task.is_cancelled()
+                        && let Ok(worker) = system.get_actor::<SinkWorker>(&ActorPath::from(child_name)).await
+                    {
+                        let _ = worker.tell(SinkWorkerMessage::Stop).await;
                     }
                 }
                 _ = token_for_task.cancelled() => {
@@ -712,11 +712,9 @@ impl SinkManager {
                 }
             }
         });
-        // Keep both the token (for future cancellation) and the handle (so the
-        // task is not orphaned).
+        // Keep the token for explicit per-sink cancellation.  The actor will
+        // abort all spawned tasks automatically on stop/restart.
         self.pending_worker_shutdowns.insert(sink_name, token);
-        // We intentionally do NOT store the JoinHandle; the task will complete
-        // on its own when either the sleep finishes or the token is cancelled.
     }
 
     /// Cancel pending worker shutdown timer for the given sink.
@@ -740,7 +738,7 @@ impl SinkManager {
         let token = CancellationToken::new();
         let token_for_task = token.clone();
         let sink_name_for_task = sink_name.clone();
-        let _handle = tokio::spawn(async move {
+        ctx.spawn(async move {
             let mut interval_idx = 0usize;
             let last_idx = intervals.len().saturating_sub(1);
             loop {

@@ -11,10 +11,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message, NotPersistentActor,
-    Response,
+    Response, TimerKey,
 };
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info_span, warn};
 
 use crate::config::SinkServer;
@@ -147,14 +146,12 @@ pub struct SinkWorker {
     /// Number of times the sink has "recovered" via healthcheck without
     /// a successful delivery.  Used to detect flapping sinks (LEV-2).
     recoveries_after_failure: u32,
-    /// F-5: Cancellation token for the pending healthcheck timer.  Cancelling
-    /// the token aborts the timer *before* it sends `HealthCheck`, eliminating
-    /// the race between `abort()` and a task that has already woken up.
-    pending_healthcheck: Option<CancellationToken>,
+    /// F-5: Timer key for the pending healthcheck timer.  Cancelling the key
+    /// aborts the timer before it sends `HealthCheck`.
+    pending_healthcheck: Option<TimerKey>,
     active_subject_workers: HashMap<String, ActorRef<crate::sink::subject_worker::SinkSubjectWorker>>,
-    /// F-5: Cancellation tokens for pending child shutdown timers.  Each token
-    /// is shared between the worker and the spawned timer task.
-    pending_child_shutdowns: HashMap<String, CancellationToken>,
+    /// F-5: Timer keys for pending child shutdown timers.
+    pending_child_shutdowns: HashMap<String, TimerKey>,
     /// `true` when this worker handles governance events (parent is under Node),
     /// `false` when it handles tracker events (parent is under Governance).
     is_governance: bool,
@@ -222,12 +219,11 @@ impl Actor for SinkWorker {
         }
 
         // Schedule first healthcheck after configurable startup delay + jitter.
-        let self_ref = ctx.reference().await?;
         let startup_delay = crate::sink::add_jitter(self.server.startup_healthcheck_delay_secs);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(startup_delay)).await;
-            let _ = self_ref.tell(SinkWorkerMessage::HealthCheck).await;
-        });
+        ctx.schedule_once(
+            Duration::from_secs(startup_delay),
+            SinkWorkerMessage::HealthCheck,
+        );
         Ok(())
     }
 }
@@ -280,7 +276,7 @@ impl Handler<SinkWorker> for SinkWorker {
                     ))
                     .await?;
 
-                self.schedule_child_shutdown(subject_id.clone(), ctx.reference().await?);
+                self.schedule_child_shutdown(ctx, subject_id.clone());
 
                 Ok(SinkWorkerResponse::Ok)
             }
@@ -293,6 +289,7 @@ impl Handler<SinkWorker> for SinkWorker {
                                 self.healthcheck_state = HealthcheckState::Healthy;
                                 self.broadcast_to_children(
                                     crate::sink::subject_worker::SinkSubjectWorkerMessage::Resume,
+                                    ctx,
                                 )
                                 .await;
                                 match ctx.get_parent::<SinkManager>().await {
@@ -314,15 +311,18 @@ impl Handler<SinkWorker> for SinkWorker {
                                 // Flapping threshold exceeded: healthcheck works but delivery
                                 // keeps failing.  This is a permanent sink misconfiguration
                                 // (wrong URL, endpoint missing, etc.).  Block the sink.
+                                let blocked_reason =
+                                    "sink flapping: healthcheck OK but delivery fails".to_owned();
                                 warn!(
                                     msg_type = "FlappingSinkBlocked",
                                     sink = %self.sink_name,
                                     recoveries = %self.recoveries_after_failure,
                                     "Sink healthcheck OK but delivery keeps failing; blocking sink"
                                 );
-                                self.blocked = Some("sink flapping: healthcheck OK but delivery fails".to_owned());
+                                self.blocked = Some(blocked_reason.clone());
                                 self.broadcast_to_children(
                                     crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop,
+                                    ctx,
                                 )
                                 .await;
                                 self.active_subject_workers.clear();
@@ -334,7 +334,7 @@ impl Handler<SinkWorker> for SinkWorker {
                                                 sink: self.sink_name.clone(),
                                                 subject_id: String::new(),
                                                 sn: 0,
-                                                reason: self.blocked.clone().unwrap(),
+                                                reason: blocked_reason,
                                             })
                                             .await
                                         {
@@ -365,11 +365,11 @@ impl Handler<SinkWorker> for SinkWorker {
                         };
                         self.broadcast_to_children(
                             crate::sink::subject_worker::SinkSubjectWorkerMessage::Pause,
+                            ctx,
                         )
                         .await;
 
-                        let self_ref = ctx.reference().await?;
-                        self.schedule_healthcheck(self_ref, delay_secs);
+                        self.schedule_healthcheck(ctx, delay_secs);
                     }
                 }
                 // Report idle state to parent so manager can decide on shutdown.
@@ -409,7 +409,7 @@ impl Handler<SinkWorker> for SinkWorker {
                     })
                     .await?;
 
-                self.schedule_child_shutdown(subject_id.clone(), ctx.reference().await?);
+                self.schedule_child_shutdown(ctx, subject_id.clone());
 
                 Ok(SinkWorkerResponse::Ok)
             }
@@ -419,7 +419,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 result,
             } => {
                 self.last_activity = Instant::now();
-                self.cancel_child_shutdown(&subject_id);
+                self.cancel_child_shutdown(ctx, &subject_id);
                 if let SendResult::Success = result {
                     self.recoveries_after_failure = 0;
                     if matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. }) {
@@ -458,7 +458,7 @@ impl Handler<SinkWorker> for SinkWorker {
                             error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
                         }
                     }
-                    self.schedule_child_shutdown(subject_id, ctx.reference().await?);
+                    self.schedule_child_shutdown(ctx, subject_id);
                 }
                 Ok(SinkWorkerResponse::Ok)
             }
@@ -468,7 +468,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 result,
             } => {
                 self.last_activity = Instant::now();
-                self.cancel_child_shutdown(&subject_id);
+                self.cancel_child_shutdown(ctx, &subject_id);
                 if let SendResult::Success = result {
                     match ctx.get_parent::<SinkManager>().await {
                         Ok(parent) => {
@@ -488,13 +488,13 @@ impl Handler<SinkWorker> for SinkWorker {
                             error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
                         }
                     }
-                    self.schedule_child_shutdown(subject_id, ctx.reference().await?);
+                    self.schedule_child_shutdown(ctx, subject_id);
                 }
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::CatchUpCompleted { subject_id } => {
                 self.in_catch_up.remove(&subject_id);
-                self.cancel_child_shutdown(&subject_id);
+                self.cancel_child_shutdown(ctx, &subject_id);
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::ChildShutdown { subject_id } => {
@@ -525,14 +525,6 @@ impl Handler<SinkWorker> for SinkWorker {
         error: SinkSubjectWorkerError,
         ctx: &mut ActorContext<SinkWorker>,
     ) {
-        let self_ref = match ctx.reference().await {
-            Ok(r) => r,
-            Err(e) => {
-                error!(msg_type = "GetSelfRef", sink = %self.sink_name, error = %e, "Failed to get self reference");
-                return;
-            }
-        };
-
         match error {
             SinkSubjectWorkerError::DeliveryFailed {
                 subject_id,
@@ -549,9 +541,9 @@ impl Handler<SinkWorker> for SinkWorker {
                     self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
                     let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
                     let delay_secs = crate::sink::add_jitter(delay_secs);
-                    self.schedule_healthcheck(self_ref.clone(), delay_secs);
+                    self.schedule_healthcheck(ctx, delay_secs);
                 }
-                self.schedule_child_shutdown(subject_id.clone(), self_ref);
+                self.schedule_child_shutdown(ctx, subject_id.clone());
                 match ctx.get_parent::<SinkManager>().await {
                     Ok(parent) => {
                         if let Err(e) = parent
@@ -585,10 +577,10 @@ impl Handler<SinkWorker> for SinkWorker {
                         self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
                         let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
                         let delay_secs = crate::sink::add_jitter(delay_secs);
-                        self.schedule_healthcheck(self_ref.clone(), delay_secs);
+                        self.schedule_healthcheck(ctx, delay_secs);
                     }
                 }
-                self.schedule_child_shutdown(subject_id.clone(), self_ref);
+                self.schedule_child_shutdown(ctx, subject_id.clone());
                 match ctx.get_parent::<SinkManager>().await {
                     Ok(parent) => {
                         if let Err(e) = parent
@@ -616,6 +608,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 self.blocked = Some(reason.clone());
                 self.broadcast_to_children(
                     crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop,
+                    ctx,
                 )
                 .await;
                 self.active_subject_workers.clear();
@@ -643,7 +636,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 if from_catch_up {
                     self.in_catch_up.remove(&subject_id);
                 }
-                self.schedule_child_shutdown(subject_id.clone(), self_ref);
+                self.schedule_child_shutdown(ctx, subject_id.clone());
                 match ctx.get_parent::<SinkManager>().await {
                     Ok(parent) => {
                         if let Err(e) = parent
@@ -669,53 +662,42 @@ impl Handler<SinkWorker> for SinkWorker {
 impl SinkWorker {
     /// F-5: Schedule a healthcheck after `delay_secs`, cancelling any
     /// previously scheduled healthcheck to avoid redundant checks.
-    fn schedule_healthcheck(&mut self, self_ref: ActorRef<SinkWorker>, delay_secs: u64) {
-        if let Some(token) = self.pending_healthcheck.take() {
-            token.cancel();
+    fn schedule_healthcheck(
+        &mut self,
+        ctx: &ActorContext<SinkWorker>,
+        delay_secs: u64,
+    ) {
+        if let Some(key) = self.pending_healthcheck.take() {
+            ctx.cancel_timer(key);
         }
-        let token = CancellationToken::new();
-        let token_for_task = token.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {
-                    if !token_for_task.is_cancelled() {
-                        let _ = self_ref.tell(SinkWorkerMessage::HealthCheck).await;
-                    }
-                }
-                _ = token_for_task.cancelled() => {
-                    // Timer was cancelled — do nothing.
-                }
-            }
-        });
-        self.pending_healthcheck = Some(token);
+        let key = ctx.schedule_once(
+            Duration::from_secs(delay_secs),
+            SinkWorkerMessage::HealthCheck,
+        );
+        self.pending_healthcheck = Some(key);
     }
 
-    fn schedule_child_shutdown(&mut self, subject_id: String, self_ref: ActorRef<Self>) {
+    fn schedule_child_shutdown(
+        &mut self,
+        ctx: &ActorContext<SinkWorker>,
+        subject_id: String,
+    ) {
         let timeout_ms = self.server.sink_subject_worker_idle_timeout_ms;
-        if let Some(token) = self.pending_child_shutdowns.remove(&subject_id) {
-            token.cancel();
+        if let Some(key) = self.pending_child_shutdowns.remove(&subject_id) {
+            ctx.cancel_timer(key);
         }
-        let sid = subject_id.clone();
-        let token = CancellationToken::new();
-        let token_for_task = token.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
-                    if !token_for_task.is_cancelled() {
-                        let _ = self_ref.tell(SinkWorkerMessage::ChildShutdown { subject_id: sid }).await;
-                    }
-                }
-                _ = token_for_task.cancelled() => {
-                    // Timer was cancelled — do nothing.
-                }
-            }
-        });
-        self.pending_child_shutdowns.insert(subject_id, token);
+        let key = ctx.schedule_once(
+            Duration::from_millis(timeout_ms),
+            SinkWorkerMessage::ChildShutdown {
+                subject_id: subject_id.clone(),
+            },
+        );
+        self.pending_child_shutdowns.insert(subject_id, key);
     }
 
-    fn cancel_child_shutdown(&mut self, subject_id: &str) {
-        if let Some(token) = self.pending_child_shutdowns.remove(subject_id) {
-            token.cancel();
+    fn cancel_child_shutdown(&mut self, ctx: &ActorContext<SinkWorker>, subject_id: &str) {
+        if let Some(key) = self.pending_child_shutdowns.remove(subject_id) {
+            ctx.cancel_timer(key);
         }
     }
 
@@ -724,7 +706,7 @@ impl SinkWorker {
         subject_id: &str,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ActorRef<crate::sink::subject_worker::SinkSubjectWorker>, ActorError> {
-        self.cancel_child_shutdown(subject_id);
+        self.cancel_child_shutdown(ctx, subject_id);
         if let Some(worker) = self.active_subject_workers.get(subject_id) {
             return Ok(worker.clone());
         }
@@ -742,6 +724,7 @@ impl SinkWorker {
     async fn broadcast_to_children(
         &mut self,
         msg: crate::sink::subject_worker::SinkSubjectWorkerMessage,
+        ctx: &ActorContext<SinkWorker>,
     ) {
         let mut dead = Vec::new();
         for (subject_id, child_ref) in &self.active_subject_workers {
@@ -756,7 +739,7 @@ impl SinkWorker {
         if matches!(msg, crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop) {
             let keys: Vec<String> = self.pending_child_shutdowns.keys().cloned().collect();
             for subject_id in keys {
-                self.cancel_child_shutdown(&subject_id);
+                self.cancel_child_shutdown(ctx, &subject_id);
             }
         }
     }

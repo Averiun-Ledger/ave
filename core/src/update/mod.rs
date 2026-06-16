@@ -5,7 +5,7 @@ use std::{
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    NotPersistentActor, TimerKey,
 };
 
 use async_trait::async_trait;
@@ -87,6 +87,7 @@ pub struct Update {
     retry_round: u64,
     retry_token: u64,
     retry_attempt: usize,
+    pending_retry: Option<TimerKey>,
     subject_kind_hint: Option<UpdateSubjectKind>,
     round_retry_interval_secs: u64,
     max_round_retries: usize,
@@ -107,6 +108,7 @@ impl Update {
             retry_round: 0,
             retry_token: 0,
             retry_attempt: 0,
+            pending_retry: None,
             subject_kind_hint: data.subject_kind_hint,
             round_retry_interval_secs: data.round_retry_interval_secs,
             max_round_retries: data.max_round_retries,
@@ -341,33 +343,29 @@ impl Update {
         }
     }
 
-    async fn schedule_retry(
+    fn schedule_retry(
         &mut self,
         ctx: &ActorContext<Self>,
         expected_target_sn: u64,
         attempt: usize,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
+    ) {
+        if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
+        }
         let round = self.retry_round;
         let token = self.retry_token.saturating_add(1);
         self.retry_token = token;
         let retry_interval_secs = self.round_retry_interval_secs.max(1);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(
-                retry_interval_secs,
-            ))
-            .await;
-            let _ = actor
-                .tell(UpdateMessage::RetryRound {
-                    expected_target_sn,
-                    round,
-                    attempt,
-                    token,
-                })
-                .await;
-        });
-
-        Ok(())
+        let key = ctx.schedule_once(
+            std::time::Duration::from_secs(retry_interval_secs),
+            UpdateMessage::RetryRound {
+                expected_target_sn,
+                round,
+                attempt,
+                token,
+            },
+        );
+        self.pending_retry = Some(key);
     }
 }
 
@@ -606,23 +604,11 @@ impl Handler<Self> for Update {
                                 && self.should_retry_auth_rounds()
                             {
                                 keep_running = true;
-                                if let Err(e) = self
-                                    .schedule_retry(
-                                        ctx,
-                                        expected_target_sn,
-                                        self.retry_attempt,
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        subject_id = %self.subject_id,
-                                        expected_target_sn = expected_target_sn,
-                                        error = %e,
-                                        "Failed to schedule update retry"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
-                                }
+                                self.schedule_retry(
+                                    ctx,
+                                    expected_target_sn,
+                                    self.retry_attempt,
+                                );
                             }
                         }
 

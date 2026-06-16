@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    NotPersistentActor, Response, TimerKey,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use rand::seq::IteratorRandom;
@@ -58,6 +58,7 @@ pub struct GovernanceVersionSync {
     pending_peers: HashSet<PublicKey>,
     update_target: Option<UpdateTarget>,
     round_open: bool,
+    pending_timeout: Option<TimerKey>,
 }
 
 impl GovernanceVersionSync {
@@ -82,39 +83,29 @@ impl GovernanceVersionSync {
             pending_peers: HashSet::new(),
             update_target: None,
             round_open: false,
+            pending_timeout: None,
         }
     }
 
-    async fn schedule_tick(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let delay = self.tick_interval;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if let Err(e) = actor.tell(GovernanceVersionSyncMessage::Tick).await {
-                debug!(
-                    error = %e,
-                    "Failed to send scheduled tick to GovernanceVersionSync"
-                );
-            }
-        });
-        Ok(())
+    fn schedule_tick(&self, ctx: &ActorContext<Self>) {
+        ctx.schedule_once(self.tick_interval, GovernanceVersionSyncMessage::Tick);
     }
 
-    async fn schedule_timeout(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let delay = self.response_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let _ =
-                actor.tell(GovernanceVersionSyncMessage::RoundTimeout).await;
-        });
-        Ok(())
+    fn schedule_timeout(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(key) = self.pending_timeout.take() {
+            ctx.cancel_timer(key);
+        }
+        let key = ctx.schedule_once(
+            self.response_timeout,
+            GovernanceVersionSyncMessage::RoundTimeout,
+        );
+        self.pending_timeout = Some(key);
+    }
+
+    fn cancel_timeout(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(key) = self.pending_timeout.take() {
+            ctx.cancel_timer(key);
+        }
     }
 
     fn refresh_governance(
@@ -230,7 +221,7 @@ impl GovernanceVersionSync {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.update_target.is_some() {
-            self.schedule_tick(ctx).await?;
+            self.schedule_tick(ctx);
             return Ok(());
         }
 
@@ -238,7 +229,7 @@ impl GovernanceVersionSync {
         let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
-            self.schedule_tick(ctx).await?;
+            self.schedule_tick(ctx);
             return Ok(());
         }
 
@@ -287,8 +278,8 @@ impl GovernanceVersionSync {
         );
 
         // The actual network request/response path is integrated later.
-        self.schedule_timeout(ctx).await?;
-        self.schedule_tick(ctx).await?;
+        self.schedule_timeout(ctx);
+        self.schedule_tick(ctx);
 
         Ok(())
     }
@@ -314,7 +305,8 @@ impl Actor for GovernanceVersionSync {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.schedule_tick(ctx).await
+        self.schedule_tick(ctx);
+        Ok(())
     }
 }
 
@@ -345,6 +337,7 @@ impl Handler<Self> for GovernanceVersionSync {
                 }
             }
             GovernanceVersionSyncMessage::RoundTimeout => {
+                self.cancel_timeout(ctx);
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
@@ -360,6 +353,7 @@ impl Handler<Self> for GovernanceVersionSync {
             }
             GovernanceVersionSyncMessage::PeerVersion { peer, version } => {
                 if self.peer_version(peer, version) {
+                    self.cancel_timeout(ctx);
                     self.round_open = false;
                     if let Err(error) = self.trigger_update_if_needed().await
                     {

@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    NotPersistentActor, Response, TimerKey,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
@@ -125,6 +125,8 @@ pub struct TrackerSync {
     update_timeout: Duration,
     next_nonce: u64,
     state: SyncState,
+    pending_fetch_timeout: Option<TimerKey>,
+    pending_update_timeout: Option<TimerKey>,
 }
 
 const MAX_STALLED_UPDATE_CHECKS: u8 = 3;
@@ -160,6 +162,8 @@ impl TrackerSync {
             update_timeout: config.update_timeout,
             next_nonce: 0,
             state: SyncState::Idle,
+            pending_fetch_timeout: None,
+            pending_update_timeout: None,
         }
     }
 
@@ -168,58 +172,53 @@ impl TrackerSync {
         self.next_nonce
     }
 
-    async fn schedule_tick(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
+    fn schedule_tick(&self, ctx: &ActorContext<Self>) {
         if !self.service {
-            return Ok(());
+            return;
         }
-
-        let actor = ctx.reference().await?;
-        let delay = self.tick_interval;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if let Err(e) = actor.tell(TrackerSyncMessage::Tick).await {
-                debug!(
-                    error = %e,
-                    "Failed to send scheduled tick to TrackerSync"
-                );
-            }
-        });
-        Ok(())
+        ctx.schedule_once(self.tick_interval, TrackerSyncMessage::Tick);
     }
 
-    async fn schedule_fetch_timeout(
-        &self,
+    fn schedule_fetch_timeout(
+        &mut self,
         ctx: &ActorContext<Self>,
         request_nonce: u64,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let delay = self.response_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let _ = actor
-                .tell(TrackerSyncMessage::FetchTimeout { request_nonce })
-                .await;
-        });
-        Ok(())
+    ) {
+        if let Some(key) = self.pending_fetch_timeout.take() {
+            ctx.cancel_timer(key);
+        }
+        let key = ctx.schedule_once(
+            self.response_timeout,
+            TrackerSyncMessage::FetchTimeout { request_nonce },
+        );
+        self.pending_fetch_timeout = Some(key);
     }
 
-    async fn schedule_update_timeout(
-        &self,
+    fn schedule_update_timeout(
+        &mut self,
         ctx: &ActorContext<Self>,
         batch_nonce: u64,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let delay = self.update_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let _ = actor
-                .tell(TrackerSyncMessage::UpdateTimeout { batch_nonce })
-                .await;
-        });
-        Ok(())
+    ) {
+        if let Some(key) = self.pending_update_timeout.take() {
+            ctx.cancel_timer(key);
+        }
+        let key = ctx.schedule_once(
+            self.update_timeout,
+            TrackerSyncMessage::UpdateTimeout { batch_nonce },
+        );
+        self.pending_update_timeout = Some(key);
+    }
+
+    fn cancel_fetch_timeout(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(key) = self.pending_fetch_timeout.take() {
+            ctx.cancel_timer(key);
+        }
+    }
+
+    fn cancel_update_timeout(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(key) = self.pending_update_timeout.take() {
+            ctx.cancel_timer(key);
+        }
     }
 
     async fn get_governance_version(
@@ -312,6 +311,7 @@ impl TrackerSync {
         governance_version: u64,
         after_subject_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
+        self.cancel_update_timeout(ctx);
         let request_nonce = self.allocate_nonce();
 
         self.network
@@ -343,7 +343,8 @@ impl TrackerSync {
             governance_version,
             request_nonce,
         });
-        self.schedule_fetch_timeout(ctx, request_nonce).await
+        self.schedule_fetch_timeout(ctx, request_nonce);
+        Ok(())
     }
 
     async fn get_local_tracker_sn(
@@ -450,6 +451,7 @@ impl TrackerSync {
         pending_items: VecDeque<CurrentWitnessSubject>,
         next_cursor: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
+        self.cancel_fetch_timeout(ctx);
         self.state = SyncState::Updating(UpdateState {
             peer,
             governance_version,
@@ -520,7 +522,8 @@ impl TrackerSync {
                 let batch_nonce = self.allocate_nonce();
                 state.batch_nonce = batch_nonce;
                 self.state = SyncState::Updating(state);
-                return self.schedule_update_timeout(ctx, batch_nonce).await;
+                self.schedule_update_timeout(ctx, batch_nonce);
+                return Ok(());
             }
         }
 
@@ -568,7 +571,8 @@ impl TrackerSync {
         state.batch_nonce = batch_nonce;
         self.state = SyncState::Updating(state);
 
-        self.schedule_update_timeout(ctx, batch_nonce).await
+        self.schedule_update_timeout(ctx, batch_nonce);
+        Ok(())
     }
 
     async fn handle_tick(
@@ -581,7 +585,7 @@ impl TrackerSync {
 
         let Some(peer) = self.select_peer(ctx).await? else {
             Self::observe_round("no_peer");
-            self.schedule_tick(ctx).await?;
+            self.schedule_tick(ctx);
             return Ok(());
         };
 
@@ -647,7 +651,10 @@ impl TrackerSync {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         self.state = SyncState::Idle;
-        self.schedule_tick(ctx).await
+        self.cancel_fetch_timeout(ctx);
+        self.cancel_update_timeout(ctx);
+        self.schedule_tick(ctx);
+        Ok(())
     }
 }
 
@@ -671,7 +678,8 @@ impl Actor for TrackerSync {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.schedule_tick(ctx).await
+        self.schedule_tick(ctx);
+        Ok(())
     }
 }
 
@@ -698,6 +706,7 @@ impl Handler<Self> for TrackerSync {
                 }
             }
             TrackerSyncMessage::FetchTimeout { request_nonce } => {
+                self.pending_fetch_timeout = None;
                 let timed_out = matches!(
                     &self.state,
                     SyncState::Fetching(state)
@@ -715,6 +724,7 @@ impl Handler<Self> for TrackerSync {
                 }
             }
             TrackerSyncMessage::UpdateTimeout { batch_nonce } => {
+                self.pending_update_timeout = None;
                 let timed_out = matches!(
                     &self.state,
                     SyncState::Updating(state)
@@ -747,6 +757,8 @@ impl Handler<Self> for TrackerSync {
                     }
                     _ => return Ok(TrackerSyncResponse::None),
                 };
+
+                self.cancel_fetch_timeout(ctx);
 
                 debug!(
                     governance_id = %self.governance_id,

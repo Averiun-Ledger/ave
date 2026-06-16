@@ -39,28 +39,15 @@ impl Reboot {
         }
     }
 
-    async fn sleep(
+    fn schedule_next_check(
         &self,
         ctx: &ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let request = RebootMessage::Update;
-        let request_id = self.request_id.clone();
-        let governance_id = self.governance_id.clone();
+    ) {
         let interval_secs = self.stability_check_interval_secs.max(1);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-            if let Err(e) = actor.tell(request).await {
-                error!(
-                    request_id = %request_id,
-                    governance_id = %governance_id,
-                    error = %e,
-                    "Failed to send Update message to Reboot actor"
-                );
-            }
-        });
-
-        Ok(())
+        ctx.schedule_once(
+            Duration::from_secs(interval_secs),
+            RebootMessage::Update,
+        );
     }
 
     async fn finish(
@@ -167,16 +154,7 @@ impl Handler<Self> for Reboot {
                     }
                 };
 
-                if let Err(e) = self.sleep(ctx).await {
-                    error!(
-                        msg_type = "Init",
-                        request_id = %self.request_id,
-                        governance_id = %self.governance_id,
-                        error = %e,
-                        "Failed to schedule sleep"
-                    );
-                    return Err(crash_system(ctx, e).await);
-                };
+                self.schedule_next_check(ctx);
             }
             RebootMessage::Update => {
                 let actual_sn = self.actual_sn;
@@ -244,16 +222,8 @@ impl Handler<Self> for Reboot {
                         );
                         return Err(crash_system(ctx, e).await);
                     }
-                } else if let Err(e) = self.sleep(ctx).await {
-                    error!(
-                        msg_type = "Update",
-                        request_id = %self.request_id,
-                        governance_id = %self.governance_id,
-                        count = self.count,
-                        error = %e,
-                        "Failed to schedule sleep"
-                    );
-                    return Err(crash_system(ctx, e).await);
+                } else {
+                    self.schedule_next_check(ctx);
                 };
             }
         };
