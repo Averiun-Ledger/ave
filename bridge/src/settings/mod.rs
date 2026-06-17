@@ -255,7 +255,7 @@ fn validate_https_config(config: &BridgeConfig) -> Result<(), BridgeError> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::BTreeSet,
         path::PathBuf,
         time::Duration,
     };
@@ -265,7 +265,8 @@ mod tests {
     use ave_core::{
         config::{
             AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-            LoggingOutput, LoggingRotation, MachineSpec, SinkServer,
+            LoggingOutput, LoggingRotation, MachineSpec, SinkConfigEntry,
+            SinkServer, SinkTarget,
         },
 
     };
@@ -360,7 +361,10 @@ max_size = 52428800
 max_files = 5
 level = "debug"
 
-[[sinks.primary]]
+[[sinks]]
+target = { type = "schema", schema_id = "primary" }
+
+[[sinks.servers]]
 server = "SinkOne"
 events = ["create", "all"]
 url = "https://sink.one"
@@ -369,7 +373,7 @@ connect_timeout_ms = 5000
 request_timeout_ms = 30000
 max_retries = 5
 
-[[sinks.primary]]
+[[sinks.servers]]
 server = "SinkTwo"
 events = ["transfer"]
 url = "https://sink.two"
@@ -519,20 +523,23 @@ logging:
   max_files: 5
   level: debug
 sinks:
-  primary:
-    - server: SinkOne
-      events: [create, all]
-      url: https://sink.one
-      auth: { auth_url: https://auth.service, username: sink-user }
-      connect_timeout_ms: 5000
-      request_timeout_ms: 30000
-      max_retries: 5
-    - server: SinkTwo
-      events: [transfer]
-      url: https://sink.two
-      connect_timeout_ms: 3000
-      request_timeout_ms: 15000
-      max_retries: 1
+  - target:
+      type: schema
+      schema_id: primary
+    servers:
+      - server: SinkOne
+        events: [create, all]
+        url: https://sink.one
+        auth: { auth_url: https://auth.service, username: sink-user }
+        connect_timeout_ms: 5000
+        request_timeout_ms: 30000
+        max_retries: 5
+      - server: SinkTwo
+        events: [transfer]
+        url: https://sink.two
+        connect_timeout_ms: 3000
+        request_timeout_ms: 15000
+        max_retries: 1
 auth:
   enable: true
   database_path: /var/db/auth.db
@@ -689,27 +696,33 @@ http:
     "max_files": 5,
     "level": "debug"
   },
-  "sinks": {
-    "primary": [
-      {
-        "server": "SinkOne",
-        "events": ["create", "all"],
-        "url": "https://sink.one",
-        "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
-        "connect_timeout_ms": 5000,
-        "request_timeout_ms": 30000,
-        "max_retries": 5
+  "sinks": [
+    {
+      "target": {
+        "type": "schema",
+        "schema_id": "primary"
       },
-      {
-        "server": "SinkTwo",
-        "events": ["transfer"],
-        "url": "https://sink.two",
-        "connect_timeout_ms": 3000,
-        "request_timeout_ms": 15000,
-        "max_retries": 1
-      }
-    ]
-  },
+      "servers": [
+        {
+          "server": "SinkOne",
+          "events": ["create", "all"],
+          "url": "https://sink.one",
+          "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
+          "connect_timeout_ms": 5000,
+          "request_timeout_ms": 30000,
+          "max_retries": 5
+        },
+        {
+          "server": "SinkTwo",
+          "events": ["transfer"],
+          "url": "https://sink.two",
+          "connect_timeout_ms": 3000,
+          "request_timeout_ms": 15000,
+          "max_retries": 1
+        }
+      ]
+    }
+  ],
   "auth": {
     "enable": true,
     "database_path": "/var/db/auth.db",
@@ -991,10 +1004,12 @@ http:
         assert_eq!(logging.level, "debug");
 
         use ave_core::config::SinkAuthConfig;
-        let mut expected_sinks = BTreeMap::new();
-        expected_sinks.insert(
-            "primary".to_owned(),
-            vec![
+        let expected_sinks = vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "primary".to_owned(),
+                governance_id: None,
+            },
+            servers: vec![
                 SinkServer {
                     server: "SinkOne".to_owned(),
                     events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
@@ -1016,7 +1031,7 @@ http:
                     sink_subject_worker_idle_timeout_ms: 2_000,
                     token_refresh_margin_secs: 30,
 
-                    max_recoveries_after_failure: 3,
+                    max_recoveries_after_failure: 5,
                     startup_healthcheck_delay_secs: 1,
                 },
                 SinkServer {
@@ -1036,11 +1051,11 @@ http:
                     sink_subject_worker_idle_timeout_ms: 2_000,
                     token_refresh_margin_secs: 30,
 
-                    max_recoveries_after_failure: 3,
+                    max_recoveries_after_failure: 5,
                     startup_healthcheck_delay_secs: 1,
                 },
             ],
-        );
+        }];
         assert_eq!(config.sinks, expected_sinks);
 
         let auth = &config.auth;

@@ -66,7 +66,7 @@ ave-core = { version = "0.11.0", default-features = false, features = ["rocksdb"
 ```rust,ignore
 use ave_common::identity::{KeyPair, KeyPairAlgorithm};
 use ave_core::{
-    config::{Config, SinkAuth},
+    config::{Config, SinkConfigEntry},
     Api,
 };
 use prometheus_client::registry::Registry;
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_api, runners) = Api::build(
         keys,
         config,
-        SinkAuth::default(),
+        Vec::<SinkConfigEntry>::new(),
         &mut registry,
         "change-me",
         graceful.clone(),

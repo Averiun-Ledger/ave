@@ -21,7 +21,7 @@ use ave_core::{
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
         AveInternalDBFeatureConfig, Config, GovernanceSyncConfig,
-        RebootSyncConfig, SinkAuth, SyncConfig, TrackerSyncConfig,
+        RebootSyncConfig, SinkConfigEntry, SyncConfig, TrackerSyncConfig,
         UpdateSyncConfig,
     },
 };
@@ -182,7 +182,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
     let (api, runners) = Api::build(
         keys.clone(),
         config,
-        SinkAuth::default(),
+        Vec::<SinkConfigEntry>::new(),
         &mut registry,
         "ave",
         graceful_token.clone(),

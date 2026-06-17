@@ -69,36 +69,6 @@ pub struct RoleRegister {
 
 type IntervalData = (IntervalSet, Option<u64>);
 
-impl RoleRegister {
-    pub fn new() -> Self {
-        Self {
-            version: 0,
-            appr_quorum: Quorum::Majority,
-            eval_quorum: HashMap::new(),
-            vali_quorum: HashMap::new(),
-            evaluators: HashMap::new(),
-            validators: HashMap::new(),
-            approvers: HashSet::new(),
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, Deserialize, Serialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct UpdateRole {
-    pub schema_id: SchemaType,
-    pub role: HashSet<RoleData>,
-}
-
-#[derive(
-    Debug, Clone, Deserialize, Serialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct UpdateQuorum {
-    pub schema_id: SchemaType,
-    pub quorum: Quorum,
-}
-
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]

@@ -2081,8 +2081,6 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.logging.max_files, 3);
 
     assert!(config.sink.sinks.is_empty());
-    assert_eq!(config.sink.auth, "");
-    assert_eq!(config.sink.username, "");
 
     assert!(!config.auth.enable);
     assert_eq!(config.auth.database_path, expected_auth_db_path);
@@ -2175,7 +2173,7 @@ fn test_sink_server_http_fields() {
         "server": "TestSink",
         "events": ["Create", "Transfer"],
         "url": "https://test.sink",
-        "auth": true,
+        "auth": { "auth_url": "https://auth", "username": "u", "api_key": "k" },
         "connect_timeout_ms": 5000,
         "request_timeout_ms": 30000,
         "max_retries": 5
@@ -2185,7 +2183,7 @@ fn test_sink_server_http_fields() {
 
     assert_eq!(http.server, "TestSink");
     assert_eq!(http.url, "https://test.sink");
-    assert!(http.auth);
+    assert!(http.auth.is_some());
     assert_eq!(http.connect_timeout_ms, 5000);
     assert_eq!(http.request_timeout_ms, 30000);
     assert_eq!(http.max_retries, 5);
@@ -2195,7 +2193,6 @@ fn test_sink_server_http_fields() {
         "server": "S2",
         "events": [],
         "url": "https://s2",
-        "auth": false,
         "connect_timeout_ms": 2000,
         "request_timeout_ms": 10000,
         "max_retries": 3
@@ -2203,7 +2200,7 @@ fn test_sink_server_http_fields() {
 
     let http2: SinkServerHttp = serde_json::from_value(json2).unwrap();
     assert_eq!(http2.server, "S2");
-    assert!(!http2.auth);
+    assert!(http2.auth.is_none());
 }
 
 #[test]

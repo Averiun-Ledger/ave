@@ -13,8 +13,8 @@ use crate::{
 
 use ave_bridge::ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
+        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, DeleteSinkQuery,
+        EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
         UpdateSubjectQuery,
     },
     response::{ApprovalEntry, RequestData, RequestInfoExtend},
@@ -497,6 +497,38 @@ pub async fn unblock_sink(
     Path(sink_name): Path<String>,
 ) -> Result<StatusCode, HttpError> {
     bridge.unblock_sink(sink_name).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete a sink's persisted cursors
+///
+/// Removes all cursors, lagging tracking and blocked state for the given sink.
+/// Only available while the node is running in safe mode.
+#[utoipa::path(
+    delete,
+    path = "/sinks/{sink_name}",
+    operation_id = "deleteSinkCursors",
+    tag = "Sink",
+    params(
+        ("sink_name" = String, Path, description = "Sink name"),
+        DeleteSinkQuery
+    ),
+    responses(
+        (status = 200, description = "Sink cursors deleted successfully"),
+        (status = 400, description = "Invalid governance ID", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn delete_sink_cursors(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(sink_name): Path<String>,
+    Query(parameters): Query<DeleteSinkQuery>,
+) -> Result<StatusCode, HttpError> {
+    bridge
+        .delete_sink_cursors(sink_name, parameters.governance_id)
+        .await?;
     Ok(StatusCode::OK)
 }
 
@@ -1297,6 +1329,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
+        $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);
         $callback!($($args)*, put, "/governances/{subject_id}/authorize", authorize_governance, require NodeSubject Put);
         $callback!($($args)*, delete, "/governances/{subject_id}/authorize", disauthorize_governance, require NodeSubject Delete);
         $callback!($($args)*, get, "/governances/authorized", authorized_governances, require NodeSubject Get);

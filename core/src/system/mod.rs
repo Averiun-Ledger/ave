@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     config::{
-        Config, GovernanceSyncConfig, RebootSyncConfig,
+        Config, GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry,
         TrackerSyncConfig, UpdateSyncConfig,
     },
     db::Database,
@@ -35,30 +35,33 @@ pub struct ConfigHelper {
     pub sync_tracker: TrackerSyncConfig,
     pub sync_update: UpdateSyncConfig,
     pub sync_reboot: RebootSyncConfig,
-    /// Sink configuration: schema_id -> list of SinkServer.
-    pub sinks: std::collections::BTreeMap<String, Vec<crate::config::SinkServer>>,
+    /// Sink configuration entries read from the bridge configuration. Each
+    /// entry pairs a [`SinkTarget`] with the list of servers that deliver
+    /// events for that target.
+    pub sinks: Vec<SinkConfigEntry>,
 }
 
-impl From<Config> for ConfigHelper {
-    fn from(value: Config) -> Self {
+impl ConfigHelper {
+    pub fn from_config(config: Config, sinks: Vec<SinkConfigEntry>) -> Self {
         Self {
-            contracts_path: value.contracts_path,
-            always_accept: value.always_accept,
-            safe_mode: value.safe_mode,
-            tracking_size: value.tracking_size,
-            only_clear_events: value.only_clear_events,
-            ledger_batch_size: value.sync.ledger_batch_size,
-            sync_governance: value.sync.governance,
-            sync_tracker: value.sync.tracker,
-            sync_update: value.sync.update,
-            sync_reboot: value.sync.reboot,
-            sinks: std::collections::BTreeMap::new(),
+            contracts_path: config.contracts_path,
+            always_accept: config.always_accept,
+            safe_mode: config.safe_mode,
+            tracking_size: config.tracking_size,
+            only_clear_events: config.only_clear_events,
+            ledger_batch_size: config.sync.ledger_batch_size,
+            sync_governance: config.sync.governance,
+            sync_tracker: config.sync.tracker,
+            sync_update: config.sync.update,
+            sync_reboot: config.sync.reboot,
+            sinks,
         }
     }
 }
 
 pub async fn system(
     config: Config,
+    sinks: Vec<SinkConfigEntry>,
     password: &str,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
@@ -67,8 +70,7 @@ pub async fn system(
     let (system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
-    let config_helper = ConfigHelper::from(config.clone());
-    // TODO: populate config_helper.sinks from bridge settings when available
+    let config_helper = ConfigHelper::from_config(config.clone(), sinks);
     system
         .add_helper("config", config_helper)
         .await;
@@ -247,6 +249,7 @@ pub mod tests {
 
         let (sys, handlers) = system(
             config.clone(),
+            Vec::new(),
             "password",
             CancellationToken::new(),
             CancellationToken::new(),

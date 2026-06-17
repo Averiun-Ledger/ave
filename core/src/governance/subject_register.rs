@@ -25,25 +25,6 @@ use crate::{
     Debug,
     Serialize,
     Deserialize,
-    Hash,
-    PartialEq,
-    Eq,
-    Ord,
-    PartialOrd,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-pub struct OwnerSchema {
-    pub owner: PublicKey,
-    pub schema_id: SchemaType,
-    pub namespace: String,
-}
-
-#[derive(
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
     Default,
     BorshDeserialize,
     BorshSerialize,
@@ -107,11 +88,6 @@ pub enum SubjectRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
-    GetSubjectsByOwnerSchema {
-        owner: PublicKey,
-        schema_id: SchemaType,
-        namespace: String,
-    },
     GetSubjectsByOwnerSchemaBatch {
         queries: Vec<(PublicKey, SchemaType, String)>,
     },
@@ -148,7 +124,6 @@ impl Message for SubjectRegisterMessage {
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
             Self::Check { .. }
-            | Self::GetSubjectsByOwnerSchema { .. }
             | Self::GetSubjectsByOwnerSchemaBatch { .. } => false,
         }
     }
@@ -157,7 +132,6 @@ impl Message for SubjectRegisterMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterResponse {
     Ok,
-    Subjects(Vec<DigestIdentifier>),
     SubjectsBatch(Vec<Vec<DigestIdentifier>>),
 }
 
@@ -243,24 +217,6 @@ impl Handler<Self> for SubjectRegister {
                 );
 
                 return Ok(SubjectRegisterResponse::Ok);
-            }
-            SubjectRegisterMessage::GetSubjectsByOwnerSchema {
-                owner,
-                schema_id,
-                namespace,
-            } => {
-                let subjects = self
-                    .register
-                    .get(&(owner, schema_id, namespace))
-                    .map(|(_, subjects)| {
-                        let mut subjects =
-                            subjects.iter().cloned().collect::<Vec<_>>();
-                        subjects.sort();
-                        subjects
-                    })
-                    .unwrap_or_default();
-
-                return Ok(SubjectRegisterResponse::Subjects(subjects));
             }
             SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch { queries } => {
                 let results: Vec<Vec<DigestIdentifier>> = queries

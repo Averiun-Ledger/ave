@@ -649,6 +649,30 @@ pub struct SinkAuthConfig {
     pub api_key: String,
 }
 
+/// Target of a sink configuration entry.
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTarget {
+    /// Sink for governance events, managed by the node-level `NodeSinkManager`.
+    Governance,
+    /// Sink for tracker events of a given schema.
+    Schema {
+        schema_id: String,
+        /// When `None`, the sink applies to every governance that contains
+        /// this schema. When `Some`, it applies only to that governance.
+        #[serde(default)]
+        governance_id: Option<String>,
+    },
+}
+
+/// A single sink configuration entry: a target plus the list of servers that
+/// serve events for that target.
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+pub struct SinkConfigEntry {
+    pub target: SinkTarget,
+    pub servers: Vec<SinkServer>,
+}
+
 #[derive(Clone, Debug, Deserialize, Default, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct SinkServer {

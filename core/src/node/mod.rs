@@ -14,6 +14,7 @@ use tracing::{Span, debug, error, info_span};
 
 use crate::{
     auth::{SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage, SubjectAccessResponse},
+    config::SinkTarget,
     db::Storable,
     distribution::worker::DistriWorker,
     governance::{
@@ -869,9 +870,10 @@ impl Actor for Node {
         {
             config_helper
                 .sinks
-                .get("governance")
-                .cloned()
-                .unwrap_or_default()
+                .iter()
+                .filter(|entry| matches!(entry.target, SinkTarget::Governance))
+                .flat_map(|entry| entry.servers.clone())
+                .collect()
         } else {
             Vec::new()
         };

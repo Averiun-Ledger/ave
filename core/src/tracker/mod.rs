@@ -270,13 +270,6 @@ impl Subject for Tracker {
         get_last_event(ctx).await
     }
 
-    fn apply_patch(
-        &mut self,
-        json_patch: ValueWrapper,
-    ) -> Result<(), ActorError> {
-        self.apply_patch_inner(json_patch)
-    }
-
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -912,7 +905,6 @@ pub enum TrackerResponse {
     LastLedger {
         ledger_event: Box<Option<Ledger>>,
     },
-    Sn(u64),
     SinkEvents(Vec<DataToSink>),
     Ok,
 }

@@ -7,8 +7,7 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::SchemaType;
-use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::identity::DigestIdentifier;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -18,25 +17,6 @@ use crate::{
     db::Storable,
     model::common::{crash_system, purge_storage},
 };
-
-#[derive(
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    Hash,
-    PartialEq,
-    Eq,
-    Ord,
-    PartialOrd,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-pub struct OwnerSchema {
-    pub owner: PublicKey,
-    pub schema_id: SchemaType,
-    pub namespace: String,
-}
 
 #[derive(
     Clone,
@@ -82,10 +62,6 @@ pub enum SnRegisterMessage {
         gov_version: u64,
         sn: u64,
     },
-    GetSn {
-        subject_id: DigestIdentifier,
-        gov_version: u64,
-    },
     GetSns {
         subject_id: DigestIdentifier,
         gov_versions: Vec<u64>,
@@ -118,7 +94,6 @@ pub enum SnLimit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterResponse {
     Ok,
-    Sn(SnLimit),
     Sns(Vec<SnLimit>),
     GovVersionWindow(Vec<SnGovVersionRange>),
 }
@@ -214,22 +189,6 @@ impl Handler<Self> for SnRegister {
                 );
 
                 Ok(SnRegisterResponse::Ok)
-            }
-            SnRegisterMessage::GetSn {
-                subject_id,
-                gov_version,
-            } => {
-                let response =
-                    SnRegisterResponse::Sn(self.lookup_sn(&subject_id, gov_version));
-
-                debug!(
-                    msg_type = "GetSn",
-                    subject_id = %subject_id,
-                    gov_version = gov_version,
-                    "Sn lookup completed"
-                );
-
-                Ok(response)
             }
             SnRegisterMessage::GetSns {
                 subject_id,

@@ -23,7 +23,7 @@ pub use ave_core::{
     config::Config as AveConfig,
     config::{
         AveExternalDBConfig, AveInternalDBConfig, LoggingConfig, LoggingOutput,
-        LoggingRotation, SinkServer,
+        LoggingRotation, SinkConfigEntry, SinkServer, SinkTarget,
     },
     error::Error,
     sink::manager::SinkStatus,
@@ -103,6 +103,7 @@ impl Bridge {
         let (api, runners) = AveApi::build(
             keys,
             settings.node.clone(),
+            settings.sinks.clone(),
             &mut registry,
             password,
             graceful_token.clone(),
@@ -110,7 +111,7 @@ impl Bridge {
         )
         .await?;
 
-        Self::bind_with_shutdown(graceful_token.clone());
+        Self::bind_with_shutdown(graceful_token.clone())?;
 
         #[cfg(feature = "prometheus")]
         let registry = std::sync::Arc::new(tokio::sync::Mutex::new(registry));
@@ -144,10 +145,12 @@ impl Bridge {
         self.registry.clone()
     }
 
-    fn bind_with_shutdown(token: CancellationToken) {
+    fn bind_with_shutdown(token: CancellationToken) -> Result<(), BridgeError> {
         let cancellation_token = token;
-        let mut sigterm = signal(SignalKind::terminate())
-            .expect("It could not be registered SIGTERM");
+        let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
+            tracing::error!(error = %e, "Failed to register SIGTERM handler");
+            BridgeError::SignalRegistration(e.to_string())
+        })?;
 
         tokio::spawn(async move {
             tokio::select! {
@@ -157,6 +160,8 @@ impl Bridge {
 
             cancellation_token.cancel();
         });
+
+        Ok(())
     }
 
     ///////// General
@@ -312,6 +317,24 @@ impl Bridge {
 
     pub async fn unblock_sink(&self, sink_name: String) -> Result<(), BridgeError> {
         self.api.unblock_sink(sink_name).await.map_err(|e| BridgeError::Api(e.to_string()))
+    }
+
+    pub async fn delete_sink_cursors(
+        &self,
+        sink_name: String,
+        governance_id: Option<String>,
+    ) -> Result<(), BridgeError> {
+        let governance_id = match governance_id {
+            Some(id) => Some(
+                DigestIdentifier::from_str(&id)
+                    .map_err(|e| BridgeError::InvalidGovernanceId(e.to_string()))?,
+            ),
+            None => None,
+        };
+        self.api
+            .delete_sink_cursors(sink_name, governance_id)
+            .await
+            .map_err(|e| BridgeError::Api(e.to_string()))
     }
 
     ///////// SubjectAccess

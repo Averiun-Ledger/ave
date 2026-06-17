@@ -27,6 +27,10 @@ pub enum BridgeError {
     #[error("Invalid request identifier: {0}")]
     InvalidRequestId(String),
 
+    /// The provided governance identifier is not valid.
+    #[error("Invalid governance identifier: {0}")]
+    InvalidGovernanceId(String),
+
     /// The provided public key is not valid.
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
@@ -94,6 +98,13 @@ pub enum BridgeError {
     /// Sink authentication failed during initialization.
     #[error("Sink authentication failed: {0}")]
     SinkAuth(#[from] SinkError),
+
+    // ========================================
+    // Runtime Errors
+    // ========================================
+    /// Failed to register a process signal handler.
+    #[error("Failed to register shutdown signal handler: {0}")]
+    SignalRegistration(String),
 
     // ========================================
     // API Errors

@@ -27,7 +27,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use auth::{AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
-use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor};
+use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
     EventsQuery, SinkEventsQuery,
@@ -44,7 +44,7 @@ use ave_network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
     NetworkWorkerRuntime,
 };
-use config::Config as AveBaseConfig;
+use config::{Config as AveBaseConfig, SinkConfigEntry};
 use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
@@ -71,7 +71,7 @@ use crate::node::InitParamsNode;
 use crate::node::subject_manager::{
     SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
 };
-use crate::sink::SinkManager;
+use crate::sink::{SinkManager, SinkManagerMessage};
 use crate::request::tracking::{
     RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
 };
@@ -105,6 +105,7 @@ pub struct Api {
     manual_dis: Option<ActorRef<ManualDistribution>>,
     tracking: Option<ActorRef<RequestTracking>>,
     node_sink_manager: Option<ActorRef<SinkManager>>,
+    system: SystemRef,
 }
 
 fn preserve_functional_actor_error<F>(err: ActorError, fallback: F) -> Error
@@ -289,6 +290,7 @@ impl Api {
     pub async fn build(
         keys: KeyPair,
         config: AveBaseConfig,
+        sinks: Vec<SinkConfigEntry>,
         registry: &mut Registry,
         password: &str,
         graceful_token: CancellationToken,
@@ -298,6 +300,7 @@ impl Api {
 
         let (system, runner) = system(
             config.clone(),
+            sinks,
             password,
             graceful_token.clone(),
             crash_token.clone(),
@@ -480,6 +483,7 @@ impl Api {
                 manual_dis: manual_dis_actor,
                 tracking: tracking_actor,
                 node_sink_manager,
+                system: system.clone(),
             },
             tasks,
         ))
@@ -1215,6 +1219,48 @@ impl Api {
         let manager = self.node_sink_manager.as_ref().ok_or_else(|| Error::Internal("NodeSinkManager not available".to_string()))?;
         manager.tell(crate::sink::manager::SinkManagerMessage::UnblockSink { sink: sink_name }).await
             .map_err(|e| actor_communication_error("node_sink_manager", e))?;
+        Ok(())
+    }
+
+    /// Delete all persisted cursors and transient state for a sink.
+    ///
+    /// This operation is only available while the node is running in safe mode.
+    /// If `governance_id` is `None`, the node-level `NodeSinkManager` (which
+    /// handles governance events) is targeted. If a governance identifier is
+    /// provided, the corresponding `SinkManager` under that governance (which
+    /// handles tracker events) is targeted instead.
+    pub async fn delete_sink_cursors(
+        &self,
+        sink_name: String,
+        governance_id: Option<DigestIdentifier>,
+    ) -> Result<(), Error> {
+        self.ensure_safe_mode_required("sink cursor deletion")?;
+
+        let manager = match governance_id {
+            Some(gov_id) => {
+                let path = ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/sink_manager",
+                    gov_id
+                ));
+                self.system
+                    .get_actor::<SinkManager>(&path)
+                    .await
+                    .map_err(|e| actor_communication_error("sink_manager", e))?
+            }
+            None => self
+                .node_sink_manager
+                .as_ref()
+                .ok_or_else(|| {
+                    Error::Internal("NodeSinkManager not available".to_string())
+                })?
+                .clone(),
+        };
+
+        manager
+            .tell(SinkManagerMessage::DeleteSinkCursors { sink: sink_name })
+            .await
+            .map_err(|e| actor_communication_error("sink_manager", e))?;
+
         Ok(())
     }
 

@@ -51,6 +51,7 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
     match err {
         // ── Input validation → 400 ──────────────────────────────
         BridgeError::InvalidSubjectId(_)
+        | BridgeError::InvalidGovernanceId(_)
         | BridgeError::InvalidRequestId(_)
         | BridgeError::InvalidPublicKey(_)
         | BridgeError::InvalidSignature(_)
@@ -78,6 +79,9 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
 
         // ── Core errors → delegate ─────────────────────────────
         BridgeError::Core(core) => status_for_core_error(core),
+
+        // ── Runtime errors → 500 ───────────────────────────────
+        BridgeError::SignalRegistration(_) => StatusCode::INTERNAL_SERVER_ERROR,
 
         // ── Generic API errors → 500 ───────────────────────────
         BridgeError::Api(_) => StatusCode::INTERNAL_SERVER_ERROR,

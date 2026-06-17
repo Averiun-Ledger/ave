@@ -1868,11 +1868,6 @@ where
     async fn eol(&self, ctx: &mut ActorContext<Self>)
     -> Result<(), ActorError>;
 
-    fn apply_patch(
-        &mut self,
-        json_patch: ValueWrapper,
-    ) -> Result<(), ActorError>;
-
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,

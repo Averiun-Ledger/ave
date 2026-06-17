@@ -24,6 +24,7 @@ use crate::config::SinkServer;
 use crate::db::Storable;
 use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
 use crate::sink::extract_sn;
+use crate::system::ConfigHelper;
 
 // ---------------------------------------------------------------------------
 // InitParams
@@ -52,17 +53,14 @@ pub enum SinkManagerMessage {
         sn: u64,
         result: SendResult,
     },
-    RegisterSinkWorker {
-        sink: SinkServer,
-    },
-    RequestCatchUp {
-        sink: String,
-        subjects: Vec<String>,
-    },
     SinkRecovered {
         sink: String,
     },
     UnblockSink {
+        sink: String,
+    },
+    /// Safe Mode only: delete all persisted cursors and transient state for a sink.
+    DeleteSinkCursors {
         sink: String,
     },
     GetStatus,
@@ -163,9 +161,6 @@ pub enum SinkManagerEvent {
     LastSeenRemoved {
         subject_id: String,
     },
-    WorkerRegistered {
-        sink: String,
-    },
     SinkRecovered {
         sink: String,
     },
@@ -174,6 +169,10 @@ pub enum SinkManagerEvent {
         reason: String,
     },
     SinkUnblocked {
+        sink: String,
+    },
+    /// Safe Mode only: all cursors and transient state for a sink have been deleted.
+    SinkCursorsDeleted {
         sink: String,
     },
 }
@@ -323,9 +322,6 @@ impl PersistentActor for SinkManager {
             SinkManagerEvent::LastSeenRemoved { subject_id } => {
                 inner.last_seen.remove(subject_id);
             }
-            SinkManagerEvent::WorkerRegistered { sink } => {
-                inner.active_sinks.insert(sink.clone());
-            }
             SinkManagerEvent::SinkRecovered { sink } => {
                 inner.active_sinks.insert(sink.clone());
             }
@@ -333,6 +329,11 @@ impl PersistentActor for SinkManager {
                 inner.blocked_sinks.insert(sink.clone(), reason.clone());
             }
             SinkManagerEvent::SinkUnblocked { sink } => {
+                inner.blocked_sinks.remove(sink);
+            }
+            SinkManagerEvent::SinkCursorsDeleted { sink } => {
+                inner.cursors.retain(|(s, _), _| s != sink);
+                inner.lagging.remove(sink);
                 inner.blocked_sinks.remove(sink);
             }
         }
@@ -427,29 +428,53 @@ impl Actor for SinkManager {
 
         // Auto-unblock all sinks on startup: the operator may have fixed the
         // sink while the node was down, so we retry permanent failures.
-        if !self.blocked_sinks.is_empty() {
+        // This is expressed as events so that the state remains the source of
+        // truth after recovery.
+        let blocked: Vec<String> = self.blocked_sinks.keys().cloned().collect();
+        if !blocked.is_empty() {
             info!(
                 msg_type = "AutoUnblock",
-                count = %self.blocked_sinks.len(),
+                count = %blocked.len(),
                 "Unblocking all sinks on startup to retry permanent failures"
             );
-            self.blocked_sinks.clear();
+            for sink in blocked {
+                self.persist(SinkManagerEvent::SinkUnblocked { sink }, ctx)
+                    .await?;
+            }
         }
 
-        // Start workers for active sinks.
-        for sink_name in self.sink_servers.keys().cloned().collect::<Vec<_>>() {
-            match self.ensure_worker(&sink_name, ctx).await {
-                Ok(_) => {
-                    info!(msg_type = "StartWorker", sink = %sink_name, "SinkWorker started");
-                }
-                Err(e) => {
-                    error!(msg_type = "StartWorker", sink = %sink_name, error = %e, "Failed to start SinkWorker");
+        // In safe mode we only need the manager alive (it holds the cursors).
+        // Workers are ephemeral and would be idle anyway because no new events
+        // are processed, so we skip creating them.
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<ConfigHelper>("config")
+            .await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if !safe_mode {
+            for sink_name in self.sink_servers.keys().cloned().collect::<Vec<_>>() {
+                match self.ensure_worker(&sink_name, ctx).await {
+                    Ok(_) => {
+                        info!(msg_type = "StartWorker", sink = %sink_name, "SinkWorker started");
+                    }
+                    Err(e) => {
+                        error!(msg_type = "StartWorker", sink = %sink_name, error = %e, "Failed to start SinkWorker");
+                    }
                 }
             }
         }
 
         info!(
             msg_type = "Start",
+            safe_mode = %safe_mode,
             active_sinks = %self.active_sinks.len(),
             lagging_subjects = %self.lagging.values().map(|s| s.len()).sum::<usize>(),
             "SinkManager started"
@@ -484,17 +509,14 @@ impl Handler<SinkManager> for SinkManager {
                 self.handle_update_progress(sink, subject_id, sn, result, ctx)
                     .await?;
             }
-            SinkManagerMessage::RegisterSinkWorker { sink } => {
-                self.handle_register_sink_worker(sink, ctx).await?;
-            }
-            SinkManagerMessage::RequestCatchUp { sink, subjects } => {
-                self.handle_request_catch_up(sink, subjects, ctx).await?;
-            }
             SinkManagerMessage::SinkRecovered { sink } => {
                 self.handle_sink_recovered(sink, ctx).await?;
             }
             SinkManagerMessage::UnblockSink { sink } => {
                 self.handle_unblock_sink(sink, ctx).await?;
+            }
+            SinkManagerMessage::DeleteSinkCursors { sink } => {
+                self.handle_delete_sink_cursors(sink, ctx).await?;
             }
             SinkManagerMessage::GetStatus => {
                 let mut all_sinks: HashSet<String> = HashSet::new();
@@ -584,15 +606,15 @@ impl Handler<SinkManager> for SinkManager {
                     reason = %reason,
                     "Sink blocked due to permanent error; operator intervention required"
                 );
-                self.blocked_sinks.insert(sink.clone(), reason.clone());
-                if let Err(e) = self.persist(
-                    SinkManagerEvent::SinkBlocked {
-                        sink: sink.clone(),
-                        reason: self.blocked_sinks[&sink].clone(),
-                    },
-                    ctx,
-                )
-                .await
+                if let Err(e) = self
+                    .persist(
+                        SinkManagerEvent::SinkBlocked {
+                            sink: sink.clone(),
+                            reason: reason.clone(),
+                        },
+                        ctx,
+                    )
+                    .await
                 {
                     error!(msg_type = "PersistBlocked", sink = %sink, error = %e, "Failed to persist blocked sink");
                 }
@@ -779,10 +801,10 @@ impl SinkManager {
         let subject_id = data.payload.get_subject_schema().0;
         let sn = extract_sn(&data);
 
-        // Update last_seen
+        // Update last_seen. The actual mutation happens in apply(); here we
+        // only decide whether the event needs to be persisted.
         let prev_last = self.last_seen.get(&subject_id).copied().unwrap_or(0);
         if sn >= prev_last {
-            self.last_seen.insert(subject_id.clone(), sn);
             self.persist(
                 SinkManagerEvent::LastSeenUpdated {
                     subject_id: subject_id.clone(),
@@ -872,7 +894,8 @@ impl SinkManager {
     ) -> Result<(), ActorError> {
         match result {
             SendResult::Success => {
-                self.cursors.insert((sink.clone(), subject_id.clone()), sn);
+                // cursors is updated in apply(); lagging is transient and can be
+                // maintained here.
                 if let Some(set) = self.lagging.get_mut(&sink) {
                     set.remove(&subject_id);
                     if set.is_empty() {
@@ -899,8 +922,7 @@ impl SinkManager {
                         self.lagging.remove(&sink);
                     }
                 }
-                self.cursors.remove(&(sink.clone(), subject_id.clone()));
-                self.last_seen.remove(&subject_id);
+                // Persistent state is only mutated in apply().
                 self.persist(
                     SinkManagerEvent::CursorRemoved {
                         sink: sink.clone(),
@@ -918,24 +940,6 @@ impl SinkManager {
                 .await?;
             }
         }
-        Ok(())
-    }
-
-    async fn handle_register_sink_worker(
-        &mut self,
-        sink: SinkServer,
-        ctx: &mut ActorContext<SinkManager>,
-    ) -> Result<(), ActorError> {
-        let sink_name = sink.server.clone();
-        self.active_sinks.insert(sink_name.clone());
-        self.sink_servers.insert(sink_name.clone(), sink.clone());
-
-        if let Err(e) = self.ensure_worker(&sink_name, ctx).await {
-            error!(msg_type = "RegisterWorker", sink = %sink_name, error = %e, "Failed to register SinkWorker");
-        }
-
-        self.persist(SinkManagerEvent::WorkerRegistered { sink: sink_name }, ctx)
-            .await?;
         Ok(())
     }
 
@@ -1018,7 +1022,7 @@ impl SinkManager {
         sink: String,
         ctx: &mut ActorContext<SinkManager>,
     ) -> Result<(), ActorError> {
-        if self.blocked_sinks.remove(&sink).is_some() {
+        if self.blocked_sinks.contains_key(&sink) {
             info!(msg_type = "SinkUnblocked", sink = %sink, "Sink manually unblocked by operator");
             self.persist(SinkManagerEvent::SinkUnblocked { sink: sink.clone() }, ctx).await?;
             // Reset flapping counter in the worker so that the first healthcheck
@@ -1062,6 +1066,60 @@ impl SinkManager {
         Ok(())
     }
 
+    async fn handle_delete_sink_cursors(
+        &mut self,
+        sink: String,
+        ctx: &mut ActorContext<SinkManager>,
+    ) -> Result<(), ActorError> {
+        // Double-check Safe Mode at the actor level: this operation is only valid
+        // while the node is running in safe mode. In safe mode there are no
+        // workers running, so we only need to clean persisted/transient state.
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<ConfigHelper>("config")
+            .await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if !safe_mode {
+            return Err(ActorError::Functional {
+                description: "DeleteSinkCursors is only available in safe mode".to_owned(),
+            });
+        }
+
+        info!(
+            msg_type = "DeleteSinkCursors",
+            sink = %sink,
+            "Deleting all sink cursors in Safe Mode"
+        );
+
+        let had_cursors = self.cursors.keys().any(|(s, _)| s == &sink);
+
+        // The event is the source of truth: apply() will remove cursors,
+        // lagging and blocked state for this sink. We must NOT mutate those
+        // fields here.
+        self.persist(
+            SinkManagerEvent::SinkCursorsDeleted { sink: sink.clone() },
+            ctx,
+        )
+        .await?;
+
+        info!(
+            msg_type = "SinkCursorsDeleted",
+            sink = %sink,
+            had_cursors = %had_cursors,
+            "Sink cursors deleted in Safe Mode"
+        );
+
+        Ok(())
+    }
+
     async fn handle_remove_subject(
         &mut self,
         subject_id: &str,
@@ -1088,7 +1146,7 @@ impl SinkManager {
             }
         }
 
-        // Remove cursors and persist.
+        // Remove cursors. The actual deletion happens in apply().
         let sinks_with_cursor: Vec<String> = self.cursors
             .keys()
             .filter(|(_, sid)| sid == subject_id)
@@ -1096,7 +1154,6 @@ impl SinkManager {
             .collect();
         for sink in sinks_with_cursor {
             affected_sinks.insert(sink.clone());
-            self.cursors.remove(&(sink.clone(), subject_id.to_string()));
             self.persist(
                 SinkManagerEvent::CursorRemoved {
                     sink,
@@ -1107,8 +1164,8 @@ impl SinkManager {
             .await?;
         }
 
-        // Remove last_seen.
-        if self.last_seen.remove(subject_id).is_some() {
+        // Remove last_seen. The actual deletion happens in apply().
+        if self.last_seen.contains_key(subject_id) {
             self.persist(
                 SinkManagerEvent::LastSeenRemoved {
                     subject_id: subject_id.to_string(),

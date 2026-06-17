@@ -6,6 +6,7 @@ use crate::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
     },
+    config::SinkTarget,
     db::Storable,
     evaluation::{
         compiler::{
@@ -300,13 +301,6 @@ impl Subject for Governance {
         ctx: &mut ActorContext<Self>,
     ) -> Result<Option<Ledger>, ActorError> {
         get_last_event(ctx).await
-    }
-
-    fn apply_patch(
-        &mut self,
-        json_patch: ValueWrapper,
-    ) -> Result<(), ActorError> {
-        self.apply_patch_inner(json_patch)
     }
 
     async fn manager_new_ledger_events(
@@ -3192,8 +3186,6 @@ pub enum GovernanceResponse {
         ledger_event: Box<Option<Ledger>>,
     },
     Governance(Box<GovernanceData>),
-    NewCompilers(Vec<SchemaType>),
-    Sn(u64),
     Version(u64),
     Bool(bool),
     Witnesses(HashSet<PublicKey>),
@@ -3249,11 +3241,23 @@ impl Actor for Governance {
                 .keys()
                 .map(|s| s.to_string())
                 .collect();
+            let governance_id = self.subject_metadata.subject_id.to_string();
             config_helper
                 .sinks
                 .iter()
-                .filter(|(schema_id, _)| schema_ids.contains(schema_id))
-                .flat_map(|(_, servers)| servers.clone())
+                .filter(|entry| match &entry.target {
+                    SinkTarget::Governance => false,
+                    SinkTarget::Schema {
+                        schema_id,
+                        governance_id: target_governance_id,
+                    } => {
+                        schema_ids.contains(schema_id)
+                            && target_governance_id
+                                .as_ref()
+                                .map_or(true, |id| id == &governance_id)
+                    }
+                })
+                .flat_map(|entry| entry.servers.clone())
                 .collect()
         } else {
             Vec::new()

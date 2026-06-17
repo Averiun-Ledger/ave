@@ -12,6 +12,8 @@ use crate::{
 };
 use ave_bridge::{
     Bridge,
+    SinkConfigEntry,
+    SinkTarget,
     clap::Parser,
     config::Config as BridgeConfig,
     settings::{
@@ -668,12 +670,22 @@ fn log_effective_configuration(
     }
 
     info!(target: TARGET, "[sink]");
-    info!(target: TARGET, "  schemas   : {}", config.sinks.len());
-    for (schema, servers) in &config.sinks {
+    info!(target: TARGET, "  entries   : {}", config.sinks.len());
+    for SinkConfigEntry { target, servers } in &config.sinks {
+        let target_label = match target {
+            SinkTarget::Governance => "governance".to_string(),
+            SinkTarget::Schema {
+                schema_id,
+                governance_id,
+            } => match governance_id {
+                Some(gov) => format!("schema '{}' (governance {})", schema_id, gov),
+                None => format!("schema '{}'", schema_id),
+            },
+        };
         info!(
             target: TARGET,
-            "  schema '{}': {} server(s)",
-            schema,
+            "  target {}: {} server(s)",
+            target_label,
             servers.len()
         );
         for s in servers {

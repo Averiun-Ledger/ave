@@ -4,14 +4,13 @@
 
 use ave_bridge::{
     AveExternalDBConfig, AveInternalDBConfig, HttpConfig, ProxyConfig,
-    SelfSignedCertConfig,
+    SelfSignedCertConfig, SinkConfigEntry, SinkTarget,
     auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -60,9 +59,7 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
             sinks: value
                 .sinks
                 .into_iter()
-                .map(|(k, v)| {
-                    (k, v.into_iter().map(SinkServerHttp::from).collect())
-                })
+                .map(SinkConfigEntryHttp::from)
                 .collect(),
         };
         Self {
@@ -664,11 +661,54 @@ impl From<ave_bridge::LoggingOutput> for LoggingOutputHttp {
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkConfigHttp {
-    /// Map of sink configurations by schema_id
-    pub sinks: BTreeMap<String, Vec<SinkServerHttp>>,
+    /// List of sink configuration entries. Each entry pairs a target with the
+    /// servers that deliver events for that target.
+    pub sinks: Vec<SinkConfigEntryHttp>,
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTargetHttp {
+    /// Sink for governance events, managed by the node-level sink manager.
+    Governance,
+    /// Sink for tracker events of a given schema.
+    Schema {
+        schema_id: String,
+        /// When `None`, the sink applies to every governance that contains
+        /// this schema. When `Some`, it applies only to that governance.
+        governance_id: Option<String>,
+    },
+}
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SinkConfigEntryHttp {
+    pub target: SinkTargetHttp,
+    pub servers: Vec<SinkServerHttp>,
+}
+
+impl From<SinkTarget> for SinkTargetHttp {
+    fn from(value: SinkTarget) -> Self {
+        match value {
+            SinkTarget::Governance => Self::Governance,
+            SinkTarget::Schema {
+                schema_id,
+                governance_id,
+            } => Self::Schema {
+                schema_id,
+                governance_id,
+            },
+        }
+    }
+}
+
+impl From<SinkConfigEntry> for SinkConfigEntryHttp {
+    fn from(value: SinkConfigEntry) -> Self {
+        Self {
+            target: value.target.into(),
+            servers: value.servers.into_iter().map(SinkServerHttp::from).collect(),
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkAuthConfigHttp {

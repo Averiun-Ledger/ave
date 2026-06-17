@@ -31,8 +31,9 @@ use crate::{
         HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
         NetworkConfigHttp, ProxyConfigHttp, RateLimitConfigHttp,
         RebootSyncConfigHttp, RoutingConfigHttp, RoutingNodeHttp,
-        SelfSignedCertConfigHttp, SessionConfigHttp, SinkConfigHttp,
-        SinkServerHttp, SyncConfigHttp, TrackerSyncConfigHttp,
+        SelfSignedCertConfigHttp, SessionConfigHttp, SinkConfigEntryHttp,
+        SinkConfigHttp, SinkServerHttp, SinkTargetHttp, SyncConfigHttp,
+        TrackerSyncConfigHttp,
         UpdateSyncConfigHttp,
     },
 };
@@ -355,7 +356,9 @@ impl Modify for SecurityAddon {
             LoggingHttp,
             LoggingOutputHttp,
             SinkConfigHttp,
+            SinkConfigEntryHttp,
             SinkServerHttp,
+            SinkTargetHttp,
             AveActorsStoreConfigHttp,
             AveStoreConfigHttp,
             MachineSpecHttp
