@@ -4,7 +4,7 @@
 //! WorkerIdle.  The MANAGER decides when to stop the worker (after a
 //! configurable idle timeout).  The worker NEVER self-destructs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -152,6 +152,9 @@ pub struct SinkWorker {
     active_subject_workers: HashMap<String, ActorRef<crate::sink::subject_worker::SinkSubjectWorker>>,
     /// F-5: Timer keys for pending child shutdown timers.
     pending_child_shutdowns: HashMap<String, TimerKey>,
+    /// Subjects waiting for a catch-up slot once `max_catch_up_concurrency`
+    /// allows it.
+    pending_catch_ups: VecDeque<(String, u64)>,
     /// `true` when this worker handles governance events (parent is under Node),
     /// `false` when it handles tracker events (parent is under Governance).
     is_governance: bool,
@@ -164,6 +167,7 @@ impl std::fmt::Debug for SinkWorker {
             .field("server", &self.server.server)
             .field("healthcheck_state", &self.healthcheck_state)
             .field("in_catch_up_len", &self.in_catch_up.len())
+            .field("pending_catch_ups_len", &self.pending_catch_ups.len())
             .field("blocked", &self.blocked.is_some())
             .finish()
     }
@@ -392,9 +396,14 @@ impl Handler<SinkWorker> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                if self.in_catch_up.len() >= self.server.max_catch_up_concurrency
-                    && !self.in_catch_up.contains(&subject_id)
-                {
+                if self.in_catch_up.contains(&subject_id) {
+                    return Ok(SinkWorkerResponse::Ok);
+                }
+
+                if self.in_catch_up.len() >= self.server.max_catch_up_concurrency {
+                    if !self.pending_catch_ups.iter().any(|(id, _)| id == &subject_id) {
+                        self.pending_catch_ups.push_back((subject_id, from_sn));
+                    }
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
@@ -495,6 +504,38 @@ impl Handler<SinkWorker> for SinkWorker {
             SinkWorkerMessage::CatchUpCompleted { subject_id } => {
                 self.in_catch_up.remove(&subject_id);
                 self.cancel_child_shutdown(ctx, &subject_id);
+                // A blocked sink must not start new catch-ups: any pending work
+                // will be drained once the operator unblocks the sink.
+                if self.blocked.is_none() {
+                    self.try_start_pending_catch_ups(ctx).await?;
+                }
+                match ctx.get_parent::<SinkManager>().await {
+                    Ok(parent) => {
+                        if let Err(e) = parent
+                            .tell(SinkManagerMessage::CatchUpCompleted {
+                                sink: self.sink_name.clone(),
+                                subject_id: subject_id.clone(),
+                            })
+                            .await
+                        {
+                            error!(
+                                msg_type = "ReportCatchUpCompleted",
+                                sink = %self.sink_name,
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to report catch-up completed to manager"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "GetParent",
+                            sink = %self.sink_name,
+                            error = %e,
+                            "Failed to get parent manager"
+                        );
+                    }
+                }
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::ChildShutdown { subject_id } => {
@@ -721,6 +762,60 @@ impl SinkWorker {
         Ok(child_ref)
     }
 
+    /// Start pending catch-ups while there is free concurrency capacity.
+    async fn try_start_pending_catch_ups(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if self.blocked.is_some() {
+            return Ok(());
+        }
+        while let Some((subject_id, from_sn)) = self.pending_catch_ups.pop_front() {
+            if self.in_catch_up.contains(&subject_id) {
+                continue;
+            }
+            if self.in_catch_up.len() >= self.server.max_catch_up_concurrency {
+                self.pending_catch_ups.push_front((subject_id, from_sn));
+                break;
+            }
+            self.in_catch_up.insert(subject_id.clone());
+            self.last_activity = Instant::now();
+            match self.ensure_subject_worker(&subject_id, ctx).await {
+                Ok(child_ref) => {
+                    if let Err(e) = child_ref
+                        .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
+                            from_sn,
+                            batch_size: self.server.batch_size,
+                        })
+                        .await
+                    {
+                        error!(
+                            msg_type = "CatchUpBatch",
+                            sink = %self.sink_name,
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to send catch-up batch to subject worker"
+                        );
+                        self.in_catch_up.remove(&subject_id);
+                    } else {
+                        self.schedule_child_shutdown(ctx, subject_id);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        msg_type = "EnsureSubjectWorker",
+                        sink = %self.sink_name,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to ensure subject worker for pending catch-up"
+                    );
+                    self.in_catch_up.remove(&subject_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn broadcast_to_children(
         &mut self,
         msg: crate::sink::subject_worker::SinkSubjectWorkerMessage,
@@ -762,13 +857,20 @@ impl SinkWorker {
             pending_healthcheck: None,
             active_subject_workers: HashMap::new(),
             pending_child_shutdowns: HashMap::new(),
+            pending_catch_ups: VecDeque::new(),
             is_governance,
         }
     }
 
     /// Report idle state to parent manager.  The manager decides whether to
     /// stop this worker after a configurable timeout.
+    ///
+    /// A worker with pending catch-ups is NOT idle: it still has work to do
+    /// once concurrency allows it, so it must remain alive.
     async fn report_idle(&self, ctx: &mut ActorContext<Self>) {
+        if !self.pending_catch_ups.is_empty() {
+            return;
+        }
         match ctx.get_parent::<SinkManager>().await {
             Ok(parent) => {
                 let _ = parent

@@ -76,6 +76,11 @@ pub enum SinkManagerMessage {
     RemoveSubject {
         subject_id: String,
     },
+    /// Worker reports that a subject catch-up has completed.
+    CatchUpCompleted {
+        sink: String,
+        subject_id: String,
+    },
 }
 
 impl Message for SinkManagerMessage {}
@@ -484,6 +489,26 @@ impl Actor for SinkManager {
                     }
                 }
             }
+
+            // Trigger catch-up for any subjects that are behind. This is
+            // essential when a new sink is added to the configuration: all
+            // existing subjects will have no cursor for it and must be brought
+            // up to date incrementally.
+            let lagging: Vec<(String, Vec<String>)> = self
+                .lagging
+                .iter()
+                .map(|(sink, subjects)| (sink.clone(), subjects.iter().cloned().collect()))
+                .collect();
+            for (sink_name, subjects) in lagging {
+                if let Err(e) = self.handle_request_catch_up(sink_name.clone(), subjects, ctx).await {
+                    error!(
+                        msg_type = "StartupCatchUp",
+                        sink = %sink_name,
+                        error = %e,
+                        "Failed to trigger startup catch-up"
+                    );
+                }
+            }
         }
 
         info!(
@@ -555,6 +580,10 @@ impl Handler<SinkManager> for SinkManager {
             }
             SinkManagerMessage::RemoveSubject { subject_id } => {
                 self.handle_remove_subject(&subject_id, ctx).await?;
+            }
+            SinkManagerMessage::CatchUpCompleted { sink, subject_id } => {
+                self.handle_catch_up_completed(sink, subject_id, ctx)
+                    .await?;
             }
         }
         Ok(SinkManagerResponse::Ok)
@@ -860,13 +889,25 @@ impl SinkManager {
                 continue;
             }
             // F-2: If the subject is already lagging for this sink, do NOT send
-            // NotifyNewEvent. The catch-up will deliver all pending events
-            // (including this one) in the correct order.
+            // NotifyNewEvent. Trigger catch-up for this specific subject so the
+            // worker can drain pending events (including this one) in order.
             let is_lagging = self.lagging
                 .get(sink_name)
                 .map(|s| s.contains(&subject_id))
                 .unwrap_or(false);
             if is_lagging {
+                if let Err(e) = self
+                    .handle_request_catch_up(sink_name.clone(), vec![subject_id.clone()], ctx)
+                    .await
+                {
+                    error!(
+                        msg_type = "NotifyCatchUp",
+                        sink = %sink_name,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to trigger catch-up for lagging subject"
+                    );
+                }
                 continue;
             }
 
@@ -889,6 +930,18 @@ impl SinkManager {
                     "Gap detected; subject entering lagging for ordered catch-up"
                 );
                 self.try_insert_lagging(sink_name, subject_id.clone());
+                if let Err(e) = self
+                    .handle_request_catch_up(sink_name.clone(), vec![subject_id.clone()], ctx)
+                    .await
+                {
+                    error!(
+                        msg_type = "GapCatchUp",
+                        sink = %sink_name,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to trigger catch-up after sequential gap"
+                    );
+                }
                 continue;
             }
 
@@ -931,23 +984,29 @@ impl SinkManager {
     ) -> Result<(), ActorError> {
         match result {
             SendResult::Success => {
-                // cursors is updated in apply(); lagging is transient and can be
-                // maintained here.
-                if let Some(set) = self.lagging.get_mut(&sink) {
-                    set.remove(&subject_id);
-                    if set.is_empty() {
-                        self.lagging.remove(&sink);
-                    }
-                }
                 self.persist(
                     SinkManagerEvent::CursorUpdated {
-                        sink,
-                        subject_id,
+                        sink: sink.clone(),
+                        subject_id: subject_id.clone(),
                         sn,
                     },
                     ctx,
                 )
                 .await?;
+
+                // Only remove the subject from lagging once the cursor has
+                // caught up with the last seen event. This prevents out-of-order
+                // or duplicate delivery if new events arrive while a catch-up is
+                // still in progress.
+                let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
+                if sn >= last_sn
+                    && let Some(set) = self.lagging.get_mut(&sink)
+                {
+                    set.remove(&subject_id);
+                    if set.is_empty() {
+                        self.lagging.remove(&sink);
+                    }
+                }
             }
             SendResult::SubjectNotFound => {
                 // MED-2: Subject was deleted — clean up tracking state.
@@ -975,6 +1034,51 @@ impl SinkManager {
                     ctx,
                 )
                 .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_catch_up_completed(
+        &mut self,
+        sink: String,
+        subject_id: String,
+        ctx: &mut ActorContext<SinkManager>,
+    ) -> Result<(), ActorError> {
+        let cursor_sn = self
+            .cursors
+            .get(&(sink.clone(), subject_id.clone()))
+            .copied();
+        let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
+
+        if cursor_sn.is_some_and(|cursor| cursor >= last_sn) {
+            if let Some(set) = self.lagging.get_mut(&sink) {
+                set.remove(&subject_id);
+                if set.is_empty() {
+                    self.lagging.remove(&sink);
+                }
+            }
+        } else if !self.blocked_sinks.contains_key(&sink) {
+            // last_seen moved forward while catch-up was running; keep going.
+            info!(
+                msg_type = "CatchUpContinue",
+                sink = %sink,
+                subject_id = %subject_id,
+                cursor = ?cursor_sn,
+                last_sn = %last_sn,
+                "Continuing catch-up because new events arrived while catch-up was in progress"
+            );
+            if let Err(e) = self
+                .handle_request_catch_up(sink.clone(), vec![subject_id.clone()], ctx)
+                .await
+            {
+                error!(
+                    msg_type = "CatchUpCompletedRetry",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Failed to continue catch-up after completion"
+                );
             }
         }
         Ok(())
