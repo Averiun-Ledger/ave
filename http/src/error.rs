@@ -113,6 +113,7 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         | CoreError::WitnessesNotFound(_)
         | CoreError::NoEventsFound(_)
         | CoreError::EventNotFound { .. }
+        | CoreError::SinkNotFound(_)
         | CoreError::NoPendingTransfers => StatusCode::NOT_FOUND,
 
         // ── 409 Conflict ───────────────────────────────────────

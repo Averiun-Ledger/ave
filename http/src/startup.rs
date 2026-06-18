@@ -672,15 +672,18 @@ fn log_effective_configuration(
     info!(target: TARGET, "[sink]");
     info!(target: TARGET, "  entries   : {}", config.sinks.len());
     for SinkConfigEntry { target, servers } in &config.sinks {
-        let target_label = match target {
-            SinkTarget::Governance => "governance".to_string(),
-            SinkTarget::Schema {
+        let SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = target;
+        let target_label = if schema_id == "governance" {
+            "governance".to_string()
+        } else {
+            format!(
+                "schema '{}' (governance {})",
                 schema_id,
-                governance_id,
-            } => match governance_id {
-                Some(gov) => format!("schema '{}' (governance {})", schema_id, gov),
-                None => format!("schema '{}'", schema_id),
-            },
+                governance_id.as_deref().unwrap_or("?")
+            )
         };
         info!(
             target: TARGET,

@@ -5,6 +5,7 @@ use tracing::{error, warn};
 pub mod command;
 use crate::config::Config as BridgeConfig;
 use crate::error::BridgeError;
+use ave_core::config::SinkTarget;
 
 pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
     // file configuration (json, yaml or toml)
@@ -31,6 +32,9 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
 
     // Validate network configuration
     validate_network_config(&bridge_config)?;
+
+    // Validate sinks configuration
+    validate_sinks_config(&bridge_config)?;
 
     // Mix configurations.
     Ok(bridge_config)
@@ -252,6 +256,60 @@ fn validate_https_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     Ok(())
 }
 
+/// Validate sinks configuration consistency.
+fn validate_sinks_config(config: &BridgeConfig) -> Result<(), BridgeError> {
+    use std::collections::HashSet;
+
+    const GOVERNANCE_SCHEMA: &str = "governance";
+
+    let mut seen_names = HashSet::new();
+    for (index, entry) in config.sinks.iter().enumerate() {
+        let SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = &entry.target;
+
+        if schema_id.trim().is_empty() {
+            let msg = format!("sinks[{}].target.schema_id must not be empty", index);
+            error!(error = %msg, "Invalid sinks configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+
+        if schema_id == GOVERNANCE_SCHEMA {
+            if governance_id.is_some() {
+                let msg = format!(
+                    "sinks[{}].target.governance_id must not be set for the '{}' schema",
+                    index, GOVERNANCE_SCHEMA
+                );
+                error!(error = %msg, "Invalid sinks configuration");
+                return Err(BridgeError::ConfigBuild(msg));
+            }
+        } else if governance_id
+            .as_ref()
+            .is_none_or(|id| id.trim().is_empty())
+        {
+            let msg = format!(
+                "sinks[{}].target.governance_id is required for schema '{}'",
+                index, schema_id
+            );
+            error!(error = %msg, "Invalid sinks configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+
+        for server in &entry.servers {
+            if !seen_names.insert(server.server.clone()) {
+                let msg = format!(
+                    "duplicate sink name '{}' in sinks configuration",
+                    server.server
+                );
+                error!(error = %msg, "Invalid sinks configuration");
+                return Err(BridgeError::ConfigBuild(msg));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -362,7 +420,7 @@ max_files = 5
 level = "debug"
 
 [[sinks]]
-target = { type = "schema", schema_id = "primary" }
+target = { type = "schema", schema_id = "primary", governance_id = "primary_gov" }
 
 [[sinks.servers]]
 server = "SinkOne"
@@ -526,6 +584,7 @@ sinks:
   - target:
       type: schema
       schema_id: primary
+      governance_id: primary_gov
     servers:
       - server: SinkOne
         events: [create, all]
@@ -700,7 +759,8 @@ http:
     {
       "target": {
         "type": "schema",
-        "schema_id": "primary"
+        "schema_id": "primary",
+        "governance_id": "primary_gov"
       },
       "servers": [
         {
@@ -1003,11 +1063,11 @@ http:
         assert_eq!(logging.max_files, 5);
         assert_eq!(logging.level, "debug");
 
-        use ave_core::config::SinkAuthConfig;
+        use ave_common::sink::SinkAuthConfig;
         let expected_sinks = vec![SinkConfigEntry {
             target: SinkTarget::Schema {
                 schema_id: "primary".to_owned(),
-                governance_id: None,
+                governance_id: Some("primary_gov".to_owned()),
             },
             servers: vec![
                 SinkServer {

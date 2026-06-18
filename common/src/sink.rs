@@ -1,9 +1,12 @@
 //! Sink payloads exported from ledger events.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::SchemaType;
+
 
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
@@ -337,4 +340,119 @@ mod tests {
         }"#;
         assert!(serde_json::from_str::<DataToSink>(json).is_err());
     }
+}
+
+/// Per-sink authentication configuration.
+/// When present, the sink requires authentication for delivery and health-check.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SinkAuthConfig {
+    /// OAuth2 / token endpoint URL.
+    pub auth_url: String,
+    /// Username for the token endpoint.
+    pub username: String,
+    /// API key for Api-Key header authentication (alternative to OAuth2).
+    #[serde(default)]
+    pub api_key: String,
+}
+
+/// Target of a sink configuration entry.
+///
+/// Every sink targets a schema. The special schema `"governance"` means the
+/// sink receives governance-level events and is handled by the node-level
+/// `NodeSinkManager`; in that case `governance_id` must be `None`. For any
+/// other schema `governance_id` is mandatory and identifies the governance
+/// whose trackers will feed the sink.
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTarget {
+    Schema {
+        schema_id: String,
+        /// Governance to which this sink applies. Must be `None` when
+        /// `schema_id` is `"governance"`; mandatory otherwise.
+        #[serde(default)]
+        governance_id: Option<String>,
+    },
+}
+
+/// Configuration for a single sink server endpoint.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct SinkServer {
+    pub server: String,
+    pub events: BTreeSet<SinkTypes>,
+    pub url: String,
+    /// Per-sink authentication. When `Some`, the worker will load the
+    /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
+    /// (where `{{SERVER}}` is the sink name upper-cased with non-alphanumeric
+    /// characters replaced by `_`).
+    pub auth: Option<SinkAuthConfig>,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub max_retries: usize,
+    pub batch_size: usize,
+    pub sink_worker_idle_timeout_ms: u64,
+    pub healthcheck_intervals_secs: Vec<u64>,
+    pub max_catch_up_concurrency: usize,
+    pub retry_base_delay_ms: u64,
+    /// Optional dedicated health-check URL.
+    pub health_check_url: Option<String>,
+    pub sink_subject_worker_idle_timeout_ms: u64,
+    pub token_refresh_margin_secs: u64,
+    /// Maximum number of recoveries after failure before a sink is considered
+    /// "flapping".
+    pub max_recoveries_after_failure: u32,
+    /// Delay in seconds before the first healthcheck is scheduled after startup.
+    pub startup_healthcheck_delay_secs: u64,
+}
+
+impl Default for SinkServer {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            events: BTreeSet::new(),
+            url: String::new(),
+            auth: None,
+            connect_timeout_ms: 2_000,
+            request_timeout_ms: 5_000,
+            max_retries: 2,
+            batch_size: 100,
+            sink_worker_idle_timeout_ms: 10_000,
+            healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
+            max_catch_up_concurrency: 2,
+            retry_base_delay_ms: 500,
+            health_check_url: None,
+            sink_subject_worker_idle_timeout_ms: 2_000,
+            token_refresh_margin_secs: 30,
+            max_recoveries_after_failure: 5,
+            startup_healthcheck_delay_secs: 1,
+        }
+    }
+}
+
+/// A single sink configuration entry: a target plus the list of servers that
+/// serve events for that target.
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SinkConfigEntry {
+    pub target: SinkTarget,
+    pub servers: Vec<SinkServer>,
+}
+
+pub const fn default_sink_worker_idle_timeout_ms() -> u64 {
+    10_000
+}
+
+pub fn default_sink_healthcheck_intervals_secs() -> Vec<u64> {
+    vec![30, 60, 120, 300, 600]
 }

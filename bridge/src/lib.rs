@@ -23,10 +23,14 @@ pub use ave_core::{
     config::Config as AveConfig,
     config::{
         AveExternalDBConfig, AveInternalDBConfig, LoggingConfig, LoggingOutput,
-        LoggingRotation, SinkConfigEntry, SinkServer, SinkTarget,
+        LoggingRotation,
     },
     error::Error,
-    sink::manager::SinkStatus,
+};
+pub use ave_common::{
+    bridge::request::SinksQuery,
+    bridge::response::{SinkInfo, SinkStatusInfo},
+    sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
 pub use ave_network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
@@ -311,8 +315,21 @@ impl Bridge {
 
     ///////// Sink
     ////////////////////////////
-    pub async fn get_sink_status(&self) -> Result<Vec<ave_core::sink::manager::SinkStatus>, BridgeError> {
-        self.api.get_sink_status().await.map_err(|e| BridgeError::Api(e.to_string()))
+    pub async fn get_sinks(
+        &self,
+        query: SinksQuery,
+    ) -> Result<Vec<SinkInfo>, BridgeError> {
+        self.api
+            .get_sinks(query)
+            .await
+            .map_err(|e| BridgeError::Api(e.to_string()))
+    }
+
+    pub async fn get_sinks_status(&self) -> Result<Vec<SinkStatusInfo>, BridgeError> {
+        self.api
+            .get_sinks_status()
+            .await
+            .map_err(|e| BridgeError::Api(e.to_string()))
     }
 
     pub async fn unblock_sink(&self, sink_name: String) -> Result<(), BridgeError> {
@@ -322,17 +339,9 @@ impl Bridge {
     pub async fn delete_sink_cursors(
         &self,
         sink_name: String,
-        governance_id: Option<String>,
     ) -> Result<(), BridgeError> {
-        let governance_id = match governance_id {
-            Some(id) => Some(
-                DigestIdentifier::from_str(&id)
-                    .map_err(|e| BridgeError::InvalidGovernanceId(e.to_string()))?,
-            ),
-            None => None,
-        };
         self.api
-            .delete_sink_cursors(sink_name, governance_id)
+            .delete_sink_cursors(sink_name)
             .await
             .map_err(|e| BridgeError::Api(e.to_string()))
     }

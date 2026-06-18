@@ -3245,17 +3245,14 @@ impl Actor for Governance {
             config_helper
                 .sinks
                 .iter()
-                .filter(|entry| match &entry.target {
-                    SinkTarget::Governance => false,
-                    SinkTarget::Schema {
+                .filter(|entry| {
+                    let SinkTarget::Schema {
                         schema_id,
                         governance_id: target_governance_id,
-                    } => {
-                        schema_ids.contains(schema_id)
-                            && target_governance_id
-                                .as_ref()
-                                .map_or(true, |id| id == &governance_id)
-                    }
+                    } = &entry.target;
+                    schema_id != "governance"
+                        && schema_ids.contains(schema_id)
+                        && target_governance_id.as_ref() == Some(&governance_id)
                 })
                 .flat_map(|entry| entry.servers.clone())
                 .collect()

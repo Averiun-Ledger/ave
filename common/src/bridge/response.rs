@@ -3,6 +3,7 @@
 use crate::{
     DataToSink, SchemaType,
     bridge::request::{ApprovalState, EventRequestType},
+    sink::{SinkServer, SinkTarget},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -308,6 +309,48 @@ pub struct SinkEventsPage {
     pub next_sn: Option<u64>,
     pub has_more: bool,
     pub events: Vec<DataToSink>,
+}
+
+/// Identifies where a sink instance is running.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkManagerTarget {
+    Node,
+    Governance { governance_id: String },
+}
+
+/// Full information about a sink instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkInfo {
+    pub name: String,
+    pub target: Option<SinkTarget>,
+    pub manager: SinkManagerTarget,
+    pub in_config: bool,
+    pub running: bool,
+    pub blocked: Option<String>,
+    pub lagging_subjects: usize,
+    pub server: Option<SinkServer>,
+}
+
+/// Reduced sink information for the quick `/sinks/status` view.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkStatusInfo {
+    pub name: String,
+    pub target: Option<SinkTarget>,
+    pub manager: SinkManagerTarget,
+    pub in_config: bool,
+    pub running: bool,
+    pub blocked: Option<String>,
+    pub lagging_subjects: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

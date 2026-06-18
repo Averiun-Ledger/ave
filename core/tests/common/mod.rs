@@ -79,6 +79,7 @@ pub struct CreateNodeConfig {
     pub ext_db: Option<PathBuf>,
     pub ledger_batch_size: Option<usize>,
     pub safe_mode: bool,
+    pub sinks: Vec<SinkConfigEntry>,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
@@ -94,6 +95,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         ext_db,
         ledger_batch_size,
         safe_mode,
+        sinks,
     } = config;
 
     let keys =
@@ -182,7 +184,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
     let (api, runners) = Api::build(
         keys.clone(),
         config,
-        Vec::<SinkConfigEntry>::new(),
+        sinks,
         &mut registry,
         "ave",
         graceful_token.clone(),

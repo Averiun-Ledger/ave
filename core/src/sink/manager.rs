@@ -20,7 +20,10 @@ use ave_actors::{
 };
 use ave_common::DataToSink;
 
-use crate::config::SinkServer;
+use ave_common::sink::{
+    default_sink_healthcheck_intervals_secs, default_sink_worker_idle_timeout_ms, SinkServer,
+};
+
 use crate::db::Storable;
 use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
 use crate::sink::extract_sn;
@@ -64,6 +67,7 @@ pub enum SinkManagerMessage {
         sink: String,
     },
     GetStatus,
+    GetDetailedStatus,
     /// Worker reports it has been idle for sink_worker_idle_timeout_ms.
     WorkerIdle {
         sink: String,
@@ -80,6 +84,7 @@ impl Message for SinkManagerMessage {}
 pub enum SinkManagerResponse {
     Ok,
     Status(Vec<SinkStatus>),
+    DetailedStatus(SinkManagerDetailedStatus),
 }
 
 impl Response for SinkManagerResponse {}
@@ -90,6 +95,15 @@ pub struct SinkStatus {
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
     pub active: bool,
+}
+
+/// Detailed runtime + configuration snapshot of a sink manager.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SinkManagerDetailedStatus {
+    pub is_governance: bool,
+    pub governance_id: Option<String>,
+    pub sinks: Vec<SinkStatus>,
+    pub servers: BTreeMap<String, SinkServer>,
 }
 
 // ---------------------------------------------------------------------------
@@ -519,20 +533,22 @@ impl Handler<SinkManager> for SinkManager {
                 self.handle_delete_sink_cursors(sink, ctx).await?;
             }
             SinkManagerMessage::GetStatus => {
-                let mut all_sinks: HashSet<String> = HashSet::new();
-                all_sinks.extend(self.sink_servers.keys().cloned());
-                all_sinks.extend(self.cursors.keys().map(|(sink, _)| sink.clone()));
-                all_sinks.extend(self.lagging.keys().cloned());
-                all_sinks.extend(self.blocked_sinks.keys().cloned());
-                let statuses = all_sinks.iter().map(|sink_name| {
-                    SinkStatus {
-                        sink: sink_name.clone(),
-                        blocked: self.blocked_sinks.get(sink_name).cloned(),
-                        lagging_subjects: self.lagging.get(sink_name).map(|s| s.len()).unwrap_or(0),
-                        active: self.active_sinks.contains(sink_name),
-                    }
-                }).collect();
-                return Ok(SinkManagerResponse::Status(statuses));
+                return Ok(SinkManagerResponse::Status(self.build_sink_statuses()));
+            }
+            SinkManagerMessage::GetDetailedStatus => {
+                let governance_id = if self.is_governance {
+                    None
+                } else {
+                    Some(ctx.path().parent().key().to_string())
+                };
+                return Ok(SinkManagerResponse::DetailedStatus(
+                    SinkManagerDetailedStatus {
+                        is_governance: self.is_governance,
+                        governance_id,
+                        sinks: self.build_sink_statuses(),
+                        servers: self.sink_servers.clone(),
+                    },
+                ));
             }
             SinkManagerMessage::WorkerIdle { sink } => {
                 self.schedule_worker_shutdown(sink, ctx);
@@ -646,6 +662,27 @@ impl Handler<SinkManager> for SinkManager {
 // ---------------------------------------------------------------------------
 
 impl SinkManager {
+    fn build_sink_statuses(&self) -> Vec<SinkStatus> {
+        let mut all_sinks: HashSet<String> = HashSet::new();
+        all_sinks.extend(self.sink_servers.keys().cloned());
+        all_sinks.extend(self.cursors.keys().map(|(sink, _)| sink.clone()));
+        all_sinks.extend(self.lagging.keys().cloned());
+        all_sinks.extend(self.blocked_sinks.keys().cloned());
+        all_sinks
+            .iter()
+            .map(|sink_name| SinkStatus {
+                sink: sink_name.clone(),
+                blocked: self.blocked_sinks.get(sink_name).cloned(),
+                lagging_subjects: self
+                    .lagging
+                    .get(sink_name)
+                    .map(|s| s.len())
+                    .unwrap_or(0),
+                active: self.active_sinks.contains(sink_name),
+            })
+            .collect()
+    }
+
     fn try_insert_lagging(&mut self, sink: &str, subject_id: String) {
         self.lagging
             .entry(sink.to_string())
@@ -715,7 +752,7 @@ impl SinkManager {
         let child_name = format!("worker_{}", sink_name);
         let shutdown_after_ms = self.sink_servers.get(&sink_name)
             .map(|s| s.sink_worker_idle_timeout_ms)
-            .unwrap_or_else(crate::config::default_sink_worker_idle_timeout_ms);
+            .unwrap_or_else(default_sink_worker_idle_timeout_ms);
         let system = ctx.system().clone();
         let token = CancellationToken::new();
         let token_for_task = token.clone();
@@ -755,7 +792,7 @@ impl SinkManager {
         }
         let intervals = self.sink_servers.get(&sink_name)
             .map(|s| s.healthcheck_intervals_secs.clone())
-            .unwrap_or_else(crate::config::default_sink_healthcheck_intervals_secs);
+            .unwrap_or_else(default_sink_healthcheck_intervals_secs);
         let system = ctx.system().clone();
         let token = CancellationToken::new();
         let token_for_task = token.clone();

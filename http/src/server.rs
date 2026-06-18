@@ -13,20 +13,19 @@ use crate::{
 
 use ave_bridge::ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, DeleteSinkQuery,
-        EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
-        UpdateSubjectQuery,
+        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
+        FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery, UpdateSubjectQuery,
     },
     response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::ApprovalStateRes,
+        bridge::request::{ApprovalStateRes, SinksQuery},
         response::{
             GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
             RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
-            SubjectDB, SubjsData, TransferSubject,
+            SinkInfo, SinkStatusInfo, SubjectDB, SubjsData, TransferSubject,
         },
     },
     http::ProxyConfig,
@@ -453,16 +452,43 @@ pub async fn get_pending_transfers(
 ///////// Sink
 ////////////////////////////
 
+/// List all sinks
+///
+/// Returns a complete view of every sink instance known to the node,
+/// including configuration, runtime state and whether it is currently running.
+/// Supports filtering by name, target type, schema, governance and status.
+#[utoipa::path(
+    get,
+    path = "/sinks",
+    operation_id = "getSinks",
+    tag = "Sink",
+    params(SinksQuery),
+    responses(
+        (status = 200, description = "List of sink information", body = [SinkInfo]),
+        (status = 400, description = "Invalid query parameter", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sinks(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Query(query): Query<SinksQuery>,
+) -> Result<Json<Vec<SinkInfo>>, HttpError> {
+    Ok(Json(bridge.get_sinks(query).await?))
+}
+
 /// Get sinks status
 ///
-/// Returns the status of all sinks managed by the NodeSinkManager.
+/// Quick view of all configured sinks, showing only the context needed to
+/// identify blocked sinks and their current state.
 #[utoipa::path(
     get,
     path = "/sinks/status",
     operation_id = "getSinksStatus",
     tag = "Sink",
     responses(
-        (status = 200, description = "List of sink statuses"),
+        (status = 200, description = "List of configured sink statuses", body = [SinkStatusInfo]),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -470,13 +496,14 @@ pub async fn get_pending_transfers(
 pub async fn get_sinks_status(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-) -> Result<Json<Vec<ave_bridge::SinkStatus>>, HttpError> {
-    Ok(Json(bridge.get_sink_status().await?))
+) -> Result<Json<Vec<SinkStatusInfo>>, HttpError> {
+    Ok(Json(bridge.get_sinks_status().await?))
 }
 
 /// Unblock a sink
 ///
-/// Unblocks a sink that was blocked due to a permanent error.
+/// Unblocks a sink that was blocked due to a permanent error. Not available
+/// while the node is running in safe mode.
 #[utoipa::path(
     post,
     path = "/sinks/{sink_name}/unblock",
@@ -487,6 +514,7 @@ pub async fn get_sinks_status(
     ),
     responses(
         (status = 200, description = "Sink unblocked successfully"),
+        (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -503,19 +531,19 @@ pub async fn unblock_sink(
 /// Delete a sink's persisted cursors
 ///
 /// Removes all cursors, lagging tracking and blocked state for the given sink.
-/// Only available while the node is running in safe mode.
+/// The sink manager is located through the sink registry, so only the sink
+/// name is required. Only available while the node is running in safe mode.
 #[utoipa::path(
     delete,
     path = "/sinks/{sink_name}",
     operation_id = "deleteSinkCursors",
     tag = "Sink",
     params(
-        ("sink_name" = String, Path, description = "Sink name"),
-        DeleteSinkQuery
+        ("sink_name" = String, Path, description = "Sink name")
     ),
     responses(
         (status = 200, description = "Sink cursors deleted successfully"),
-        (status = 400, description = "Invalid governance ID", body = ErrorResponse),
+        (status = 404, description = "Sink not found in registry", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -524,11 +552,8 @@ pub async fn delete_sink_cursors(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(sink_name): Path<String>,
-    Query(parameters): Query<DeleteSinkQuery>,
 ) -> Result<StatusCode, HttpError> {
-    bridge
-        .delete_sink_cursors(sink_name, parameters.governance_id)
-        .await?;
+    bridge.delete_sink_cursors(sink_name).await?;
     Ok(StatusCode::OK)
 }
 
@@ -1327,6 +1352,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/request", get_all_request_state, require NodeRequest Get);
         $callback!($($args)*, get, "/request/{request_id}", get_request_state, require NodeRequest Get);
         $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
+        $callback!($($args)*, get, "/sinks", get_sinks, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
         $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);

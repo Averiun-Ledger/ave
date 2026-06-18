@@ -28,7 +28,7 @@ use crate::{
     manual_distribution::ManualDistribution,
     model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
-    sink::{SinkManager, SinkManagerInitParams},
+    sink::{SinkManager, SinkManagerInitParams, SinkRegistry, SinkRegistryMessage},
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
@@ -44,7 +44,7 @@ use ave_common::{
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
     Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
@@ -862,21 +862,43 @@ impl Actor for Node {
             return Err(e);
         }
 
-        // Create NodeSinkManager for governance events.
-        let gov_sinks = if let Some(config_helper) = ctx
+        // Create SinkRegistry and populate it from current config.
+        let Some(config_helper) = ctx
             .system()
             .get_helper::<ConfigHelper>("config")
             .await
-        {
-            config_helper
-                .sinks
-                .iter()
-                .filter(|entry| matches!(entry.target, SinkTarget::Governance))
-                .flat_map(|entry| entry.servers.clone())
-                .collect()
-        } else {
-            Vec::new()
+        else {
+            error!("Config helper not found");
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not found".to_string(),
+            });
         };
+        let registry_actor = match ctx
+            .create_child("sink_registry", SinkRegistry::initial(()))
+            .await
+        {
+            Ok(actor) => actor,
+            Err(e) => {
+                error!(error = %e, "Failed to create SinkRegistry");
+                return Err(e);
+            }
+        };
+        if let Err(e) = populate_sink_registry(&registry_actor, &config_helper.sinks).await {
+            error!(error = %e, "Failed to populate SinkRegistry");
+            return Err(e);
+        }
+
+        // Create NodeSinkManager for governance events.
+        let gov_sinks = config_helper
+            .sinks
+            .iter()
+            .filter(|entry| matches!(
+                entry.target,
+                SinkTarget::Schema { schema_id: ref id, governance_id: None } if id == "governance"
+            ))
+            .flat_map(|entry| entry.servers.clone())
+            .collect();
         if let Err(e) = ctx
             .create_child(
                 "node_sink_manager",
@@ -891,15 +913,7 @@ impl Actor for Node {
             return Err(e);
         }
 
-        let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        else {
-            error!("Config helper not found");
-            return Err(ActorError::Helper {
-                name: "config".to_string(),
-                reason: "Not found".to_string(),
-            });
-        };
+        let config = config_helper;
         let safe_mode = config.safe_mode;
         let Some(network): Option<Arc<NetworkSender>> =
             ctx.system().get_helper("network").await
@@ -1608,5 +1622,41 @@ fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+async fn populate_sink_registry(
+    registry: &ActorRef<SinkRegistry>,
+    sinks: &[crate::config::SinkConfigEntry],
+) -> Result<(), ActorError> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    for entry in sinks {
+        let crate::config::SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = &entry.target;
+        for server in &entry.servers {
+            if !seen.insert(server.server.clone()) {
+                let msg = format!(
+                    "duplicate sink name '{}' in configuration",
+                    server.server
+                );
+                error!(%msg);
+                return Err(ActorError::Functional {
+                    description: msg,
+                });
+            }
+            registry
+                .tell(SinkRegistryMessage::RegisterSink {
+                    name: server.server.clone(),
+                    schema_id: schema_id.clone(),
+                    governance_id: governance_id.clone(),
+                    from_config: true,
+                })
+                .await?;
+        }
+    }
     Ok(())
 }

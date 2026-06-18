@@ -87,19 +87,19 @@ pub struct SinkEventsQuery {
     pub limit: Option<u64>,
 }
 
-/// Query parameters for deleting a sink's persisted cursors.
-///
-/// Only available while the node is running in safe mode.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Query parameters for listing sinks.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
-pub struct DeleteSinkQuery {
-    /// When provided, targets the `SinkManager` under the given governance
-    /// (tracker events). Otherwise targets the node-level `NodeSinkManager`
-    /// (governance events).
+pub struct SinksQuery {
+    pub name: Option<String>,
+    pub target: Option<String>,
+    pub schema_id: Option<String>,
     pub governance_id: Option<String>,
+    pub in_config: Option<bool>,
+    pub running: Option<bool>,
 }
 
 /// Pagination filters for abort queries.

@@ -144,6 +144,10 @@ pub enum Error {
     #[error("Database error: {0}")]
     DatabaseError(String),
 
+    /// Sink not found in the registry.
+    #[error("Sink '{0}' not found")]
+    SinkNotFound(String),
+
     // ========================================
     // Validation Errors
     // ========================================

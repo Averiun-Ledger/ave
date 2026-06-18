@@ -308,11 +308,11 @@ impl SinkHttpClient {
                         last_token_err = Some(e);
                     }
                     Err(e) => {
-                        return Err(SinkError::from(e));
+                        return Err(e);
                     }
                 }
             }
-            return Err(last_token_err.map(SinkError::from).unwrap_or(SinkError::Unauthorized));
+            return Err(last_token_err.unwrap_or(SinkError::Unauthorized));
         }
 
         Err(SinkError::Unauthorized)

@@ -22,7 +22,7 @@ pub mod tracker;
 pub mod update;
 pub mod validation;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -44,13 +44,19 @@ use ave_network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
     NetworkWorkerRuntime,
 };
-use config::{Config as AveBaseConfig, SinkConfigEntry};
+use config::Config as AveBaseConfig;
+use ave_common::{
+    bridge::request::SinksQuery,
+    bridge::response::{SinkInfo, SinkStatusInfo, SinkManagerTarget},
+    sink::{SinkConfigEntry, SinkServer, SinkTarget},
+};
 use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
+use sink::{SinkRegistry, SinkRegistryMessage, SinkRegistryResponse};
 use prometheus_client::registry::Registry;
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
@@ -71,7 +77,7 @@ use crate::node::InitParamsNode;
 use crate::node::subject_manager::{
     SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
 };
-use crate::sink::{SinkManager, SinkManagerMessage};
+use crate::sink::{SinkManager, SinkManagerDetailedStatus, SinkManagerMessage, SinkManagerResponse};
 use crate::request::tracking::{
     RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
 };
@@ -104,7 +110,6 @@ pub struct Api {
     monitor: ActorRef<Monitor>,
     manual_dis: Option<ActorRef<ManualDistribution>>,
     tracking: Option<ActorRef<RequestTracking>>,
-    node_sink_manager: Option<ActorRef<SinkManager>>,
     system: SystemRef,
 }
 
@@ -446,11 +451,6 @@ impl Api {
             )
         };
 
-        let node_sink_manager: Option<ActorRef<SinkManager>> = system
-            .get_actor(&ActorPath::from("/user/node/node_sink_manager"))
-            .await
-            .ok();
-
         let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db").await
         else {
             error!("External database helper not found");
@@ -482,7 +482,6 @@ impl Api {
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
                 tracking: tracking_actor,
-                node_sink_manager,
                 system: system.clone(),
             },
             tasks,
@@ -1201,65 +1200,305 @@ impl Api {
         Ok("Manual distribution in progress".to_owned())
     }
 
-    pub async fn get_sink_status(&self) -> Result<Vec<crate::sink::manager::SinkStatus>, Error> {
-        let manager = self.node_sink_manager.as_ref().ok_or_else(|| Error::Internal("NodeSinkManager not available".to_string()))?;
-        let response = manager.ask(crate::sink::manager::SinkManagerMessage::GetStatus).await
-            .map_err(|e| actor_communication_error("node_sink_manager", e))?;
+    pub async fn get_sinks(&self, query: SinksQuery) -> Result<Vec<SinkInfo>, Error> {
+        let registrations = self.get_sink_registry().await?;
+
+        // Group registered sinks by their manager target so we can query only
+        // the relevant sink managers.
+        let mut by_manager: HashMap<
+            SinkManagerTarget,
+            Vec<crate::sink::SinkRegistration>,
+        > = HashMap::new();
+        for reg in &registrations {
+            let target = manager_target_from_registration(reg)?;
+            by_manager
+                .entry(target)
+                .or_default()
+                .push(reg.clone());
+        }
+
+        let mut set = tokio::task::JoinSet::new();
+        for target in by_manager.keys() {
+            let target = target.clone();
+            let path = manager_path(&target);
+            let system = self.system.clone();
+            set.spawn(async move {
+                let Ok(actor) = system.get_actor::<SinkManager>(&path).await else {
+                    return Ok(None);
+                };
+                match actor.ask(SinkManagerMessage::GetDetailedStatus).await {
+                    Ok(SinkManagerResponse::DetailedStatus(status)) => Ok(Some(status)),
+                    Ok(other) => {
+                        warn!(
+                            manager = ?target,
+                            response = ?other,
+                            "Unexpected response from sink manager"
+                        );
+                        Err(Error::UnexpectedResponse {
+                            actor: "sink_manager".to_string(),
+                            expected: "DetailedStatus".to_string(),
+                            received: format!("{other:?}"),
+                        })
+                    }
+                    Err(e) => {
+                        warn!(manager = ?target, error = %e, "Failed to query sink manager status");
+                        Err(actor_communication_error("sink_manager", e))
+                    }
+                }
+            });
+        }
+
+        let mut statuses_by_manager: HashMap<SinkManagerTarget, SinkManagerDetailedStatus> =
+            HashMap::new();
+        while let Some(res) = set.join_next().await {
+            let response = res.map_err(|e| {
+                warn!(error = %e, "Sink manager status task panicked");
+                Error::Internal(format!("sink manager status task failed: {e}"))
+            })?;
+            let Some(status) = response? else {
+                continue;
+            };
+            let target = manager_target_from_status(&status);
+            statuses_by_manager.insert(target, status);
+        }
+
+        let config_helper = self
+            .system
+            .get_helper::<system::ConfigHelper>("config")
+            .await
+            .ok_or_else(|| Error::Internal("ConfigHelper not available".to_string()))?;
+        let sinks_config = &config_helper.sinks;
+
+        let mut infos = Vec::new();
+        for reg in registrations {
+            let manager = manager_target_from_registration(&reg)?;
+            let status = statuses_by_manager.get(&manager);
+            let sink_status = status.and_then(|s| {
+                s.sinks.iter().find(|st| st.sink == reg.name)
+            });
+            let (target, server) =
+                find_sink_config(sinks_config, &manager, &reg.name);
+            let in_config = reg.from_config;
+            let running = in_config && sink_status.is_some_and(|st| st.blocked.is_none());
+            infos.push(SinkInfo {
+                name: reg.name,
+                target,
+                manager,
+                in_config,
+                running,
+                blocked: sink_status.and_then(|st| st.blocked.clone()),
+                lagging_subjects: sink_status
+                    .map(|st| st.lagging_subjects)
+                    .unwrap_or_default(),
+                server,
+            });
+        }
+
+        // Include residual sinks reported by a manager but missing from the
+        // registry. This can happen when the registry state was lost while the
+        // sink manager still holds persisted cursors.
+        let registered_keys: std::collections::HashSet<_> = infos
+            .iter()
+            .map(|info| (info.manager.clone(), info.name.clone()))
+            .collect();
+        for (manager, status) in &statuses_by_manager {
+            for sink_status in &status.sinks {
+                if !registered_keys.contains(&(manager.clone(), sink_status.sink.clone())) {
+                    infos.push(SinkInfo {
+                        name: sink_status.sink.clone(),
+                        target: None,
+                        manager: manager.clone(),
+                        in_config: false,
+                        running: false,
+                        blocked: sink_status.blocked.clone(),
+                        lagging_subjects: sink_status.lagging_subjects,
+                        server: None,
+                    });
+                }
+            }
+        }
+
+        infos.retain(|info| sink_info_matches_query(info, &query));
+        infos.sort_by(|a, b| {
+            manager_sort_key(&a.manager)
+                .cmp(&manager_sort_key(&b.manager))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        Ok(infos)
+    }
+
+    pub async fn get_sinks_status(&self) -> Result<Vec<SinkStatusInfo>, Error> {
+        let query = SinksQuery {
+            in_config: Some(true),
+            ..SinksQuery::default()
+        };
+        self.get_sinks(query)
+            .await
+            .map(|infos| {
+                infos
+                    .into_iter()
+                    .map(|info| SinkStatusInfo {
+                        name: info.name,
+                        target: info.target,
+                        manager: info.manager,
+                        in_config: info.in_config,
+                        running: info.running,
+                        blocked: info.blocked,
+                        lagging_subjects: info.lagging_subjects,
+                    })
+                    .collect()
+            })
+    }
+
+    async fn get_sink_registry(
+        &self,
+    ) -> Result<Vec<crate::sink::SinkRegistration>, Error> {
+        let path = ActorPath::from("/user/node/sink_registry");
+        let registry = self
+            .system
+            .get_actor::<SinkRegistry>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get sink registry actor");
+                actor_communication_error("sink_registry", e)
+            })?;
+        let response = registry
+            .ask(SinkRegistryMessage::GetSinkRegistry)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to query sink registry");
+                actor_communication_error("sink_registry", e)
+            })?;
         match response {
-            crate::sink::manager::SinkManagerResponse::Status(statuses) => Ok(statuses),
-            _ => Err(Error::UnexpectedResponse {
-                actor: "node_sink_manager".to_string(),
-                expected: "Status".to_string(),
-                received: "other".to_string(),
-            }),
+            SinkRegistryResponse::Registry(regs) => Ok(regs),
+            other => {
+                warn!(response = ?other, "Unexpected response from sink registry");
+                Err(Error::UnexpectedResponse {
+                    actor: "sink_registry".to_string(),
+                    expected: "Registry".to_string(),
+                    received: format!("{other:?}"),
+                })
+            }
         }
     }
 
+    async fn get_sink_registration(
+        &self,
+        name: &str,
+    ) -> Result<crate::sink::SinkRegistration, Error> {
+        let path = ActorPath::from("/user/node/sink_registry");
+        let registry = self
+            .system
+            .get_actor::<SinkRegistry>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get sink registry actor");
+                actor_communication_error("sink_registry", e)
+            })?;
+        let response = registry
+            .ask(SinkRegistryMessage::GetSink {
+                name: name.to_owned(),
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %name, "Failed to query sink registry");
+                actor_communication_error("sink_registry", e)
+            })?;
+        match response {
+            SinkRegistryResponse::Sink(Some(reg)) => Ok(reg),
+            SinkRegistryResponse::Sink(None) => Err(Error::SinkNotFound(name.to_string())),
+            other => {
+                warn!(response = ?other, sink = %name, "Unexpected response from sink registry");
+                Err(Error::UnexpectedResponse {
+                    actor: "sink_registry".to_string(),
+                    expected: "Sink".to_string(),
+                    received: format!("{other:?}"),
+                })
+            }
+        }
+    }
+
+    async fn unregister_sink(&self, name: &str) -> Result<(), Error> {
+        let path = ActorPath::from("/user/node/sink_registry");
+        let registry = self
+            .system
+            .get_actor::<SinkRegistry>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get sink registry actor");
+                actor_communication_error("sink_registry", e)
+            })?;
+        registry
+            .tell(SinkRegistryMessage::UnregisterSink {
+                name: name.to_owned(),
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %name, "Failed to unregister sink");
+                actor_communication_error("sink_registry", e)
+            })?;
+        Ok(())
+    }
+
     pub async fn unblock_sink(&self, sink_name: String) -> Result<(), Error> {
-        let manager = self.node_sink_manager.as_ref().ok_or_else(|| Error::Internal("NodeSinkManager not available".to_string()))?;
-        manager.tell(crate::sink::manager::SinkManagerMessage::UnblockSink { sink: sink_name }).await
-            .map_err(|e| actor_communication_error("node_sink_manager", e))?;
+        self.ensure_mutations_allowed()?;
+        let registration = self.get_sink_registration(&sink_name).await?;
+        let target = manager_target_from_registration(&registration)?;
+        let path = manager_path(&target);
+        let manager = self
+            .system
+            .get_actor::<SinkManager>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                actor_communication_error("sink_manager", e)
+            })?;
+        manager
+            .tell(SinkManagerMessage::UnblockSink {
+                sink: sink_name.clone(),
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %sink_name, "Failed to unblock sink");
+                actor_communication_error("sink_manager", e)
+            })?;
         Ok(())
     }
 
     /// Delete all persisted cursors and transient state for a sink.
     ///
     /// This operation is only available while the node is running in safe mode.
-    /// If `governance_id` is `None`, the node-level `NodeSinkManager` (which
-    /// handles governance events) is targeted. If a governance identifier is
-    /// provided, the corresponding `SinkManager` under that governance (which
-    /// handles tracker events) is targeted instead.
-    pub async fn delete_sink_cursors(
-        &self,
-        sink_name: String,
-        governance_id: Option<DigestIdentifier>,
-    ) -> Result<(), Error> {
+    /// The sink manager is located through the sink registry, so callers only
+    /// need to provide the unique sink name.
+    pub async fn delete_sink_cursors(&self, sink_name: String) -> Result<(), Error> {
         self.ensure_safe_mode_required("sink cursor deletion")?;
 
-        let manager = match governance_id {
-            Some(gov_id) => {
-                let path = ActorPath::from(format!(
-                    "/user/node/subject_manager/{}/sink_manager",
-                    gov_id
-                ));
-                self.system
-                    .get_actor::<SinkManager>(&path)
-                    .await
-                    .map_err(|e| actor_communication_error("sink_manager", e))?
-            }
-            None => self
-                .node_sink_manager
-                .as_ref()
-                .ok_or_else(|| {
-                    Error::Internal("NodeSinkManager not available".to_string())
-                })?
-                .clone(),
-        };
+        let registration = self.get_sink_registration(&sink_name).await?;
+        let target = manager_target_from_registration(&registration)?;
+        let path = manager_path(&target);
+        let manager = self
+            .system
+            .get_actor::<SinkManager>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                actor_communication_error("sink_manager", e)
+            })?;
 
         manager
-            .tell(SinkManagerMessage::DeleteSinkCursors { sink: sink_name })
+            .tell(SinkManagerMessage::DeleteSinkCursors {
+                sink: sink_name.clone(),
+            })
             .await
-            .map_err(|e| actor_communication_error("sink_manager", e))?;
+            .map_err(|e| {
+                warn!(error = %e, sink = %sink_name, "Failed to delete sink cursors");
+                actor_communication_error("sink_manager", e)
+            })?;
+
+        if !registration.from_config {
+            self.unregister_sink(&sink_name).await?;
+        }
 
         Ok(())
     }
@@ -1580,6 +1819,121 @@ impl Api {
     }
 }
 
+fn manager_target_from_status(status: &SinkManagerDetailedStatus) -> SinkManagerTarget {
+    if status.is_governance {
+        SinkManagerTarget::Node
+    } else {
+        SinkManagerTarget::Governance {
+            governance_id: status.governance_id.clone().unwrap_or_default(),
+        }
+    }
+}
+
+fn manager_target_from_registration(
+    reg: &crate::sink::SinkRegistration,
+) -> Result<SinkManagerTarget, Error> {
+    if reg.schema_id == "governance" {
+        Ok(SinkManagerTarget::Node)
+    } else if let Some(gov_id) = &reg.governance_id {
+        Ok(SinkManagerTarget::Governance {
+            governance_id: gov_id.clone(),
+        })
+    } else {
+        Err(Error::Internal(format!(
+            "sink '{}' has schema '{}' but no governance_id",
+            reg.name, reg.schema_id
+        )))
+    }
+}
+
+fn manager_path(target: &SinkManagerTarget) -> ActorPath {
+    match target {
+        SinkManagerTarget::Node => ActorPath::from("/user/node/node_sink_manager"),
+        SinkManagerTarget::Governance { governance_id } => {
+            ActorPath::from(format!(
+                "/user/node/subject_manager/{}/sink_manager",
+                governance_id
+            ))
+        }
+    }
+}
+
+fn find_sink_config(
+    sinks: &[SinkConfigEntry],
+    manager: &SinkManagerTarget,
+    sink_name: &str,
+) -> (Option<SinkTarget>, Option<SinkServer>) {
+    for entry in sinks {
+        let SinkTarget::Schema {
+            schema_id,
+            governance_id: target_gov_id,
+        } = &entry.target;
+        let applies = match (schema_id.as_str(), target_gov_id, manager) {
+            ("governance", None, SinkManagerTarget::Node) => true,
+            (_, Some(target_gov_id), SinkManagerTarget::Governance { governance_id }) => {
+                target_gov_id == governance_id
+            }
+            _ => false,
+        };
+        if applies
+            && let Some(server) = entry.servers.iter().find(|s| s.server == sink_name)
+        {
+            return (Some(entry.target.clone()), Some(server.clone()));
+        }
+    }
+    (None, None)
+}
+
+fn sink_info_matches_query(info: &SinkInfo, query: &SinksQuery) -> bool {
+    if let Some(name) = &query.name && info.name != *name {
+        return false;
+    }
+    if let Some(target) = &query.target {
+        let matches = match info.target.as_ref() {
+            Some(SinkTarget::Schema { schema_id, .. }) => {
+                (target == "governance" && schema_id == "governance")
+                    || (target == "schema" && schema_id != "governance")
+            }
+            None => false,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(schema_id) = &query.schema_id {
+        let matches = matches!(
+            info.target.as_ref(),
+            Some(SinkTarget::Schema { schema_id: id, .. }) if id == schema_id
+        );
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(governance_id) = &query.governance_id {
+        let matches = matches!(
+            info.target.as_ref(),
+            Some(SinkTarget::Schema { governance_id: id, .. }) if id.as_ref() == Some(governance_id)
+        );
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(in_config) = query.in_config && info.in_config != in_config {
+        return false;
+    }
+    if let Some(running) = query.running && info.running != running {
+        return false;
+    }
+    true
+}
+
+fn manager_sort_key(manager: &SinkManagerTarget) -> String {
+    match manager {
+        SinkManagerTarget::Node => "node".to_string(),
+        SinkManagerTarget::Governance { governance_id } => format!("governance:{governance_id}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1615,6 +1969,146 @@ mod tests {
         assert!(matches!(
             error,
             Error::MissingResource { name, .. } if name == "/user/request"
+        ));
+    }
+
+    #[test]
+    fn finds_sink_config_for_node_manager() {
+        let server = SinkServer {
+            server: "gov_sink".to_string(),
+            url: "http://example.com".to_string(),
+            ..Default::default()
+        };
+        let entry = SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "governance".to_string(),
+                governance_id: None,
+            },
+            servers: vec![server.clone()],
+        };
+        let (target, found_server) =
+            find_sink_config(&[entry], &SinkManagerTarget::Node, "gov_sink");
+        assert!(
+            matches!(target, Some(SinkTarget::Schema { schema_id, .. }) if schema_id == "governance")
+        );
+        assert_eq!(found_server.unwrap().server, "gov_sink");
+    }
+
+    #[test]
+    fn finds_sink_config_for_governance_manager() {
+        let server = SinkServer {
+            server: "schema_sink".to_string(),
+            url: "http://example.com".to_string(),
+            ..Default::default()
+        };
+        let entry = SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "schema1".to_string(),
+                governance_id: Some("gov1".to_string()),
+            },
+            servers: vec![server.clone()],
+        };
+        let manager = SinkManagerTarget::Governance {
+            governance_id: "gov1".to_string(),
+        };
+        let (target, found_server) =
+            find_sink_config(&[entry], &manager, "schema_sink");
+        assert!(matches!(target, Some(SinkTarget::Schema { .. })));
+        assert_eq!(found_server.unwrap().server, "schema_sink");
+    }
+
+    #[test]
+    fn sink_info_query_filters_by_name() {
+        let info = SinkInfo {
+            name: "foo".to_string(),
+            target: Some(SinkTarget::Schema {
+                schema_id: "governance".to_string(),
+                governance_id: None,
+            }),
+            manager: SinkManagerTarget::Node,
+            in_config: true,
+            running: true,
+            blocked: None,
+            lagging_subjects: 0,
+            server: None,
+        };
+        assert!(sink_info_matches_query(
+            &info,
+            &SinksQuery {
+                name: Some("foo".to_string()),
+                ..Default::default()
+            }
+        ));
+        assert!(!sink_info_matches_query(
+            &info,
+            &SinksQuery {
+                name: Some("bar".to_string()),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn sink_info_query_filters_by_running_and_in_config() {
+        let info = SinkInfo {
+            name: "foo".to_string(),
+            target: Some(SinkTarget::Schema {
+                schema_id: "governance".to_string(),
+                governance_id: None,
+            }),
+            manager: SinkManagerTarget::Node,
+            in_config: true,
+            running: false,
+            blocked: Some("boom".to_string()),
+            lagging_subjects: 0,
+            server: None,
+        };
+        assert!(sink_info_matches_query(
+            &info,
+            &SinksQuery {
+                in_config: Some(true),
+                ..Default::default()
+            }
+        ));
+        assert!(!sink_info_matches_query(
+            &info,
+            &SinksQuery {
+                running: Some(true),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn sink_info_query_filters_by_governance_id() {
+        let info = SinkInfo {
+            name: "schema_sink".to_string(),
+            target: Some(SinkTarget::Schema {
+                schema_id: "schema1".to_string(),
+                governance_id: Some("gov1".to_string()),
+            }),
+            manager: SinkManagerTarget::Governance {
+                governance_id: "gov1".to_string(),
+            },
+            in_config: true,
+            running: true,
+            blocked: None,
+            lagging_subjects: 0,
+            server: None,
+        };
+        assert!(sink_info_matches_query(
+            &info,
+            &SinksQuery {
+                governance_id: Some("gov1".to_string()),
+                ..Default::default()
+            }
+        ));
+        assert!(!sink_info_matches_query(
+            &info,
+            &SinksQuery {
+                governance_id: Some("gov2".to_string()),
+                ..Default::default()
+            }
         ));
     }
 }

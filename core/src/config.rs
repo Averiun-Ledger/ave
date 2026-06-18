@@ -1,14 +1,14 @@
 //! # Configuration module
 
 use std::{
-    collections::BTreeSet,
     fmt::{self, Display},
     path::PathBuf,
     time::Instant,
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-use ave_common::SinkTypes;
+
+pub use ave_common::sink::{SinkConfigEntry, SinkServer, SinkTarget};
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -635,141 +635,4 @@ impl LoggingConfig {
         self.output.api || self.output.file || self.output.stdout
     }
 }
-
-/// Per-sink authentication configuration.
-/// When present, the sink requires authentication for delivery and health-check.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct SinkAuthConfig {
-    /// OAuth2 / token endpoint URL.
-    pub auth_url: String,
-    /// Username for the token endpoint.
-    pub username: String,
-    /// API key for Api-Key header authentication (alternative to OAuth2).
-    #[serde(default)]
-    pub api_key: String,
-}
-
-/// Target of a sink configuration entry.
-#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord, Hash)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SinkTarget {
-    /// Sink for governance events, managed by the node-level `NodeSinkManager`.
-    Governance,
-    /// Sink for tracker events of a given schema.
-    Schema {
-        schema_id: String,
-        /// When `None`, the sink applies to every governance that contains
-        /// this schema. When `Some`, it applies only to that governance.
-        #[serde(default)]
-        governance_id: Option<String>,
-    },
-}
-
-/// A single sink configuration entry: a target plus the list of servers that
-/// serve events for that target.
-#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
-pub struct SinkConfigEntry {
-    pub target: SinkTarget,
-    pub servers: Vec<SinkServer>,
-}
-
-#[derive(Clone, Debug, Deserialize, Default, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct SinkServer {
-    pub server: String,
-    pub events: BTreeSet<SinkTypes>,
-    pub url: String,
-    /// Per-sink authentication. When `Some`, the worker will load the
-    /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
-    /// (where `{{SERVER}}` is the sink name upper-cased with non-alphanumeric
-    /// characters replaced by `_`).
-    #[serde(default)]
-    pub auth: Option<SinkAuthConfig>,
-    #[serde(default = "default_sink_connect_timeout_ms")]
-    pub connect_timeout_ms: u64,
-    #[serde(default = "default_sink_request_timeout_ms")]
-    pub request_timeout_ms: u64,
-    #[serde(default = "default_sink_max_retries")]
-    pub max_retries: usize,
-    #[serde(default = "default_sink_batch_size")]
-    pub batch_size: usize,
-    #[serde(default = "default_sink_worker_idle_timeout_ms")]
-    pub sink_worker_idle_timeout_ms: u64,
-    #[serde(default = "default_sink_healthcheck_intervals_secs")]
-    pub healthcheck_intervals_secs: Vec<u64>,
-    #[serde(default = "default_sink_max_catch_up_concurrency")]
-    pub max_catch_up_concurrency: usize,
-    #[serde(default = "default_sink_retry_base_delay_ms")]
-    pub retry_base_delay_ms: u64,
-    /// Optional dedicated health-check URL. If provided, the worker performs
-    /// health-check GETs against this endpoint instead of the delivery URL.
-    #[serde(default)]
-    pub health_check_url: Option<String>,
-    #[serde(default = "default_sink_subject_worker_idle_timeout_ms")]
-    pub sink_subject_worker_idle_timeout_ms: u64,
-    #[serde(default = "default_token_refresh_margin_secs")]
-    pub token_refresh_margin_secs: u64,
-
-    /// Maximum number of recoveries after failure before a sink is considered
-    /// "flapping" (healthcheck OK but delivery keeps failing).  After this
-    /// threshold the worker transitions to Healthy without catch-up.
-    #[serde(default = "default_max_recoveries_after_failure")]
-    pub max_recoveries_after_failure: u32,
-    /// Delay in seconds before the first healthcheck is scheduled after
-    /// the worker starts up.
-    #[serde(default = "default_startup_healthcheck_delay_secs")]
-    pub startup_healthcheck_delay_secs: u64,
-
-}
-
-
-
-const fn default_sink_connect_timeout_ms() -> u64 {
-    2_000
-}
-
-const fn default_sink_request_timeout_ms() -> u64 {
-    5_000
-}
-
-const fn default_sink_max_retries() -> usize {
-    2
-}
-
-const fn default_sink_batch_size() -> usize {
-    100
-}
-
-pub const fn default_sink_worker_idle_timeout_ms() -> u64 {
-    10_000
-}
-
-pub fn default_sink_healthcheck_intervals_secs() -> Vec<u64> {
-    vec![30, 60, 120, 300, 600]
-}
-
-const fn default_sink_max_catch_up_concurrency() -> usize {
-    2
-}
-
-const fn default_sink_retry_base_delay_ms() -> u64 {
-    500
-}
-
-const fn default_sink_subject_worker_idle_timeout_ms() -> u64 {
-    2_000
-}
-
-const fn default_token_refresh_margin_secs() -> u64 {
-    30
-}
-
-const fn default_max_recoveries_after_failure() -> u32 {
-    5
-}
-
-const fn default_startup_healthcheck_delay_secs() -> u64 {
-    1
-}
-
 

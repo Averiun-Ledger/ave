@@ -669,13 +669,13 @@ pub struct SinkConfigHttp {
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTargetHttp {
-    /// Sink for governance events, managed by the node-level sink manager.
-    Governance,
-    /// Sink for tracker events of a given schema.
+    /// Every sink targets a schema. Use `"governance"` as `schema_id` for
+    /// node-level governance sinks; in that case `governance_id` must be
+    /// `None`.
     Schema {
         schema_id: String,
-        /// When `None`, the sink applies to every governance that contains
-        /// this schema. When `Some`, it applies only to that governance.
+        /// Governance to which this sink applies. Must be `None` when
+        /// `schema_id` is `"governance"`; mandatory otherwise.
         governance_id: Option<String>,
     },
 }
@@ -688,15 +688,13 @@ pub struct SinkConfigEntryHttp {
 
 impl From<SinkTarget> for SinkTargetHttp {
     fn from(value: SinkTarget) -> Self {
-        match value {
-            SinkTarget::Governance => Self::Governance,
-            SinkTarget::Schema {
-                schema_id,
-                governance_id,
-            } => Self::Schema {
-                schema_id,
-                governance_id,
-            },
+        let SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = value;
+        Self::Schema {
+            schema_id,
+            governance_id,
         }
     }
 }

@@ -3,11 +3,18 @@
 pub mod error;
 pub mod http;
 pub mod manager;
+pub mod registry;
 pub mod subject_worker;
 pub mod worker;
 
 pub use error::SinkError;
-pub use manager::{SinkManager, SinkManagerInitParams, SinkManagerMessage, SinkManagerResponse, SinkManagerEvent, SendResult};
+pub use manager::{
+    SendResult, SinkManager, SinkManagerDetailedStatus, SinkManagerEvent, SinkManagerInitParams,
+    SinkManagerMessage, SinkManagerResponse, SinkStatus,
+};
+pub use registry::{
+    SinkRegistration, SinkRegistry, SinkRegistryEvent, SinkRegistryMessage, SinkRegistryResponse,
+};
 pub use subject_worker::{SinkSubjectWorker, SinkSubjectWorkerMessage, SinkSubjectWorkerResponse};
 pub use worker::{SinkWorker, SinkWorkerMessage, SinkWorkerResponse};
 
