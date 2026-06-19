@@ -30,7 +30,7 @@ use auth::{AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessRespon
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
-    EventsQuery, SinkEventsQuery,
+    EventsQuery, SinkEventsQuery, SinkReplayItem, SinkReplayRequest,
 };
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
@@ -38,7 +38,8 @@ use ave_common::request::EventRequest;
 use ave_common::response::{
     GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents,
     RequestInfo, RequestInfoExtend, RequestsInManager,
-    RequestsInManagerSubject, SinkEventsPage, SubjectDB, SubjsData,
+    RequestsInManagerSubject, SinkEventsPage, SinkReplayError, SinkReplayResponse,
+    SubjectDB, SubjsData,
 };
 use ave_network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
@@ -1501,6 +1502,181 @@ impl Api {
         }
 
         Ok(())
+    }
+
+    /// Manually replay events for specific subject/sink pairs.
+    ///
+    /// Each item rewinds the sink cursor for the subject to `from_sn - 1`, marks
+    /// the subject as lagging and triggers a catch-up. The catch-up will deliver
+    /// events from `from_sn` up to the last seen event.
+    ///
+    /// Only available outside safe mode.
+    pub async fn replay_sink_events(
+        &self,
+        request: SinkReplayRequest,
+    ) -> Result<SinkReplayResponse, Error> {
+        self.ensure_mutations_allowed()?;
+
+        // Resolve each distinct sink once in parallel instead of once per item.
+        let unique_sinks: HashSet<String> =
+            request.requests.iter().map(|item| item.sink.clone()).collect();
+
+        let mut registration_futures = Vec::with_capacity(unique_sinks.len());
+        for sink in unique_sinks {
+            registration_futures.push(async move {
+                self.get_sink_registration(&sink)
+                    .await
+                    .map(|registration| (sink, registration))
+            });
+        }
+
+        let registration_results = futures::future::join_all(registration_futures).await;
+        let mut registrations: HashMap<String, crate::sink::SinkRegistration> = HashMap::new();
+        let mut errors: Vec<SinkReplayError> = Vec::new();
+
+        for result in registration_results {
+            match result {
+                Ok((sink, registration)) => {
+                    registrations.insert(sink, registration);
+                }
+                Err(e) => {
+                    // The sink name is lost here because get_sink_registration failed
+                    // before returning it. We log the error; the individual items for
+                    // this sink will be reported below using the request data.
+                    warn!(error = %e, "Failed to resolve sink for replay");
+                }
+            }
+        }
+
+        let mut by_manager: HashMap<ActorPath, Vec<SinkReplayItem>> = HashMap::new();
+
+        for item in request.requests {
+            match registrations.get(&item.sink) {
+                Some(registration) => {
+                    match manager_target_from_registration(registration) {
+                        Ok(target) => {
+                            let path = manager_path(&target);
+                            by_manager.entry(path).or_default().push(item);
+                        }
+                        Err(e) => {
+                            warn!(
+                                sink = %item.sink,
+                                subject_id = %item.subject_id,
+                                from_sn = %item.from_sn,
+                                error = %e,
+                                "Failed to determine manager for replay item"
+                            );
+                            errors.push(SinkReplayError {
+                                sink: item.sink,
+                                subject_id: item.subject_id,
+                                from_sn: item.from_sn,
+                                reason: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    warn!(
+                        sink = %item.sink,
+                        subject_id = %item.subject_id,
+                        from_sn = %item.from_sn,
+                        "Sink not found for replay item"
+                    );
+                    let sink_name = item.sink.clone();
+                    errors.push(SinkReplayError {
+                        sink: sink_name.clone(),
+                        subject_id: item.subject_id,
+                        from_sn: item.from_sn,
+                        reason: Error::SinkNotFound(sink_name).to_string(),
+                    });
+                }
+            }
+        }
+
+        let mut processed = Vec::new();
+
+        for (path, items) in by_manager {
+            let manager = match self
+                .system
+                .get_actor::<crate::sink::manager::SinkManager>(&path)
+                .await
+            {
+                Ok(manager) => manager,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %path,
+                        "Failed to get sink manager actor for replay"
+                    );
+                    let reason = actor_communication_error("sink_manager", e).to_string();
+                    for item in items {
+                        errors.push(SinkReplayError {
+                            sink: item.sink,
+                            subject_id: item.subject_id,
+                            from_sn: item.from_sn,
+                            reason: reason.clone(),
+                        });
+                    }
+                    continue;
+                }
+            };
+
+            let response = match manager
+                .ask(crate::sink::manager::SinkManagerMessage::ReplayEvents {
+                    requests: items.clone(),
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %path,
+                        "Failed to send replay request to sink manager"
+                    );
+                    let reason = actor_communication_error("sink_manager", e).to_string();
+                    for item in items {
+                        errors.push(SinkReplayError {
+                            sink: item.sink,
+                            subject_id: item.subject_id,
+                            from_sn: item.from_sn,
+                            reason: reason.clone(),
+                        });
+                    }
+                    continue;
+                }
+            };
+
+            match response {
+                crate::sink::manager::SinkManagerResponse::ReplayResult(mut res) => {
+                    processed.append(&mut res.processed);
+                    errors.append(&mut res.errors);
+                }
+                other => {
+                    warn!(
+                        response = ?other,
+                        path = %path,
+                        "Unexpected response from sink manager for replay"
+                    );
+                    let reason = Error::UnexpectedResponse {
+                        actor: "sink_manager".to_string(),
+                        expected: "ReplayResult".to_string(),
+                        received: format!("{other:?}"),
+                    }
+                    .to_string();
+                    for item in items {
+                        errors.push(SinkReplayError {
+                            sink: item.sink,
+                            subject_id: item.subject_id,
+                            from_sn: item.from_sn,
+                            reason: reason.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(SinkReplayResponse { processed, errors })
     }
 
     pub async fn delete_subject(

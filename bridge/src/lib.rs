@@ -5,15 +5,16 @@ pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery, SinkEventsQuery, UpdateSubjectQuery,
+        EventRequestType, EventsQuery, SinkEventsQuery, SinkReplayRequest,
+        UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
     response::{
         ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
         RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
-        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SubjectDB,
-        SubjsData, TransferSubject,
+        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SinkReplayResponse,
+        SubjectDB, SubjsData, TransferSubject,
     },
 };
 pub use ave_core::config::{MachineSpec, resolve_spec};
@@ -342,6 +343,16 @@ impl Bridge {
     ) -> Result<(), BridgeError> {
         self.api
             .delete_sink_cursors(sink_name)
+            .await
+            .map_err(|e| BridgeError::Api(e.to_string()))
+    }
+
+    pub async fn replay_sink_events(
+        &self,
+        request: SinkReplayRequest,
+    ) -> Result<SinkReplayResponse, BridgeError> {
+        self.api
+            .replay_sink_events(request)
             .await
             .map_err(|e| BridgeError::Api(e.to_string()))
     }

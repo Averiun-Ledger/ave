@@ -18,7 +18,11 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
     LightPersistence, Message, PersistentActor, Response,
 };
-use ave_common::DataToSink;
+use ave_common::{
+    bridge::request::SinkReplayItem,
+    bridge::response::{SinkReplayError, SinkReplayResponse},
+    DataToSink,
+};
 
 use ave_common::sink::{
     default_sink_healthcheck_intervals_secs, default_sink_worker_idle_timeout_ms, SinkServer,
@@ -81,6 +85,11 @@ pub enum SinkManagerMessage {
         sink: String,
         subject_id: String,
     },
+    /// Manual replay: resend events from `from_sn` up to the last seen event
+    /// for the given subject/sink pairs. Only available outside safe mode.
+    ReplayEvents {
+        requests: Vec<SinkReplayItem>,
+    },
 }
 
 impl Message for SinkManagerMessage {}
@@ -90,6 +99,7 @@ pub enum SinkManagerResponse {
     Ok,
     Status(Vec<SinkStatus>),
     DetailedStatus(SinkManagerDetailedStatus),
+    ReplayResult(SinkReplayResponse),
 }
 
 impl Response for SinkManagerResponse {}
@@ -584,6 +594,10 @@ impl Handler<SinkManager> for SinkManager {
             SinkManagerMessage::CatchUpCompleted { sink, subject_id } => {
                 self.handle_catch_up_completed(sink, subject_id, ctx)
                     .await?;
+            }
+            SinkManagerMessage::ReplayEvents { requests } => {
+                let response = self.handle_replay_events(requests, ctx).await?;
+                return Ok(SinkManagerResponse::ReplayResult(response));
             }
         }
         Ok(SinkManagerResponse::Ok)
@@ -1082,6 +1096,192 @@ impl SinkManager {
             }
         }
         Ok(())
+    }
+
+    async fn handle_replay_events(
+        &mut self,
+        requests: Vec<SinkReplayItem>,
+        ctx: &mut ActorContext<SinkManager>,
+    ) -> Result<SinkReplayResponse, ActorError> {
+        // Defensive check: replay is a manual mutation and must not run in safe mode.
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<ConfigHelper>("config")
+            .await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            return Err(ActorError::Functional {
+                description: "ReplayEvents is not available in safe mode".to_owned(),
+            });
+        }
+
+        // Deduplicate by (sink, subject_id), keeping the smallest from_sn so that
+        // a single catch-up covers all requested ranges for the same pair.
+        let mut dedup: HashMap<(String, String), u64> = HashMap::with_capacity(requests.len());
+        for item in &requests {
+            dedup
+                .entry((item.sink.clone(), item.subject_id.clone()))
+                .and_modify(|sn| *sn = (*sn).min(item.from_sn))
+                .or_insert(item.from_sn);
+        }
+        let unique_requests: Vec<SinkReplayItem> = dedup
+            .into_iter()
+            .map(|((sink, subject_id), from_sn)| SinkReplayItem {
+                sink,
+                subject_id,
+                from_sn,
+            })
+            .collect();
+
+        let mut processed = Vec::with_capacity(unique_requests.len());
+        let mut errors = Vec::new();
+        let mut valid_by_sink: HashMap<String, Vec<SinkReplayItem>> = HashMap::new();
+
+        for item in unique_requests {
+            if self.blocked_sinks.contains_key(&item.sink) {
+                error!(
+                    msg_type = "ReplayBlocked",
+                    sink = %item.sink,
+                    subject_id = %item.subject_id,
+                    from_sn = %item.from_sn,
+                    "Skipping replay because sink is blocked"
+                );
+                errors.push(SinkReplayError {
+                    sink: item.sink,
+                    subject_id: item.subject_id,
+                    from_sn: item.from_sn,
+                    reason: "sink is blocked".to_owned(),
+                });
+                continue;
+            }
+
+            if !self.sink_servers.contains_key(&item.sink) {
+                error!(
+                    msg_type = "ReplaySinkNotConfigured",
+                    sink = %item.sink,
+                    subject_id = %item.subject_id,
+                    from_sn = %item.from_sn,
+                    "Skipping replay because sink is not configured"
+                );
+                errors.push(SinkReplayError {
+                    sink: item.sink,
+                    subject_id: item.subject_id,
+                    from_sn: item.from_sn,
+                    reason: "sink is not configured".to_owned(),
+                });
+                continue;
+            }
+
+            let last_sn = match self.last_seen.get(&item.subject_id).copied() {
+                Some(sn) => sn,
+                None => {
+                    error!(
+                        msg_type = "ReplaySubjectUnknown",
+                        sink = %item.sink,
+                        subject_id = %item.subject_id,
+                        from_sn = %item.from_sn,
+                        "Skipping replay because subject has no known events"
+                    );
+                    errors.push(SinkReplayError {
+                        sink: item.sink,
+                        subject_id: item.subject_id,
+                        from_sn: item.from_sn,
+                        reason: "subject has no known events".to_owned(),
+                    });
+                    continue;
+                }
+            };
+
+            if item.from_sn > last_sn {
+                error!(
+                    msg_type = "ReplayFromSnOutOfRange",
+                    sink = %item.sink,
+                    subject_id = %item.subject_id,
+                    from_sn = %item.from_sn,
+                    last_sn = %last_sn,
+                    "Skipping replay because from_sn is beyond the last seen event"
+                );
+                errors.push(SinkReplayError {
+                    sink: item.sink,
+                    subject_id: item.subject_id,
+                    from_sn: item.from_sn,
+                    reason: format!(
+                        "from_sn {} is beyond the last seen event {}",
+                        item.from_sn, last_sn
+                    ),
+                });
+                continue;
+            }
+
+            // Rewind cursor so catch-up will deliver from `from_sn` onwards.
+            if item.from_sn == 0 {
+                self.persist(
+                    SinkManagerEvent::CursorRemoved {
+                        sink: item.sink.clone(),
+                        subject_id: item.subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await?;
+            } else {
+                self.persist(
+                    SinkManagerEvent::CursorUpdated {
+                        sink: item.sink.clone(),
+                        subject_id: item.subject_id.clone(),
+                        sn: item.from_sn - 1,
+                    },
+                    ctx,
+                )
+                .await?;
+            }
+
+            self.try_insert_lagging(&item.sink, item.subject_id.clone());
+            valid_by_sink
+                .entry(item.sink.clone())
+                .or_default()
+                .push(item);
+        }
+
+        // Launch a single catch-up per sink with all valid subjects.
+        for (sink, items) in valid_by_sink {
+            let subject_ids: Vec<String> = items
+                .iter()
+                .map(|item| item.subject_id.clone())
+                .collect();
+
+            if let Err(e) = self
+                .handle_request_catch_up(sink.clone(), subject_ids, ctx)
+                .await
+            {
+                warn!(
+                    msg_type = "ReplayCatchUpFailed",
+                    sink = %sink,
+                    error = %e,
+                    "Failed to trigger catch-up for replay; subjects remain in lagging"
+                );
+            }
+
+            for item in items {
+                info!(
+                    msg_type = "ReplayAccepted",
+                    sink = %item.sink,
+                    subject_id = %item.subject_id,
+                    from_sn = %item.from_sn,
+                    "Replay item accepted; catch-up will resend events"
+                );
+                processed.push(item);
+            }
+        }
+
+        Ok(SinkReplayResponse { processed, errors })
     }
 
     async fn handle_request_catch_up(

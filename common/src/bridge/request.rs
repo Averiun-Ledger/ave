@@ -87,6 +87,27 @@ pub struct SinkEventsQuery {
     pub limit: Option<u64>,
 }
 
+/// Single replay request: resend events for one subject to one sink starting
+/// at `from_sn` up to the last seen event.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayItem {
+    pub sink: String,
+    pub subject_id: String,
+    pub from_sn: u64,
+}
+
+/// Request body for the manual sink replay endpoint.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayRequest {
+    pub requests: Vec<SinkReplayItem>,
+}
+
 /// Query parameters for listing sinks.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]

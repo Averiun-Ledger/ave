@@ -2,7 +2,7 @@
 
 use crate::{
     DataToSink, SchemaType,
-    bridge::request::{ApprovalState, EventRequestType},
+    bridge::request::{ApprovalState, EventRequestType, SinkReplayItem},
     sink::{SinkServer, SinkTarget},
 };
 use serde::{Deserialize, Serialize};
@@ -490,6 +490,28 @@ impl Display for RequestState {
 pub struct RequestData {
     pub request_id: String,
     pub subject_id: String,
+}
+
+/// Error entry for a single failed manual sink replay item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayError {
+    pub sink: String,
+    pub subject_id: String,
+    pub from_sn: u64,
+    pub reason: String,
+}
+
+/// Result of a manual sink replay request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayResponse {
+    pub processed: Vec<SinkReplayItem>,
+    pub errors: Vec<SinkReplayError>,
 }
 
 /// Time range filter for querying events by timestamp.

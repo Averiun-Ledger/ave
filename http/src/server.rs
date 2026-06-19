@@ -14,9 +14,10 @@ use crate::{
 use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery, UpdateSubjectQuery,
+        FirstEndEvents, GovQuery, SinkEventsQuery, SinkReplayRequest,
+        SubjectQuery, UpdateSubjectQuery,
     },
-    response::{ApprovalEntry, RequestData, RequestInfoExtend},
+    response::{ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse},
 };
 use ave_bridge::{
     Bridge, MonitorNetworkState,
@@ -555,6 +556,33 @@ pub async fn delete_sink_cursors(
 ) -> Result<StatusCode, HttpError> {
     bridge.delete_sink_cursors(sink_name).await?;
     Ok(StatusCode::OK)
+}
+
+/// Manually replay events to sinks
+///
+/// Resends events for the given subject/sink pairs starting at `from_sn` up to
+/// the last seen event. This is useful when a sink has lost a few events and
+/// the operator wants to recover them without deleting the entire cursor
+/// history. Only available while the node is not running in safe mode.
+#[utoipa::path(
+    post,
+    path = "/sinks/replay",
+    operation_id = "replaySinkEvents",
+    tag = "Sink",
+    request_body = SinkReplayRequest,
+    responses(
+        (status = 200, description = "Replay request processed", body = SinkReplayResponse),
+        (status = 400, description = "Invalid request or safe mode enabled", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn replay_sink_events(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Json(request): Json<SinkReplayRequest>,
+) -> Result<Json<SinkReplayResponse>, HttpError> {
+    Ok(Json(bridge.replay_sink_events(request).await?))
 }
 
 ///////// Auth
@@ -1356,6 +1384,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
         $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);
+        $callback!($($args)*, post, "/sinks/replay", replay_sink_events, require NodeSink Post);
         $callback!($($args)*, put, "/governances/{subject_id}/authorize", authorize_governance, require NodeSubject Put);
         $callback!($($args)*, delete, "/governances/{subject_id}/authorize", disauthorize_governance, require NodeSubject Delete);
         $callback!($($args)*, get, "/governances/authorized", authorized_governances, require NodeSubject Get);
