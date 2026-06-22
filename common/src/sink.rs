@@ -223,6 +223,64 @@ pub struct LightEvent {
     pub success: bool,
 }
 
+/// Event received by an external HTTP sink.
+///
+/// A sink may be configured to receive full [`DataToSink`] payloads or
+/// lightweight [`LightEvent`] payloads depending on its `events` filter. This
+/// untagged enum allows a generic sink endpoint to accept either format without
+/// knowing the filter in advance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(untagged)]
+pub enum IncomingSinkEvent {
+    Full(DataToSink),
+    Light(LightEvent),
+}
+
+impl IncomingSinkEvent {
+    /// Returns the subject identifier for the event.
+    pub fn subject_id(&self) -> &str {
+        match self {
+            Self::Full(d) => match &d.payload {
+                DataToSinkEvent::Create { subject_id, .. }
+                | DataToSinkEvent::FactFull { subject_id, .. }
+                | DataToSinkEvent::FactOpaque { subject_id, .. }
+                | DataToSinkEvent::Transfer { subject_id, .. }
+                | DataToSinkEvent::Confirm { subject_id, .. }
+                | DataToSinkEvent::Reject { subject_id, .. }
+                | DataToSinkEvent::Eol { subject_id, .. } => subject_id,
+            },
+            Self::Light(l) => &l.subject_id,
+        }
+    }
+
+    /// Returns the sequence number for the event.
+    pub fn sn(&self) -> u64 {
+        match self {
+            Self::Full(d) => match &d.payload {
+                DataToSinkEvent::Create { sn, .. }
+                | DataToSinkEvent::FactFull { sn, .. }
+                | DataToSinkEvent::FactOpaque { sn, .. }
+                | DataToSinkEvent::Transfer { sn, .. }
+                | DataToSinkEvent::Confirm { sn, .. }
+                | DataToSinkEvent::Reject { sn, .. }
+                | DataToSinkEvent::Eol { sn, .. } => *sn,
+            },
+            Self::Light(l) => l.sn,
+        }
+    }
+
+    /// Returns the sink event type category.
+    pub fn event_type(&self) -> SinkTypes {
+        match self {
+            Self::Full(d) => SinkTypes::from(d),
+            Self::Light(l) => l.event_type.clone(),
+        }
+    }
+}
+
 impl From<&DataToSink> for LightEvent {
     fn from(data: &DataToSink) -> Self {
         let (subject_id, schema_id) = data.payload.get_subject_schema();

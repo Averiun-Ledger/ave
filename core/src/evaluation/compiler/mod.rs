@@ -186,9 +186,10 @@ impl CompilerSupport {
         shared_target_dir: &Path,
         vendor_dir: Option<&Path>,
     ) -> String {
-        let mut config = format!(
-            "[build]\ntarget-dir = \"{}\"\n",
-            shared_target_dir.to_string_lossy()
+        let mut config = include_str!("contract_cargo_config.toml").to_owned();
+        config = config.replace(
+            "{target_dir}",
+            &shared_target_dir.to_string_lossy(),
         );
 
         if let Some(vendor_dir) = vendor_dir {

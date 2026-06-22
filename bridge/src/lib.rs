@@ -334,7 +334,7 @@ impl Bridge {
     }
 
     pub async fn unblock_sink(&self, sink_name: String) -> Result<(), BridgeError> {
-        self.api.unblock_sink(sink_name).await.map_err(|e| BridgeError::Api(e.to_string()))
+        self.api.unblock_sink(sink_name).await.map_err(BridgeError::Core)
     }
 
     pub async fn delete_sink_cursors(
@@ -344,7 +344,7 @@ impl Bridge {
         self.api
             .delete_sink_cursors(sink_name)
             .await
-            .map_err(|e| BridgeError::Api(e.to_string()))
+            .map_err(BridgeError::Core)
     }
 
     pub async fn replay_sink_events(
@@ -354,7 +354,7 @@ impl Bridge {
         self.api
             .replay_sink_events(request)
             .await
-            .map_err(|e| BridgeError::Api(e.to_string()))
+            .map_err(BridgeError::Core)
     }
 
     ///////// SubjectAccess
