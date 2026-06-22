@@ -7664,10 +7664,9 @@ async fn test_old_owner_cut_ranges_battery() {
             get_subject(&witness_dali, subject_id.clone(), Some(3), true)
                 .await
                 .unwrap();
-        let _state =
-            get_subject(&owner, subject_id.clone(), Some(5), true)
-                .await
-                .unwrap();
+        let _state = get_subject(&owner, subject_id.clone(), Some(5), true)
+            .await
+            .unwrap();
 
         nodes[3].token.cancel();
         join_all(nodes[3].handler.iter_mut()).await;

@@ -71,9 +71,7 @@ pub async fn system(
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
-    system
-        .add_helper("config", config_helper)
-        .await;
+    system.add_helper("config", config_helper).await;
 
     // Build engine + limits together; actors fetch both via a single helper access.
     let wasm_runtime = WasmRuntime::new(config.spec.clone())

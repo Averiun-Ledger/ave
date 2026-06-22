@@ -13,9 +13,8 @@ use ave_common::identity::{PublicKey, Signed};
 use ave_network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath,
-    IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
-    RetryMessage, Strategy,
+    Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
+    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -73,7 +72,7 @@ impl Actor for ValiCoordinator {
     type Message = ValiCoordinatorMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -175,13 +174,15 @@ impl Handler<Self> for ValiCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(any(test, feature = "test"))]
-                let strategy = Strategy::Interval(
-                    IntervalStrategy::new(1, Duration::from_secs(10)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    1,
+                    Duration::from_secs(10),
+                ));
                 #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(
-                    IntervalStrategy::new(3, Duration::from_secs(30)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    3,
+                    Duration::from_secs(30),
+                ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
                     target,

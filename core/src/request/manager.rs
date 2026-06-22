@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    Message,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::bridge::request::EventRequestType;
@@ -35,8 +34,10 @@ use crate::metrics::try_core_metrics;
 use crate::model::common::distribution_plan::build_tracker_event_distribution_plan;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::subject::{
-    acquire_subject, create_subject, get_gov, get_gov_sn, get_init_state, get_members, get_quorum_and_signers, get_schema_viewpoints, get_signers, get_version, get_witnesses, has_role,
-    get_last_ledger_event, get_metadata, make_obsolete, update_ledger,
+    acquire_subject, create_subject, get_gov, get_gov_sn, get_init_state,
+    get_last_ledger_event, get_members, get_metadata, get_quorum_and_signers,
+    get_schema_viewpoints, get_signers, get_version, get_witnesses, has_role,
+    make_obsolete, update_ledger,
 };
 use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::event::{
@@ -421,9 +422,7 @@ impl RequestManager {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
                     (
-                        EvaluateData::GovFact {
-                            state,
-                        },
+                        EvaluateData::GovFact { state },
                         None,
                         EvalWorkerContext::default(),
                     )
@@ -432,9 +431,7 @@ impl RequestManager {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
                     (
-                        EvaluateData::GovTransfer {
-                            state,
-                        },
+                        EvaluateData::GovTransfer { state },
                         None,
                         EvalWorkerContext::default(),
                     )
@@ -443,21 +440,18 @@ impl RequestManager {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
                     (
-                        EvaluateData::GovConfirm {
-                            state,
-                        },
+                        EvaluateData::GovConfirm { state },
                         None,
                         EvalWorkerContext::default(),
                     )
                 }
                 (false, EventRequestType::Fact) => {
-                    let init_state =
-                        get_init_state(
-                            ctx,
-                            &metadata.governance_id,
-                            metadata.schema_id.clone(),
-                        )
-                        .await?;
+                    let init_state = get_init_state(
+                        ctx,
+                        &metadata.governance_id,
+                        metadata.schema_id.clone(),
+                    )
+                    .await?;
                     let (issuers, issuer_any) = get_signers(
                         ctx,
                         &metadata.governance_id,
@@ -511,7 +505,10 @@ impl RequestManager {
                     let creators = creator_signers
                         .into_iter()
                         .map(|creator| {
-                            (creator, BTreeSet::from([metadata.namespace.clone()]))
+                            (
+                                creator,
+                                BTreeSet::from([metadata.namespace.clone()]),
+                            )
                         })
                         .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
                     let tracker_context = EvalWorkerContext::TrackerTransfer {
@@ -558,8 +555,7 @@ impl RequestManager {
                 metadata.namespace.clone(),
             )
             .await?;
-            let gov_version =
-                get_version(ctx, &metadata.governance_id).await?;
+            let gov_version = get_version(ctx, &metadata.governance_id).await?;
             (signers, quorum, gov_version)
         };
 
@@ -906,9 +902,12 @@ impl RequestManager {
                 )
                 .await?;
 
-                let init_state =
-                    get_init_state(ctx, &create.governance_id, create.schema_id.clone())
-                        .await?;
+                let init_state = get_init_state(
+                    ctx,
+                    &create.governance_id,
+                    create.schema_id.clone(),
+                )
+                .await?;
 
                 let gov_version =
                     get_version(ctx, &create.governance_id).await?;
@@ -1280,14 +1279,15 @@ impl RequestManager {
 
         if is_governance {
             let governance_id = ledger.get_subject_id();
-            distribution_plan = get_witnesses(ctx, &governance_id, WitnessesData::Gov)
-                .await?
-                .into_iter()
-                .map(|node| DistributionPlanEntry {
-                    node,
-                    mode: DistributionPlanMode::Clear,
-                })
-                .collect();
+            distribution_plan =
+                get_witnesses(ctx, &governance_id, WitnessesData::Gov)
+                    .await?
+                    .into_iter()
+                    .map(|node| DistributionPlanEntry {
+                        node,
+                        mode: DistributionPlanMode::Clear,
+                    })
+                    .collect();
         }
 
         distribution_plan.retain(|entry| entry.node != *self.our_key);
@@ -2053,7 +2053,7 @@ impl Actor for RequestManager {
     type Message = RequestManagerMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {

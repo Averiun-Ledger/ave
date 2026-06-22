@@ -720,9 +720,15 @@ mod tests {
         fn dummy_wake(_: *const ()) {}
         fn dummy_wake_by_ref(_: *const ()) {}
         fn dummy_drop(_: *const ()) {}
-        static DUMMY_VTABLE: RawWakerVTable =
-            RawWakerVTable::new(dummy_clone, dummy_wake, dummy_wake_by_ref, dummy_drop);
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)) };
+        static DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            dummy_clone,
+            dummy_wake,
+            dummy_wake_by_ref,
+            dummy_drop,
+        );
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE))
+        };
 
         let mut behaviour = build_behaviour(NodeType::Bootstrap);
         behaviour.waker = Some(waker);
@@ -780,9 +786,15 @@ mod tests {
         fn dummy_wake(_: *const ()) {}
         fn dummy_wake_by_ref(_: *const ()) {}
         fn dummy_drop(_: *const ()) {}
-        static DUMMY_VTABLE: RawWakerVTable =
-            RawWakerVTable::new(dummy_clone, dummy_wake, dummy_wake_by_ref, dummy_drop);
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)) };
+        static DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            dummy_clone,
+            dummy_wake,
+            dummy_wake_by_ref,
+            dummy_drop,
+        );
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE))
+        };
         let mut cx = Context::from_waker(&waker);
 
         let mut behaviour = build_behaviour(NodeType::Bootstrap);
@@ -809,9 +821,15 @@ mod tests {
         fn dummy_wake(_: *const ()) {}
         fn dummy_wake_by_ref(_: *const ()) {}
         fn dummy_drop(_: *const ()) {}
-        static DUMMY_VTABLE: RawWakerVTable =
-            RawWakerVTable::new(dummy_clone, dummy_wake, dummy_wake_by_ref, dummy_drop);
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)) };
+        static DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            dummy_clone,
+            dummy_wake,
+            dummy_wake_by_ref,
+            dummy_drop,
+        );
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE))
+        };
         let mut cx = Context::from_waker(&waker);
 
         let mut behaviour = build_behaviour(NodeType::Bootstrap);

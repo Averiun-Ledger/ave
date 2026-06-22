@@ -365,7 +365,10 @@ mod tests {
             subject_id: "bad-id".to_string(),
         };
         let result: Result<EOLRequest, _> = bridge_eol.try_into();
-        assert!(matches!(result.unwrap_err(), ConversionError::InvalidSubjectId(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
     }
 
     #[test]
@@ -375,7 +378,10 @@ mod tests {
             name_old_owner: None,
         };
         let result: Result<ConfirmRequest, _> = bridge_confirm.try_into();
-        assert!(matches!(result.unwrap_err(), ConversionError::InvalidSubjectId(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
     }
 
     #[test]
@@ -384,13 +390,17 @@ mod tests {
             subject_id: "bad-id".to_string(),
         };
         let result: Result<RejectRequest, _> = bridge_reject.try_into();
-        assert!(matches!(result.unwrap_err(), ConversionError::InvalidSubjectId(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
     }
 
     #[test]
     fn test_bridge_fact_request_conversion_preserves_viewpoints() {
         let bridge_fact = BridgeFactRequest {
-            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s".to_string(),
+            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                .to_string(),
             payload: json!({"test": "value"}),
             viewpoints: vec!["vp1".to_string(), "vp2".to_string()],
         };
@@ -413,7 +423,10 @@ mod tests {
         let bridge: BridgeEventRequest = event.into();
         match bridge {
             BridgeEventRequest::Fact(req) => {
-                assert_eq!(req.viewpoints, vec!["vp1".to_string(), "vp2".to_string()]);
+                assert_eq!(
+                    req.viewpoints,
+                    vec!["vp1".to_string(), "vp2".to_string()]
+                );
             }
             other => panic!("expected Fact, got {:?}", other),
         }

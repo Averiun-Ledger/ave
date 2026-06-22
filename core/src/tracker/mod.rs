@@ -5,13 +5,12 @@ use crate::{
     governance::{
         sn_register::{SnRegister, SnRegisterMessage},
         subject_register::{SubjectRegister, SubjectRegisterMessage},
-
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,
         },
     },
-
+    model::sink::{SinkDataEvent, SubjectSinkEvent},
     model::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
@@ -24,16 +23,13 @@ use crate::{
     sink::{SinkManager, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
-        SubjectMetadata,
-        error::SubjectError,
+        SubjectMetadata, error::SubjectError,
     },
-    model::sink::{SinkDataEvent, SubjectSinkEvent},
     validation::request::LastData,
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
 };
 use ave_common::{
     DataToSink, Namespace, ValueWrapper,
@@ -49,7 +45,9 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
-#[derive(Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize,
+)]
 pub struct TrackerState {
     pub subject_metadata: SubjectMetadata,
     pub governance_id: DigestIdentifier,
@@ -310,7 +308,9 @@ impl Subject for Tracker {
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             let subject_db = self.build_subject_db(ctx).await?;
-            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(Box::new(subject_db))));
+            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(
+                Box::new(subject_db),
+            )));
 
             self.update_sn(ctx).await?;
         }
@@ -885,10 +885,7 @@ pub enum TrackerMessage {
     GetLastLedger,
     PurgeStorage,
     UpdateLedger { events: Vec<Ledger> },
-    GetSinkEvents {
-        from_sn: u64,
-        batch_size: usize,
-    },
+    GetSinkEvents { from_sn: u64, batch_size: usize },
 }
 
 impl Message for TrackerMessage {}
@@ -916,7 +913,7 @@ impl Actor for Tracker {
     type Message = TrackerMessage;
     type Response = TrackerResponse;
     type SinkEvent = SubjectSinkEvent;
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -975,9 +972,9 @@ impl Handler<Self> for Tracker {
                     ledger_event: Box::new(ledger_event),
                 })
             }
-            TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
-                Box::new(Metadata::from(&*self)),
-            )),
+            TrackerMessage::GetMetadata => {
+                Ok(TrackerResponse::Metadata(Box::new(Metadata::from(&*self))))
+            }
             TrackerMessage::PurgeStorage => {
                 purge_storage(ctx).await?;
 
@@ -993,7 +990,8 @@ impl Handler<Self> for Tracker {
                 from_sn,
                 batch_size,
             } => {
-                let events = self.get_sink_events(ctx, from_sn, batch_size).await?;
+                let events =
+                    self.get_sink_events(ctx, from_sn, batch_size).await?;
                 Ok(TrackerResponse::SinkEvents(events))
             }
             TrackerMessage::UpdateLedger { events } => {

@@ -26,7 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use auth::{AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
+use auth::{
+    AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse,
+};
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
@@ -38,30 +40,30 @@ use ave_common::request::EventRequest;
 use ave_common::response::{
     GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents,
     RequestInfo, RequestInfoExtend, RequestsInManager,
-    RequestsInManagerSubject, SinkEventsPage, SinkReplayError, SinkReplayResponse,
-    SubjectDB, SubjsData,
+    RequestsInManagerSubject, SinkEventsPage, SinkReplayError,
+    SinkReplayResponse, SubjectDB, SubjsData,
+};
+use ave_common::{
+    bridge::request::SinksQuery,
+    bridge::response::{SinkInfo, SinkManagerTarget, SinkStatusInfo},
+    sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
 use ave_network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
     NetworkWorkerRuntime,
 };
 use config::Config as AveBaseConfig;
-use ave_common::{
-    bridge::request::SinksQuery,
-    bridge::response::{SinkInfo, SinkStatusInfo, SinkManagerTarget},
-    sink::{SinkConfigEntry, SinkServer, SinkTarget},
-};
 use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
-use sink::{SinkRegistry, SinkRegistryMessage, SinkRegistryResponse};
 use prometheus_client::registry::Registry;
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
 };
+use sink::{SinkRegistry, SinkRegistryMessage, SinkRegistryResponse};
 use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -78,9 +80,12 @@ use crate::node::InitParamsNode;
 use crate::node::subject_manager::{
     SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
 };
-use crate::sink::{SinkManager, SinkManagerDetailedStatus, SinkManagerMessage, SinkManagerResponse};
 use crate::request::tracking::{
     RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
+};
+use crate::sink::{
+    SinkManager, SinkManagerDetailedStatus, SinkManagerMessage,
+    SinkManagerResponse,
 };
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
@@ -264,9 +269,12 @@ impl Api {
             .await
         {
             Ok(SubjectAccessResponse::None) => {}
-            Ok(other) => cleanup_errors
-                .push(format!("subject_access clear: unexpected response {other:?}")),
-            Err(err) => cleanup_errors.push(format!("subject_access clear: {err}")),
+            Ok(other) => cleanup_errors.push(format!(
+                "subject_access clear: unexpected response {other:?}"
+            )),
+            Err(err) => {
+                cleanup_errors.push(format!("subject_access clear: {err}"))
+            }
         }
 
         if let Err(err) = self.db.delete_subject(&subject_id.to_string()).await
@@ -1201,7 +1209,10 @@ impl Api {
         Ok("Manual distribution in progress".to_owned())
     }
 
-    pub async fn get_sinks(&self, query: SinksQuery) -> Result<Vec<SinkInfo>, Error> {
+    pub async fn get_sinks(
+        &self,
+        query: SinksQuery,
+    ) -> Result<Vec<SinkInfo>, Error> {
         let registrations = self.get_sink_registry().await?;
 
         // Group registered sinks by their manager target so we can query only
@@ -1212,10 +1223,7 @@ impl Api {
         > = HashMap::new();
         for reg in &registrations {
             let target = manager_target_from_registration(reg)?;
-            by_manager
-                .entry(target)
-                .or_default()
-                .push(reg.clone());
+            by_manager.entry(target).or_default().push(reg.clone());
         }
 
         let mut set = tokio::task::JoinSet::new();
@@ -1249,8 +1257,10 @@ impl Api {
             });
         }
 
-        let mut statuses_by_manager: HashMap<SinkManagerTarget, SinkManagerDetailedStatus> =
-            HashMap::new();
+        let mut statuses_by_manager: HashMap<
+            SinkManagerTarget,
+            SinkManagerDetailedStatus,
+        > = HashMap::new();
         while let Some(res) = set.join_next().await {
             let response = res.map_err(|e| {
                 warn!(error = %e, "Sink manager status task panicked");
@@ -1267,20 +1277,22 @@ impl Api {
             .system
             .get_helper::<system::ConfigHelper>("config")
             .await
-            .ok_or_else(|| Error::Internal("ConfigHelper not available".to_string()))?;
+            .ok_or_else(|| {
+                Error::Internal("ConfigHelper not available".to_string())
+            })?;
         let sinks_config = &config_helper.sinks;
 
         let mut infos = Vec::new();
         for reg in registrations {
             let manager = manager_target_from_registration(&reg)?;
             let status = statuses_by_manager.get(&manager);
-            let sink_status = status.and_then(|s| {
-                s.sinks.iter().find(|st| st.sink == reg.name)
-            });
+            let sink_status = status
+                .and_then(|s| s.sinks.iter().find(|st| st.sink == reg.name));
             let (target, server) =
                 find_sink_config(sinks_config, &manager, &reg.name);
             let in_config = reg.from_config;
-            let running = in_config && sink_status.is_some_and(|st| st.blocked.is_none());
+            let running =
+                in_config && sink_status.is_some_and(|st| st.blocked.is_none());
             infos.push(SinkInfo {
                 name: reg.name,
                 target,
@@ -1304,7 +1316,9 @@ impl Api {
             .collect();
         for (manager, status) in &statuses_by_manager {
             for sink_status in &status.sinks {
-                if !registered_keys.contains(&(manager.clone(), sink_status.sink.clone())) {
+                if !registered_keys
+                    .contains(&(manager.clone(), sink_status.sink.clone()))
+                {
                     infos.push(SinkInfo {
                         name: sink_status.sink.clone(),
                         target: None,
@@ -1334,36 +1348,33 @@ impl Api {
             in_config: Some(true),
             ..SinksQuery::default()
         };
-        self.get_sinks(query)
-            .await
-            .map(|infos| {
-                infos
-                    .into_iter()
-                    .map(|info| SinkStatusInfo {
-                        name: info.name,
-                        target: info.target,
-                        manager: info.manager,
-                        in_config: info.in_config,
-                        running: info.running,
-                        blocked: info.blocked,
-                        lagging_subjects: info.lagging_subjects,
-                    })
-                    .collect()
-            })
+        self.get_sinks(query).await.map(|infos| {
+            infos
+                .into_iter()
+                .map(|info| SinkStatusInfo {
+                    name: info.name,
+                    target: info.target,
+                    manager: info.manager,
+                    in_config: info.in_config,
+                    running: info.running,
+                    blocked: info.blocked,
+                    lagging_subjects: info.lagging_subjects,
+                })
+                .collect()
+        })
     }
 
     async fn get_sink_registry(
         &self,
     ) -> Result<Vec<crate::sink::SinkRegistration>, Error> {
         let path = ActorPath::from("/user/node/sink_registry");
-        let registry = self
-            .system
-            .get_actor::<SinkRegistry>(&path)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get sink registry actor");
-                actor_communication_error("sink_registry", e)
-            })?;
+        let registry =
+            self.system.get_actor::<SinkRegistry>(&path).await.map_err(
+                |e| {
+                    warn!(error = %e, "Failed to get sink registry actor");
+                    actor_communication_error("sink_registry", e)
+                },
+            )?;
         let response = registry
             .ask(SinkRegistryMessage::GetSinkRegistry)
             .await
@@ -1389,14 +1400,13 @@ impl Api {
         name: &str,
     ) -> Result<crate::sink::SinkRegistration, Error> {
         let path = ActorPath::from("/user/node/sink_registry");
-        let registry = self
-            .system
-            .get_actor::<SinkRegistry>(&path)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get sink registry actor");
-                actor_communication_error("sink_registry", e)
-            })?;
+        let registry =
+            self.system.get_actor::<SinkRegistry>(&path).await.map_err(
+                |e| {
+                    warn!(error = %e, "Failed to get sink registry actor");
+                    actor_communication_error("sink_registry", e)
+                },
+            )?;
         let response = registry
             .ask(SinkRegistryMessage::GetSink {
                 name: name.to_owned(),
@@ -1408,7 +1418,9 @@ impl Api {
             })?;
         match response {
             SinkRegistryResponse::Sink(Some(reg)) => Ok(reg),
-            SinkRegistryResponse::Sink(None) => Err(Error::SinkNotFound(name.to_string())),
+            SinkRegistryResponse::Sink(None) => {
+                Err(Error::SinkNotFound(name.to_string()))
+            }
             other => {
                 warn!(response = ?other, sink = %name, "Unexpected response from sink registry");
                 Err(Error::UnexpectedResponse {
@@ -1422,14 +1434,13 @@ impl Api {
 
     async fn unregister_sink(&self, name: &str) -> Result<(), Error> {
         let path = ActorPath::from("/user/node/sink_registry");
-        let registry = self
-            .system
-            .get_actor::<SinkRegistry>(&path)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get sink registry actor");
-                actor_communication_error("sink_registry", e)
-            })?;
+        let registry =
+            self.system.get_actor::<SinkRegistry>(&path).await.map_err(
+                |e| {
+                    warn!(error = %e, "Failed to get sink registry actor");
+                    actor_communication_error("sink_registry", e)
+                },
+            )?;
         registry
             .tell(SinkRegistryMessage::UnregisterSink {
                 name: name.to_owned(),
@@ -1472,7 +1483,10 @@ impl Api {
     /// This operation is only available while the node is running in safe mode.
     /// The sink manager is located through the sink registry, so callers only
     /// need to provide the unique sink name.
-    pub async fn delete_sink_cursors(&self, sink_name: String) -> Result<(), Error> {
+    pub async fn delete_sink_cursors(
+        &self,
+        sink_name: String,
+    ) -> Result<(), Error> {
         self.ensure_safe_mode_required("sink cursor deletion")?;
 
         let registration = self.get_sink_registration(&sink_name).await?;
@@ -1518,8 +1532,11 @@ impl Api {
         self.ensure_mutations_allowed()?;
 
         // Resolve each distinct sink once in parallel instead of once per item.
-        let unique_sinks: HashSet<String> =
-            request.requests.iter().map(|item| item.sink.clone()).collect();
+        let unique_sinks: HashSet<String> = request
+            .requests
+            .iter()
+            .map(|item| item.sink.clone())
+            .collect();
 
         let mut registration_futures = Vec::with_capacity(unique_sinks.len());
         for sink in unique_sinks {
@@ -1530,8 +1547,10 @@ impl Api {
             });
         }
 
-        let registration_results = futures::future::join_all(registration_futures).await;
-        let mut registrations: HashMap<String, crate::sink::SinkRegistration> = HashMap::new();
+        let registration_results =
+            futures::future::join_all(registration_futures).await;
+        let mut registrations: HashMap<String, crate::sink::SinkRegistration> =
+            HashMap::new();
         let mut errors: Vec<SinkReplayError> = Vec::new();
 
         for result in registration_results {
@@ -1548,7 +1567,8 @@ impl Api {
             }
         }
 
-        let mut by_manager: HashMap<ActorPath, Vec<SinkReplayItem>> = HashMap::new();
+        let mut by_manager: HashMap<ActorPath, Vec<SinkReplayItem>> =
+            HashMap::new();
 
         for item in request.requests {
             match registrations.get(&item.sink) {
@@ -1608,7 +1628,8 @@ impl Api {
                         path = %path,
                         "Failed to get sink manager actor for replay"
                     );
-                    let reason = actor_communication_error("sink_manager", e).to_string();
+                    let reason = actor_communication_error("sink_manager", e)
+                        .to_string();
                     for item in items {
                         errors.push(SinkReplayError {
                             sink: item.sink,
@@ -1634,7 +1655,8 @@ impl Api {
                         path = %path,
                         "Failed to send replay request to sink manager"
                     );
-                    let reason = actor_communication_error("sink_manager", e).to_string();
+                    let reason = actor_communication_error("sink_manager", e)
+                        .to_string();
                     for item in items {
                         errors.push(SinkReplayError {
                             sink: item.sink,
@@ -1648,7 +1670,9 @@ impl Api {
             };
 
             match response {
-                crate::sink::manager::SinkManagerResponse::ReplayResult(mut res) => {
+                crate::sink::manager::SinkManagerResponse::ReplayResult(
+                    mut res,
+                ) => {
                     processed.append(&mut res.processed);
                     errors.append(&mut res.errors);
                 }
@@ -1995,7 +2019,9 @@ impl Api {
     }
 }
 
-fn manager_target_from_status(status: &SinkManagerDetailedStatus) -> SinkManagerTarget {
+fn manager_target_from_status(
+    status: &SinkManagerDetailedStatus,
+) -> SinkManagerTarget {
     if status.is_governance {
         SinkManagerTarget::Node
     } else {
@@ -2024,7 +2050,9 @@ fn manager_target_from_registration(
 
 fn manager_path(target: &SinkManagerTarget) -> ActorPath {
     match target {
-        SinkManagerTarget::Node => ActorPath::from("/user/node/node_sink_manager"),
+        SinkManagerTarget::Node => {
+            ActorPath::from("/user/node/node_sink_manager")
+        }
         SinkManagerTarget::Governance { governance_id } => {
             ActorPath::from(format!(
                 "/user/node/subject_manager/{}/sink_manager",
@@ -2046,13 +2074,16 @@ fn find_sink_config(
         } = &entry.target;
         let applies = match (schema_id.as_str(), target_gov_id, manager) {
             ("governance", None, SinkManagerTarget::Node) => true,
-            (_, Some(target_gov_id), SinkManagerTarget::Governance { governance_id }) => {
-                target_gov_id == governance_id
-            }
+            (
+                _,
+                Some(target_gov_id),
+                SinkManagerTarget::Governance { governance_id },
+            ) => target_gov_id == governance_id,
             _ => false,
         };
         if applies
-            && let Some(server) = entry.servers.iter().find(|s| s.server == sink_name)
+            && let Some(server) =
+                entry.servers.iter().find(|s| s.server == sink_name)
         {
             return (Some(entry.target.clone()), Some(server.clone()));
         }
@@ -2061,7 +2092,9 @@ fn find_sink_config(
 }
 
 fn sink_info_matches_query(info: &SinkInfo, query: &SinksQuery) -> bool {
-    if let Some(name) = &query.name && info.name != *name {
+    if let Some(name) = &query.name
+        && info.name != *name
+    {
         return false;
     }
     if let Some(target) = &query.target {
@@ -2094,10 +2127,14 @@ fn sink_info_matches_query(info: &SinkInfo, query: &SinksQuery) -> bool {
             return false;
         }
     }
-    if let Some(in_config) = query.in_config && info.in_config != in_config {
+    if let Some(in_config) = query.in_config
+        && info.in_config != in_config
+    {
         return false;
     }
-    if let Some(running) = query.running && info.running != running {
+    if let Some(running) = query.running
+        && info.running != running
+    {
         return false;
     }
     true
@@ -2106,7 +2143,9 @@ fn sink_info_matches_query(info: &SinkInfo, query: &SinksQuery) -> bool {
 fn manager_sort_key(manager: &SinkManagerTarget) -> String {
     match manager {
         SinkManagerTarget::Node => "node".to_string(),
-        SinkManagerTarget::Governance { governance_id } => format!("governance:{governance_id}"),
+        SinkManagerTarget::Governance { governance_id } => {
+            format!("governance:{governance_id}")
+        }
     }
 }
 

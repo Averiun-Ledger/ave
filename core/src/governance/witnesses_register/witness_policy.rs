@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::governance::sn_register::SnLimit;
-use crate::model::common::{Interval, IntervalSet, OwnerContext, TrackerIdentity};
+use crate::model::common::{
+    Interval, IntervalSet, OwnerContext, TrackerIdentity,
+};
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};
 
 use super::{
-    CreatorWitnessRegistration, GovVersionLimit, HiSnLimit, IntervalData,
-    WitnessesRegister, WitnessesType, ActualSearch, WitnessStatus,
+    ActualSearch, CreatorWitnessRegistration, GovVersionLimit, HiSnLimit,
+    IntervalData, WitnessStatus, WitnessesRegister, WitnessesType,
 };
 
 impl WitnessesRegister {
@@ -87,7 +89,8 @@ impl WitnessesRegister {
         }
 
         for (witness_type, grant) in grant_map {
-            entry.grants
+            entry
+                .grants
                 .entry(witness_type)
                 .or_default()
                 .apply_version(version, Some(grant));
@@ -120,12 +123,14 @@ impl WitnessesRegister {
 
     pub(crate) fn rebuild_node_creator_index(&mut self) {
         self.node_creator_index.clear();
-        for ((creator, namespace, schema_id), entry) in
-            &self.creator_witnesses
+        for ((creator, namespace, schema_id), entry) in &self.creator_witnesses
         {
             for (witness_type, (_, current_lo)) in &entry.intervals {
-                if let WitnessesType::User(node) = witness_type && current_lo.is_some() {
-                    let key = (creator.clone(), namespace.clone(), schema_id.clone());
+                if let WitnessesType::User(node) = witness_type
+                    && current_lo.is_some()
+                {
+                    let key =
+                        (creator.clone(), namespace.clone(), schema_id.clone());
                     if let Some(set) = self.node_creator_index.get_mut(node) {
                         set.insert(key);
                     } else {
@@ -184,7 +189,8 @@ impl WitnessesRegister {
         self.creator_witnesses
             .get(&(owner.clone(), namespace.to_string(), schema_id.clone()))
             .is_some_and(|entry| {
-                entry.intervals
+                entry
+                    .intervals
                     .get(&WitnessesType::User(node.clone()))
                     .is_some_and(|(intervals, current_from)| {
                         Self::interval_active_at_version(
@@ -193,7 +199,8 @@ impl WitnessesRegister {
                             gov_version,
                         )
                     })
-                    || entry.intervals
+                    || entry
+                        .intervals
                         .get(&WitnessesType::Witnesses)
                         .is_some_and(|(intervals, current_from)| {
                             Self::interval_active_at_version(
@@ -261,7 +268,8 @@ impl WitnessesRegister {
         identity: TrackerIdentity,
         owner_ctx: OwnerContext,
         cached_search: Option<(SnLimit, Option<PublicKey>)>,
-    ) -> Result<(WitnessStatus, Option<(SnLimit, Option<PublicKey>)>), ActorError> {
+    ) -> Result<(WitnessStatus, Option<(SnLimit, Option<PublicKey>)>), ActorError>
+    {
         let mut access_sn = None;
         let mut hi_sn_limit = HiSnLimit::None;
         let mut gov_version_limit = GovVersionLimit::None;
@@ -271,34 +279,65 @@ impl WitnessesRegister {
 
         if let Some(subject_id) = &subject_id {
             access_sn = self
-                .access_limit_for_node(ctx, subject_id, &node, &identity.namespace, &identity.schema_id, &mut cached)
+                .access_limit_for_node(
+                    ctx,
+                    subject_id,
+                    &node,
+                    &identity.namespace,
+                    &identity.schema_id,
+                    &mut cached,
+                )
                 .await?;
             hi_sn_limit = self
-                .hi_sn_limit_for_node(ctx, subject_id, &node, &identity.namespace, &identity.schema_id, &mut cached)
+                .hi_sn_limit_for_node(
+                    ctx,
+                    subject_id,
+                    &node,
+                    &identity.namespace,
+                    &identity.schema_id,
+                    &mut cached,
+                )
                 .await?;
             gov_version_limit = self
-                .gov_version_limit_for_node(subject_id, &node, &identity.namespace, &identity.schema_id)
+                .gov_version_limit_for_node(
+                    subject_id,
+                    &node,
+                    &identity.namespace,
+                    &identity.schema_id,
+                )
                 .await?;
         }
 
-        if let Some(owner) = owner_ctx.owner && let Some(gov_version) = owner_ctx.gov_version {
+        if let Some(owner) = owner_ctx.owner
+            && let Some(gov_version) = owner_ctx.gov_version
+        {
             create_access = self.has_create_access_for_node_at_version(
-                &node, &owner, &identity.schema_id, &identity.namespace, gov_version,
+                &node,
+                &owner,
+                &identity.schema_id,
+                &identity.namespace,
+                gov_version,
             );
             create_gov_version_limit = self
                 .create_gov_version_limit_for_node(
-                    &node, &owner, &identity.schema_id, &identity.namespace, gov_version,
+                    &node,
+                    &owner,
+                    &identity.schema_id,
+                    &identity.namespace,
+                    gov_version,
                 )
                 .await;
         }
 
-        Ok((WitnessStatus {
-            access_sn,
-            hi_sn_limit,
-            gov_version_limit,
-            create_access,
-            create_gov_version_limit,
-        }, cached))
+        Ok((
+            WitnessStatus {
+                access_sn,
+                hi_sn_limit,
+                gov_version_limit,
+                create_access,
+                create_gov_version_limit,
+            },
+            cached,
+        ))
     }
-
 }

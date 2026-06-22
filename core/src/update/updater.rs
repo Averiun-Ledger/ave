@@ -1,9 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath,
-    IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
-    RetryMessage, Strategy,
+    Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
+    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
 };
 
 use async_trait::async_trait;
@@ -73,7 +72,7 @@ impl Actor for Updater {
     type Message = UpdaterMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -156,13 +155,12 @@ impl Handler<Self> for Updater {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                let strategy =
-                    Strategy::Interval(IntervalStrategy::new(
-                        self.witness_retry_count.max(1),
-                        Duration::from_secs(
-                            self.witness_retry_interval_secs.max(1),
-                        ),
-                    ));
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    self.witness_retry_count.max(1),
+                    Duration::from_secs(
+                        self.witness_retry_interval_secs.max(1),
+                    ),
+                ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
                     target,

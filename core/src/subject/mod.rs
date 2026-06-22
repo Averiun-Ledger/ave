@@ -415,7 +415,11 @@ impl SinkReplayState {
         sink_timestamp: u64,
     ) -> Result<DataToSink, ActorError> {
         let replay_parts = SinkReplayEventParts::from_ledger(ledger)?;
-        let data = self.data_for_sink(ledger, replay_parts.event_data_ledger, public_key.to_owned());
+        let data = self.data_for_sink(
+            ledger,
+            replay_parts.event_data_ledger,
+            public_key.to_owned(),
+        );
 
         Ok(build_data_to_sink(
             data,

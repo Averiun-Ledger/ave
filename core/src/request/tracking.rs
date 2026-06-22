@@ -63,7 +63,7 @@ impl Actor for RequestTracking {
     type Event = RequestTrackingEvent;
     type Response = RequestTrackingResponse;
     type SinkEvent = RequestTrackingEvent;
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

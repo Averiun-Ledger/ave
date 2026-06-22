@@ -22,8 +22,7 @@ use crate::{
     },
     helpers::network::{ActorMessage, service::NetworkSender},
     model::common::{
-        crash_system, get_verified_transfer_sn,
-        node::get_subject_data,
+        crash_system, get_verified_transfer_sn, node::get_subject_data,
         subject::get_local_subject_sn,
     },
     node::SubjectData,
@@ -301,8 +300,7 @@ impl Update {
                 return Ok(UpdateStartMode::Direct);
             };
 
-            let verified_sn =
-                self.already_verified_transfer_sn(ctx).await;
+            let verified_sn = self.already_verified_transfer_sn(ctx).await;
             self.request_distribution(witness.clone(), None, verified_sn)
                 .await?;
             return Ok(UpdateStartMode::Direct);
@@ -569,9 +567,8 @@ impl Handler<Self> for Update {
                                 .max()
                                 .unwrap_or(target_sn);
 
-                            let verified_sn = self
-                                .already_verified_transfer_sn(ctx)
-                                .await;
+                            let verified_sn =
+                                self.already_verified_transfer_sn(ctx).await;
                             if let Err(e) = self
                                 .request_distribution(
                                     better_node.clone(),

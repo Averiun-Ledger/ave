@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
@@ -137,9 +137,8 @@ impl RequestHandler {
             .await?
         {
             return Err(ActorError::Functional {
-                description:
-                    "In tracker events, the node has to be a creator"
-                        .to_string(),
+                description: "In tracker events, the node has to be a creator"
+                    .to_string(),
             });
         }
 
@@ -505,9 +504,12 @@ impl RequestHandler {
                 schema_id,
                 ..
             } => {
-                let viewpoints =
-                    get_schema_viewpoints(ctx, governance_id, schema_id.clone())
-                        .await?;
+                let viewpoints = get_schema_viewpoints(
+                    ctx,
+                    governance_id,
+                    schema_id.clone(),
+                )
+                .await?;
                 let Some(viewpoints) = viewpoints else {
                     return Err(RequestHandlerError::Actor(
                         ActorError::FunctionalCritical {
@@ -1010,7 +1012,7 @@ impl Actor for RequestHandler {
     type Message = RequestHandlerMessage;
     type Response = RequestHandlerResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -1576,7 +1578,8 @@ impl PersistentActor for RequestHandler {
                 event,
                 request_id,
             } => {
-                inner.in_queue
+                inner
+                    .in_queue
                     .entry(subject_id.clone())
                     .or_default()
                     .push_back((event.clone(), request_id.clone()));
@@ -1593,7 +1596,9 @@ impl PersistentActor for RequestHandler {
                 subject_id,
                 request_id,
             } => {
-                inner.handling.insert(subject_id.clone(), request_id.clone());
+                inner
+                    .handling
+                    .insert(subject_id.clone(), request_id.clone());
                 if let Some(vec) = inner.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                     if vec.is_empty() {

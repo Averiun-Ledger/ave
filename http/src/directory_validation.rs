@@ -82,7 +82,8 @@ fn check_dir_writable(path: &Path, name: &str) -> Result<(), String> {
     };
 
     // Verify real writability with a temporary file (no leftover on success)
-    let test_file = target.join(format!(".ave_write_test_{}", rand::random::<u32>()));
+    let test_file =
+        target.join(format!(".ave_write_test_{}", rand::random::<u32>()));
     match fs::File::create(&test_file) {
         Ok(_) => {
             let _ = fs::remove_file(&test_file);

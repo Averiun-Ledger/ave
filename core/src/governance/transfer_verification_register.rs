@@ -87,7 +87,7 @@ impl Actor for TransferVerificationRegister {
     type Event = TransferVerificationRegisterEvent;
     type Response = TransferVerificationRegisterResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -141,9 +141,7 @@ impl Handler<Self> for TransferVerificationRegister {
 
                 Ok(TransferVerificationRegisterResponse::Ok)
             }
-            TransferVerificationRegisterMessage::Remove {
-                subject_id,
-            } => {
+            TransferVerificationRegisterMessage::Remove { subject_id } => {
                 self.on_event(
                     TransferVerificationRegisterEvent::Remove {
                         subject_id: subject_id.clone(),
@@ -197,11 +195,9 @@ impl Handler<Self> for TransferVerificationRegister {
                     "Transfer verification lookup completed"
                 );
 
-                Ok(
-                    TransferVerificationRegisterResponse::VerifiedTransferSn(
-                        result,
-                    ),
-                )
+                Ok(TransferVerificationRegisterResponse::VerifiedTransferSn(
+                    result,
+                ))
             }
         }
     }
@@ -238,9 +234,7 @@ impl PersistentActor for TransferVerificationRegister {
         let mut state = Arc::clone(&state);
         let inner = Arc::make_mut(&mut state);
         match event {
-            TransferVerificationRegisterEvent::Remove {
-                subject_id,
-            } => {
+            TransferVerificationRegisterEvent::Remove { subject_id } => {
                 inner.register.remove(subject_id);
 
                 debug!(
@@ -254,7 +248,8 @@ impl PersistentActor for TransferVerificationRegister {
                 transfer_sn,
                 sender,
             } => {
-                inner.register
+                inner
+                    .register
                     .entry(subject_id.to_owned())
                     .and_modify(|(existing_sn, existing_sender)| {
                         if *transfer_sn > *existing_sn {

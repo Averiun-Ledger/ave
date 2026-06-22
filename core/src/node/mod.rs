@@ -13,7 +13,10 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage, SubjectAccessResponse},
+    auth::{
+        SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage,
+        SubjectAccessResponse,
+    },
     config::SinkTarget,
     db::Storable,
     distribution::worker::DistriWorker,
@@ -28,7 +31,9 @@ use crate::{
     manual_distribution::ManualDistribution,
     model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
-    sink::{SinkManager, SinkManagerInitParams, SinkRegistry, SinkRegistryMessage},
+    sink::{
+        SinkManager, SinkManagerInitParams, SinkRegistry, SinkRegistryMessage,
+    },
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
@@ -350,7 +355,9 @@ impl Node {
         // Passive permission check before creating anything
         if let Err(e) = check_dir_writable(&dir) {
             return Err(ActorError::FunctionalCritical {
-                description: format!("Contracts directory permission check failed: {e}"),
+                description: format!(
+                    "Contracts directory permission check failed: {e}"
+                ),
             });
         }
 
@@ -665,9 +672,8 @@ impl Node {
                                 subject_id: subject_id.clone(),
                             })
                             .await?;
-                        let WitnessesRegisterResponse::TrackerOwnerSn {
-                            data,
-                        } = response
+                        let WitnessesRegisterResponse::TrackerOwnerSn { data } =
+                            response
                         else {
                             return Err(ActorError::UnexpectedResponse {
                                 path: actor_path,
@@ -695,13 +701,14 @@ impl Node {
                             .system()
                             .get_actor::<Tracker>(&tracker_path)
                             .await?;
-                        let response = tracker
-                            .ask(TrackerMessage::GetMetadata)
-                            .await?;
-                        let TrackerResponse::Metadata(metadata) = response else {
+                        let response =
+                            tracker.ask(TrackerMessage::GetMetadata).await?;
+                        let TrackerResponse::Metadata(metadata) = response
+                        else {
                             return Err(ActorError::UnexpectedResponse {
                                 path: tracker_path,
-                                expected: "TrackerResponse::Metadata".to_owned(),
+                                expected: "TrackerResponse::Metadata"
+                                    .to_owned(),
                             });
                         };
                         metadata.sn
@@ -831,7 +838,7 @@ impl Actor for Node {
     type Message = NodeMessage;
     type Response = NodeResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -863,10 +870,8 @@ impl Actor for Node {
         }
 
         // Create SinkRegistry and populate it from current config.
-        let Some(config_helper) = ctx
-            .system()
-            .get_helper::<ConfigHelper>("config")
-            .await
+        let Some(config_helper) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
         else {
             error!("Config helper not found");
             return Err(ActorError::Helper {
@@ -884,7 +889,9 @@ impl Actor for Node {
                 return Err(e);
             }
         };
-        if let Err(e) = populate_sink_registry(&registry_actor, &config_helper.sinks).await {
+        if let Err(e) =
+            populate_sink_registry(&registry_actor, &config_helper.sinks).await
+        {
             error!(error = %e, "Failed to populate SinkRegistry");
             return Err(e);
         }
@@ -1368,9 +1375,7 @@ impl Handler<Self> for Node {
                 })
             }
             NodeMessage::SubjectAccessData(subject_id) => {
-                let access = match ctx
-                    .get_child::<SubjectAccess>("auth")
-                    .await
+                let access = match ctx.get_child::<SubjectAccess>("auth").await
                 {
                     Ok(access) => access,
                     Err(e) => {
@@ -1391,9 +1396,10 @@ impl Handler<Self> for Node {
                     })
                     .await
                 {
-                    Ok(SubjectAccessResponse::AccessInfo { is_gov_authorized, is_tracker_banned }) => {
-                        (is_gov_authorized, is_tracker_banned)
-                    }
+                    Ok(SubjectAccessResponse::AccessInfo {
+                        is_gov_authorized,
+                        is_tracker_banned,
+                    }) => (is_gov_authorized, is_tracker_banned),
                     Ok(other) => {
                         error!(
                             msg_type = "SubjectAccessData",
@@ -1403,7 +1409,8 @@ impl Handler<Self> for Node {
                         );
                         ctx.system().crash_system();
                         return Err(ActorError::UnexpectedResponse {
-                            expected: "SubjectAccessResponse::AccessInfo".to_owned(),
+                            expected: "SubjectAccessResponse::AccessInfo"
+                                .to_owned(),
                             path: ctx.path().clone() / "auth",
                         });
                     }
@@ -1644,9 +1651,7 @@ async fn populate_sink_registry(
                     server.server
                 );
                 error!(%msg);
-                return Err(ActorError::Functional {
-                    description: msg,
-                });
+                return Err(ActorError::Functional { description: msg });
             }
             registry
                 .tell(SinkRegistryMessage::RegisterSink {

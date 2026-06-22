@@ -342,7 +342,7 @@ impl Actor for ApprPersist {
     type Message = ApprPersistMessage;
     type Response = ApprPersistResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -357,7 +357,12 @@ impl Actor for ApprPersist {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self
-            .init_store("approver", Some(ctx.path().parent().key().to_owned()), false, ctx)
+            .init_store(
+                "approver",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(

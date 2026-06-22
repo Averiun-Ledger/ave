@@ -28,8 +28,8 @@ use crate::governance::transfer_verification_register::{
     TransferVerificationRegisterResponse,
 };
 use crate::governance::witnesses_register::{
-    WitnessStatus, WitnessesRegister,
-    WitnessesRegisterMessage, WitnessesRegisterResponse,
+    WitnessStatus, WitnessesRegister, WitnessesRegisterMessage,
+    WitnessesRegisterResponse,
 };
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
@@ -262,11 +262,14 @@ where
         .await?;
 
     match response {
-        TransferVerificationRegisterResponse::VerifiedTransferSn(result) => Ok(result),
+        TransferVerificationRegisterResponse::VerifiedTransferSn(result) => {
+            Ok(result)
+        }
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
-            expected: "TransferVerificationRegisterResponse::VerifiedTransferSn"
-                .to_string(),
+            expected:
+                "TransferVerificationRegisterResponse::VerifiedTransferSn"
+                    .to_string(),
         }),
     }
 }
@@ -290,11 +293,13 @@ where
         ctx.system().get_actor(&actor_path).await?;
 
     let response = actor
-        .ask(TransferVerificationRegisterMessage::RecordVerifiedTransfer {
-            subject_id: subject_id.to_owned(),
-            transfer_sn,
-            sender,
-        })
+        .ask(
+            TransferVerificationRegisterMessage::RecordVerifiedTransfer {
+                subject_id: subject_id.to_owned(),
+                transfer_sn,
+                sender,
+            },
+        )
         .await?;
 
     match response {
@@ -336,7 +341,6 @@ where
         }),
     }
 }
-
 
 #[derive(
     Clone,
@@ -921,7 +925,7 @@ where
 {
     error!("Crashing system, error: {}, actor: {}", error, ctx.path());
     ctx.system().crash_system();
-    
+
     error
 }
 

@@ -563,8 +563,14 @@ async fn test_subject_access_endpoints_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let (status, body) =
-        make_request(&client, &server.url("/governances/authorized"), "GET", None, None).await;
+    let (status, body) = make_request(
+        &client,
+        &server.url("/governances/authorized"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
     assert!(status.is_success());
 
     let subjects: Vec<String> = serde_json::from_value(body).unwrap();
@@ -578,7 +584,9 @@ async fn test_subject_access_endpoints_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA/sync-peers"),
+        &server.url(
+            "/subjects/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA/sync-peers",
+        ),
         "GET",
         None,
         None,
@@ -604,8 +612,14 @@ async fn test_subject_access_endpoints_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let (status, body) =
-        make_request(&client, &server.url("/governances/authorized"), "GET", None, None).await;
+    let (status, body) = make_request(
+        &client,
+        &server.url("/governances/authorized"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
     assert!(status.is_success());
 
     let subjects: Vec<String> = serde_json::from_value(body).unwrap();
@@ -633,7 +647,10 @@ async fn test_update_and_transfer_deserialization() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url(&format!("/governances/{}/authorize", request_data.subject_id)),
+        &server.url(&format!(
+            "/governances/{}/authorize",
+            request_data.subject_id
+        )),
         "PUT",
         None,
         Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),

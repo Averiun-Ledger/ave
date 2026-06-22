@@ -32,7 +32,11 @@ pub struct SnRegister {
 }
 
 impl SnRegister {
-    fn lookup_sn(&self, subject_id: &DigestIdentifier, gov_version: u64) -> SnLimit {
+    fn lookup_sn(
+        &self,
+        subject_id: &DigestIdentifier,
+        gov_version: u64,
+    ) -> SnLimit {
         if let Some(gov_version_register) = self.register.get(subject_id)
             && let Some(last) = gov_version_register.last()
         {
@@ -129,7 +133,7 @@ impl Actor for SnRegister {
     type Event = SnRegisterEvent;
     type Response = SnRegisterResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -144,7 +148,12 @@ impl Actor for SnRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self
-            .init_store("sn_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
+            .init_store(
+                "sn_register",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
@@ -317,7 +326,8 @@ impl PersistentActor for SnRegister {
                 gov_version,
                 sn,
             } => {
-                inner.register
+                inner
+                    .register
                     .entry(subject_id.to_owned())
                     .or_default()
                     .insert(*gov_version, *sn);

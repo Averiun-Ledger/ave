@@ -55,15 +55,14 @@ impl WitnessesRegister {
         }
 
         // Witnesses de schema: iterar solo sobre creators con Witnesses activo.
-        for ((creator, namespace, schema_id), entry) in
-            &self.creator_witnesses
+        for ((creator, namespace, schema_id), entry) in &self.creator_witnesses
         {
-            let key =
-                (creator.clone(), namespace.clone(), schema_id.clone());
+            let key = (creator.clone(), namespace.clone(), schema_id.clone());
             if relevant_creators.contains(&key) {
                 continue;
             }
-            if entry.intervals
+            if entry
+                .intervals
                 .get(&super::WitnessesType::Witnesses)
                 .is_some_and(|(_, current_lo)| current_lo.is_some())
                 && self.has_active_schema_witness(

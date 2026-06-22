@@ -928,10 +928,9 @@ async fn build_test_router_with_options(
         serde_json::from_str(&bridge_config_json)
             .expect("Failed to parse bridge config");
 
-    let (bridge, runners) =
-        Bridge::build(&bridge_config, "test", None, None)
-            .await
-            .expect("Failed to create bridge");
+    let (bridge, runners) = Bridge::build(&bridge_config, "test", None, None)
+        .await
+        .expect("Failed to create bridge");
     let graceful_token = bridge.graceful_token().clone();
 
     let auth_db: Option<Arc<AuthDatabase>> =

@@ -263,5 +263,4 @@ mod tests {
         assert!(ts >= before);
         assert!(ts <= after);
     }
-
 }

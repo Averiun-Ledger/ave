@@ -406,7 +406,6 @@ mod tests {
         assert_eq!(hash, parsed);
     }
 
-
     #[test]
     fn test_invalid_algorithm_identifier() {
         let mut bytes = vec![b'X']; // Invalid identifier
@@ -419,7 +418,6 @@ mod tests {
             CryptoError::UnknownAlgorithm(_)
         ));
     }
-
 
     #[test]
     fn test_hash_borsh() {
@@ -448,9 +446,6 @@ mod tests {
         assert_eq!(hash1.algorithm(), HashAlgorithm::Blake3);
     }
 
-
-
-
     #[test]
     fn test_hash_array() {
         let hasher = Blake3Hasher;
@@ -474,7 +469,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_empty_digest_serialization() {
         let empty = DigestIdentifier::default();
@@ -493,8 +487,6 @@ mod tests {
         assert!(deserialized.is_empty());
         assert_eq!(deserialized.algorithm(), empty.algorithm());
     }
-
-
 
     #[test]
     fn test_digest_identifier_from_str_invalid_base64() {

@@ -632,7 +632,10 @@ impl Quorum {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreatorWitness, CreatorQuantity, Quorum, RoleCreator, SchemaAdd, SchemaChange, default_creator_witnesses};
+    use super::{
+        CreatorQuantity, CreatorWitness, Quorum, RoleCreator, SchemaAdd,
+        SchemaChange, default_creator_witnesses,
+    };
     use crate::Namespace;
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -728,10 +731,12 @@ mod tests {
         let q: CreatorQuantity = serde_json::from_str("0").unwrap();
         assert!(!q.check());
 
-        let err = serde_json::from_str::<CreatorQuantity>("\"other\"").unwrap_err();
+        let err =
+            serde_json::from_str::<CreatorQuantity>("\"other\"").unwrap_err();
         assert!(err.to_string().contains("number or 'infinity'"));
 
-        let json = serde_json::to_string(&CreatorQuantity::Quantity(3)).unwrap();
+        let json =
+            serde_json::to_string(&CreatorQuantity::Quantity(3)).unwrap();
         assert_eq!(json, "3");
         let json = serde_json::to_string(&CreatorQuantity::Infinity).unwrap();
         assert_eq!(json, "\"infinity\"");

@@ -368,7 +368,8 @@ mod tests {
         assert_eq!(decoded.schema_id, None);
 
         // Only active provided.
-        let decoded: SubjectQuery = serde_json::from_str(r#"{"active":false}"#).unwrap();
+        let decoded: SubjectQuery =
+            serde_json::from_str(r#"{"active":false}"#).unwrap();
         assert_eq!(decoded.active, Some(false));
         assert_eq!(decoded.schema_id, None);
     }
@@ -408,8 +409,14 @@ mod tests {
         let decoded: BridgeEventRequest = serde_json::from_str(json).unwrap();
         match decoded {
             BridgeEventRequest::Fact(req) => {
-                assert_eq!(req.subject_id, "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s");
-                assert_eq!(req.viewpoints, vec!["vp1".to_string(), "vp2".to_string()]);
+                assert_eq!(
+                    req.subject_id,
+                    "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                );
+                assert_eq!(
+                    req.viewpoints,
+                    vec!["vp1".to_string(), "vp2".to_string()]
+                );
             }
             other => panic!("expected Fact, got {:?}", other),
         }

@@ -88,7 +88,10 @@ impl GovernanceVersionSync {
     }
 
     fn schedule_tick(&self, ctx: &ActorContext<Self>) {
-        ctx.schedule_once(self.tick_interval, GovernanceVersionSyncMessage::Tick);
+        ctx.schedule_once(
+            self.tick_interval,
+            GovernanceVersionSyncMessage::Tick,
+        );
     }
 
     fn schedule_timeout(&mut self, ctx: &ActorContext<Self>) {
@@ -126,9 +129,7 @@ impl GovernanceVersionSync {
         }
     }
 
-    async fn trigger_update_if_needed(
-        &self,
-    ) -> Result<(), ActorError> {
+    async fn trigger_update_if_needed(&self) -> Result<(), ActorError> {
         let Some(UpdateTarget { peer, .. }) = self.update_target.clone() else {
             return Ok(());
         };
@@ -163,7 +164,10 @@ impl GovernanceVersionSync {
         ctx: &ActorContext<Self>,
     ) -> Result<HashSet<PublicKey>, ActorError> {
         let access_path = ActorPath::from("/user/node/auth");
-        let access = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
+        let access = ctx
+            .system()
+            .get_actor::<SubjectAccess>(&access_path)
+            .await?;
         match access
             .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: self.governance_id.clone(),
@@ -291,7 +295,7 @@ impl Actor for GovernanceVersionSync {
     type Message = GovernanceVersionSyncMessage;
     type Response = GovernanceVersionSyncResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -341,8 +345,7 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
-                    if let Err(error) = self.trigger_update_if_needed().await
-                    {
+                    if let Err(error) = self.trigger_update_if_needed().await {
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,
@@ -355,8 +358,7 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.peer_version(peer, version) {
                     self.cancel_timeout(ctx);
                     self.round_open = false;
-                    if let Err(error) = self.trigger_update_if_needed().await
-                    {
+                    if let Err(error) = self.trigger_update_if_needed().await {
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,

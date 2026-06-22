@@ -11,7 +11,7 @@ use ave_network::NodeType;
 use test_log::test;
 
 use crate::common::{
-    create_node, node_running, CreateNodeConfig, PORT_COUNTER,
+    CreateNodeConfig, PORT_COUNTER, create_node, node_running,
 };
 
 /// Build a sink configuration with one governance sink and one schema sink.
@@ -63,7 +63,10 @@ async fn sink_registry_populated_from_config() {
 
     let gov = sinks.iter().find(|s| s.name == "gov-sink").unwrap();
     assert!(gov.in_config);
-    assert_eq!(gov.manager, ave_common::bridge::response::SinkManagerTarget::Node);
+    assert_eq!(
+        gov.manager,
+        ave_common::bridge::response::SinkManagerTarget::Node
+    );
 
     let schema = sinks.iter().find(|s| s.name == "schema-sink").unwrap();
     assert!(schema.in_config);
@@ -111,7 +114,11 @@ async fn delete_sink_cursors_fails_outside_safe_mode() {
         .delete_sink_cursors("gov-sink".to_owned())
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::SafeMode(_)), "expected safe mode error, got {:?}", err);
+    assert!(
+        matches!(err, Error::SafeMode(_)),
+        "expected safe mode error, got {:?}",
+        err
+    );
 }
 
 #[test(tokio::test)]
@@ -131,5 +138,9 @@ async fn unknown_sink_returns_not_found() {
         .unblock_sink("missing-sink".to_owned())
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::SinkNotFound(_)), "expected sink not found, got {:?}", err);
+    assert!(
+        matches!(err, Error::SinkNotFound(_)),
+        "expected sink not found, got {:?}",
+        err
+    );
 }

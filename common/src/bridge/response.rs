@@ -543,14 +543,21 @@ mod tests {
             "description": null
         }"#;
         let decoded: SubjsData = serde_json::from_str(json).unwrap();
-        assert_eq!(decoded.schema_id, SchemaType::Type("custom_schema".to_string()));
+        assert_eq!(
+            decoded.schema_id,
+            SchemaType::Type("custom_schema".to_string())
+        );
         assert!(!decoded.active);
         assert_eq!(decoded.name, None);
     }
 
     #[test]
     fn test_approval_entry_deserialize_variants() {
-        for state in [ApprovalState::Pending, ApprovalState::Accepted, ApprovalState::Rejected] {
+        for state in [
+            ApprovalState::Pending,
+            ApprovalState::Accepted,
+            ApprovalState::Rejected,
+        ] {
             let entry = ApprovalEntry {
                 request: ApprovalReq {
                     subject_id: "sub1".to_string(),
@@ -562,7 +569,8 @@ mod tests {
                 state: state.clone(),
             };
             let json_str = serde_json::to_string(&entry).unwrap();
-            let decoded: ApprovalEntry = serde_json::from_str(&json_str).unwrap();
+            let decoded: ApprovalEntry =
+                serde_json::from_str(&json_str).unwrap();
             assert_eq!(decoded.state, state);
         }
     }
@@ -576,10 +584,12 @@ mod tests {
 
     #[test]
     fn test_tracker_stored_visibility_deserialize_full_and_none() {
-        let full: TrackerStoredVisibilityDB = serde_json::from_str(r#"{"kind":"full"}"#).unwrap();
+        let full: TrackerStoredVisibilityDB =
+            serde_json::from_str(r#"{"kind":"full"}"#).unwrap();
         assert_eq!(full, TrackerStoredVisibilityDB::Full);
 
-        let none: TrackerStoredVisibilityDB = serde_json::from_str(r#"{"kind":"none"}"#).unwrap();
+        let none: TrackerStoredVisibilityDB =
+            serde_json::from_str(r#"{"kind":"none"}"#).unwrap();
         assert_eq!(none, TrackerStoredVisibilityDB::None);
     }
 }

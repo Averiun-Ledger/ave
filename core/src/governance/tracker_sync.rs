@@ -27,8 +27,7 @@ use crate::helpers::network::{
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::{
-    get_verified_transfer_sn,
-    node::get_subject_data,
+    get_verified_transfer_sn, node::get_subject_data,
     subject::get_tracker_sn_owner,
 };
 use crate::node::SubjectData;
@@ -271,7 +270,10 @@ impl TrackerSync {
         ctx: &ActorContext<Self>,
     ) -> Result<HashSet<PublicKey>, ActorError> {
         let access_path = ActorPath::from("/user/node/auth");
-        let access = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
+        let access = ctx
+            .system()
+            .get_actor::<SubjectAccess>(&access_path)
+            .await?;
         match access
             .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: self.governance_id.clone(),
@@ -409,11 +411,11 @@ impl TrackerSync {
     ) -> Result<VecDeque<CurrentWitnessSubject>, ActorError> {
         let banned_set: HashSet<DigestIdentifier> = {
             let access_path = ActorPath::from("/user/node/auth");
-            let access = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
-            match access
-                .ask(SubjectAccessMessage::GetBannedTrackers)
-                .await
-            {
+            let access = ctx
+                .system()
+                .get_actor::<SubjectAccess>(&access_path)
+                .await?;
+            match access.ask(SubjectAccessMessage::GetBannedTrackers).await {
                 Ok(SubjectAccessResponse::Subjects(list)) => {
                     list.into_iter().collect()
                 }
@@ -664,7 +666,7 @@ impl Actor for TrackerSync {
     type Message = TrackerSyncMessage;
     type Response = TrackerSyncResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

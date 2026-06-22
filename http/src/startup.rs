@@ -11,9 +11,7 @@ use crate::{
     server::build_routes,
 };
 use ave_bridge::{
-    Bridge,
-    SinkConfigEntry,
-    SinkTarget,
+    Bridge, SinkConfigEntry, SinkTarget,
     clap::Parser,
     config::Config as BridgeConfig,
     settings::{
@@ -797,7 +795,9 @@ pub async fn run() -> Result<(), StartupError> {
     // emit the error to stderr if the log directory is not writable.
     if let Err(e) = crate::directory_validation::validate_logging_path(&config)
     {
-        eprintln!("ERROR: cannot start logging — log directory is not accessible: {e}");
+        eprintln!(
+            "ERROR: cannot start logging — log directory is not accessible: {e}"
+        );
         return Err(StartupError::DirectoryValidation(e));
     }
 

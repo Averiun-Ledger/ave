@@ -257,9 +257,21 @@ mod tests {
 
     #[test]
     fn test_event_request_check_request_signature() {
-        let owner = PublicKey::new(ave_identity::keys::DSAlgorithm::Ed25519, vec![0u8; 32]).unwrap();
-        let new_owner = PublicKey::new(ave_identity::keys::DSAlgorithm::Ed25519, vec![1u8; 32]).unwrap();
-        let other = PublicKey::new(ave_identity::keys::DSAlgorithm::Ed25519, vec![2u8; 32]).unwrap();
+        let owner = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let new_owner = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![1u8; 32],
+        )
+        .unwrap();
+        let other = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![2u8; 32],
+        )
+        .unwrap();
 
         let create = EventRequest::Create(CreateRequest {
             name: None,
@@ -282,20 +294,40 @@ mod tests {
             subject_id: DigestIdentifier::default(),
             new_owner: new_owner.clone(),
         });
-        assert!(transfer.check_request_signature(&owner, &owner, &Some(new_owner.clone())));
-        assert!(!transfer.check_request_signature(&other, &owner, &Some(new_owner.clone())));
+        assert!(transfer.check_request_signature(
+            &owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+        assert!(!transfer.check_request_signature(
+            &other,
+            &owner,
+            &Some(new_owner.clone())
+        ));
 
         let confirm = EventRequest::Confirm(ConfirmRequest {
             subject_id: DigestIdentifier::default(),
             name_old_owner: None,
         });
-        assert!(confirm.check_request_signature(&new_owner, &owner, &Some(new_owner.clone())));
-        assert!(!confirm.check_request_signature(&owner, &owner, &Some(new_owner.clone())));
+        assert!(confirm.check_request_signature(
+            &new_owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+        assert!(!confirm.check_request_signature(
+            &owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
 
         let reject = EventRequest::Reject(RejectRequest {
             subject_id: DigestIdentifier::default(),
         });
-        assert!(reject.check_request_signature(&new_owner, &owner, &Some(new_owner.clone())));
+        assert!(reject.check_request_signature(
+            &new_owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
 
         let eol = EventRequest::EOL(EOLRequest {
             subject_id: DigestIdentifier::default(),
@@ -305,15 +337,28 @@ mod tests {
     }
 
     #[test]
-    fn test_event_request_check_request_signature_rejects_unauthorised_transfer() {
-        let owner = PublicKey::new(ave_identity::keys::DSAlgorithm::Ed25519, vec![0u8; 32]).unwrap();
-        let thief = PublicKey::new(ave_identity::keys::DSAlgorithm::Ed25519, vec![99u8; 32]).unwrap();
+    fn test_event_request_check_request_signature_rejects_unauthorised_transfer()
+     {
+        let owner = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let thief = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![99u8; 32],
+        )
+        .unwrap();
 
         // Transfer must be signed by the current owner, not a random key.
         let transfer = EventRequest::Transfer(TransferRequest {
             subject_id: DigestIdentifier::default(),
             new_owner: thief.clone(),
         });
-        assert!(!transfer.check_request_signature(&thief, &owner, &Some(thief.clone())));
+        assert!(!transfer.check_request_signature(
+            &thief,
+            &owner,
+            &Some(thief.clone())
+        ));
     }
 }

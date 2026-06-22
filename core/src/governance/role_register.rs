@@ -210,7 +210,7 @@ impl Actor for RoleRegister {
     type Message = RoleRegisterMessage;
     type Response = RoleRegisterResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -225,7 +225,12 @@ impl Actor for RoleRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self
-            .init_store("role_register", Some(ctx.path().parent().key().to_owned()), true, ctx)
+            .init_store(
+                "role_register",
+                Some(ctx.path().parent().key().to_owned()),
+                true,
+                ctx,
+            )
             .await
         {
             error!(
@@ -728,14 +733,16 @@ impl PersistentActor for RoleRegister {
                 }
 
                 if let Some(evaluator) = new_evaluator {
-                    inner.evaluators
+                    inner
+                        .evaluators
                         .entry(SchemaType::Governance)
                         .or_default()
                         .insert((evaluator.clone(), Namespace::new()));
                 }
 
                 if let Some(validator) = new_validator {
-                    inner.validators
+                    inner
+                        .validators
                         .entry(SchemaType::Governance)
                         .or_default()
                         .entry((validator.clone(), Namespace::new()))
@@ -749,7 +756,8 @@ impl PersistentActor for RoleRegister {
                     remove_evaluators.iter()
                 {
                     for ns in namespaces.iter() {
-                        inner.evaluators
+                        inner
+                            .evaluators
                             .entry(schema_id.clone())
                             .or_default()
                             .remove(&(evaluator.clone(), ns.clone()));
@@ -806,7 +814,8 @@ impl PersistentActor for RoleRegister {
                 }
 
                 for (schema_id, quorum) in vali_quorum.iter() {
-                    inner.vali_quorum
+                    inner
+                        .vali_quorum
                         .entry(schema_id.clone())
                         .or_default()
                         .insert(*version, quorum.clone());
@@ -828,7 +837,8 @@ impl PersistentActor for RoleRegister {
                     new_evaluators.iter()
                 {
                     for ns in namespaces.iter() {
-                        inner.evaluators
+                        inner
+                            .evaluators
                             .entry(schema_id.clone())
                             .or_default()
                             .insert((evaluator.clone(), ns.clone()));
@@ -839,7 +849,8 @@ impl PersistentActor for RoleRegister {
                     remove_evaluators.iter()
                 {
                     for ns in namespaces.iter() {
-                        inner.evaluators
+                        inner
+                            .evaluators
                             .entry(schema_id.clone())
                             .or_default()
                             .remove(&(evaluator.clone(), ns.clone()));
@@ -850,7 +861,8 @@ impl PersistentActor for RoleRegister {
                     new_validators.iter()
                 {
                     for ns in namespaces.iter() {
-                        inner.validators
+                        inner
+                            .validators
                             .entry(schema_id.clone())
                             .or_default()
                             .entry((validator.clone(), ns.clone()))

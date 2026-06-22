@@ -451,7 +451,8 @@ mod tests {
 
     #[test]
     fn test_resolve_spec_profile() {
-        let spec = resolve_spec(Some(MachineSpec::Profile(MachineProfile::Medium)));
+        let spec =
+            resolve_spec(Some(MachineSpec::Profile(MachineProfile::Medium)));
         assert_eq!(spec.ram_mb, 4_096);
         assert_eq!(spec.cpu_cores, 2);
     }
@@ -476,16 +477,36 @@ mod tests {
     #[test]
     fn test_memory_limits_validate_ok() {
         assert!(MemoryLimitsConfig::Disabled.validate().is_ok());
-        assert!(MemoryLimitsConfig::Percentage { value: 0.5 }.validate().is_ok());
-        assert!(MemoryLimitsConfig::Percentage { value: 1.0 }.validate().is_ok());
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.5 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.0 }
+                .validate()
+                .is_ok()
+        );
         assert!(MemoryLimitsConfig::Mb { value: 1024 }.validate().is_ok());
     }
 
     #[test]
     fn test_memory_limits_validate_err() {
-        assert!(MemoryLimitsConfig::Percentage { value: 0.0 }.validate().is_err());
-        assert!(MemoryLimitsConfig::Percentage { value: -0.5 }.validate().is_err());
-        assert!(MemoryLimitsConfig::Percentage { value: 1.5 }.validate().is_err());
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.0 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: -0.5 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.5 }
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -508,19 +529,38 @@ mod tests {
 
     #[test]
     fn test_memory_limits_validate_boundary() {
-        assert!(MemoryLimitsConfig::Percentage { value: 1.0 }.validate().is_ok());
-        assert!(MemoryLimitsConfig::Percentage { value: 0.0001 }.validate().is_ok());
-        assert!(MemoryLimitsConfig::Percentage { value: 0.0 }.validate().is_err());
-        assert!(MemoryLimitsConfig::Percentage { value: 1.5 }.validate().is_err());
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.0 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.0001 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.0 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.5 }
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
     fn test_node_type_deserialize_variants() {
-        let bootstrap: NodeType = serde_json::from_str("\"Bootstrap\"").unwrap();
+        let bootstrap: NodeType =
+            serde_json::from_str("\"Bootstrap\"").unwrap();
         assert_eq!(bootstrap, NodeType::Bootstrap);
-        let addressable: NodeType = serde_json::from_str("\"Addressable\"").unwrap();
+        let addressable: NodeType =
+            serde_json::from_str("\"Addressable\"").unwrap();
         assert_eq!(addressable, NodeType::Addressable);
-        let ephemeral: NodeType = serde_json::from_str("\"Ephemeral\"").unwrap();
+        let ephemeral: NodeType =
+            serde_json::from_str("\"Ephemeral\"").unwrap();
         assert_eq!(ephemeral, NodeType::Ephemeral);
     }
 

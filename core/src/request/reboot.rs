@@ -39,10 +39,7 @@ impl Reboot {
         }
     }
 
-    fn schedule_next_check(
-        &self,
-        ctx: &ave_actors::ActorContext<Self>,
-    ) {
+    fn schedule_next_check(&self, ctx: &ave_actors::ActorContext<Self>) {
         let interval_secs = self.stability_check_interval_secs.max(1);
         ctx.schedule_once(
             Duration::from_secs(interval_secs),
@@ -110,7 +107,7 @@ impl Actor for Reboot {
     type Event = ();
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

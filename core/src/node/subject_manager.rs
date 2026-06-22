@@ -401,8 +401,13 @@ impl SubjectManager {
         }
 
         // Notify NodeSinkManager to remove all tracking state for this governance.
-        let node_sink_manager_path = ActorPath::from("/user/node/node_sink_manager");
-        match ctx.system().get_actor::<crate::sink::SinkManager>(&node_sink_manager_path).await {
+        let node_sink_manager_path =
+            ActorPath::from("/user/node/node_sink_manager");
+        match ctx
+            .system()
+            .get_actor::<crate::sink::SinkManager>(&node_sink_manager_path)
+            .await
+        {
             Ok(node_sink_manager) => {
                 if let Err(error) = node_sink_manager
                     .tell(crate::sink::SinkManagerMessage::RemoveSubject {
@@ -414,7 +419,8 @@ impl SubjectManager {
                 }
             }
             Err(error) => {
-                cleanup_errors.push(format!("node_sink_manager lookup: {error}"));
+                cleanup_errors
+                    .push(format!("node_sink_manager lookup: {error}"));
             }
         }
 
@@ -689,7 +695,7 @@ impl Actor for SubjectManager {
     type Message = SubjectManagerMessage;
     type Response = SubjectManagerResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

@@ -143,7 +143,10 @@ where
     A: Actor + Handler<A>,
 {
     let access_path = ActorPath::from("/user/node/auth");
-    let access_actor = ctx.system().get_actor::<SubjectAccess>(&access_path).await?;
+    let access_actor = ctx
+        .system()
+        .get_actor::<SubjectAccess>(&access_path)
+        .await?;
 
     access_actor
         .tell(SubjectAccessMessage::Update {

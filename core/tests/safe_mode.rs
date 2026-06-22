@@ -4,7 +4,7 @@ use std::{collections::HashSet, str::FromStr, sync::atomic::Ordering};
 
 use ave_common::{
     bridge::request::{EventsQuery, SinkEventsQuery},
-    identity::{DigestIdentifier, PublicKey, keys::Ed25519Signer, KeyPair},
+    identity::{DigestIdentifier, KeyPair, PublicKey, keys::Ed25519Signer},
 };
 use ave_core::error::Error;
 use ave_network::NodeType;
@@ -13,9 +13,9 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    create_and_authorize_governance, create_node, create_subject, emit_fact,
-    emit_transfer, get_subject, node_running, wait_request, CreateNodeConfig,
-    PORT_COUNTER,
+    CreateNodeConfig, PORT_COUNTER, create_and_authorize_governance,
+    create_node, create_subject, emit_fact, emit_transfer, get_subject,
+    node_running, wait_request,
 };
 
 const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
@@ -125,7 +125,10 @@ async fn restart_node_with_safe_mode(
 async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
-        listen_address: format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
         peers: vec![],
         always_accept: true,
         ..Default::default()
@@ -136,15 +139,19 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     let witness_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
     let witness_pk = witness_keypair.public_key().to_string();
 
-    let governance_id = setup_governance_with_example_schema(owner, &witness_pk).await;
+    let governance_id =
+        setup_governance_with_example_schema(owner, &witness_pk).await;
 
-    let (tracker_id, _) = create_subject(owner, governance_id.clone(), "Example1", "", true)
-        .await
-        .unwrap();
+    let (tracker_id, _) =
+        create_subject(owner, governance_id.clone(), "Example1", "", true)
+            .await
+            .unwrap();
 
     // Emit a fact on the tracker
     let json = json!({"ModOne": {"data": 1}});
-    let request_id = emit_fact(owner, tracker_id.clone(), json, true).await.unwrap();
+    let request_id = emit_fact(owner, tracker_id.clone(), json, true)
+        .await
+        .unwrap();
     wait_request(owner, request_id).await.unwrap();
 
     // Transfer the tracker
@@ -157,7 +164,9 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     .await
     .unwrap();
 
-    let _ = get_subject(owner, tracker_id.clone(), Some(2), true).await.unwrap();
+    let _ = get_subject(owner, tracker_id.clone(), Some(2), true)
+        .await
+        .unwrap();
 
     // Restart in safe mode
     restart_node_with_safe_mode(&mut node, &mut dirs, true).await;
@@ -167,25 +176,45 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     let state = owner.get_subject_state(tracker_id.clone()).await.unwrap();
     assert_eq!(state.subject_id, tracker_id.to_string());
 
-    let subjects = owner.all_subjs(governance_id.clone(), None, None).await.unwrap();
-    assert!(subjects.iter().any(|s| s.subject_id == tracker_id.to_string()));
+    let subjects = owner
+        .all_subjs(governance_id.clone(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        subjects
+            .iter()
+            .any(|s| s.subject_id == tracker_id.to_string())
+    );
 
     let transfers = owner.get_pending_transfers().await.unwrap();
     assert!(transfers.iter().any(|t| t.subject_id == tracker_id));
 
     // Delete tracker in safe mode
-    owner.delete_subject(tracker_id.clone()).await.expect("tracker delete failed");
+    owner
+        .delete_subject(tracker_id.clone())
+        .await
+        .expect("tracker delete failed");
 
     // Verify tracker is gone from all views
-    let err = owner.get_subject_state(tracker_id.clone()).await.unwrap_err();
+    let err = owner
+        .get_subject_state(tracker_id.clone())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, Error::SubjectNotFound(_)),
         "expected SubjectNotFound, got {:?}",
         err
     );
 
-    let subjects = owner.all_subjs(governance_id.clone(), None, None).await.unwrap();
-    assert!(!subjects.iter().any(|s| s.subject_id == tracker_id.to_string()));
+    let subjects = owner
+        .all_subjs(governance_id.clone(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        !subjects
+            .iter()
+            .any(|s| s.subject_id == tracker_id.to_string())
+    );
 
     let transfers = owner.get_pending_transfers().await.unwrap();
     assert!(!transfers.iter().any(|t| t.subject_id == tracker_id));
@@ -210,7 +239,9 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     assert!(
         matches!(
             events_err,
-            Error::NoEventsFound(_) | Error::SubjectNotFound(_) | Error::MissingResource { .. }
+            Error::NoEventsFound(_)
+                | Error::SubjectNotFound(_)
+                | Error::MissingResource { .. }
         ),
         "unexpected events error: {:?}",
         events_err
@@ -230,32 +261,47 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     assert!(
         matches!(
             sink_err,
-            Error::NoEventsFound(_) | Error::SubjectNotFound(_) | Error::MissingResource { .. }
+            Error::NoEventsFound(_)
+                | Error::SubjectNotFound(_)
+                | Error::MissingResource { .. }
         ),
         "unexpected sink error: {:?}",
         sink_err
     );
 
     // Verify governance still exists
-    let gov_state = owner.get_subject_state(governance_id.clone()).await.unwrap();
+    let gov_state = owner
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(gov_state.subject_id, governance_id.to_string());
 
     // Restart without safe mode and verify persistence
     restart_node_with_safe_mode(&mut node, &mut dirs, false).await;
     let owner = &node.api;
 
-    let err = owner.get_subject_state(tracker_id.clone()).await.unwrap_err();
+    let err = owner
+        .get_subject_state(tracker_id.clone())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
-    let gov_state = owner.get_subject_state(governance_id.clone()).await.unwrap();
+    let gov_state = owner
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(gov_state.subject_id, governance_id.to_string());
 }
 
 #[test(tokio::test)]
-async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_delete() {
+async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_delete()
+ {
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
-        listen_address: format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
         peers: vec![],
         always_accept: true,
         ..Default::default()
@@ -266,16 +312,20 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     let witness_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
     let witness_pk = witness_keypair.public_key().to_string();
 
-    let governance_id = setup_governance_with_example_schema(owner, &witness_pk).await;
+    let governance_id =
+        setup_governance_with_example_schema(owner, &witness_pk).await;
 
-    let (tracker_id, _) = create_subject(owner, governance_id.clone(), "Example1", "", true)
-        .await
-        .unwrap();
+    let (tracker_id, _) =
+        create_subject(owner, governance_id.clone(), "Example1", "", true)
+            .await
+            .unwrap();
 
     // Add 6 facts
     for i in 1..=6 {
         let json = json!({"ModOne": {"data": i}});
-        let request_id = emit_fact(owner, tracker_id.clone(), json, true).await.unwrap();
+        let request_id = emit_fact(owner, tracker_id.clone(), json, true)
+            .await
+            .unwrap();
         wait_request(owner, request_id).await.unwrap();
     }
 
@@ -295,7 +345,9 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     .await
     .unwrap();
 
-    let _ = get_subject(owner, tracker_id.clone(), Some(7), true).await.unwrap();
+    let _ = get_subject(owner, tracker_id.clone(), Some(7), true)
+        .await
+        .unwrap();
 
     // Restart in safe mode
     restart_node_with_safe_mode(&mut node, &mut dirs, true).await;
@@ -363,7 +415,10 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
 async fn safe_mode_governance_delete_lists_pending_trackers() {
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
-        listen_address: format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
         peers: vec![],
         always_accept: true,
         ..Default::default()
@@ -374,15 +429,19 @@ async fn safe_mode_governance_delete_lists_pending_trackers() {
     let witness_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
     let witness_pk = witness_keypair.public_key().to_string();
 
-    let governance_id = setup_governance_with_example_schema(owner, &witness_pk).await;
+    let governance_id =
+        setup_governance_with_example_schema(owner, &witness_pk).await;
 
     let mut tracker_ids = Vec::new();
     for i in 1..=3 {
-        let (tracker_id, _) = create_subject(owner, governance_id.clone(), "Example1", "", true)
+        let (tracker_id, _) =
+            create_subject(owner, governance_id.clone(), "Example1", "", true)
+                .await
+                .unwrap();
+        let json = json!({"ModOne": {"data": i}});
+        let request_id = emit_fact(owner, tracker_id.clone(), json, true)
             .await
             .unwrap();
-        let json = json!({"ModOne": {"data": i}});
-        let request_id = emit_fact(owner, tracker_id.clone(), json, true).await.unwrap();
         wait_request(owner, request_id).await.unwrap();
         tracker_ids.push(tracker_id);
     }
@@ -392,21 +451,34 @@ async fn safe_mode_governance_delete_lists_pending_trackers() {
     let owner = &node.api;
 
     // Verify governance exists
-    let gov_state = owner.get_subject_state(governance_id.clone()).await.unwrap();
+    let gov_state = owner
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(gov_state.subject_id, governance_id.to_string());
 
-    let subjects = owner.all_subjs(governance_id.clone(), None, None).await.unwrap();
+    let subjects = owner
+        .all_subjs(governance_id.clone(), None, None)
+        .await
+        .unwrap();
     assert_eq!(subjects.len(), tracker_ids.len());
     for tid in &tracker_ids {
         assert!(subjects.iter().any(|s| s.subject_id == tid.to_string()));
     }
 
     // Attempt to delete governance with trackers
-    let err = owner.delete_subject(governance_id.clone()).await.unwrap_err();
+    let err = owner
+        .delete_subject(governance_id.clone())
+        .await
+        .unwrap_err();
     match err {
-        Error::GovernanceHasTrackers { governance_id: gid, trackers } => {
+        Error::GovernanceHasTrackers {
+            governance_id: gid,
+            trackers,
+        } => {
             assert_eq!(gid, governance_id.to_string());
-            let expected: HashSet<_> = tracker_ids.iter().map(|t| t.to_string()).collect();
+            let expected: HashSet<_> =
+                tracker_ids.iter().map(|t| t.to_string()).collect();
             let actual: HashSet<_> = trackers.into_iter().collect();
             assert_eq!(expected, actual);
         }
@@ -415,10 +487,14 @@ async fn safe_mode_governance_delete_lists_pending_trackers() {
 }
 
 #[test(tokio::test)]
-async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted() {
+async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
+{
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
-        listen_address: format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
         peers: vec![],
         always_accept: true,
         ..Default::default()
@@ -429,15 +505,19 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted() 
     let witness_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
     let witness_pk = witness_keypair.public_key().to_string();
 
-    let governance_id = setup_governance_with_example_schema(owner, &witness_pk).await;
+    let governance_id =
+        setup_governance_with_example_schema(owner, &witness_pk).await;
 
     let mut tracker_ids = Vec::new();
     for i in 1..=3 {
-        let (tracker_id, _) = create_subject(owner, governance_id.clone(), "Example1", "", true)
+        let (tracker_id, _) =
+            create_subject(owner, governance_id.clone(), "Example1", "", true)
+                .await
+                .unwrap();
+        let json = json!({"ModOne": {"data": i}});
+        let request_id = emit_fact(owner, tracker_id.clone(), json, true)
             .await
             .unwrap();
-        let json = json!({"ModOne": {"data": i}});
-        let request_id = emit_fact(owner, tracker_id.clone(), json, true).await.unwrap();
         wait_request(owner, request_id).await.unwrap();
         tracker_ids.push(tracker_id);
     }
@@ -448,7 +528,10 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted() 
 
     // Verify governance exists
     let govs = owner.all_govs(None).await.unwrap();
-    assert!(govs.iter().any(|g| g.governance_id == governance_id.to_string()));
+    assert!(
+        govs.iter()
+            .any(|g| g.governance_id == governance_id.to_string())
+    );
 
     // Delete all trackers first
     for tracker_id in &tracker_ids {
@@ -465,13 +548,23 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted() 
         .expect("governance delete failed");
 
     // Verify governance is gone
-    let err = owner.get_subject_state(governance_id.clone()).await.unwrap_err();
+    let err = owner
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
     let govs = owner.all_govs(None).await.unwrap();
-    assert!(!govs.iter().any(|g| g.governance_id == governance_id.to_string()));
+    assert!(
+        !govs
+            .iter()
+            .any(|g| g.governance_id == governance_id.to_string())
+    );
 
-    let err = owner.all_subjs(governance_id.clone(), None, None).await.unwrap_err();
+    let err = owner
+        .all_subjs(governance_id.clone(), None, None)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, Error::GovernanceNotFound(_)),
         "expected GovernanceNotFound, got {:?}",
@@ -482,9 +575,16 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted() 
     restart_node_with_safe_mode(&mut node, &mut dirs, false).await;
     let owner = &node.api;
 
-    let err = owner.get_subject_state(governance_id.clone()).await.unwrap_err();
+    let err = owner
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
     let govs = owner.all_govs(None).await.unwrap();
-    assert!(!govs.iter().any(|g| g.governance_id == governance_id.to_string()));
+    assert!(
+        !govs
+            .iter()
+            .any(|g| g.governance_id == governance_id.to_string())
+    );
 }

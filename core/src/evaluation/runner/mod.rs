@@ -10,8 +10,8 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    ContractData, ContractResultData, Namespace, SchemaType, ValueWrapper, identity::PublicKey,
-    schematype::ReservedWords,
+    ContractData, ContractResultData, Namespace, SchemaType, ValueWrapper,
+    identity::PublicKey, schematype::ReservedWords,
 };
 use borsh::{BorshDeserialize, to_vec};
 use serde::{Deserialize, Serialize};
@@ -488,8 +488,12 @@ impl Runner {
         match call_result {
             Ok(result_ptr) => {
                 if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_contract_fuel_consumed("success", fuel_consumed);
-                    metrics.observe_contract_memory_peak("success", memory_bytes);
+                    metrics.observe_contract_fuel_consumed(
+                        "success",
+                        fuel_consumed,
+                    );
+                    metrics
+                        .observe_contract_memory_peak("success", memory_bytes);
                 }
 
                 let result = Self::get_result(&store, result_ptr)?;
@@ -502,13 +506,15 @@ impl Runner {
                 ))
             }
             Err(e) => {
-                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) &&
-                    let Some(metrics) = try_core_metrics() {
-                        metrics.observe_contract_fuel_exhausted();
-                    }
-                
+                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel)
+                    && let Some(metrics) = try_core_metrics()
+                {
+                    metrics.observe_contract_fuel_exhausted();
+                }
+
                 if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_contract_fuel_consumed("error", fuel_consumed);
+                    metrics
+                        .observe_contract_fuel_consumed("error", fuel_consumed);
                     metrics.observe_contract_memory_peak("error", memory_bytes);
                 }
                 Err(RunnerError::WasmError {
@@ -1557,14 +1563,18 @@ impl Runner {
     ) -> Result<(MemoryManager, u32, u32, u32), RunnerError> {
         let mut context = MemoryManager::from_limits(limits);
 
-        let state_data = ContractData::from_json_value(&state.0)
-            .map_err(|e| RunnerError::SerializationError {
-                context: "serialize state to JSON bytes",
-                details: e.to_string(),
+        let state_data =
+            ContractData::from_json_value(&state.0).map_err(|e| {
+                RunnerError::SerializationError {
+                    context: "serialize state to JSON bytes",
+                    details: e.to_string(),
+                }
             })?;
-        let state_bytes = to_vec(&state_data).map_err(|e| RunnerError::SerializationError {
-            context: "serialize state",
-            details: e.to_string(),
+        let state_bytes = to_vec(&state_data).map_err(|e| {
+            RunnerError::SerializationError {
+                context: "serialize state",
+                details: e.to_string(),
+            }
         })?;
         let state_ptr = context.add_data_raw(&state_bytes)?;
 
@@ -1581,14 +1591,18 @@ impl Runner {
         })?;
         let init_state_ptr = context.add_data_raw(&init_state_bytes)?;
 
-        let event_data = ContractData::from_json_value(&event.0)
-            .map_err(|e| RunnerError::SerializationError {
-                context: "serialize event to JSON bytes",
-                details: e.to_string(),
+        let event_data =
+            ContractData::from_json_value(&event.0).map_err(|e| {
+                RunnerError::SerializationError {
+                    context: "serialize event to JSON bytes",
+                    details: e.to_string(),
+                }
             })?;
-        let event_bytes = to_vec(&event_data).map_err(|e| RunnerError::SerializationError {
-            context: "serialize event",
-            details: e.to_string(),
+        let event_bytes = to_vec(&event_data).map_err(|e| {
+            RunnerError::SerializationError {
+                context: "serialize event",
+                details: e.to_string(),
+            }
         })?;
         let event_ptr = context.add_data_raw(&event_bytes)?;
 
@@ -1615,7 +1629,9 @@ impl Runner {
             })?;
 
         if contract_result.success {
-            let final_state_json = contract_result.final_state.to_json_value()
+            let final_state_json = contract_result
+                .final_state
+                .to_json_value()
                 .map_err(|e| RunnerError::SerializationError {
                     context: "parse final_state JSON",
                     details: e.to_string(),
@@ -1662,7 +1678,7 @@ impl Actor for Runner {
     type Message = RunnerMessage;
     type Response = RunnerResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

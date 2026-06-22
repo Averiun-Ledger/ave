@@ -8,8 +8,8 @@ use test_log::test;
 use crate::common::{
     TestPersistencePaths, TestServer, TestServerOptions,
     add_example_schema_to_governance, add_governance_member_as_witness,
-    create_governance, create_subject, login,
-    make_request, server_auth_route_catalog, server_main_route_catalog,
+    create_governance, create_subject, login, make_request,
+    server_auth_route_catalog, server_main_route_catalog,
     server_public_auth_route_catalog, wait_request_finish,
 };
 
@@ -132,7 +132,6 @@ async fn wait_network_running(
         "network did not reach running state in safe mode; last_status={last_status}, last_body={last_body}"
     );
 }
-
 
 async fn accept_approval(
     client: &Client,
@@ -454,7 +453,6 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
     })
 }
 
-
 #[test(tokio::test)]
 async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let Some(env) = setup_node_env_without_auth().await else {
@@ -549,16 +547,22 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 
-    let (status, body) =
-        make_request(&client, &env.server.url("/governances/authorized"), "GET", None, None)
-            .await;
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/governances/authorized"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let authorized_govs = body.as_array().cloned().unwrap_or_default();
     assert_eq!(authorized_govs, vec![json!(fixture.governance_id)]);
 
     let (status, body) = make_request(
         &client,
-        &env.server.url(&format!("/subjects/{}/sync-peers", fixture.governance_id)),
+        &env.server
+            .url(&format!("/subjects/{}/sync-peers", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -872,7 +876,6 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     )
     .await;
 }
-
 
 #[test(tokio::test)]
 async fn safe_mode_auth_api_with_auth_keeps_reads_and_blocks_mutations() {

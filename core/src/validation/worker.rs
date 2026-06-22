@@ -1097,7 +1097,7 @@ impl Actor for ValiWorker {
     type Message = ValiWorkerMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {

@@ -123,8 +123,9 @@ impl Message for SubjectRegisterMessage {
             | Self::CreateSubject { .. }
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
-            Self::Check { .. }
-            | Self::GetSubjectsByOwnerSchemaBatch { .. } => false,
+            Self::Check { .. } | Self::GetSubjectsByOwnerSchemaBatch { .. } => {
+                false
+            }
         }
     }
 }
@@ -171,7 +172,7 @@ impl Actor for SubjectRegister {
     type Event = SubjectRegisterEvent;
     type Response = SubjectRegisterResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -186,7 +187,12 @@ impl Actor for SubjectRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self
-            .init_store("subject_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
+            .init_store(
+                "subject_register",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
@@ -218,15 +224,19 @@ impl Handler<Self> for SubjectRegister {
 
                 return Ok(SubjectRegisterResponse::Ok);
             }
-            SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch { queries } => {
+            SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch {
+                queries,
+            } => {
                 let results: Vec<Vec<DigestIdentifier>> = queries
                     .into_iter()
                     .map(|(owner, schema_id, namespace)| {
                         self.register
                             .get(&(owner, schema_id, namespace))
                             .map(|(_, subjects)| {
-                                let mut subjects =
-                                    subjects.iter().cloned().collect::<Vec<_>>();
+                                let mut subjects = subjects
+                                    .iter()
+                                    .cloned()
+                                    .collect::<Vec<_>>();
                                 subjects.sort();
                                 subjects
                             })
@@ -386,7 +396,8 @@ impl PersistentActor for SubjectRegister {
         match event {
             SubjectRegisterEvent::RegisterData { gov_version, data } => {
                 for (creator, schema_id, namespace, quantity) in data.iter() {
-                    inner.register
+                    inner
+                        .register
                         .entry((
                             creator.to_owned(),
                             schema_id.to_owned(),
@@ -410,7 +421,8 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
-                inner.register
+                inner
+                    .register
                     .entry((
                         creator.to_owned(),
                         schema_id.to_owned(),
@@ -445,7 +457,8 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
-                inner.register
+                inner
+                    .register
                     .entry((
                         new_owner.to_owned(),
                         schema_id.to_owned(),
@@ -455,7 +468,8 @@ impl PersistentActor for SubjectRegister {
                     .1
                     .insert(subject_id.to_owned());
 
-                inner.register
+                inner
+                    .register
                     .entry((
                         old_owner.to_owned(),
                         schema_id.to_owned(),

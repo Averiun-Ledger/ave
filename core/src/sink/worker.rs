@@ -10,16 +10,18 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message, NotPersistentActor,
-    Response, TimerKey,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
+    NotPersistentActor, Response, TimerKey,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{error, info_span, warn};
 
 use crate::config::SinkServer;
-use crate::sink::http::SinkHttpClient;
-use crate::sink::manager::{SinkManager, SinkManagerMessage, SendResult, SinkWorkerError};
 use crate::sink::extract_sn;
+use crate::sink::http::SinkHttpClient;
+use crate::sink::manager::{
+    SendResult, SinkManager, SinkManagerMessage, SinkWorkerError,
+};
 use ave_common::DataToSink;
 
 // ---------------------------------------------------------------------------
@@ -149,7 +151,10 @@ pub struct SinkWorker {
     /// F-5: Timer key for the pending healthcheck timer.  Cancelling the key
     /// aborts the timer before it sends `HealthCheck`.
     pending_healthcheck: Option<TimerKey>,
-    active_subject_workers: HashMap<String, ActorRef<crate::sink::subject_worker::SinkSubjectWorker>>,
+    active_subject_workers: HashMap<
+        String,
+        ActorRef<crate::sink::subject_worker::SinkSubjectWorker>,
+    >,
     /// F-5: Timer keys for pending child shutdown timers.
     pending_child_shutdowns: HashMap<String, TimerKey>,
     /// Subjects waiting for a catch-up slot once `max_catch_up_concurrency`
@@ -201,8 +206,9 @@ impl Actor for SinkWorker {
             && !auth.username.is_empty()
         {
             let password = std::env::var(
-                crate::sink::http::sink_password_env_var(&self.sink_name)
-            ).unwrap_or_default();
+                crate::sink::http::sink_password_env_var(&self.sink_name),
+            )
+            .unwrap_or_default();
             if !password.is_empty() {
                 match crate::sink::obtain_token(
                     &auth.auth_url,
@@ -223,7 +229,8 @@ impl Actor for SinkWorker {
         }
 
         // Schedule first healthcheck after configurable startup delay + jitter.
-        let startup_delay = crate::sink::add_jitter(self.server.startup_healthcheck_delay_secs);
+        let startup_delay =
+            crate::sink::add_jitter(self.server.startup_healthcheck_delay_secs);
         ctx.schedule_once(
             Duration::from_secs(startup_delay),
             SinkWorkerMessage::HealthCheck,
@@ -246,8 +253,12 @@ impl Handler<SinkWorker> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                if matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. }) {
-                    let (subject_id, _schema_id) = data.payload.get_subject_schema();
+                if matches!(
+                    self.healthcheck_state,
+                    HealthcheckState::Unhealthy { .. }
+                ) {
+                    let (subject_id, _schema_id) =
+                        data.payload.get_subject_schema();
                     let sn = extract_sn(&data);
                     match ctx.get_parent::<SinkManager>().await {
                         Ok(parent) => {
@@ -271,9 +282,11 @@ impl Handler<SinkWorker> for SinkWorker {
                 }
 
                 self.last_activity = Instant::now();
-                let (subject_id, _schema_id) = data.payload.get_subject_schema();
+                let (subject_id, _schema_id) =
+                    data.payload.get_subject_schema();
 
-                let child_ref = self.ensure_subject_worker(&subject_id, ctx).await?;
+                let child_ref =
+                    self.ensure_subject_worker(&subject_id, ctx).await?;
                 child_ref
                     .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::DeliverEvent(
                         Arc::clone(&data),
@@ -287,10 +300,15 @@ impl Handler<SinkWorker> for SinkWorker {
             SinkWorkerMessage::HealthCheck => {
                 match self.client.health_check().await {
                     Ok(()) => {
-                        if let HealthcheckState::Unhealthy { .. } = self.healthcheck_state {
+                        if let HealthcheckState::Unhealthy { .. } =
+                            self.healthcheck_state
+                        {
                             self.recoveries_after_failure += 1;
-                            if self.recoveries_after_failure < self.server.max_recoveries_after_failure {
-                                self.healthcheck_state = HealthcheckState::Healthy;
+                            if self.recoveries_after_failure
+                                < self.server.max_recoveries_after_failure
+                            {
+                                self.healthcheck_state =
+                                    HealthcheckState::Healthy;
                                 self.broadcast_to_children(
                                     crate::sink::subject_worker::SinkSubjectWorkerMessage::Resume,
                                     ctx,
@@ -334,12 +352,16 @@ impl Handler<SinkWorker> for SinkWorker {
                                 match ctx.get_parent::<SinkManager>().await {
                                     Ok(parent) => {
                                         if let Err(e) = parent
-                                            .emit_error(SinkWorkerError::Blocked {
-                                                sink: self.sink_name.clone(),
-                                                subject_id: String::new(),
-                                                sn: 0,
-                                                reason: blocked_reason,
-                                            })
+                                            .emit_error(
+                                                SinkWorkerError::Blocked {
+                                                    sink: self
+                                                        .sink_name
+                                                        .clone(),
+                                                    subject_id: String::new(),
+                                                    sn: 0,
+                                                    reason: blocked_reason,
+                                                },
+                                            )
                                             .await
                                         {
                                             error!(msg_type = "ReportBlocked", sink = %self.sink_name, error = %e, "Failed to report blocked sink");
@@ -355,7 +377,9 @@ impl Handler<SinkWorker> for SinkWorker {
                     Err(_) => {
                         let idx = match self.healthcheck_state {
                             HealthcheckState::Healthy => 0,
-                            HealthcheckState::Unhealthy { next_interval_idx } => next_interval_idx,
+                            HealthcheckState::Unhealthy {
+                                next_interval_idx,
+                            } => next_interval_idx,
                         };
                         let intervals = &self.server.healthcheck_intervals_secs;
                         let last_idx = intervals.len().saturating_sub(1);
@@ -378,7 +402,9 @@ impl Handler<SinkWorker> for SinkWorker {
                 }
                 // Report idle state to parent so manager can decide on shutdown.
                 if Instant::now().duration_since(self.last_activity)
-                    >= Duration::from_millis(self.server.sink_worker_idle_timeout_ms)
+                    >= Duration::from_millis(
+                        self.server.sink_worker_idle_timeout_ms,
+                    )
                 {
                     self.report_idle(ctx).await;
                 }
@@ -392,7 +418,10 @@ impl Handler<SinkWorker> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                if matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. }) {
+                if matches!(
+                    self.healthcheck_state,
+                    HealthcheckState::Unhealthy { .. }
+                ) {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
@@ -400,8 +429,14 @@ impl Handler<SinkWorker> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                if self.in_catch_up.len() >= self.server.max_catch_up_concurrency {
-                    if !self.pending_catch_ups.iter().any(|(id, _)| id == &subject_id) {
+                if self.in_catch_up.len()
+                    >= self.server.max_catch_up_concurrency
+                {
+                    if !self
+                        .pending_catch_ups
+                        .iter()
+                        .any(|(id, _)| id == &subject_id)
+                    {
                         self.pending_catch_ups.push_back((subject_id, from_sn));
                     }
                     return Ok(SinkWorkerResponse::Ok);
@@ -410,7 +445,8 @@ impl Handler<SinkWorker> for SinkWorker {
                 self.in_catch_up.insert(subject_id.clone());
                 self.last_activity = Instant::now();
 
-                let child_ref = self.ensure_subject_worker(&subject_id, ctx).await?;
+                let child_ref =
+                    self.ensure_subject_worker(&subject_id, ctx).await?;
                 child_ref
                     .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
                         from_sn,
@@ -431,7 +467,10 @@ impl Handler<SinkWorker> for SinkWorker {
                 self.cancel_child_shutdown(ctx, &subject_id);
                 if let SendResult::Success = result {
                     self.recoveries_after_failure = 0;
-                    if matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. }) {
+                    if matches!(
+                        self.healthcheck_state,
+                        HealthcheckState::Unhealthy { .. }
+                    ) {
                         self.healthcheck_state = HealthcheckState::Healthy;
                         match ctx.get_parent::<SinkManager>().await {
                             Ok(parent) => {
@@ -540,7 +579,9 @@ impl Handler<SinkWorker> for SinkWorker {
             }
             SinkWorkerMessage::ChildShutdown { subject_id } => {
                 self.in_catch_up.remove(&subject_id);
-                if let Some(child_ref) = self.active_subject_workers.remove(&subject_id) {
+                if let Some(child_ref) =
+                    self.active_subject_workers.remove(&subject_id)
+                {
                     let _ = child_ref.tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop).await;
                 }
                 self.pending_child_shutdowns.remove(&subject_id);
@@ -577,10 +618,20 @@ impl Handler<SinkWorker> for SinkWorker {
                     self.in_catch_up.remove(&subject_id);
                 }
                 if self.blocked.is_none()
-                    && !matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. })
+                    && !matches!(
+                        self.healthcheck_state,
+                        HealthcheckState::Unhealthy { .. }
+                    )
                 {
-                    self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
-                    let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
+                    self.healthcheck_state = HealthcheckState::Unhealthy {
+                        next_interval_idx: 0,
+                    };
+                    let delay_secs = self
+                        .server
+                        .healthcheck_intervals_secs
+                        .first()
+                        .copied()
+                        .unwrap_or(30);
                     let delay_secs = crate::sink::add_jitter(delay_secs);
                     self.schedule_healthcheck(ctx, delay_secs);
                 }
@@ -613,10 +664,20 @@ impl Handler<SinkWorker> for SinkWorker {
                 if from_catch_up {
                     self.in_catch_up.remove(&subject_id);
                     if self.blocked.is_none()
-                        && !matches!(self.healthcheck_state, HealthcheckState::Unhealthy { .. })
+                        && !matches!(
+                            self.healthcheck_state,
+                            HealthcheckState::Unhealthy { .. }
+                        )
                     {
-                        self.healthcheck_state = HealthcheckState::Unhealthy { next_interval_idx: 0 };
-                        let delay_secs = self.server.healthcheck_intervals_secs.first().copied().unwrap_or(30);
+                        self.healthcheck_state = HealthcheckState::Unhealthy {
+                            next_interval_idx: 0,
+                        };
+                        let delay_secs = self
+                            .server
+                            .healthcheck_intervals_secs
+                            .first()
+                            .copied()
+                            .unwrap_or(30);
                         let delay_secs = crate::sink::add_jitter(delay_secs);
                         self.schedule_healthcheck(ctx, delay_secs);
                     }
@@ -673,7 +734,11 @@ impl Handler<SinkWorker> for SinkWorker {
                     }
                 }
             }
-            SinkSubjectWorkerError::SubjectNotFound { subject_id, sn, from_catch_up } => {
+            SinkSubjectWorkerError::SubjectNotFound {
+                subject_id,
+                sn,
+                from_catch_up,
+            } => {
                 if from_catch_up {
                     self.in_catch_up.remove(&subject_id);
                 }
@@ -736,7 +801,11 @@ impl SinkWorker {
         self.pending_child_shutdowns.insert(subject_id, key);
     }
 
-    fn cancel_child_shutdown(&mut self, ctx: &ActorContext<SinkWorker>, subject_id: &str) {
+    fn cancel_child_shutdown(
+        &mut self,
+        ctx: &ActorContext<SinkWorker>,
+        subject_id: &str,
+    ) {
         if let Some(key) = self.pending_child_shutdowns.remove(subject_id) {
             ctx.cancel_timer(key);
         }
@@ -746,7 +815,10 @@ impl SinkWorker {
         &mut self,
         subject_id: &str,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<ActorRef<crate::sink::subject_worker::SinkSubjectWorker>, ActorError> {
+    ) -> Result<
+        ActorRef<crate::sink::subject_worker::SinkSubjectWorker>,
+        ActorError,
+    > {
         self.cancel_child_shutdown(ctx, subject_id);
         if let Some(worker) = self.active_subject_workers.get(subject_id) {
             return Ok(worker.clone());
@@ -758,7 +830,8 @@ impl SinkWorker {
             self.is_governance,
         );
         let child_ref = ctx.create_child(subject_id, worker).await?;
-        self.active_subject_workers.insert(subject_id.to_string(), child_ref.clone());
+        self.active_subject_workers
+            .insert(subject_id.to_string(), child_ref.clone());
         Ok(child_ref)
     }
 
@@ -770,7 +843,9 @@ impl SinkWorker {
         if self.blocked.is_some() {
             return Ok(());
         }
-        while let Some((subject_id, from_sn)) = self.pending_catch_ups.pop_front() {
+        while let Some((subject_id, from_sn)) =
+            self.pending_catch_ups.pop_front()
+        {
             if self.in_catch_up.contains(&subject_id) {
                 continue;
             }
@@ -831,8 +906,12 @@ impl SinkWorker {
             self.active_subject_workers.remove(&subject_id);
         }
         // Also cancel any pending shutdowns for children we're broadcasting to
-        if matches!(msg, crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop) {
-            let keys: Vec<String> = self.pending_child_shutdowns.keys().cloned().collect();
+        if matches!(
+            msg,
+            crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop
+        ) {
+            let keys: Vec<String> =
+                self.pending_child_shutdowns.keys().cloned().collect();
             for subject_id in keys {
                 self.cancel_child_shutdown(ctx, &subject_id);
             }
@@ -885,5 +964,3 @@ impl SinkWorker {
         }
     }
 }
-
-

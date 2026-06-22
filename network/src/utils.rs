@@ -662,7 +662,8 @@ mod tests {
 
     #[test]
     fn req_res_config_deserialize_duration_secs() {
-        let cfg: ReqResConfig = serde_json::from_str(r#"{"message_timeout": 5}"#).unwrap();
+        let cfg: ReqResConfig =
+            serde_json::from_str(r#"{"message_timeout": 5}"#).unwrap();
         assert_eq!(cfg.message_timeout, Duration::from_secs(5));
     }
 

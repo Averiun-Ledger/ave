@@ -250,7 +250,8 @@ mod tests {
     #[test]
     fn test_from_bytes_invalid_length() {
         // Valid identifier 'E' (0x45) for Ed25519, but wrong signature length
-        let err = SignatureIdentifier::from_bytes(&[0x45, 1, 2, 3]).unwrap_err();
+        let err =
+            SignatureIdentifier::from_bytes(&[0x45, 1, 2, 3]).unwrap_err();
         match err {
             CryptoError::InvalidDataLength { expected, actual } => {
                 assert_eq!(expected, 65); // 1 prefix + 64 signature
@@ -288,7 +289,9 @@ mod tests {
         let corrupted: SignatureIdentifier = borsh::from_slice(&bytes).unwrap();
 
         let public_key = signer.public_key();
-        let err = corrupted.verify(message, public_key.as_bytes()).unwrap_err();
+        let err = corrupted
+            .verify(message, public_key.as_bytes())
+            .unwrap_err();
         match err {
             CryptoError::InvalidSignatureFormat(msg) => {
                 assert!(msg.contains("Invalid signature length"));

@@ -308,10 +308,8 @@ mod tests {
         );
 
         // Changing one IP should trigger renewal
-        let config_b = test_config(vec![
-            "127.0.0.1".to_string(),
-            "10.0.0.1".to_string(),
-        ]);
+        let config_b =
+            test_config(vec!["127.0.0.1".to_string(), "10.0.0.1".to_string()]);
         assert!(
             cert_needs_renewal(&config_b, &cert_path, &key_path).await,
             "changed IP should trigger renewal"

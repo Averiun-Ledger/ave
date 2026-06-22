@@ -102,7 +102,10 @@ mod tests {
         };
         let result: Result<Signature, _> = bridge.try_into();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SignatureError::InvalidPublicKey(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SignatureError::InvalidPublicKey(_)
+        ));
     }
 
     #[test]
@@ -121,7 +124,10 @@ mod tests {
         };
         let result: Result<Signature, _> = bridge.try_into();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SignatureError::InvalidSignature(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SignatureError::InvalidSignature(_)
+        ));
     }
 
     #[test]
@@ -140,7 +146,10 @@ mod tests {
         };
         let result: Result<Signature, _> = bridge.try_into();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SignatureError::InvalidContentHash(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SignatureError::InvalidContentHash(_)
+        ));
     }
 
     #[test]

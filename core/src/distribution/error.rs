@@ -91,11 +91,9 @@ impl From<DistributorError> for ActorError {
             | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. }
             | DistributorError::TransferEventInvalid { .. }
-            | DistributorError::TrackerBanned => {
-                Self::Functional {
-                    description: error.to_string(),
-                }
-            }
+            | DistributorError::TrackerBanned => Self::Functional {
+                description: error.to_string(),
+            },
             DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
             | DistributorError::UpTrackerFailed { .. }

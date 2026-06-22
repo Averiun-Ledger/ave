@@ -30,7 +30,10 @@ pub(crate) struct TransferVerifier {
 }
 
 impl TransferVerifier {
-    pub(crate) const fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
+    pub(crate) const fn new(
+        hash: HashAlgorithm,
+        our_key: Arc<PublicKey>,
+    ) -> Self {
         Self { hash, our_key }
     }
 
@@ -42,18 +45,22 @@ impl TransferVerifier {
         transfer_event: &Ledger,
         expected_subject_id: &DigestIdentifier,
         ledger: &Ledger,
-    ) -> Result<(DigestIdentifier, bool, Option<SubjectData>), DistributorError> {
+    ) -> Result<(DigestIdentifier, bool, Option<SubjectData>), DistributorError>
+    {
         // 1. El protocolo debe ser Transfer.
-        let (event_request, evaluation, validation) = match &transfer_event.protocols {
-            Protocols::Transfer { event_request, evaluation, validation } => {
-                (event_request, evaluation, validation)
-            }
-            _ => {
-                return Err(DistributorError::TransferEventInvalid {
-                    details: "protocol is not Transfer".to_string(),
-                });
-            }
-        };
+        let (event_request, evaluation, validation) =
+            match &transfer_event.protocols {
+                Protocols::Transfer {
+                    event_request,
+                    evaluation,
+                    validation,
+                } => (event_request, evaluation, validation),
+                _ => {
+                    return Err(DistributorError::TransferEventInvalid {
+                        details: "protocol is not Transfer".to_string(),
+                    });
+                }
+            };
 
         if !evaluation.is_ok() {
             return Err(DistributorError::TransferEventInvalid {
@@ -119,7 +126,9 @@ impl TransferVerifier {
         let ledger_seal = LedgerSeal {
             gov_version: transfer_event.gov_version,
             sn: transfer_event.sn,
-            prev_ledger_event_hash: transfer_event.prev_ledger_event_hash.clone(),
+            prev_ledger_event_hash: transfer_event
+                .prev_ledger_event_hash
+                .clone(),
             protocols_hash,
         };
 
@@ -167,35 +176,53 @@ impl TransferVerifier {
         }
 
         // 8. Verificar quorum de validación.
-        let subject_data = get_subject_data(ctx, expected_subject_id).await
+        let subject_data = get_subject_data(ctx, expected_subject_id)
+            .await
             .map_err(|e| DistributorError::TransferEventInvalid {
                 details: format!("failed to get subject data: {}", e),
             })?;
 
-        let (governance_id, schema_id, namespace, is_register) = match &subject_data {
-            Some(SubjectData::Tracker { governance_id, schema_id, namespace, .. }) => {
-                (governance_id.clone(), schema_id.clone(), Namespace::from(namespace.clone()), true)
-            }
-            Some(SubjectData::Governance { .. }) => {
-                return Err(DistributorError::TransferEventInvalid {
-                    details: "subject is governance".to_string(),
-                });
-            }
-            None => {
-                let Some(create) = ledger.get_create_event() else {
+        let (governance_id, schema_id, namespace, is_register) =
+            match &subject_data {
+                Some(SubjectData::Tracker {
+                    governance_id,
+                    schema_id,
+                    namespace,
+                    ..
+                }) => (
+                    governance_id.clone(),
+                    schema_id.clone(),
+                    Namespace::from(namespace.clone()),
+                    true,
+                ),
+                Some(SubjectData::Governance { .. }) => {
                     return Err(DistributorError::TransferEventInvalid {
-                        details: "ledger has no create event".to_string(),
-                    });
-                };
-                if create.schema_id.is_gov() || create.governance_id.is_empty() {
-                    return Err(DistributorError::TransferEventInvalid {
-                        details: "invalid create event for transfer hint".to_string(),
+                        details: "subject is governance".to_string(),
                     });
                 }
+                None => {
+                    let Some(create) = ledger.get_create_event() else {
+                        return Err(DistributorError::TransferEventInvalid {
+                            details: "ledger has no create event".to_string(),
+                        });
+                    };
+                    if create.schema_id.is_gov()
+                        || create.governance_id.is_empty()
+                    {
+                        return Err(DistributorError::TransferEventInvalid {
+                            details: "invalid create event for transfer hint"
+                                .to_string(),
+                        });
+                    }
 
-                (create.governance_id, create.schema_id, create.namespace, false)
-            }
-        };
+                    (
+                        create.governance_id,
+                        create.schema_id,
+                        create.namespace,
+                        false,
+                    )
+                }
+            };
 
         let role_data = crate::model::common::get_validation_roles_register(
             ctx,
@@ -238,9 +265,14 @@ impl TransferVerifier {
         sender_ledger: &[Ledger],
         transfer_event: &Ledger,
     ) -> Result<TransferSimulationResult, ActorError> {
-        let first_ledger = sender_ledger.first().ok_or_else(|| ActorError::Functional {
-            description: "Empty sender ledger in verify_and_simulate_transfer".to_string(),
-        })?;
+        let first_ledger =
+            sender_ledger
+                .first()
+                .ok_or_else(|| ActorError::Functional {
+                    description:
+                        "Empty sender ledger in verify_and_simulate_transfer"
+                            .to_string(),
+                })?;
         let (governance_id, _, subject_data) = self
             .verify_light(ctx, transfer_event, subject_id, first_ledger)
             .await?;
@@ -277,7 +309,10 @@ impl TransferVerifier {
         )
         .await?;
 
-        if !matches!(simulated_limit, crate::governance::witnesses_register::HiSnLimit::None) {
+        if !matches!(
+            simulated_limit,
+            crate::governance::witnesses_register::HiSnLimit::None
+        ) {
             Ok(TransferSimulationResult::Witness)
         } else {
             Ok(TransferSimulationResult::NotWitness)

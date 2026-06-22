@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::governance::sn_register::SnLimit;
 
 use crate::model::common::{
-    Interval, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerIdentity, TrackerParams, TrackerVisibilityState,
+    Interval, TrackerEventVisibility, TrackerIdentity, TrackerParams,
+    TrackerStoredVisibility, TrackerVisibilityState,
 };
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
@@ -12,12 +12,13 @@ use ave_common::{Namespace, SchemaType};
 use tracing::{debug, warn};
 
 use super::{
-    CreatorWitnessGrant, GovVersionLimit, HiSnLimit, OldOwnerData, TransferData,
-    TrackerDeliveryMode, TrackerDeliveryRange, WitnessesRegister, WitnessesType,
-    ActualSearch,
+    ActualSearch, CreatorWitnessGrant, GovVersionLimit, HiSnLimit,
+    OldOwnerData, TrackerDeliveryMode, TrackerDeliveryRange, TransferData,
+    WitnessesRegister, WitnessesType,
 };
 
-type OldOwnerCandidate = (PublicKey, OldOwnerData, Option<u64>, Option<u64>, bool);
+type OldOwnerCandidate =
+    (PublicKey, OldOwnerData, Option<u64>, Option<u64>, bool);
 
 impl WitnessesRegister {
     pub(crate) fn event_delivery_mode(
@@ -244,16 +245,15 @@ impl WitnessesRegister {
         let (sn_limit, mut effective_owner) = match search_result {
             Some(result) => result,
             None => {
-                self
-                    .search_witnesses_with_owner(
-                        ctx,
-                        node,
-                        data,
-                        params.namespace.clone(),
-                        params.schema_id.clone(),
-                        subject_id.clone(),
-                    )
-                    .await?
+                self.search_witnesses_with_owner(
+                    ctx,
+                    node,
+                    data,
+                    params.namespace.clone(),
+                    params.schema_id.clone(),
+                    subject_id.clone(),
+                )
+                .await?
             }
         };
 
@@ -310,45 +310,50 @@ impl WitnessesRegister {
             .collect();
         sorted_old_owners.sort_by_key(|(_, sn)| *sn);
 
-        let transfer_sn = effective_owner.and_then(|owner| {
-            if data.actual_new_owner_data.as_ref().is_some_and(|(new_owner, _)| new_owner == &owner)
-            {
-                // Es el new_owner pendiente: necesita ver la transferencia actual
-                Some(data.sn)
-            } else if data.actual_owner == owner {
-                // Es el owner actual: su incoming transfer es el outgoing del
-                // último old_owner. Solo lo necesita si su acceso cruza ese transfer.
-                sorted_old_owners
-                    .last()
-                    .map(|(_, sn)| sn.saturating_sub(1))
-                    .filter(|transfer_sn| access_limit >= *transfer_sn)
-            } else if let Some(idx) = sorted_old_owners.iter().position(|(o, _)| o == &owner) {
-                // Es un old_owner: su incoming transfer es el outgoing del owner
-                // anterior. Para idx==0, el owner anterior es el creador original
-                // (que no está en old_owners); su outgoing transfer está justo
-                // antes del Confirm del primer old_owner.
-                let candidate = if idx == 0 {
-                    sorted_old_owners[0].1.saturating_sub(1)
-                } else {
-                    sorted_old_owners[idx - 1].1.saturating_sub(1)
-                };
-                // Solo necesita el transfer_event si su access_limit lo cruza
-                if access_limit >= candidate {
-                    Some(candidate)
+        let transfer_sn = effective_owner
+            .and_then(|owner| {
+                if data
+                    .actual_new_owner_data
+                    .as_ref()
+                    .is_some_and(|(new_owner, _)| new_owner == &owner)
+                {
+                    // Es el new_owner pendiente: necesita ver la transferencia actual
+                    Some(data.sn)
+                } else if data.actual_owner == owner {
+                    // Es el owner actual: su incoming transfer es el outgoing del
+                    // último old_owner. Solo lo necesita si su acceso cruza ese transfer.
+                    sorted_old_owners
+                        .last()
+                        .map(|(_, sn)| sn.saturating_sub(1))
+                        .filter(|transfer_sn| access_limit >= *transfer_sn)
+                } else if let Some(idx) =
+                    sorted_old_owners.iter().position(|(o, _)| o == &owner)
+                {
+                    // Es un old_owner: su incoming transfer es el outgoing del owner
+                    // anterior. Para idx==0, el owner anterior es el creador original
+                    // (que no está en old_owners); su outgoing transfer está justo
+                    // antes del Confirm del primer old_owner.
+                    let candidate = if idx == 0 {
+                        sorted_old_owners[0].1.saturating_sub(1)
+                    } else {
+                        sorted_old_owners[idx - 1].1.saturating_sub(1)
+                    };
+                    // Solo necesita el transfer_event si su access_limit lo cruza
+                    if access_limit >= candidate {
+                        Some(candidate)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
-            }
-        })
-        .filter(|transfer_sn| params.actual_sn.is_none_or(|sn| sn < *transfer_sn));
-
-
+            })
+            .filter(|transfer_sn| {
+                params.actual_sn.is_none_or(|sn| sn < *transfer_sn)
+            });
 
         let from_sn = params.actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
-
             return Ok((None, transfer_sn, None, true, Vec::new()));
         }
 
@@ -373,7 +378,9 @@ impl WitnessesRegister {
             let range_from = window[0];
             let range_to = window[1].saturating_sub(1);
 
-            while gv_idx < gov_versions.len() && gov_versions[gv_idx].0.hi < range_from {
+            while gv_idx < gov_versions.len()
+                && gov_versions[gv_idx].0.hi < range_from
+            {
                 gv_idx += 1;
             }
 
@@ -548,15 +555,12 @@ impl WitnessesRegister {
         data: &TransferData,
         cached: &mut Option<(SnLimit, Option<PublicKey>)>,
     ) -> Result<HiSnLimit, ActorError> {
-
-
         if data.actual_owner == *node
             || data
                 .actual_new_owner_data
                 .as_ref()
                 .is_some_and(|(new_owner, _)| new_owner == node)
         {
-
             return Ok(HiSnLimit::Infinity);
         }
 
@@ -578,7 +582,9 @@ impl WitnessesRegister {
             SnLimit::Sn(sn) => {
                 HiSnLimit::Sn(old_owner_limit.map_or(sn, |old| sn.max(old)))
             }
-            SnLimit::NotSn => old_owner_limit.map_or(HiSnLimit::None, HiSnLimit::Sn),
+            SnLimit::NotSn => {
+                old_owner_limit.map_or(HiSnLimit::None, HiSnLimit::Sn)
+            }
         };
         Ok(limit)
     }
@@ -766,7 +772,8 @@ impl WitnessesRegister {
             }
         }
 
-        better_gov_version.map_or(GovVersionLimit::None, GovVersionLimit::Version)
+        better_gov_version
+            .map_or(GovVersionLimit::None, GovVersionLimit::Version)
     }
 
     pub(crate) async fn search_witnesses_with_owner(
@@ -909,18 +916,18 @@ impl WitnessesRegister {
         }
 
         // === FASE 2: Batch fetch de SNs ===
-        let sn_cache: HashMap<u64, SnLimit> = if gov_versions_to_fetch.is_empty()
-        {
-            HashMap::new()
-        } else {
-            let unique: std::collections::HashSet<u64> =
-                gov_versions_to_fetch.into_iter().collect();
-            let unique_vec: Vec<u64> = unique.into_iter().collect();
-            let sns = self
-                .get_sns(ctx, subject_id.clone(), unique_vec.clone())
-                .await?;
-            unique_vec.into_iter().zip(sns).collect()
-        };
+        let sn_cache: HashMap<u64, SnLimit> =
+            if gov_versions_to_fetch.is_empty() {
+                HashMap::new()
+            } else {
+                let unique: std::collections::HashSet<u64> =
+                    gov_versions_to_fetch.into_iter().collect();
+                let unique_vec: Vec<u64> = unique.into_iter().collect();
+                let sns = self
+                    .get_sns(ctx, subject_id.clone(), unique_vec.clone())
+                    .await?;
+                unique_vec.into_iter().zip(sns).collect()
+            };
 
         // === FASE 3: Evaluación con cache ===
         for (creator, old_data, user_gv, schema_gv, is_direct) in
@@ -955,15 +962,17 @@ impl WitnessesRegister {
 
         let sn_limit = better_gov_version.map_or_else(
             || better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
-            |gov_version| {
-                match sn_cache.get(&gov_version).cloned().unwrap_or(SnLimit::NotSn) {
-                    SnLimit::Sn(sn) => better_sn
-                        .map_or(SnLimit::Sn(sn), |better_sn| {
-                            SnLimit::Sn(sn.max(better_sn))
-                        }),
-                    SnLimit::LastSn => SnLimit::Sn(data.sn),
-                    SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
-                }
+            |gov_version| match sn_cache
+                .get(&gov_version)
+                .cloned()
+                .unwrap_or(SnLimit::NotSn)
+            {
+                SnLimit::Sn(sn) => better_sn
+                    .map_or(SnLimit::Sn(sn), |better_sn| {
+                        SnLimit::Sn(sn.max(better_sn))
+                    }),
+                SnLimit::LastSn => SnLimit::Sn(data.sn),
+                SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
             },
         );
 
@@ -984,7 +993,12 @@ impl WitnessesRegister {
             None => {
                 let (sn_limit, effective_owner) = self
                     .search_witnesses_with_owner(
-                        ctx, node, data, identity.namespace, identity.schema_id, subject_id,
+                        ctx,
+                        node,
+                        data,
+                        identity.namespace,
+                        identity.schema_id,
+                        subject_id,
                     )
                     .await?;
                 *cached = Some((sn_limit, effective_owner));
@@ -992,5 +1006,4 @@ impl WitnessesRegister {
             }
         }
     }
-
 }

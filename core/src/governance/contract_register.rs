@@ -92,7 +92,7 @@ impl Actor for ContractRegister {
     type Message = ContractRegisterMessage;
     type Response = ContractRegisterResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -106,8 +106,13 @@ impl Actor for ContractRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("contract_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
-            .await
+        self.init_store(
+            "contract_register",
+            Some(ctx.path().parent().key().to_owned()),
+            false,
+            ctx,
+        )
+        .await
     }
 }
 
@@ -201,7 +206,8 @@ impl PersistentActor for ContractRegister {
                 contract_name,
                 metadata,
             } => {
-                inner.contracts
+                inner
+                    .contracts
                     .insert(contract_name.clone(), metadata.clone());
             }
         }

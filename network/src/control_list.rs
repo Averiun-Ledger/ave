@@ -1094,9 +1094,9 @@ mod tests {
         let mut registry = Registry::default();
         let metrics = crate::metrics::register(&mut registry);
         let mut behaviour = Behaviour::new(
-            Config::default().with_enable(true).with_allow_list(vec![
-                PeerId::random().to_string(),
-            ]),
+            Config::default()
+                .with_enable(true)
+                .with_allow_list(vec![PeerId::random().to_string()]),
             &[],
             None,
             Some(metrics),
@@ -1180,13 +1180,16 @@ mod tests {
         assert_eq!(raw, 42);
         // The function itself is invoked via serde attribute on Config fields;
         // verify that Config deserialization uses it correctly.
-        let config: Config = serde_json::from_str(r#"{"interval_request": 300}"#).unwrap();
+        let config: Config =
+            serde_json::from_str(r#"{"interval_request": 300}"#).unwrap();
         assert_eq!(config.get_interval_request(), Duration::from_secs(300));
     }
 
     #[test]
     fn deserialize_duration_secs_rejects_non_integer() {
-        let result = serde_json::from_str::<Config>(r#"{"interval_request": "not-a-number"}"#);
+        let result = serde_json::from_str::<Config>(
+            r#"{"interval_request": "not-a-number"}"#,
+        );
         assert!(result.is_err());
     }
 

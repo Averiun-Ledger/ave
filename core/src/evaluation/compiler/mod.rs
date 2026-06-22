@@ -171,7 +171,10 @@ impl CompilerSupport {
     }
 
     fn vendor_dir_for_contract() -> PathBuf {
-        PathBuf::from(".").join("..").join("..").join(Self::VENDOR_DIR)
+        PathBuf::from(".")
+            .join("..")
+            .join("..")
+            .join(Self::VENDOR_DIR)
     }
 
     fn build_output_wasm_path(contracts_root: &Path) -> PathBuf {
@@ -187,10 +190,8 @@ impl CompilerSupport {
         vendor_dir: Option<&Path>,
     ) -> String {
         let mut config = include_str!("contract_cargo_config.toml").to_owned();
-        config = config.replace(
-            "{target_dir}",
-            &shared_target_dir.to_string_lossy(),
-        );
+        config = config
+            .replace("{target_dir}", &shared_target_dir.to_string_lossy());
 
         if let Some(vendor_dir) = vendor_dir {
             config.push_str(&format!(
@@ -1410,16 +1411,19 @@ impl CompilerSupport {
         limits: &WasmLimits,
     ) -> Result<(MemoryManager, u32), CompilerError> {
         let mut context = MemoryManager::from_limits(limits);
-        let state_data = ContractData::from_json_value(&state.0)
-            .map_err(|e| CompilerError::SerializationError {
-                context: "state serialization to JSON bytes",
-                details: e.to_string(),
+        let state_data =
+            ContractData::from_json_value(&state.0).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "state serialization to JSON bytes",
+                    details: e.to_string(),
+                }
             })?;
-        let state_bytes =
-            to_vec(&state_data).map_err(|e| CompilerError::SerializationError {
+        let state_bytes = to_vec(&state_data).map_err(|e| {
+            CompilerError::SerializationError {
                 context: "state serialization",
                 details: e.to_string(),
-            })?;
+            }
+        })?;
         let state_ptr = context.add_data_raw(&state_bytes)?;
         Ok((context, state_ptr as u32))
     }

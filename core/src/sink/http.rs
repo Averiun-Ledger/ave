@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::Client;
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -43,8 +43,10 @@ impl CompiledUrlTemplate {
     }
 
     pub fn render(&self, subject_id: &str, schema_id: &str) -> String {
-        let encoded_subject = utf8_percent_encode(subject_id, PATH_SEGMENT_ENCODE_SET);
-        let encoded_schema = utf8_percent_encode(schema_id, PATH_SEGMENT_ENCODE_SET);
+        let encoded_subject =
+            utf8_percent_encode(subject_id, PATH_SEGMENT_ENCODE_SET);
+        let encoded_schema =
+            utf8_percent_encode(schema_id, PATH_SEGMENT_ENCODE_SET);
         self.template
             .replace("{{subject-id}}", &encoded_subject.to_string())
             .replace("{{schema-id}}", &encoded_schema.to_string())
@@ -57,7 +59,13 @@ impl CompiledUrlTemplate {
 pub fn sink_password_env_var(sink_name: &str) -> String {
     let normalized: String = sink_name
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("AVE_SINK_PASSWORD_{}", normalized)
 }
@@ -110,7 +118,9 @@ impl SinkHttpClient {
         // Add auth header if available
         if self.server.auth.is_some() {
             match self.build_auth_header().await {
-                Ok(Some(header)) => { request = request.header("Authorization", header); }
+                Ok(Some(header)) => {
+                    request = request.header("Authorization", header);
+                }
                 Ok(None) => {}
                 Err(_e) => {
                     // If auth is required but we can't build a header, still try without auth
@@ -119,23 +129,30 @@ impl SinkHttpClient {
             }
         }
 
-        let response = request.send().await.map_err(|e| SinkError::SendRequest {
-            message: format!("Health check request failed: {}", e),
-            retryable: true,
-        })?;
+        let response =
+            request.send().await.map_err(|e| SinkError::SendRequest {
+                message: format!("Health check request failed: {}", e),
+                retryable: true,
+            })?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else if status == 401 || status == 403 {
             self.invalidate_cached_token().await;
-            let body = response.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_owned());
             Err(SinkError::AuthExpired {
                 status: status.as_u16(),
                 message: format!("Health check returned {}: {}", status, body),
             })
         } else {
-            let body = response.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_owned());
             Err(SinkError::HttpStatus {
                 status: status.as_u16(),
                 message: format!("Health check returned {}: {}", status, body),
@@ -144,23 +161,34 @@ impl SinkHttpClient {
         }
     }
 
-    pub async fn send_data_to_sink(&self, data: Arc<DataToSink>) -> Result<(), SinkError> {
+    pub async fn send_data_to_sink(
+        &self,
+        data: Arc<DataToSink>,
+    ) -> Result<(), SinkError> {
         let (subject_id, schema_id) = data.payload.get_subject_schema();
         let url = self.url_template.render(&subject_id, &schema_id);
-        let payload = serde_json::to_vec(data.as_ref()).map_err(|e| SinkError::SendRequest {
-            message: format!("JSON serialization failed: {}", e),
-            retryable: false,
+        let payload = serde_json::to_vec(data.as_ref()).map_err(|e| {
+            SinkError::SendRequest {
+                message: format!("JSON serialization failed: {}", e),
+                retryable: false,
+            }
         })?;
 
         self.send_with_retry(&url, payload).await
     }
 
-    pub async fn send_light_event(&self, light: LightEvent) -> Result<(), SinkError> {
-        let url = self.url_template.render(&light.subject_id, &light.schema_id);
-        let payload = serde_json::to_vec(&light).map_err(|e| SinkError::SendRequest {
-            message: format!("JSON serialization failed: {}", e),
-            retryable: false,
-        })?;
+    pub async fn send_light_event(
+        &self,
+        light: LightEvent,
+    ) -> Result<(), SinkError> {
+        let url = self
+            .url_template
+            .render(&light.subject_id, &light.schema_id);
+        let payload =
+            serde_json::to_vec(&light).map_err(|e| SinkError::SendRequest {
+                message: format!("JSON serialization failed: {}", e),
+                retryable: false,
+            })?;
 
         self.send_with_retry(&url, payload).await
     }
@@ -170,12 +198,17 @@ impl SinkHttpClient {
         *guard = None;
     }
 
-    async fn send_with_retry(&self, url: &str, payload: Vec<u8>) -> Result<(), SinkError> {
+    async fn send_with_retry(
+        &self,
+        url: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), SinkError> {
         let mut last_err = None;
 
         for attempt in 0..=self.server.max_retries {
             if attempt > 0 {
-                let base_delay = self.server.retry_base_delay_ms * (1_u64 << (attempt - 1));
+                let base_delay =
+                    self.server.retry_base_delay_ms * (1_u64 << (attempt - 1));
                 let delay = crate::sink::add_jitter(base_delay);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
@@ -217,21 +250,28 @@ impl SinkHttpClient {
         }))
     }
 
-    async fn send_once(&self, url: &str, payload: &[u8]) -> Result<(), SinkError> {
+    async fn send_once(
+        &self,
+        url: &str,
+        payload: &[u8],
+    ) -> Result<(), SinkError> {
         let mut request = self
             .client
             .post(url)
             .header("Content-Type", "application/json")
             .body(payload.to_vec());
 
-        if self.server.auth.is_some() && let Some(header) = self.build_auth_header().await? {
+        if self.server.auth.is_some()
+            && let Some(header) = self.build_auth_header().await?
+        {
             request = request.header("Authorization", header);
         }
 
-        let response = request.send().await.map_err(|e| SinkError::SendRequest {
-            message: format!("HTTP request failed: {}", e),
-            retryable: true,
-        })?;
+        let response =
+            request.send().await.map_err(|e| SinkError::SendRequest {
+                message: format!("HTTP request failed: {}", e),
+                retryable: true,
+            })?;
 
         let status = response.status();
         if status.is_success() {
@@ -244,13 +284,19 @@ impl SinkHttpClient {
             );
             Ok(())
         } else if status == 401 || status == 403 {
-            let body = response.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_owned());
             Err(SinkError::AuthExpired {
                 status: status.as_u16(),
                 message: format!("HTTP {}: {}", status, body),
             })
         } else {
-            let body = response.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_owned());
             Err(SinkError::HttpStatus {
                 status: status.as_u16(),
                 message: format!("HTTP {}: {}", status, body),
@@ -274,31 +320,42 @@ impl SinkHttpClient {
         // Check cached token
         {
             let guard = self.cached_token.read().await;
-            if let Some(token) = guard.as_ref() && !token.is_expired_or_expiring_soon(margin) {
+            if let Some(token) = guard.as_ref()
+                && !token.is_expired_or_expiring_soon(margin)
+            {
                 return Ok(Some(format!("Bearer {}", token.access_token)));
             }
             // Token is missing, expired or expiring soon; fall through to obtain new token
         }
 
-        if !auth.auth_url.is_empty() && !auth.username.is_empty() && !self.password.is_empty() {
+        if !auth.auth_url.is_empty()
+            && !auth.username.is_empty()
+            && !self.password.is_empty()
+        {
             // Double-check inside write lock to prevent parallel token refresh.
             let mut guard = self.cached_token.write().await;
-            if let Some(token) = guard.as_ref() && !token.is_expired_or_expiring_soon(margin) {
+            if let Some(token) = guard.as_ref()
+                && !token.is_expired_or_expiring_soon(margin)
+            {
                 return Ok(Some(format!("Bearer {}", token.access_token)));
             }
             // Retry obtain_token with backoff to survive transient auth endpoint failures.
             let mut last_token_err = None;
             for attempt in 0..=2 {
                 if attempt > 0 {
-                    let base_delay = self.server.retry_base_delay_ms * (1_u64 << (attempt - 1));
+                    let base_delay = self.server.retry_base_delay_ms
+                        * (1_u64 << (attempt - 1));
                     let delay = crate::sink::add_jitter(base_delay);
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(delay))
+                        .await;
                 }
                 match crate::sink::obtain_token(
                     &auth.auth_url,
                     &auth.username,
                     &self.password,
-                ).await {
+                )
+                .await
+                {
                     Ok(token) => {
                         let header = format!("Bearer {}", token.access_token);
                         *guard = Some(token);

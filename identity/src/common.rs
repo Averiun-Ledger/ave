@@ -148,9 +148,13 @@ mod tests {
 
     #[test]
     fn new_with_invalid_length() {
-        let err = AlgorithmIdentifiedBytes::new(1u8, vec![1, 2], 3).unwrap_err();
+        let err =
+            AlgorithmIdentifiedBytes::new(1u8, vec![1, 2], 3).unwrap_err();
         match err {
-            crate::error::CryptoError::InvalidDataLength { expected, actual } => {
+            crate::error::CryptoError::InvalidDataLength {
+                expected,
+                actual,
+            } => {
                 assert_eq!(expected, 3);
                 assert_eq!(actual, 2);
             }
@@ -168,7 +172,10 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            crate::error::CryptoError::InvalidDataLength { expected, actual } => {
+            crate::error::CryptoError::InvalidDataLength {
+                expected,
+                actual,
+            } => {
                 assert_eq!(expected, 33);
                 assert_eq!(actual, 0);
             }
@@ -203,7 +210,10 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            crate::error::CryptoError::InvalidDataLength { expected, actual } => {
+            crate::error::CryptoError::InvalidDataLength {
+                expected,
+                actual,
+            } => {
                 assert_eq!(expected, 11);
                 assert_eq!(actual, 2);
             }

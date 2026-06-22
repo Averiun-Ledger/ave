@@ -11,9 +11,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath,
-    CustomIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
-    RetryMessage, Strategy,
+    Actor, ActorContext, ActorError, ActorPath, CustomIntervalStrategy,
+    Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
 };
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
@@ -84,7 +83,7 @@ impl Actor for ApprLight {
     type Message = ApprLightMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {

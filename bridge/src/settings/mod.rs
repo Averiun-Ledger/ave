@@ -270,7 +270,8 @@ fn validate_sinks_config(config: &BridgeConfig) -> Result<(), BridgeError> {
         } = &entry.target;
 
         if schema_id.trim().is_empty() {
-            let msg = format!("sinks[{}].target.schema_id must not be empty", index);
+            let msg =
+                format!("sinks[{}].target.schema_id must not be empty", index);
             error!(error = %msg, "Invalid sinks configuration");
             return Err(BridgeError::ConfigBuild(msg));
         }
@@ -284,10 +285,7 @@ fn validate_sinks_config(config: &BridgeConfig) -> Result<(), BridgeError> {
                 error!(error = %msg, "Invalid sinks configuration");
                 return Err(BridgeError::ConfigBuild(msg));
             }
-        } else if governance_id
-            .as_ref()
-            .is_none_or(|id| id.trim().is_empty())
-        {
+        } else if governance_id.as_ref().is_none_or(|id| id.trim().is_empty()) {
             let msg = format!(
                 "sinks[{}].target.governance_id is required for schema '{}'",
                 index, schema_id
@@ -312,21 +310,13 @@ fn validate_sinks_config(config: &BridgeConfig) -> Result<(), BridgeError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeSet,
-        path::PathBuf,
-        time::Duration,
-    };
+    use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
-    use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_common::SinkTypes;
-    use ave_core::{
-        config::{
-            AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-            LoggingOutput, LoggingRotation, MachineSpec, SinkConfigEntry,
-            SinkServer, SinkTarget,
-        },
-
+    use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
+    use ave_core::config::{
+        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, LoggingOutput,
+        LoggingRotation, MachineSpec, SinkConfigEntry, SinkServer, SinkTarget,
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;

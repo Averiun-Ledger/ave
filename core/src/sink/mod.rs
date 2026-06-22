@@ -9,13 +9,16 @@ pub mod worker;
 
 pub use error::SinkError;
 pub use manager::{
-    SendResult, SinkManager, SinkManagerDetailedStatus, SinkManagerEvent, SinkManagerInitParams,
-    SinkManagerMessage, SinkManagerResponse, SinkStatus,
+    SendResult, SinkManager, SinkManagerDetailedStatus, SinkManagerEvent,
+    SinkManagerInitParams, SinkManagerMessage, SinkManagerResponse, SinkStatus,
 };
 pub use registry::{
-    SinkRegistration, SinkRegistry, SinkRegistryEvent, SinkRegistryMessage, SinkRegistryResponse,
+    SinkRegistration, SinkRegistry, SinkRegistryEvent, SinkRegistryMessage,
+    SinkRegistryResponse,
 };
-pub use subject_worker::{SinkSubjectWorker, SinkSubjectWorkerMessage, SinkSubjectWorkerResponse};
+pub use subject_worker::{
+    SinkSubjectWorker, SinkSubjectWorkerMessage, SinkSubjectWorkerResponse,
+};
 pub use worker::{SinkWorker, SinkWorkerMessage, SinkWorkerResponse};
 
 use std::time::Duration;
@@ -57,7 +60,9 @@ pub async fn obtain_token(
 
     let res = client
         .post(auth)
-        .json(&serde_json::json!({ "username": username, "password": password }))
+        .json(
+            &serde_json::json!({ "username": username, "password": password }),
+        )
         .send()
         .await
         .map_err(|e| SinkError::AuthRequest(e.to_string()))?;

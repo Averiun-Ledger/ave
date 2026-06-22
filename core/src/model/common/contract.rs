@@ -214,7 +214,11 @@ impl MemoryManager {
     }
 
     /// Reads a slice of bytes from the host buffer starting at `ptr`.
-    pub fn read_bytes(&self, ptr: usize, len: usize) -> Result<&[u8], ContractError> {
+    pub fn read_bytes(
+        &self,
+        ptr: usize,
+        len: usize,
+    ) -> Result<&[u8], ContractError> {
         let end = ptr
             .checked_add(len)
             .ok_or(ContractError::InvalidPointer { pointer: ptr })?;
@@ -225,7 +229,11 @@ impl MemoryManager {
     }
 
     /// Writes a slice of bytes into a previously allocated host buffer at `ptr`.
-    pub fn write_bytes(&mut self, ptr: usize, data: &[u8]) -> Result<(), ContractError> {
+    pub fn write_bytes(
+        &mut self,
+        ptr: usize,
+        data: &[u8],
+    ) -> Result<(), ContractError> {
         let len = self
             .map
             .get(&ptr)

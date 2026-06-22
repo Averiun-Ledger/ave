@@ -10,9 +10,7 @@ use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
 use tracing::{debug, warn};
 
-use super::{
-    TransferData, WitnessesRegister,
-};
+use super::{TransferData, WitnessesRegister};
 
 impl WitnessesRegister {
     pub(crate) fn transfer_data_from_ledger(
@@ -96,7 +94,8 @@ impl WitnessesRegister {
                     if let Some((new_owner, new_owner_gov_version)) =
                         data.actual_new_owner_data.take()
                     {
-                        let entry = data.old_owners.entry(new_owner).or_default();
+                        let entry =
+                            data.old_owners.entry(new_owner).or_default();
                         entry.sn = event.sn;
                         entry.interval_gov_version.insert(Interval {
                             lo: new_owner_gov_version,
@@ -117,5 +116,4 @@ impl WitnessesRegister {
 
         Ok(data)
     }
-
 }

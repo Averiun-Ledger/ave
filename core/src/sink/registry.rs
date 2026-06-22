@@ -27,7 +27,13 @@ use crate::{
 
 /// Stored metadata for a single sink.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
     BorshSerialize,
 )]
 pub struct SinkRegistration {
@@ -86,7 +92,9 @@ pub enum SinkRegistryResponse {
 impl Response for SinkRegistryResponse {}
 
 /// Persistent events used to mutate the registry state.
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum SinkRegistryEvent {
     SinkRegistered {
         name: String,
@@ -140,9 +148,7 @@ impl Actor for SinkRegistry {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if let Err(e) = self
-            .init_store("sink_registry", None, false, ctx)
-            .await
+        if let Err(e) = self.init_store("sink_registry", None, false, ctx).await
         {
             error!(error = %e, "Failed to initialize sink registry store");
             return Err(e);

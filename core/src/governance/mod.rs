@@ -27,7 +27,8 @@ use crate::{
         },
         model::{
             CreatorQuantity, CreatorWitness, HashThisRole, ProtocolTypes,
-            Quorum, RoleCreator, RoleTypes, RolesSchema, RolesTrackerSchemas, Schema, WitnessesData,
+            Quorum, RoleCreator, RoleTypes, RolesSchema, RolesTrackerSchemas,
+            Schema, WitnessesData,
         },
         role_register::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
@@ -38,18 +39,18 @@ use crate::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
         tracker_sync::{TrackerSync, TrackerSyncConfig},
-
-        version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         transfer_verification_register::{
             TransferVerificationRegister, TransferVerificationRegisterMessage,
             TransferVerificationRegisterResponse,
         },
+        version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
         },
     },
     helpers::network::service::NetworkSender,
+    model::sink::{SinkDataEvent, SubjectSinkEvent},
     model::{
         common::{
             crash_system, get_last_event, purge_storage, subject::make_obsolete,
@@ -60,10 +61,8 @@ use crate::{
     sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
-        SubjectMetadata,
-        error::SubjectError,
+        SubjectMetadata, error::SubjectError,
     },
-    model::sink::{SinkDataEvent, SubjectSinkEvent},
     system::ConfigHelper,
     validation::{
         request::LastData,
@@ -73,8 +72,8 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
-    Message, Response,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
+    Response,
 };
 use ave_common::{
     DataToSink, Namespace, SchemaType, ValueWrapper,
@@ -184,7 +183,15 @@ pub struct CreatorRoleUpdate {
     pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct GovernanceState {
     pub subject_metadata: SubjectMetadata,
     pub properties: GovernanceData,
@@ -454,9 +461,9 @@ impl Subject for Governance {
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
-            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(Box::new(
-                SubjectDB::from(&*self),
-            ))));
+            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(
+                Box::new(SubjectDB::from(&*self)),
+            )));
 
             self.update_sn(ctx).await?;
             self.refresh_version_sync(ctx).await?;
@@ -475,7 +482,8 @@ impl Subject for Governance {
         data: DataToSink,
     ) -> Result<(), ActorError> {
         let node_path = ctx.path().parent().parent();
-        let manager_path = ActorPath::from(format!("{}/node_sink_manager", node_path));
+        let manager_path =
+            ActorPath::from(format!("{}/node_sink_manager", node_path));
         match ctx.system().get_actor::<SinkManager>(&manager_path).await {
             Ok(manager) => {
                 if let Err(e) = manager
@@ -2705,9 +2713,8 @@ impl Governance {
                 }
             }
             Err(error) => {
-                cleanup_errors.push(format!(
-                    "transfer_verification_register: {error}"
-                ));
+                cleanup_errors
+                    .push(format!("transfer_verification_register: {error}"));
                 None
             }
         };
@@ -3069,9 +3076,8 @@ impl Governance {
                 }
             }
             Err(error) => {
-                cleanup_errors.push(format!(
-                    "transfer_verification_register: {error}"
-                ));
+                cleanup_errors
+                    .push(format!("transfer_verification_register: {error}"));
                 None
             }
         };
@@ -3120,11 +3126,18 @@ impl Governance {
 #[derive(Debug, Clone)]
 pub enum GovernanceMessage {
     GetMetadata,
-    GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
+    GetLedger {
+        lo_sn: Option<u64>,
+        hi_sn: u64,
+    },
     GetLastLedger,
-    DeleteTrackerReferences { subject_id: DigestIdentifier },
+    DeleteTrackerReferences {
+        subject_id: DigestIdentifier,
+    },
     DeleteGovernanceStorage,
-    UpdateLedger { events: Vec<Ledger> },
+    UpdateLedger {
+        events: Vec<Ledger>,
+    },
     GetGovernance,
     GetVersion,
     HasRole {
@@ -3207,7 +3220,7 @@ impl Actor for Governance {
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
     type SinkEvent = SubjectSinkEvent;
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -3399,15 +3412,15 @@ impl Actor for Governance {
             return Err(e);
         }
 
-        if self.subject_metadata.active 
-            && let Err(e) = self.build_childs(ctx, &hash, &network).await {
-                error!(
-                    error = %e,
-                    "Failed to build governance child actors"
-                );
-                return Err(e);
-            }
-        
+        if self.subject_metadata.active
+            && let Err(e) = self.build_childs(ctx, &hash, &network).await
+        {
+            error!(
+                error = %e,
+                "Failed to build governance child actors"
+            );
+            return Err(e);
+        }
 
         if self.service {
             let Some(config): Option<ConfigHelper> =
@@ -3582,31 +3595,23 @@ impl Handler<Self> for Governance {
                     self.properties.clone(),
                 )))
             }
-            GovernanceMessage::HasRole {
-                role_query,
-                ..
-            } => {
+            GovernanceMessage::HasRole { role_query, .. } => {
                 let result = self.properties.has_this_role(role_query);
                 Ok(GovernanceResponse::Bool(result))
             }
-            GovernanceMessage::GetWitnesses {
-                data,
-                ..
-            } => {
-                let witnesses = self.properties.get_witnesses(data).map_err(
-                    |e| ActorError::Functional {
-                        description: format!(
-                            "Failed to get witnesses from governance: {}",
-                            e
-                        ),
-                    },
-                )?;
+            GovernanceMessage::GetWitnesses { data, .. } => {
+                let witnesses =
+                    self.properties.get_witnesses(data).map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Failed to get witnesses from governance: {}",
+                                e
+                            ),
+                        }
+                    })?;
                 Ok(GovernanceResponse::Witnesses(witnesses))
             }
-            GovernanceMessage::GetSchemaViewpoints {
-                schema_id,
-                ..
-            } => {
+            GovernanceMessage::GetSchemaViewpoints { schema_id, .. } => {
                 let viewpoints = self
                     .properties
                     .schemas
@@ -3631,10 +3636,7 @@ impl Handler<Self> for Governance {
                     })?;
                 Ok(GovernanceResponse::QuorumAndSigners(signers, quorum))
             }
-            GovernanceMessage::GetInitState {
-                schema_id,
-                ..
-            } => {
+            GovernanceMessage::GetInitState { schema_id, .. } => {
                 let init_state = self
                     .properties
                     .get_init_state(&schema_id)
@@ -3656,27 +3658,15 @@ impl Handler<Self> for Governance {
                     self.properties.get_signers(role, &schema_id, namespace);
                 Ok(GovernanceResponse::Signers(signers, any))
             }
-            GovernanceMessage::GetMembers {
-                ..
-            } => {
-                Ok(GovernanceResponse::Members(
-                    self.properties.members.clone(),
-                ))
+            GovernanceMessage::GetMembers { .. } => {
+                Ok(GovernanceResponse::Members(self.properties.members.clone()))
             }
-            GovernanceMessage::GetSchemaRoles {
-                schema_id,
-                ..
-            } => {
-                let roles = self
-                    .properties
-                    .roles_schema
-                    .get(&schema_id)
-                    .cloned();
+            GovernanceMessage::GetSchemaRoles { schema_id, .. } => {
+                let roles =
+                    self.properties.roles_schema.get(&schema_id).cloned();
                 Ok(GovernanceResponse::SchemaRoles(roles))
             }
-            GovernanceMessage::GetTrackerRoles {
-                ..
-            } => {
+            GovernanceMessage::GetTrackerRoles { .. } => {
                 Ok(GovernanceResponse::TrackerRoles(
                     self.properties.roles_tracker_schemas.clone(),
                 ))
@@ -3685,7 +3675,8 @@ impl Handler<Self> for Governance {
                 from_sn,
                 batch_size,
             } => {
-                let events = self.get_sink_events(ctx, from_sn, batch_size).await?;
+                let events =
+                    self.get_sink_events(ctx, from_sn, batch_size).await?;
                 Ok(GovernanceResponse::SinkEvents(events))
             }
         }

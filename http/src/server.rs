@@ -17,7 +17,9 @@ use ave_bridge::ave_common::{
         FirstEndEvents, GovQuery, SinkEventsQuery, SinkReplayRequest,
         SubjectQuery, UpdateSubjectQuery,
     },
-    response::{ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse},
+    response::{
+        ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
+    },
 };
 use ave_bridge::{
     Bridge, MonitorNetworkState,
@@ -74,7 +76,7 @@ async fn protected_auth_safe_mode_layer(
     req: Request<Body>,
     next: middleware::Next,
 ) -> Response {
-     if auth_safe_mode.0
+    if auth_safe_mode.0
         && req.method() != Method::GET
         && is_server_auth_mutation_path(req.uri().path())
     {
@@ -614,7 +616,9 @@ pub async fn authorize_governance(
     Path(subject_id): Path<String>,
     Json(witnesses): Json<Vec<String>>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.authorize_governance(subject_id, witnesses).await?))
+    Ok(Json(
+        bridge.authorize_governance(subject_id, witnesses).await?,
+    ))
 }
 
 /// Disauthorize a governance

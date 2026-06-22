@@ -2,9 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath,
-    IntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
-    RetryMessage, Strategy,
+    Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
+    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
 };
 use ave_common::identity::PublicKey;
 use ave_network::ComunicateInfo;
@@ -31,7 +30,7 @@ impl Actor for DistriCoordinator {
     type Message = DistriCoordinatorMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -141,13 +140,15 @@ impl Handler<Self> for DistriCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(any(test, feature = "test"))]
-                let strategy = Strategy::Interval(
-                    IntervalStrategy::new(2, Duration::from_secs(2)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    2,
+                    Duration::from_secs(2),
+                ));
                 #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(
-                    IntervalStrategy::new(3, Duration::from_secs(30)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    3,
+                    Duration::from_secs(30),
+                ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
                     target,

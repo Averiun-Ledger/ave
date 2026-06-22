@@ -75,4 +75,6 @@ pub use namespace::Namespace;
 pub use sink::*;
 
 #[cfg(feature = "value-wrapper")]
-pub use wrapper::{ContractData, ContractInitCheckData, ContractResultData, ValueWrapper};
+pub use wrapper::{
+    ContractData, ContractInitCheckData, ContractResultData, ValueWrapper,
+};

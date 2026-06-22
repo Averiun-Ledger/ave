@@ -4,8 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ave_actors::ActorPath;
 use ave_actors::{
-    Actor, ActorContext, ActorError, Handler, Message,
-    NotPersistentActor,
+    Actor, ActorContext, ActorError, Handler, Message, NotPersistentActor,
 };
 
 use ave_common::identity::{
@@ -185,7 +184,7 @@ impl Actor for Approval {
     type Message = ApprovalMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

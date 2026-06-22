@@ -47,10 +47,7 @@ pub fn validate_keys_path(path: &std::path::Path) -> Result<(), String> {
             let _ = std::fs::remove_file(&test_file);
         }
         Err(e) => {
-            return Err(format!(
-                "'{}' is not writable: {e}",
-                target.display()
-            ));
+            return Err(format!("'{}' is not writable: {e}", target.display()));
         }
     }
 
@@ -100,12 +97,13 @@ pub fn key_pair(
             fill(&mut iv)
                 .map_err(|e| BridgeError::KeyEncrypt(e.to_string()))?;
 
-            let params = pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes256cbc(
-                PBKDF2_ITERATIONS,
-                &salt,
-                iv,
-            )
-            .map_err(|e| BridgeError::KeyEncrypt(e.to_string()))?;
+            let params =
+                pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes256cbc(
+                    PBKDF2_ITERATIONS,
+                    &salt,
+                    iv,
+                )
+                .map_err(|e| BridgeError::KeyEncrypt(e.to_string()))?;
             let enc_pk =
                 pk.encrypt_with_params(params, password).map_err(|_| {
                     BridgeError::KeyEncrypt(

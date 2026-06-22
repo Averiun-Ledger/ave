@@ -1,9 +1,8 @@
 mod error;
 
 use crate::{
-    external_db::DBManager,
+    external_db::DBManager, model::sink::SubjectSinkEvent,
     node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
-    model::sink::SubjectSinkEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
@@ -119,9 +118,8 @@ impl ExternalDB {
             #[cfg(feature = "ext-sqlite")]
             AveExternalDBFeatureConfig::Sqlite { path } => {
                 // Passive permission check before creating anything
-                check_dir_writable(&path).map_err(|e| {
-                    DatabaseError::PermissionDenied(e)
-                })?;
+                check_dir_writable(&path)
+                    .map_err(|e| DatabaseError::PermissionDenied(e))?;
 
                 if !Path::new(&path).exists() {
                     fs::create_dir_all(&path).await.map_err(|e| {
@@ -355,4 +353,3 @@ fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
 
     Ok(())
 }
-

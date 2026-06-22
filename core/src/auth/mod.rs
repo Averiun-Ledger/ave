@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
@@ -22,7 +22,6 @@ use crate::node::SubjectData;
 use crate::update::UpdateType;
 use crate::{
     db::Storable,
-
     governance::model::WitnessesData,
     model::common::crash_system,
     update::{Update, UpdateMessage, UpdateNew, UpdateSubjectKind},
@@ -88,8 +87,10 @@ impl BorshDeserialize for SubjectAccess {
     fn deserialize_reader<R: std::io::Read>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
-        let gov_allowlist = HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
-        let tracker_banlist = HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
+        let gov_allowlist =
+            HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
+        let tracker_banlist =
+            HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
         let sync_peers = HashMap::<DigestIdentifier, HashSet<PublicKey>>::deserialize_reader(reader)?;
         let network = None;
         let our_key = Arc::new(PublicKey::default());
@@ -231,7 +232,7 @@ impl Actor for SubjectAccess {
     type Message = SubjectAccessMessage;
     type Response = SubjectAccessResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -457,8 +458,10 @@ impl Handler<Self> for SubjectAccess {
                         description: "subject_id cannot be empty".to_owned(),
                     });
                 }
-                let is_gov_authorized = self.gov_allowlist.contains(&subject_id);
-                let is_tracker_banned = self.tracker_banlist.contains(&subject_id);
+                let is_gov_authorized =
+                    self.gov_allowlist.contains(&subject_id);
+                let is_tracker_banned =
+                    self.tracker_banlist.contains(&subject_id);
                 return Ok(SubjectAccessResponse::AccessInfo {
                     is_gov_authorized,
                     is_tracker_banned,
@@ -504,7 +507,8 @@ impl Handler<Self> for SubjectAccess {
                 }
 
                 let data = get_subject_data(ctx, &subject_id).await?;
-                let is_gov = matches!(data, Some(SubjectData::Governance { .. }));
+                let is_gov =
+                    matches!(data, Some(SubjectData::Governance { .. }));
 
                 if is_gov && !self.gov_allowlist.contains(&subject_id) {
                     warn!(
@@ -529,19 +533,31 @@ impl Handler<Self> for SubjectAccess {
                 };
 
                 let (witnesses, actual_sn, subject_kind_hint) = {
-                    let sync_witnesses =
-                        self.sync_peers.get(&subject_id).cloned().unwrap_or_default();
+                    let sync_witnesses = self
+                        .sync_peers
+                        .get(&subject_id)
+                        .cloned()
+                        .unwrap_or_default();
                     let (mut witnesses, actual_sn, subject_kind_hint) =
                         if strict {
-                            let actual_sn = if let Some(SubjectData::Tracker { governance_id, .. }) = &data {
-                                get_tracker_sn_owner(ctx, governance_id, &subject_id)
+                            let actual_sn =
+                                if let Some(SubjectData::Tracker {
+                                    governance_id,
+                                    ..
+                                }) = &data
+                                {
+                                    get_tracker_sn_owner(
+                                        ctx,
+                                        governance_id,
+                                        &subject_id,
+                                    )
                                     .await?
                                     .map(|(_, sn)| sn)
-                            } else if data.is_some() {
-                                Some(get_gov_sn(ctx, &subject_id).await?)
-                            } else {
-                                None
-                            };
+                                } else if data.is_some() {
+                                    Some(get_gov_sn(ctx, &subject_id).await?)
+                                } else {
+                                    None
+                                };
                             let kind = if is_gov {
                                 Some(UpdateSubjectKind::Governance)
                             } else {
@@ -559,8 +575,12 @@ impl Handler<Self> for SubjectAccess {
                                             ..
                                         } => {
                                             if let Some((owner, actual_sn)) =
-                                                get_tracker_sn_owner(ctx, governance_id, &subject_id)
-                                                    .await?
+                                                get_tracker_sn_owner(
+                                                    ctx,
+                                                    governance_id,
+                                                    &subject_id,
+                                                )
+                                                .await?
                                             {
                                                 let w = get_witnesses(
                                                     ctx,
@@ -603,7 +623,9 @@ impl Handler<Self> for SubjectAccess {
                                                         description: e.to_string(),
                                                     }
                                                 })?;
-                                            let sn = get_gov_sn(ctx, &subject_id).await?;
+                                            let sn =
+                                                get_gov_sn(ctx, &subject_id)
+                                                    .await?;
                                             (w, Some(sn), Some(UpdateSubjectKind::Governance))
                                         }
                                     }
@@ -772,7 +794,8 @@ impl PersistentActor for SubjectAccess {
                 );
             }
             SubjectAccessEvent::SyncPeersAdded { subject_id, peers } => {
-                inner.sync_peers
+                inner
+                    .sync_peers
                     .entry(subject_id.clone())
                     .or_default()
                     .extend(peers.iter().cloned());

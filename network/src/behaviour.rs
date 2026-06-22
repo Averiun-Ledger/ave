@@ -741,7 +741,8 @@ mod tests {
 
     #[test]
     fn test_peer_management_methods() {
-        let mut node = build_node(create_config(vec![], false, NodeType::Addressable));
+        let mut node =
+            build_node(create_config(vec![], false, NodeType::Addressable));
         let peer = PeerId::random();
 
         node.behaviour_mut().add_peer_to_remove(&peer);
@@ -762,7 +763,8 @@ mod tests {
 
     #[test]
     fn test_is_invalid_address_always_false_in_test_mode() {
-        let mut node = build_node(create_config(vec![], false, NodeType::Addressable));
+        let mut node =
+            build_node(create_config(vec![], false, NodeType::Addressable));
         // In test builds is_invalid_address always returns false.
         let addr: Multiaddr = "/memory/1".parse().unwrap();
         assert!(!node.behaviour_mut().is_invalid_address(&addr));

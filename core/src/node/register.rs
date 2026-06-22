@@ -93,7 +93,7 @@ impl Actor for Register {
     type Message = RegisterMessage;
     type Response = RegisterResponse;
     type SinkEvent = RegisterEvent;
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {

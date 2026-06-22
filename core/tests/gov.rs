@@ -3923,7 +3923,10 @@ async fn test_sink_replay_and_external_db_battery() {
         .unwrap();
 
     owner
-        .authorize_governance(governance_id.clone(), AuthWitness::One(bob_pk.clone()))
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(bob_pk.clone()),
+        )
         .await
         .unwrap();
     owner.update_subject(governance_id.clone()).await.unwrap();
@@ -4257,7 +4260,6 @@ async fn test_sink_replay_and_external_db_battery() {
     assert_eq!(sink_events[7].public_key, owner.public_key());
 }
 
-
 #[test(tokio::test)]
 // test_build_batch_gov: Emisor construye batch de governance
 //
@@ -4342,10 +4344,10 @@ async fn test_build_batch_gov() {
     get_subject(owner, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
-    
+
     get_subject(witness, governance_id.clone(), Some(4), true)
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 }
 
 #[test(tokio::test)]
@@ -4430,7 +4432,7 @@ async fn test_update_offer_gov() {
 
     // Witness pide update de nuevo → debe llegar a SN=3
     witness.update_subject(governance_id.clone()).await.unwrap();
-    
+
     get_subject(witness, governance_id.clone(), Some(3), true)
         .await
         .unwrap();

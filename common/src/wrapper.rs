@@ -967,12 +967,16 @@ pub struct ContractData(pub Vec<u8>);
 
 impl ContractData {
     /// Crea `ContractData` a partir de un `serde_json::Value`.
-    pub fn from_json_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
+    pub fn from_json_value(
+        value: &serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
         Ok(Self(serde_json::to_vec(value)?))
     }
 
     /// Reconstruye un `serde_json::Value` a partir de los bytes internos.
-    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+    pub fn to_json_value(
+        &self,
+    ) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::from_slice(&self.0)
     }
 }
@@ -1046,7 +1050,8 @@ mod contract_data_tests {
         let value = serde_json::json!({"name": "test"});
         let data = ContractData::from_json_value(&value).unwrap();
         let bytes = borsh::to_vec(&data).unwrap();
-        let recovered: ContractData = BorshDeserialize::try_from_slice(&bytes).unwrap();
+        let recovered: ContractData =
+            BorshDeserialize::try_from_slice(&bytes).unwrap();
         assert_eq!(data.0, recovered.0);
         assert_eq!(
             data.to_json_value().unwrap(),
@@ -1057,12 +1062,16 @@ mod contract_data_tests {
     #[test]
     fn contract_result_data_borsh_round_trip() {
         let result = ContractResultData {
-            final_state: ContractData::from_json_value(&serde_json::json!({"state": 1})).unwrap(),
+            final_state: ContractData::from_json_value(
+                &serde_json::json!({"state": 1}),
+            )
+            .unwrap(),
             success: true,
             error: String::new(),
         };
         let bytes = borsh::to_vec(&result).unwrap();
-        let recovered: ContractResultData = BorshDeserialize::try_from_slice(&bytes).unwrap();
+        let recovered: ContractResultData =
+            BorshDeserialize::try_from_slice(&bytes).unwrap();
         assert_eq!(result.final_state.0, recovered.final_state.0);
         assert_eq!(result.success, recovered.success);
         assert_eq!(result.error, recovered.error);
@@ -1075,7 +1084,8 @@ mod contract_data_tests {
             error: "invalid state".to_owned(),
         };
         let bytes = borsh::to_vec(&check).unwrap();
-        let recovered: ContractInitCheckData = BorshDeserialize::try_from_slice(&bytes).unwrap();
+        let recovered: ContractInitCheckData =
+            BorshDeserialize::try_from_slice(&bytes).unwrap();
         assert_eq!(check.success, recovered.success);
         assert_eq!(check.error, recovered.error);
     }
@@ -1085,7 +1095,10 @@ mod contract_data_tests {
         let err = ContractResultData::error("something went wrong");
         assert!(!err.success);
         assert_eq!(err.error, "something went wrong");
-        assert_eq!(err.final_state.to_json_value().unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            err.final_state.to_json_value().unwrap(),
+            serde_json::Value::Null
+        );
     }
 
     #[test]

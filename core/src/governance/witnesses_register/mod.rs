@@ -6,9 +6,9 @@ use crate::governance::sn_register::{
 };
 
 use crate::model::common::{
-    Interval, IntervalSet, OwnerContext, TrackerEventVisibility, TrackerIdentity,
-    TrackerParams, TrackerStoredVisibility, TrackerVisibilityMode, TrackerVisibilityState,
-    crash_system, purge_storage,
+    Interval, IntervalSet, OwnerContext, TrackerEventVisibility,
+    TrackerIdentity, TrackerParams, TrackerStoredVisibility,
+    TrackerVisibilityMode, TrackerVisibilityState, crash_system, purge_storage,
 };
 use crate::model::event::Ledger;
 use async_trait::async_trait;
@@ -45,15 +45,14 @@ pub struct WitnessesRegister {
     pub(crate) subjects: HashMap<DigestIdentifier, TransferData>,
     pub(crate) witnesses:
         HashMap<(PublicKey, SchemaType), HashMap<Namespace, IntervalData>>,
-    pub(crate) creator_witnesses: HashMap<
-        (PublicKey, String, SchemaType),
-        CreatorWitnessEntry,
-    >,
+    pub(crate) creator_witnesses:
+        HashMap<(PublicKey, String, SchemaType), CreatorWitnessEntry>,
     /// Índice invertido: nodo → creators donde es witness explícito.
     /// No incluye witnesses de schema (WitnessesType::Witnesses) porque
     /// dependen del nodo que pregunta y se evalúan dinámicamente.
     #[serde(skip)]
-    pub(crate) node_creator_index: HashMap<PublicKey, HashSet<(PublicKey, String, SchemaType)>>,
+    pub(crate) node_creator_index:
+        HashMap<PublicKey, HashSet<(PublicKey, String, SchemaType)>>,
     #[serde(skip)]
     pub(crate) ledger_batch_size: usize,
 }
@@ -548,7 +547,8 @@ impl WitnessesRegister {
     ) -> IntervalSet {
         let mut covered = IntervalSet::new();
 
-        let owners: Vec<&Interval> = old_owner.interval_gov_version.iter().collect();
+        let owners: Vec<&Interval> =
+            old_owner.interval_gov_version.iter().collect();
         let witnesses: Vec<&Interval> = intervals.iter().collect();
 
         let mut i = 0;
@@ -1022,7 +1022,7 @@ impl Actor for WitnessesRegister {
     type Message = WitnessesRegisterMessage;
     type Response = WitnessesRegisterResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -1037,7 +1037,12 @@ impl Actor for WitnessesRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self
-            .init_store("witnesses_register", Some(ctx.path().parent().key().to_owned()), false, ctx)
+            .init_store(
+                "witnesses_register",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
@@ -1417,34 +1422,41 @@ impl Handler<Self> for WitnessesRegister {
                 namespace,
                 schema_id,
             } => {
-                let (new_owner, gov_version) =
-                    match transfer_event.get_event_request() {
-                        Some(EventRequest::Transfer(req)) => {
-                            (req.new_owner, transfer_event.gov_version)
-                        }
-                        _ => {
-                            return Err(ActorError::Functional {
+                let (new_owner, gov_version) = match transfer_event
+                    .get_event_request()
+                {
+                    Some(EventRequest::Transfer(req)) => {
+                        (req.new_owner, transfer_event.gov_version)
+                    }
+                    _ => {
+                        return Err(ActorError::Functional {
                                 description:
                                     "SimulateTransferHiSnLimit called with non-Transfer event"
                                         .to_string(),
                             });
-                        }
-                    };
+                    }
+                };
 
                 // Si ya tenemos TransferData para este subject (por gobernanza o
                 // batches anteriores), lo usamos como base y solo actualizamos el
                 // estado actual con el evento de transferencia. Así conservamos
                 // el historial de old_owners que la simulación necesita.
-                let mut data = if let Some(existing) = self.subjects.get(&subject_id) {
+                let mut data = if let Some(existing) =
+                    self.subjects.get(&subject_id)
+                {
                     let mut data = existing.clone();
-                    data.actual_owner = transfer_event.ledger_seal_signature.signer.clone();
+                    data.actual_owner =
+                        transfer_event.ledger_seal_signature.signer.clone();
                     data.actual_new_owner_data = Some((new_owner, gov_version));
                     data.sn = transfer_event.sn;
                     data.gov_version = gov_version;
                     data
                 } else {
                     TransferData {
-                        actual_owner: transfer_event.ledger_seal_signature.signer.clone(),
+                        actual_owner: transfer_event
+                            .ledger_seal_signature
+                            .signer
+                            .clone(),
                         actual_new_owner_data: Some((new_owner, gov_version)),
                         sn: transfer_event.sn,
                         gov_version,
@@ -1473,13 +1485,15 @@ impl Handler<Self> for WitnessesRegister {
                     )
                     .await?;
 
-                return Ok(WitnessesRegisterResponse::WitnessStatus(WitnessStatus {
-                    access_sn: None,
-                    hi_sn_limit: limit,
-                    gov_version_limit: GovVersionLimit::None,
-                    create_access: false,
-                    create_gov_version_limit: GovVersionLimit::None,
-                }));
+                return Ok(WitnessesRegisterResponse::WitnessStatus(
+                    WitnessStatus {
+                        access_sn: None,
+                        hi_sn_limit: limit,
+                        gov_version_limit: GovVersionLimit::None,
+                        create_access: false,
+                        create_gov_version_limit: GovVersionLimit::None,
+                    },
+                ));
             }
             WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
                 subject_id,
@@ -1705,7 +1719,8 @@ impl PersistentActor for WitnessesRegister {
 
                 for ((schema_id, witness), namespace) in new_witnesses {
                     for ns in namespace.iter() {
-                        inner.witnesses
+                        inner
+                            .witnesses
                             .entry((witness.clone(), schema_id.clone()))
                             .or_default()
                             .entry(ns.clone())
@@ -1797,7 +1812,8 @@ impl PersistentActor for WitnessesRegister {
                 owner,
                 gov_version,
             } => {
-                let data = inner.subjects.entry(subject_id.clone()).or_default();
+                let data =
+                    inner.subjects.entry(subject_id.clone()).or_default();
 
                 data.actual_owner = owner.clone();
                 data.gov_version = *gov_version;

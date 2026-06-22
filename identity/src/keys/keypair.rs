@@ -266,14 +266,20 @@ impl KeyPair {
         wrapped_key.extend_from_slice(&secret_key_bytes);
 
         let octet_key = pkcs8::der::asn1::OctetStringRef::new(&wrapped_key)
-            .map_err(|e| CryptoError::InvalidSecretKey(format!("DER encoding failed: {}", e)))?;
+            .map_err(|e| {
+                CryptoError::InvalidSecretKey(format!(
+                    "DER encoding failed: {}",
+                    e
+                ))
+            })?;
 
         let algorithm_identifier = pkcs8::AlgorithmIdentifierRef {
             oid: ED25519_OID,
             parameters: None,
         };
 
-        let private_key_info = PrivateKeyInfoRef::new(algorithm_identifier, octet_key);
+        let private_key_info =
+            PrivateKeyInfoRef::new(algorithm_identifier, octet_key);
 
         private_key_info.to_der().map_err(|e| {
             CryptoError::InvalidSecretKey(format!("DER encoding failed: {}", e))
@@ -413,8 +419,6 @@ mod tests {
         assert!(public_key.verify(message, &sig2).is_ok());
     }
 
-
-
     #[test]
     fn test_keypair_from_secret_key_autodetect() {
         let keypair1 = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
@@ -425,7 +429,6 @@ mod tests {
 
         assert_eq!(keypair1.public_key_bytes(), keypair2.public_key_bytes());
     }
-
 
     #[test]
     fn test_keypair_algorithm_generate() {
@@ -441,9 +444,6 @@ mod tests {
         let public_key = keypair.public_key();
         assert!(public_key.verify(message, &signature).is_ok());
     }
-
-
-
 
     #[test]
     fn test_keypair_der_roundtrip() {
@@ -496,14 +496,16 @@ mod tests {
         fake_key.extend_from_slice(&[0x04, 0x20]); // OCTET STRING tag + length
         fake_key.extend_from_slice(&[0u8; 32]);
 
-        let octet_key = pkcs8::der::asn1::OctetStringRef::new(&fake_key).unwrap();
+        let octet_key =
+            pkcs8::der::asn1::OctetStringRef::new(&fake_key).unwrap();
 
         let algorithm_identifier = pkcs8::AlgorithmIdentifierRef {
             oid: unsupported_oid,
             parameters: None,
         };
 
-        let private_key_info = PrivateKeyInfoRef::new(algorithm_identifier, octet_key);
+        let private_key_info =
+            PrivateKeyInfoRef::new(algorithm_identifier, octet_key);
 
         let der_bytes = private_key_info.to_der().unwrap();
 

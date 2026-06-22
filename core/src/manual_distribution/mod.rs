@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
 use ave_common::{
     identity::{DigestIdentifier, PublicKey},
@@ -15,13 +14,14 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    governance::{
-        model::{RoleTypes, WitnessesData},
-    },
+    governance::model::{RoleTypes, WitnessesData},
     helpers::network::service::NetworkSender,
     model::common::{
         node::i_can_send_last_ledger,
-        subject::{acquire_subject, get_last_ledger_event, get_members, get_schema_roles, get_tracker_roles, get_witnesses},
+        subject::{
+            acquire_subject, get_last_ledger_event, get_members,
+            get_schema_roles, get_tracker_roles, get_witnesses,
+        },
     },
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
@@ -73,16 +73,15 @@ impl ManualDistribution {
             return DistributionPlanMode::Opaque;
         };
 
-        let is_generic_witness =
-            roles_ctx.schema.hash_this_rol(
-                RoleTypes::Witness,
-                namespace.clone(),
-                &witness_name,
-            ) || roles_ctx.tracker.hash_this_rol(
-                RoleTypes::Witness,
-                namespace.clone(),
-                &witness_name,
-            );
+        let is_generic_witness = roles_ctx.schema.hash_this_rol(
+            RoleTypes::Witness,
+            namespace.clone(),
+            &witness_name,
+        ) || roles_ctx.tracker.hash_this_rol(
+            RoleTypes::Witness,
+            namespace.clone(),
+            &witness_name,
+        );
 
         let allows_clear =
             role_creator.witnesses.iter().any(|creator_witness| {
@@ -155,7 +154,7 @@ impl Actor for ManualDistribution {
     type Event = ();
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -252,17 +251,17 @@ impl Handler<Self> for ManualDistribution {
                         get_witnesses(ctx, &governance_id, WitnessesData::Gov)
                             .await
                             .map_err(|e| {
-                            error!(
-                                msg_type = "Update",
-                                subject_id = %subject_id,
-                                is_gov = is_gov,
-                                error = %e,
-                                "Failed to get witnesses from governance"
-                            );
-                            ActorError::Functional {
-                                description: e.to_string(),
-                            }
-                        })?;
+                                error!(
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    is_gov = is_gov,
+                                    error = %e,
+                                    "Failed to get witnesses from governance"
+                                );
+                                ActorError::Functional {
+                                    description: e.to_string(),
+                                }
+                            })?;
                     witnesses.remove(&*self.our_key);
                     witnesses
                         .into_iter()

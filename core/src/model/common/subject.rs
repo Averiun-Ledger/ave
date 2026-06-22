@@ -19,10 +19,14 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
         data::MemberName,
-        model::{HashThisRole, ProtocolTypes, Quorum, RoleTypes, RolesSchema, RolesTrackerSchemas, WitnessesData},
+        model::{
+            HashThisRole, ProtocolTypes, Quorum, RoleTypes, RolesSchema,
+            RolesTrackerSchemas, WitnessesData,
+        },
         witnesses_register::{
-            HiSnLimit, TrackerDeliveryRange, TransferData, WitnessStatus, WitnessesRegister,
-            WitnessesRegisterMessage, WitnessesRegisterResponse,
+            HiSnLimit, TrackerDeliveryRange, TransferData, WitnessStatus,
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
         },
     },
     model::{
@@ -962,7 +966,8 @@ where
         } => Ok((status, sn, transfer_sn, clear_sn, is_all, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
-            expected: "WitnessesRegisterResponse::WitnessStatusAndWindow".to_string(),
+            expected: "WitnessesRegisterResponse::WitnessStatusAndWindow"
+                .to_string(),
         }),
     }
 }
@@ -998,7 +1003,9 @@ where
         .await?;
 
     match response {
-        WitnessesRegisterResponse::WitnessStatus(status) => Ok(status.hi_sn_limit),
+        WitnessesRegisterResponse::WitnessStatus(status) => {
+            Ok(status.hi_sn_limit)
+        }
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::WitnessStatus".to_string(),

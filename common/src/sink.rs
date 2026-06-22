@@ -7,7 +7,6 @@ use serde_json::Value;
 
 use crate::SchemaType;
 
-
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 #[cfg(feature = "openapi")]
@@ -285,9 +284,9 @@ impl From<&DataToSink> for LightEvent {
     fn from(data: &DataToSink) -> Self {
         let (subject_id, schema_id) = data.payload.get_subject_schema();
         let (governance_id, sn, event_type, success) = match &data.payload {
-            DataToSinkEvent::Create { governance_id, sn, .. } => {
-                (governance_id.clone(), *sn, SinkTypes::Create, true)
-            }
+            DataToSinkEvent::Create {
+                governance_id, sn, ..
+            } => (governance_id.clone(), *sn, SinkTypes::Create, true),
             DataToSinkEvent::FactFull {
                 governance_id,
                 sn,
@@ -312,12 +311,12 @@ impl From<&DataToSink> for LightEvent {
                 success,
                 ..
             } => (governance_id.clone(), *sn, SinkTypes::Confirm, *success),
-            DataToSinkEvent::Reject { governance_id, sn, .. } => {
-                (governance_id.clone(), *sn, SinkTypes::Reject, true)
-            }
-            DataToSinkEvent::Eol { governance_id, sn, .. } => {
-                (governance_id.clone(), *sn, SinkTypes::EOL, true)
-            }
+            DataToSinkEvent::Reject {
+                governance_id, sn, ..
+            } => (governance_id.clone(), *sn, SinkTypes::Reject, true),
+            DataToSinkEvent::Eol {
+                governance_id, sn, ..
+            } => (governance_id.clone(), *sn, SinkTypes::EOL, true),
         };
 
         Self {
@@ -359,7 +358,10 @@ mod tests {
             sn: 1,
             gov_version: 1,
         };
-        assert_eq!(event.get_subject_schema(), ("sub_custom".to_string(), "my_custom_schema".to_string()));
+        assert_eq!(
+            event.get_subject_schema(),
+            ("sub_custom".to_string(), "my_custom_schema".to_string())
+        );
     }
 
     #[test]
@@ -423,7 +425,9 @@ pub struct SinkAuthConfig {
 /// `NodeSinkManager`; in that case `governance_id` must be `None`. For any
 /// other schema `governance_id` is mandatory and identifies the governance
 /// whose trackers will feed the sink.
-#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord, Hash,
+)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]

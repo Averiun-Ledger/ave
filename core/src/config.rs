@@ -28,7 +28,8 @@ impl TokenResponse {
         match self.obtained_at {
             Some(t) => {
                 let elapsed = t.elapsed().as_secs();
-                self.expires_in > 0 && elapsed + margin_secs >= self.expires_in as u64
+                self.expires_in > 0
+                    && elapsed + margin_secs >= self.expires_in as u64
             }
             None => true,
         }
@@ -635,4 +636,3 @@ impl LoggingConfig {
         self.output.api || self.output.file || self.output.stdout
     }
 }
-

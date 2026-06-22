@@ -19,24 +19,22 @@ use crate::{
         model::{HashThisRole, RoleTypes},
         witnesses_register::{
             GovVersionLimit, HiSnLimit, TrackerDeliveryMode,
-            TrackerDeliveryRange,
-            WitnessesRegister,
+            TrackerDeliveryRange, WitnessesRegister,
         },
     },
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_witness_status,
-            crash_system,
-            get_verified_transfer_sn, node::get_subject_data,
+            OwnerContext, TrackerIdentity, TrackerParams, TrackerPeers,
+            check_witness_status, crash_system, get_verified_transfer_sn,
+            node::get_subject_data,
             subject::{
-                acquire_subject, get_gov_sn, get_version, has_role,
+                acquire_subject, check_simulated_transfer_hi_sn_limit,
+                check_witness_status_and_window, get_gov_sn,
                 get_local_subject_sn,
-                get_tracker_window as resolve_tracker_window,
-                check_simulated_transfer_hi_sn_limit,
-                check_witness_status_and_window,
+                get_tracker_window as resolve_tracker_window, get_version,
+                has_role,
             },
-            TrackerIdentity, OwnerContext, TrackerParams, TrackerPeers,
         },
         event::Ledger,
     },
@@ -115,8 +113,11 @@ impl DistriWorker {
             GovVersionLimit::None => None,
             GovVersionLimit::Infinity => Some(offered_hi_sn),
             GovVersionLimit::Version(limit) => {
-                let idx = ledger.partition_point(|event| event.gov_version <= limit);
-                ledger.get(idx.saturating_sub(1)).map(|event| event.sn.min(offered_hi_sn))
+                let idx =
+                    ledger.partition_point(|event| event.gov_version <= limit);
+                ledger
+                    .get(idx.saturating_sub(1))
+                    .map(|event| event.sn.min(offered_hi_sn))
             }
         }
     }
@@ -289,9 +290,11 @@ impl DistriWorker {
             .ask(NodeMessage::SubjectAccessData(subject_id.to_owned()))
             .await?;
         match response {
-            NodeResponse::SubjectAccessData { is_gov_authorized, is_tracker_banned, subject_data } => {
-                Ok((is_gov_authorized, is_tracker_banned, subject_data))
-            }
+            NodeResponse::SubjectAccessData {
+                is_gov_authorized,
+                is_tracker_banned,
+                subject_data,
+            } => Ok((is_gov_authorized, is_tracker_banned, subject_data)),
             _ => Err(ActorError::UnexpectedResponse {
                 expected: "NodeResponse::SubjectAccessData".to_owned(),
                 path: node_path,
@@ -394,11 +397,12 @@ impl DistriWorker {
             .into());
         };
 
-        let gov_version = get_version(ctx, &governance_id).await.map_err(|e| {
-            DistributorError::GetGovernanceFailed {
-                details: e.to_string(),
-            }
-        })?;
+        let gov_version =
+            get_version(ctx, &governance_id).await.map_err(|e| {
+                DistributorError::GetGovernanceFailed {
+                    details: e.to_string(),
+                }
+            })?;
 
         if gov_version < first_ledger.gov_version {
             return Err(DistributorError::GovernanceVersionMismatch {
@@ -435,7 +439,13 @@ impl DistriWorker {
             });
         }
 
-        let CheckAuthCommon { subject_id, schema_id, governance_id, namespace, .. } = common;
+        let CheckAuthCommon {
+            subject_id,
+            schema_id,
+            governance_id,
+            namespace,
+            ..
+        } = common;
 
         // subject_data puede haber cambiado entre iteraciones del loop de
         // LedgerDistribution (ej. subject creado en chunk anterior). Si
@@ -447,8 +457,11 @@ impl DistriWorker {
         };
 
         // 1. Batch actual trae un transfer_event nuevo y la simulación dice Witness
-        if let (Some(transfer_event), Some(TransferSimulationResult::Witness)) = (transfer_batch.event, transfer_batch.simulation.as_ref()) {
-            let chunk_first_sn = ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
+        if let (Some(transfer_event), Some(TransferSimulationResult::Witness)) =
+            (transfer_batch.event, transfer_batch.simulation.as_ref())
+        {
+            let chunk_first_sn =
+                ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
             if chunk_first_sn <= transfer_event.sn {
                 return Ok(DistributionAuth {
                     is_gov: false,
@@ -460,8 +473,11 @@ impl DistriWorker {
 
         // 2. Tenemos un transfer verificado anteriormente y el chunk está dentro
         //    de su rango de free passage. Vía libre hasta verified_transfer_sn.
-        let chunk_first_sn = ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
-        if let Some(verified_sn) = transfer_batch.verified_sn && chunk_first_sn <= verified_sn {
+        let chunk_first_sn =
+            ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
+        if let Some(verified_sn) = transfer_batch.verified_sn
+            && chunk_first_sn <= verified_sn
+        {
             return Ok(DistributionAuth {
                 is_gov: false,
                 is_register,
@@ -476,8 +492,14 @@ impl DistriWorker {
                 governance_id,
                 (*self.our_key).clone(),
                 Some(subject_id.clone()),
-                TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
-                OwnerContext { owner: None, gov_version: None },
+                TrackerIdentity {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                },
+                OwnerContext {
+                    owner: None,
+                    gov_version: None,
+                },
             )
             .await?;
 
@@ -487,39 +509,42 @@ impl DistriWorker {
                 offered_hi_sn,
             );
 
-
             let Some(receiver_limit) = receiver_limit else {
                 return Err(DistributorError::ReceiverNoAccess.into());
             };
 
             receiver_limit.min(offered_hi_sn)
         } else {
-            let first_ledger = ledger.first().ok_or(DistributorError::EmptyEvents)?;
+            let first_ledger =
+                ledger.first().ok_or(DistributorError::EmptyEvents)?;
             let owner = first_ledger.ledger_seal_signature.signer.clone();
             let gov_version = first_ledger.gov_version;
             let transfer_data =
-                Some(WitnessesRegister::transfer_data_from_ledger(subject_id, ledger)?);
+                Some(WitnessesRegister::transfer_data_from_ledger(
+                    subject_id, ledger,
+                )?);
 
-            let (witness_status, receiver_window_sn, ..) = check_witness_status_and_window(
-                ctx,
-                governance_id,
-                subject_id,
-                transfer_data,
-                TrackerPeers {
-                    node: (*self.our_key).clone(),
-                    sender: sender.clone(),
-                },
-                TrackerParams {
-                    namespace: namespace.clone(),
-                    schema_id: schema_id.clone(),
-                    actual_sn: None,
-                },
-                OwnerContext {
-                    owner: Some(owner),
-                    gov_version: Some(gov_version),
-                },
-            )
-            .await?;
+            let (witness_status, receiver_window_sn, ..) =
+                check_witness_status_and_window(
+                    ctx,
+                    governance_id,
+                    subject_id,
+                    transfer_data,
+                    TrackerPeers {
+                        node: (*self.our_key).clone(),
+                        sender: sender.clone(),
+                    },
+                    TrackerParams {
+                        namespace: namespace.clone(),
+                        schema_id: schema_id.clone(),
+                        actual_sn: None,
+                    },
+                    OwnerContext {
+                        owner: Some(owner),
+                        gov_version: Some(gov_version),
+                    },
+                )
+                .await?;
 
             let receiver_hi_limit = Self::concrete_hi_sn_limit(
                 witness_status.hi_sn_limit,
@@ -550,13 +575,16 @@ impl DistriWorker {
 
         // Seguridad: capar en Confirm/Reject para evitar distribución más allá de
         // cambios de ownership.
-        let safe_hi_sn = ledger.iter().find_map(|event| {
-            matches!(
-                event.get_event_request_type(),
-                EventRequestType::Confirm | EventRequestType::Reject
-            )
-            .then_some(event.sn)
-        }).map_or(safe_hi_sn, |boundary| safe_hi_sn.min(boundary));
+        let safe_hi_sn = ledger
+            .iter()
+            .find_map(|event| {
+                matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Confirm | EventRequestType::Reject
+                )
+                .then_some(event.sn)
+            })
+            .map_or(safe_hi_sn, |boundary| safe_hi_sn.min(boundary));
 
         Ok(DistributionAuth {
             is_gov: false,
@@ -573,7 +601,9 @@ impl DistriWorker {
         ledger: &[Ledger],
         offered_hi_sn: u64,
     ) -> Result<DistributionAuth, ActorError> {
-        let common = self.check_auth_common(ctx, sender.clone(), info, ledger).await?;
+        let common = self
+            .check_auth_common(ctx, sender.clone(), info, ledger)
+            .await?;
         if common.is_gov {
             return Ok(DistributionAuth {
                 is_gov: true,
@@ -582,8 +612,16 @@ impl DistriWorker {
             });
         }
 
-        let CheckAuthCommon { subject_id, subject_data, schema_id, governance_id, namespace, .. } = common;
-        let first_ledger = ledger.first().ok_or(DistributorError::EmptyEvents)?;
+        let CheckAuthCommon {
+            subject_id,
+            subject_data,
+            schema_id,
+            governance_id,
+            namespace,
+            ..
+        } = common;
+        let first_ledger =
+            ledger.first().ok_or(DistributorError::EmptyEvents)?;
 
         if subject_data.is_none() && !first_ledger.is_create_event() {
             self.request_ledger_from_sender(
@@ -598,7 +636,10 @@ impl DistriWorker {
             return Err(DistributorError::UpdatingSubject.into());
         }
 
-        if matches!(first_ledger.get_event_request_type(), EventRequestType::Transfer) {
+        if matches!(
+            first_ledger.get_event_request_type(),
+            EventRequestType::Transfer
+        ) {
             let simulated_limit = check_simulated_transfer_hi_sn_limit(
                 ctx,
                 &governance_id,
@@ -627,8 +668,14 @@ impl DistriWorker {
                 &governance_id,
                 (*self.our_key).clone(),
                 Some(subject_id.clone()),
-                TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
-                OwnerContext { owner: None, gov_version: None },
+                TrackerIdentity {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                },
+                OwnerContext {
+                    owner: None,
+                    gov_version: None,
+                },
             )
             .await?;
 
@@ -659,28 +706,32 @@ impl DistriWorker {
             let owner = first_ledger.ledger_seal_signature.signer.clone();
             let gov_version = first_ledger.gov_version;
             let transfer_data =
-                Some(WitnessesRegister::transfer_data_from_ledger(&subject_id, ledger)?);
+                Some(WitnessesRegister::transfer_data_from_ledger(
+                    &subject_id,
+                    ledger,
+                )?);
 
-            let (witness_status, receiver_window_sn, ..) = check_witness_status_and_window(
-                ctx,
-                &governance_id,
-                &subject_id,
-                transfer_data,
-                TrackerPeers {
-                    node: (*self.our_key).clone(),
-                    sender: sender.clone(),
-                },
-                TrackerParams {
-                    namespace: namespace.clone(),
-                    schema_id: schema_id.clone(),
-                    actual_sn: None,
-                },
-                OwnerContext {
-                    owner: Some(owner),
-                    gov_version: Some(gov_version),
-                },
-            )
-            .await?;
+            let (witness_status, receiver_window_sn, ..) =
+                check_witness_status_and_window(
+                    ctx,
+                    &governance_id,
+                    &subject_id,
+                    transfer_data,
+                    TrackerPeers {
+                        node: (*self.our_key).clone(),
+                        sender: sender.clone(),
+                    },
+                    TrackerParams {
+                        namespace: namespace.clone(),
+                        schema_id: schema_id.clone(),
+                        actual_sn: None,
+                    },
+                    OwnerContext {
+                        owner: Some(owner),
+                        gov_version: Some(gov_version),
+                    },
+                )
+                .await?;
 
             let receiver_hi_limit = Self::concrete_hi_sn_limit(
                 witness_status.hi_sn_limit,
@@ -710,13 +761,16 @@ impl DistriWorker {
         };
 
         // Seguridad: capar en Confirm/Reject para coherencia con check_auth_batch.
-        let safe_hi_sn = ledger.iter().find_map(|event| {
-            matches!(
-                event.get_event_request_type(),
-                EventRequestType::Confirm | EventRequestType::Reject
-            )
-            .then_some(event.sn)
-        }).map_or(safe_hi_sn, |boundary| safe_hi_sn.min(boundary));
+        let safe_hi_sn = ledger
+            .iter()
+            .find_map(|event| {
+                matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Confirm | EventRequestType::Reject
+                )
+                .then_some(event.sn)
+            })
+            .map_or(safe_hi_sn, |boundary| safe_hi_sn.min(boundary));
 
         Ok(DistributionAuth {
             is_gov: false,
@@ -724,9 +778,6 @@ impl DistriWorker {
             safe_hi_sn,
         })
     }
-
-
-
 
     pub(crate) fn split_off_after_safe_hi(
         ledger: &mut Vec<Ledger>,
@@ -785,8 +836,14 @@ impl DistriWorker {
                 governance_id,
                 sender.clone(),
                 Some(subject_id.clone()),
-                TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
-                OwnerContext { owner: None, gov_version: None },
+                TrackerIdentity {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                },
+                OwnerContext {
+                    owner: None,
+                    gov_version: None,
+                },
             )
             .await?;
 
@@ -815,7 +872,8 @@ impl DistriWorker {
         let mut range_idx = 0;
 
         for event in ledger {
-            while range_idx < ranges.len() && ranges[range_idx].to_sn < event.sn {
+            while range_idx < ranges.len() && ranges[range_idx].to_sn < event.sn
+            {
                 range_idx += 1;
             }
 
@@ -861,8 +919,14 @@ impl DistriWorker {
                     governance_id,
                     sender.clone(),
                     Some(subject_id.clone()),
-                    TrackerIdentity { namespace: namespace.clone(), schema_id: schema_id.clone() },
-                    OwnerContext { owner: None, gov_version: None },
+                    TrackerIdentity {
+                        namespace: namespace.clone(),
+                        schema_id: schema_id.clone(),
+                    },
+                    OwnerContext {
+                        owner: None,
+                        gov_version: None,
+                    },
                 )
                 .await?;
 
@@ -931,8 +995,9 @@ impl DistriWorker {
                 })
             }
             SubjectData::Governance { .. } => {
-                let (sn, ..) =
-                    self.check_witness(ctx, subject_id, sender.clone(), &data).await?;
+                let (sn, ..) = self
+                    .check_witness(ctx, subject_id, sender.clone(), &data)
+                    .await?;
                 Ok(UpdateWitnessOffer {
                     kind: UpdateSubjectKind::Governance,
                     sn,
@@ -960,9 +1025,14 @@ impl DistriWorker {
         match data {
             SubjectData::Tracker { .. } => {
                 let (window_sn, transfer_sn, clear_sn, _, ranges) = self
-                    .get_tracker_window(ctx, subject_id, sender.clone(), actual_sn, &data)
+                    .get_tracker_window(
+                        ctx,
+                        subject_id,
+                        sender.clone(),
+                        actual_sn,
+                        &data,
+                    )
                     .await?;
-
 
                 if let Some(actual_sn) = actual_sn
                     && actual_sn >= window_sn
@@ -1005,7 +1075,8 @@ impl DistriWorker {
                     {
                         None
                     } else {
-                        let idx = ledger.partition_point(|event| event.sn < transfer_sn);
+                        let idx = ledger
+                            .partition_point(|event| event.sn < transfer_sn);
                         if idx < ledger.len() && ledger[idx].sn == transfer_sn {
                             Some(ledger[idx].clone())
                         } else {
@@ -1072,7 +1143,9 @@ impl DistriWorker {
     ) -> Result<(), ActorError> {
         let verified = match subject_data {
             Some(SubjectData::Tracker { governance_id, .. }) => {
-                match get_verified_transfer_sn(ctx, &governance_id, subject_id).await {
+                match get_verified_transfer_sn(ctx, &governance_id, subject_id)
+                    .await
+                {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(
@@ -1086,7 +1159,9 @@ impl DistriWorker {
                 }
             }
             Some(SubjectData::Governance { .. }) => {
-                match get_verified_transfer_sn(ctx, subject_id, subject_id).await {
+                match get_verified_transfer_sn(ctx, subject_id, subject_id)
+                    .await
+                {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(
@@ -1138,11 +1213,15 @@ impl DistriWorker {
         let subject_data = get_subject_data(ctx, subject_id).await?;
 
         if subject_data.is_some() {
-            let Some(local_sn) =
-                get_local_subject_sn(ctx, subject_id).await?
+            let Some(local_sn) = get_local_subject_sn(ctx, subject_id).await?
             else {
                 self.request_ledger_from_sender(
-                    ctx, subject_id, sender, info, None, subject_data.clone(),
+                    ctx,
+                    subject_id,
+                    sender,
+                    info,
+                    None,
+                    subject_data.clone(),
                 )
                 .await?;
                 return Ok(false);
@@ -1300,8 +1379,6 @@ impl DistriWorker {
 
         Ok(())
     }
-
-
 }
 
 #[async_trait]
@@ -1310,7 +1387,7 @@ impl Actor for DistriWorker {
     type Message = DistriWorkerMessage;
     type Response = ();
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -1478,7 +1555,10 @@ impl Handler<Self> for DistriWorker {
                 info,
                 sender,
             } => {
-                self.process_last_event_distribution(ctx, *ledger, info, sender).await?;
+                self.process_last_event_distribution(
+                    ctx, *ledger, info, sender,
+                )
+                .await?;
             }
             DistriWorkerMessage::LedgerDistribution {
                 mut ledger,
@@ -1517,20 +1597,32 @@ impl Handler<Self> for DistriWorker {
                     return Ok(());
                 }
 
-                let common = self.check_auth_common(ctx, sender.clone(), &info, &ledger).await?;
+                let common = self
+                    .check_auth_common(ctx, sender.clone(), &info, &ledger)
+                    .await?;
                 let subject_id = ledger[0].get_subject_id();
 
-                let transfer_simulation = if let Some(ref transfer_event) = transfer_event {
+                let transfer_simulation = if let Some(ref transfer_event) =
+                    transfer_event
+                {
                     if !common.is_gov {
-                        match self.transfer_verifier.verify_and_simulate(
-                            ctx,
-                            &subject_id,
-                            &ledger,
-                            transfer_event,
-                        ).await? {
-                            TransferSimulationResult::Witness => Some(TransferSimulationResult::Witness),
+                        match self
+                            .transfer_verifier
+                            .verify_and_simulate(
+                                ctx,
+                                &subject_id,
+                                &ledger,
+                                transfer_event,
+                            )
+                            .await?
+                        {
+                            TransferSimulationResult::Witness => {
+                                Some(TransferSimulationResult::Witness)
+                            }
                             TransferSimulationResult::NotWitness => {
-                                return Err(DistributorError::ReceiverNoAccess.into());
+                                return Err(
+                                    DistributorError::ReceiverNoAccess.into()
+                                );
                             }
                         }
                     } else {
@@ -1541,9 +1633,17 @@ impl Handler<Self> for DistriWorker {
                 };
 
                 let verified_transfer_sn = if !common.is_gov {
-                    match get_verified_transfer_sn(ctx, &common.governance_id, &subject_id).await {
+                    match get_verified_transfer_sn(
+                        ctx,
+                        &common.governance_id,
+                        &subject_id,
+                    )
+                    .await
+                    {
                         Ok(v) => v
-                            .filter(|(_, verified_sender)| *verified_sender == sender)
+                            .filter(|(_, verified_sender)| {
+                                *verified_sender == sender
+                            })
                             .map(|(sn, _)| sn),
                         Err(e) => {
                             warn!(
@@ -1578,7 +1678,8 @@ impl Handler<Self> for DistriWorker {
                         sender_is_all,
                         ledger_count,
                     },
-                ).await?;
+                )
+                .await?;
 
                 debug!(
                     msg_type = "LedgerDistribution",

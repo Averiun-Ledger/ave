@@ -104,8 +104,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     async fn setup_monitor() -> ave_actors::ActorRef<Monitor> {
-        let (system, mut runner) =
-            ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         tokio::spawn(async move {
             runner.run().await;
         });

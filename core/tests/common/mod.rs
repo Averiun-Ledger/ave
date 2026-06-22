@@ -870,4 +870,3 @@ pub fn assert_tracker_visibility(
 
     Ok(())
 }
-

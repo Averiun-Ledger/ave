@@ -703,7 +703,11 @@ impl From<SinkConfigEntry> for SinkConfigEntryHttp {
     fn from(value: SinkConfigEntry) -> Self {
         Self {
             target: value.target.into(),
-            servers: value.servers.into_iter().map(SinkServerHttp::from).collect(),
+            servers: value
+                .servers
+                .into_iter()
+                .map(SinkServerHttp::from)
+                .collect(),
         }
     }
 }

@@ -2,6 +2,11 @@ use std::{collections::HashSet, str::FromStr};
 
 pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
+pub use ave_common::{
+    bridge::request::SinksQuery,
+    bridge::response::{SinkInfo, SinkStatusInfo},
+    sink::{SinkConfigEntry, SinkServer, SinkTarget},
+};
 use ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
@@ -13,8 +18,8 @@ use ave_common::{
     response::{
         ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
         RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
-        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SinkReplayResponse,
-        SubjectDB, SubjsData, TransferSubject,
+        RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
+        SinkReplayResponse, SubjectDB, SubjsData, TransferSubject,
     },
 };
 pub use ave_core::config::{MachineSpec, resolve_spec};
@@ -27,11 +32,6 @@ pub use ave_core::{
         LoggingRotation,
     },
     error::Error,
-};
-pub use ave_common::{
-    bridge::request::SinksQuery,
-    bridge::response::{SinkInfo, SinkStatusInfo},
-    sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
 pub use ave_network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
@@ -326,15 +326,23 @@ impl Bridge {
             .map_err(|e| BridgeError::Api(e.to_string()))
     }
 
-    pub async fn get_sinks_status(&self) -> Result<Vec<SinkStatusInfo>, BridgeError> {
+    pub async fn get_sinks_status(
+        &self,
+    ) -> Result<Vec<SinkStatusInfo>, BridgeError> {
         self.api
             .get_sinks_status()
             .await
             .map_err(|e| BridgeError::Api(e.to_string()))
     }
 
-    pub async fn unblock_sink(&self, sink_name: String) -> Result<(), BridgeError> {
-        self.api.unblock_sink(sink_name).await.map_err(BridgeError::Core)
+    pub async fn unblock_sink(
+        &self,
+        sink_name: String,
+    ) -> Result<(), BridgeError> {
+        self.api
+            .unblock_sink(sink_name)
+            .await
+            .map_err(BridgeError::Core)
     }
 
     pub async fn delete_sink_cursors(
@@ -387,7 +395,10 @@ impl Bridge {
             AuthWitness::Many(witnesses_key)
         };
 
-        Ok(self.api.authorize_governance(subject_id, auh_witness).await?)
+        Ok(self
+            .api
+            .authorize_governance(subject_id, auh_witness)
+            .await?)
     }
 
     pub async fn disauthorize_governance(
@@ -478,16 +489,20 @@ impl Bridge {
             return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
         }
         if peers.is_empty() {
-            return Err(BridgeError::InvalidPublicKey("empty peers list".to_owned()));
+            return Err(BridgeError::InvalidPublicKey(
+                "empty peers list".to_owned(),
+            ));
         }
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
         let mut peers_key = vec![];
         for peer in peers {
-            peers_key.push(PublicKey::from_str(&peer).map_err(|e| {
-                BridgeError::InvalidPublicKey(e.to_string())
-            })?);
+            peers_key.push(
+                PublicKey::from_str(&peer).map_err(|e| {
+                    BridgeError::InvalidPublicKey(e.to_string())
+                })?,
+            );
         }
 
         Ok(self.api.add_sync_peer(subject_id, peers_key).await?)
@@ -502,16 +517,20 @@ impl Bridge {
             return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
         }
         if peers.is_empty() {
-            return Err(BridgeError::InvalidPublicKey("empty peers list".to_owned()));
+            return Err(BridgeError::InvalidPublicKey(
+                "empty peers list".to_owned(),
+            ));
         }
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
         let mut peers_key = vec![];
         for peer in peers {
-            peers_key.push(PublicKey::from_str(&peer).map_err(|e| {
-                BridgeError::InvalidPublicKey(e.to_string())
-            })?);
+            peers_key.push(
+                PublicKey::from_str(&peer).map_err(|e| {
+                    BridgeError::InvalidPublicKey(e.to_string())
+                })?,
+            );
         }
 
         Ok(self.api.remove_sync_peer(subject_id, peers_key).await?)

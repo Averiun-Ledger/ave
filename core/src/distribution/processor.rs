@@ -2,16 +2,18 @@ use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::PublicKey;
 use ave_network::ComunicateInfo;
 
-use crate::{
-    distribution::error::DistributorError,
-    distribution::worker::{CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch},
-    model::event::Ledger,
+use crate::model::common::subject::{
+    acquire_subject, create_subject, get_local_subject_sn, update_ledger,
 };
 use crate::model::common::{
     check_subject_creation, crash_system, record_verified_transfer,
 };
-use crate::model::common::subject::{
-    acquire_subject, create_subject, get_local_subject_sn, update_ledger,
+use crate::{
+    distribution::error::DistributorError,
+    distribution::worker::{
+        CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
+    },
+    model::event::Ledger,
 };
 use tracing::{debug, error, warn};
 
@@ -44,7 +46,6 @@ impl DistriWorker {
                 .map(|event| event.sn)
                 .unwrap_or(chunk_first_sn);
 
-
             let auth = self
                 .check_auth_batch(
                     ctx,
@@ -60,15 +61,19 @@ impl DistriWorker {
                 )
                 .await?;
 
-
-            if !transfer_recorded && transfer_simulation.is_some() && !common.is_gov && let Some(transfer_event) = transfer_event {
+            if !transfer_recorded
+                && transfer_simulation.is_some()
+                && !common.is_gov
+                && let Some(transfer_event) = transfer_event
+            {
                 record_verified_transfer(
                     ctx,
                     &common.governance_id,
                     &subject_id,
                     transfer_event.sn,
                     sender.clone(),
-                ).await?;
+                )
+                .await?;
                 transfer_recorded = true;
                 // Refrescar verified_transfer_sn para que la siguiente
                 // iteración del loop pueda usar Path C (free passage).
@@ -79,10 +84,8 @@ impl DistriWorker {
             let is_register = auth.is_register;
             let safe_hi_sn = auth.safe_hi_sn;
 
-            let remaining_ledger = Self::split_off_after_safe_hi(
-                &mut pending_ledger,
-                safe_hi_sn,
-            );
+            let remaining_ledger =
+                Self::split_off_after_safe_hi(&mut pending_ledger, safe_hi_sn);
             if pending_ledger.is_empty() {
                 warn!(
                     msg_type = "LedgerDistribution",
@@ -94,12 +97,9 @@ impl DistriWorker {
                 return Err(DistributorError::ReceiverNoAccess.into());
             }
 
-            let chunk_is_all =
-                remaining_ledger.is_empty() && sender_is_all;
+            let chunk_is_all = remaining_ledger.is_empty() && sender_is_all;
 
-            let lease = if pending_ledger[0].is_create_event()
-                && !is_register
-            {
+            let lease = if pending_ledger[0].is_create_event() && !is_register {
                 let create_ledger = pending_ledger[0].clone();
                 let requester = Self::requester_id(
                     "ledger_distribution_create",
@@ -109,7 +109,8 @@ impl DistriWorker {
                 );
 
                 let lease = if is_gov {
-                    let result = create_subject(ctx, create_ledger.clone()).await;
+                    let result =
+                        create_subject(ctx, create_ledger.clone()).await;
                     handle_distri_error!(
                         ctx,
                         result,
@@ -119,26 +120,22 @@ impl DistriWorker {
                     )?;
                     None
                 } else {
-                    let request = create_ledger
-                            .get_create_event()
-                            .ok_or_else(|| {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    "Create ledger is missing create event payload"
-                                );
-                                DistributorError::MissingCreateEventInCreateLedger {
-                                    subject_id: subject_id.clone(),
-                                }
-                            })?;
+                    let request =
+                        create_ledger.get_create_event().ok_or_else(|| {
+                            error!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                "Create ledger is missing create event payload"
+                            );
+                            DistributorError::MissingCreateEventInCreateLedger {
+                                subject_id: subject_id.clone(),
+                            }
+                        })?;
 
                     let result = check_subject_creation(
                         ctx,
                         &request.governance_id,
-                        create_ledger
-                            .ledger_seal_signature
-                            .signer
-                            .clone(),
+                        create_ledger.ledger_seal_signature.signer.clone(),
                         create_ledger.gov_version,
                         request.namespace.to_string(),
                         request.schema_id,
@@ -200,13 +197,10 @@ impl DistriWorker {
                                 error = %e,
                                 "Failed to bring up tracker for subject update"
                             );
-                            let error =
-                                DistributorError::UpTrackerFailed {
-                                    details: e.to_string(),
-                                };
-                            return Err(
-                                crash_system(ctx, error.into()).await
-                            );
+                            let error = DistributorError::UpTrackerFailed {
+                                details: e.to_string(),
+                            };
+                            return Err(crash_system(ctx, error.into()).await);
                         }
                     }
                 } else {
@@ -221,8 +215,7 @@ impl DistriWorker {
 
             if !pending_ledger.is_empty() {
                 let update_result =
-                    update_ledger(ctx, &subject_id, pending_ledger)
-                        .await;
+                    update_ledger(ctx, &subject_id, pending_ledger).await;
 
                 if let Some(lease) = lease.clone()
                     && update_result.is_err()
@@ -272,9 +265,7 @@ impl DistriWorker {
                         }
                     }
                     Err(e) => {
-                        if let ActorError::FunctionalCritical {
-                            ..
-                        } = e.clone()
+                        if let ActorError::FunctionalCritical { .. } = e.clone()
                         {
                             error!(
                                 msg_type = "LedgerDistribution",
@@ -345,7 +336,6 @@ impl DistriWorker {
         Ok(())
     }
 
-
     pub(crate) async fn process_last_event_distribution(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -353,205 +343,200 @@ impl DistriWorker {
         info: ComunicateInfo,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
-                    let subject_id = ledger.get_subject_id();
-                    let sn = ledger.sn;
+        let subject_id = ledger.get_subject_id();
+        let sn = ledger.sn;
 
-                    if !self
-                        .ensure_next_sn_or_request_update(
-                            ctx,
-                            &subject_id,
-                            sn,
-                            &info,
-                            sender.clone(),
-                        )
-                        .await?
-                    {
-                        if let Some(local_sn) =
-                            get_local_subject_sn(ctx, &subject_id).await?
-                            && local_sn >= sn
-                        {
-                            self.send_last_event_ack(sender.clone(), &info).await?;
-                        }
-                        return Ok(());
-                    }
+        if !self
+            .ensure_next_sn_or_request_update(
+                ctx,
+                &subject_id,
+                sn,
+                &info,
+                sender.clone(),
+            )
+            .await?
+        {
+            if let Some(local_sn) =
+                get_local_subject_sn(ctx, &subject_id).await?
+                && local_sn >= sn
+            {
+                self.send_last_event_ack(sender.clone(), &info).await?;
+            }
+            return Ok(());
+        }
 
-                    let result = self
-                        .check_auth_single(
-                            ctx,
-                            sender.clone(),
-                            &info,
-                            std::slice::from_ref(&ledger),
-                            sn,
-                        )
-                        .await;
-                    let auth = handle_distri_error!(
-                        ctx,
-                        result,
-                        "LastEventDistribution",
-                        &subject_id,
-                        "Authorization check failed",
-                        sender = &sender,
-                        sn = sn
-                    )?;
+        let result = self
+            .check_auth_single(
+                ctx,
+                sender.clone(),
+                &info,
+                std::slice::from_ref(&ledger),
+                sn,
+            )
+            .await;
+        let auth = handle_distri_error!(
+            ctx,
+            result,
+            "LastEventDistribution",
+            &subject_id,
+            "Authorization check failed",
+            sender = &sender,
+            sn = sn
+        )?;
 
-                    let is_gov = auth.is_gov;
+        let is_gov = auth.is_gov;
 
-                    if !is_gov && auth.safe_hi_sn < sn {
-                        warn!(
+        if !is_gov && auth.safe_hi_sn < sn {
+            warn!(
+                msg_type = "LastEventDistribution",
+                subject_id = %subject_id,
+                sn = sn,
+                safe_hi_sn = auth.safe_hi_sn,
+                sender = %sender,
+                "Discarding event above current receiver access limit"
+            );
+            return Err(DistributorError::ReceiverNoAccess.into());
+        }
+
+        let lease = if ledger.is_create_event() {
+            let result = create_subject(ctx, ledger.clone()).await;
+            handle_distri_error!(
+                ctx,
+                result,
+                "LastEventDistribution",
+                &subject_id,
+                "Failed to create subject from create event"
+            )?;
+            None
+        } else {
+            let requester = Self::requester_id(
+                "last_event_distribution",
+                &subject_id,
+                &info,
+                &sender,
+            );
+            let lease = if !is_gov {
+                match acquire_subject(
+                    ctx,
+                    &subject_id,
+                    requester.clone(),
+                    None,
+                    true,
+                )
+                .await
+                {
+                    Ok(lease) => Some(lease),
+                    Err(e) => {
+                        error!(
                             msg_type = "LastEventDistribution",
                             subject_id = %subject_id,
-                            sn = sn,
-                            safe_hi_sn = auth.safe_hi_sn,
-                            sender = %sender,
-                            "Discarding event above current receiver access limit"
+                            error = %e,
+                            "Failed to bring up tracker for subject update"
                         );
-                        return Err(DistributorError::ReceiverNoAccess.into());
+                        let error = DistributorError::UpTrackerFailed {
+                            details: e.to_string(),
+                        };
+                        return Err(crash_system(ctx, error.into()).await);
+                    }
+                }
+            } else {
+                None
+            };
+
+            let update_result =
+                update_ledger(ctx, &subject_id, vec![ledger.clone()]).await;
+
+            if let Some(lease) = lease.clone()
+                && update_result.is_err()
+            {
+                lease.finish(ctx).await?;
+            }
+
+            match update_result {
+                Ok((last_sn, _, _)) if last_sn < ledger.sn => {
+                    debug!(
+                        msg_type = "LastEventDistribution",
+                        subject_id = %subject_id,
+                        last_sn = last_sn,
+                        received_sn = sn,
+                        "SN gap detected, requesting update"
+                    );
+
+                    if let Err(e) = self
+                        .request_ledger_from_sender(
+                            ctx,
+                            &subject_id,
+                            sender.clone(),
+                            &info,
+                            Some(last_sn),
+                            None,
+                        )
+                        .await
+                    {
+                        error!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            last_sn = last_sn,
+                            error = %e,
+                            "Failed to request ledger from network"
+                        );
+                        return Err(crash_system(ctx, e).await);
                     }
 
-                    let lease = if ledger.is_create_event() {
-                        let result = create_subject(ctx, ledger.clone()).await;
-                        handle_distri_error!(
-                            ctx,
-                            result,
-                            "LastEventDistribution",
-                            &subject_id,
-                            "Failed to create subject from create event"
-                        )?;
-                        None
-                    } else {
-                        let requester = Self::requester_id(
-                            "last_event_distribution",
-                            &subject_id,
-                            &info,
-                            &sender,
-                        );
-                        let lease = if !is_gov {
-                            match acquire_subject(
-                                ctx,
-                                &subject_id,
-                                requester.clone(),
-                                None,
-                                true,
-                            )
-                            .await
-                            {
-                                Ok(lease) => Some(lease),
-                                Err(e) => {
-                                    error!(
-                                        msg_type = "LastEventDistribution",
-                                        subject_id = %subject_id,
-                                        error = %e,
-                                        "Failed to bring up tracker for subject update"
-                                    );
-                                    let error = DistributorError::UpTrackerFailed {
-                                        details: e.to_string(),
-                                    };
-                                    return Err(crash_system(ctx, error.into()).await);
-                                }
-                            }
-                        } else {
-                            None
-                        };
+                    if let Some(lease) = lease.clone() {
+                        lease.finish(ctx).await?;
+                    }
 
-                        let update_result =
-                            update_ledger(ctx, &subject_id, vec![ledger.clone()])
-                                .await;
-
-                        if let Some(lease) = lease.clone()
-                            && update_result.is_err()
-                        {
-                            lease.finish(ctx).await?;
-                        }
-
-                        match update_result {
-                            Ok((last_sn, _, _)) if last_sn < ledger.sn => {
-                                debug!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    last_sn = last_sn,
-                                    received_sn = sn,
-                                    "SN gap detected, requesting update"
-                                );
-
-                                if let Err(e) = self
-                                    .request_ledger_from_sender(
-                                        ctx,
-                                        &subject_id,
-                                        sender.clone(),
-                                        &info,
-                                        Some(last_sn),
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        msg_type = "LastEventDistribution",
-                                        subject_id = %subject_id,
-                                        last_sn = last_sn,
-                                        error = %e,
-                                        "Failed to request ledger from network"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
-                                }
-
-                                if let Some(lease) = lease.clone() {
-                                    lease.finish(ctx).await?;
-                                }
-
-                                return Ok(());
-                            }
-                            Ok((..)) => lease,
-                            Err(e) => {
-                                if let ActorError::FunctionalCritical { .. } =
-                                    e.clone()
-                                {
-                                    error!(
-                                        msg_type = "LastEventDistribution",
-                                        subject_id = %subject_id,
-                                        sn = sn,
-                                        error = %e,
-                                        "Failed to update subject ledger"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
-                                } else {
-                                    warn!(
-                                        msg_type = "LastEventDistribution",
-                                        subject_id = %subject_id,
-                                        sn = sn,
-                                        error = %e,
-                                        "Failed to update subject ledger"
-                                    );
-                                    return Err(e);
-                                }
-                            }
-                        }
-                    };
-
-                    if let Err(e) =
-                        self.send_last_event_ack(sender.clone(), &info).await
-                    {
+                    return Ok(());
+                }
+                Ok((..)) => lease,
+                Err(e) => {
+                    if let ActorError::FunctionalCritical { .. } = e.clone() {
                         error!(
                             msg_type = "LastEventDistribution",
                             subject_id = %subject_id,
                             sn = sn,
                             error = %e,
-                            "Failed to send distribution acknowledgment"
+                            "Failed to update subject ledger"
                         );
                         return Err(crash_system(ctx, e).await);
-                    };
-
-                    if let Some(lease) = lease {
-                        lease.finish(ctx).await?;
+                    } else {
+                        warn!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            error = %e,
+                            "Failed to update subject ledger"
+                        );
+                        return Err(e);
                     }
+                }
+            }
+        };
 
-                    debug!(
-                        msg_type = "LastEventDistribution",
-                        subject_id = %subject_id,
-                        sn = sn,
-                        sender = %sender,
-                        is_gov = is_gov,
-                        "Last event distribution processed successfully"
-                    );
+        if let Err(e) = self.send_last_event_ack(sender.clone(), &info).await {
+            error!(
+                msg_type = "LastEventDistribution",
+                subject_id = %subject_id,
+                sn = sn,
+                error = %e,
+                "Failed to send distribution acknowledgment"
+            );
+            return Err(crash_system(ctx, e).await);
+        };
+
+        if let Some(lease) = lease {
+            lease.finish(ctx).await?;
+        }
+
+        debug!(
+            msg_type = "LastEventDistribution",
+            subject_id = %subject_id,
+            sn = sn,
+            sender = %sender,
+            is_gov = is_gov,
+            "Last event distribution processed successfully"
+        );
         Ok(())
     }
 }

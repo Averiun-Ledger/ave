@@ -47,7 +47,7 @@ impl Actor for TempCompiler {
     type Message = TempCompilerMessage;
     type Response = CompilerResponse;
     type SinkEvent = ();
-        type ChildError = ActorError;
+    type ChildError = ActorError;
     type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
