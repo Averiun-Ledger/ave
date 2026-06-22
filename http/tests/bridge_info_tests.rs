@@ -1832,7 +1832,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
                 &event.payload,
                 DataToSinkEvent::FactFull {
                     success: false,
-                    payload: None,
+                    payload: _,
                     patch: None,
                     error: Some(_),
                     ..
@@ -1956,7 +1956,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
             &event.payload,
             DataToSinkEvent::FactFull {
                 success: false,
-                payload: None,
+                payload: _,
                 patch: None,
                 error: Some(_),
                 ..

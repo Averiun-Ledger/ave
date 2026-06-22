@@ -4102,7 +4102,7 @@ async fn test_sink_replay_and_external_db_battery() {
             assert!(viewpoints.is_empty());
             assert_eq!(issuer, &owner.public_key());
             assert_eq!(event_owner, &owner.public_key());
-            assert_eq!(payload.as_ref(), Some(&governance_setup_payload));
+            assert_eq!(payload, &governance_setup_payload);
             assert!(patch.is_some());
             assert!(*success);
             assert!(error.is_none());
@@ -4134,7 +4134,7 @@ async fn test_sink_replay_and_external_db_battery() {
             assert!(viewpoints.is_empty());
             assert_eq!(issuer, &owner.public_key());
             assert_eq!(event_owner, &owner.public_key());
-            assert!(payload.is_none());
+            assert_eq!(payload, &governance_setup_payload);
             assert!(patch.is_none());
             assert!(!success);
             assert!(error.is_some());

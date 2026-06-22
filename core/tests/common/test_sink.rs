@@ -26,6 +26,9 @@ pub enum ResponseMode {
     /// unresponsive sink. When `ms` is larger than the sink's configured
     /// `request_timeout_ms`, the worker will see a timeout.
     Timeout(u64),
+    /// Never respond, simulating a crashed or unreachable sink. The HTTP
+    /// connection will hang until the node's request timeout fires.
+    Drop,
 }
 
 struct TestSinkState {
@@ -161,6 +164,11 @@ impl TestSink {
             ResponseMode::Timeout(ms) => {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 StatusCode::OK.into_response()
+            }
+            ResponseMode::Drop => {
+                // Never return: the connection hangs just like a crashed sink.
+                std::future::pending::<()>().await;
+                unreachable!()
             }
         }
     }

@@ -662,7 +662,7 @@ fn data_to_sink_event(
             issuer: data.issuer.to_string(),
             viewpoints: fact_request.viewpoints.iter().cloned().collect(),
             owner: data.owner,
-            payload: success.then_some(fact_request.payload.0),
+            payload: fact_request.payload.0,
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,

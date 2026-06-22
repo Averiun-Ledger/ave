@@ -96,6 +96,97 @@ pub fn example_sink_config(
     )]
 }
 
+pub fn governance_with_transfer_roles_fact(
+    new_owner_key: &str,
+) -> serde_json::Value {
+    json!({
+        "members": {
+            "add": [
+                {
+                    "name": "NewOwner",
+                    "key": new_owner_key
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "tracker_schemas": {
+                "add": {
+                    "issuer": [
+                        { "name": "Owner", "namespace": [] }
+                    ]
+                }
+            },
+            "governance": {
+                "add": {
+                    "witness": ["NewOwner"]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "validator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "witness": [
+                            { "name": "Owner", "namespace": [] },
+                            { "name": "NewOwner", "namespace": [] }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            },
+                            {
+                                "name": "NewOwner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    })
+}
+
+pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
+    vec![SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "governance".to_owned(),
+            governance_id: None,
+        },
+        servers: vec![SinkServer {
+            server: "gov-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::All]),
+            url,
+            max_retries: 0,
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            request_timeout_ms: 2000,
+            connect_timeout_ms: 1000,
+            ..Default::default()
+        }],
+    }]
+}
+
 pub fn restart_config(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
@@ -103,10 +194,23 @@ pub fn restart_config(
     listen_address: String,
     sinks: Vec<SinkConfigEntry>,
 ) -> CreateNodeConfig {
+    restart_config_with_peers(
+        keys, local_db, ext_db, listen_address, vec![], sinks,
+    )
+}
+
+pub fn restart_config_with_peers(
+    keys: ave_common::identity::keys::KeyPair,
+    local_db: std::path::PathBuf,
+    ext_db: std::path::PathBuf,
+    listen_address: String,
+    peers: Vec<ave_network::RoutingNode>,
+    sinks: Vec<SinkConfigEntry>,
+) -> CreateNodeConfig {
     CreateNodeConfig {
         node_type: NodeType::Bootstrap,
         listen_address,
-        peers: vec![],
+        peers,
         always_accept: true,
         is_service: false,
         only_clear_events: false,
@@ -153,8 +257,8 @@ pub fn assert_event_is_fact_full(
                 assert_eq!(*s, success, "unexpected success flag at sn {}", sn);
                 if let Some(expected) = expected_payload {
                     assert_eq!(
-                        payload.as_ref(),
-                        Some(&expected),
+                        payload,
+                        &expected,
                         "unexpected payload at sn {}",
                         sn
                     );
@@ -211,4 +315,100 @@ pub fn count_events_for_subject(
     subject_id: &str,
 ) -> usize {
     events.iter().filter(|e| e.subject_id() == subject_id).count()
+}
+
+pub fn assert_event_is_transfer(
+    event: &IncomingSinkEvent,
+    subject_id: &str,
+    sn: u64,
+) {
+    assert_eq!(event.subject_id(), subject_id);
+    assert_eq!(event.sn(), sn);
+    match event {
+        IncomingSinkEvent::Full(data) => {
+            assert!(matches!(data.payload, DataToSinkEvent::Transfer { .. }));
+        }
+        _ => panic!("expected full transfer event"),
+    }
+}
+
+pub fn assert_event_is_confirm(
+    event: &IncomingSinkEvent,
+    subject_id: &str,
+    sn: u64,
+) {
+    assert_eq!(event.subject_id(), subject_id);
+    assert_eq!(event.sn(), sn);
+    match event {
+        IncomingSinkEvent::Full(data) => {
+            assert!(matches!(data.payload, DataToSinkEvent::Confirm { .. }));
+        }
+        _ => panic!("expected full confirm event"),
+    }
+}
+
+pub fn assert_event_is_reject(
+    event: &IncomingSinkEvent,
+    subject_id: &str,
+    sn: u64,
+) {
+    assert_eq!(event.subject_id(), subject_id);
+    assert_eq!(event.sn(), sn);
+    match event {
+        IncomingSinkEvent::Full(data) => {
+            assert!(matches!(data.payload, DataToSinkEvent::Reject { .. }));
+        }
+        _ => panic!("expected full reject event"),
+    }
+}
+
+pub fn assert_event_is_eol(
+    event: &IncomingSinkEvent,
+    subject_id: &str,
+    sn: u64,
+) {
+    assert_eq!(event.subject_id(), subject_id);
+    assert_eq!(event.sn(), sn);
+    match event {
+        IncomingSinkEvent::Full(data) => {
+            assert!(matches!(data.payload, DataToSinkEvent::Eol { .. }));
+        }
+        _ => panic!("expected full eol event"),
+    }
+}
+
+pub fn assert_sink_contains_transfer(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_transfer(event, subject_id, sn);
+}
+
+pub fn assert_sink_contains_confirm(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_confirm(event, subject_id, sn);
+}
+
+pub fn assert_sink_contains_reject(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_reject(event, subject_id, sn);
+}
+
+pub fn assert_sink_contains_eol(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_eol(event, subject_id, sn);
 }

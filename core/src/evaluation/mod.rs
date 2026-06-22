@@ -1967,7 +1967,7 @@ pub mod tests {
                     Some(gov_id.to_string().as_str())
                 );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
-                assert_eq!(replay_payload.as_ref(), Some(&payload));
+                assert_eq!(replay_payload, &payload);
                 assert!(*success);
                 assert_eq!(*sn, 1);
                 assert_eq!(*gov_version, 1);
