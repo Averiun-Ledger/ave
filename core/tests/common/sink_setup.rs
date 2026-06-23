@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{sink::DataToSinkEvent, IncomingSinkEvent, SinkTypes};
-use ave_core::config::{SinkConfigEntry, SinkServer, SinkTarget};
+use ave_core::{Api, config::{SinkConfigEntry, SinkServer, SinkTarget}};
 use ave_network::NodeType;
 use serde_json::{json, Value};
 
@@ -94,6 +94,73 @@ pub fn example_sink_config(
         governance_id,
         BTreeSet::from([SinkTypes::All]),
     )]
+}
+
+/// Poll `get_sinks_status` until `sink_name` is reported as blocked.
+/// Returns the block reason. Panics on timeout.
+pub async fn wait_for_sink_blocked(
+    api: &Api,
+    sink_name: &str,
+) -> String {
+    let mut attempts = 0;
+    loop {
+        let statuses = api.get_sinks_status().await.unwrap();
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
+            if let Some(reason) = &status.blocked {
+                return reason.clone();
+            }
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for sink {} to be blocked", sink_name);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
+/// Poll `get_sinks_status` until `sink_name` is no longer blocked.
+/// Panics on timeout.
+pub async fn wait_for_sink_unblocked(api: &Api, sink_name: &str) {
+    let mut attempts = 0;
+    loop {
+        let statuses = api.get_sinks_status().await.unwrap();
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
+            if status.blocked.is_none() {
+                return;
+            }
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for sink {} to be unblocked", sink_name);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
+/// Poll `get_sinks_status` until `sink_name` reports at least `min`
+/// lagging subjects. Panics on timeout.
+pub async fn wait_for_sink_lagging_subjects(
+    api: &Api,
+    sink_name: &str,
+    min: usize,
+) {
+    let mut attempts = 0;
+    loop {
+        let statuses = api.get_sinks_status().await.unwrap();
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
+            if status.lagging_subjects >= min {
+                return;
+            }
+        }
+        if attempts > 100 {
+            panic!(
+                "timeout waiting for sink {} to have {} lagging subjects",
+                sink_name, min
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
 }
 
 pub fn governance_with_transfer_roles_fact(
