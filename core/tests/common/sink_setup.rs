@@ -167,6 +167,70 @@ pub fn governance_with_transfer_roles_fact(
     })
 }
 
+pub fn governance_with_viewpoints_fact(witness_key: &str) -> serde_json::Value {
+    json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Witness",
+                    "key": witness_key
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Witness"]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "validator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "witness": [
+                            { "name": "Owner", "namespace": [] },
+                            { "name": "Witness", "namespace": [] }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    { "name": "Witness", "viewpoints": [] }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            { "name": "Owner", "namespace": [] }
+                        ]
+                    }
+                }
+            ]
+        }
+    })
+}
+
 pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
     vec![SinkConfigEntry {
         target: SinkTarget::Schema {
@@ -270,6 +334,64 @@ pub fn assert_event_is_fact_full(
     }
 }
 
+pub fn assert_event_is_fact_opaque(
+    event: &IncomingSinkEvent,
+    subject_id: &str,
+    sn: u64,
+    success: bool,
+    expected_viewpoints: &[&str],
+) {
+    assert_eq!(event.subject_id(), subject_id);
+    assert_eq!(event.sn(), sn);
+    match event {
+        IncomingSinkEvent::Full(data) => match &data.payload {
+            DataToSinkEvent::FactOpaque {
+                success: s,
+                viewpoints,
+                ..
+            } => {
+                assert_eq!(*s, success, "unexpected success flag at sn {}", sn);
+                let expected: Vec<String> =
+                    expected_viewpoints.iter().map(|v| (*v).to_owned()).collect();
+                assert_eq!(
+                    viewpoints, &expected,
+                    "unexpected viewpoints at sn {}",
+                    sn
+                );
+            }
+            other => panic!("expected FactOpaque event, got {:?}", other),
+        },
+        _ => panic!("expected full opaque fact event"),
+    }
+}
+
+pub fn sample_sinks() -> Vec<SinkConfigEntry> {
+    vec![
+        SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "governance".to_owned(),
+                governance_id: None,
+            },
+            servers: vec![SinkServer {
+                server: "gov-sink".to_owned(),
+                url: "http://localhost:9000".to_owned(),
+                ..Default::default()
+            }],
+        },
+        SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "Example1".to_owned(),
+                governance_id: Some("some-governance".to_owned()),
+            },
+            servers: vec![SinkServer {
+                server: "schema-sink".to_owned(),
+                url: "http://localhost:9001".to_owned(),
+                ..Default::default()
+            }],
+        },
+    ]
+}
+
 /// Returns the first event in `events` matching `subject_id` and `sn`, or panics.
 fn find_event<'a>(
     events: &'a [IncomingSinkEvent],
@@ -307,6 +429,18 @@ pub fn assert_sink_contains_fact_full(
 ) {
     let event = find_event(events, subject_id, sn);
     assert_event_is_fact_full(event, subject_id, sn, success, expected_payload);
+}
+
+/// Asserts that `events` contains a FactOpaque event for `subject_id` at `sn`.
+pub fn assert_sink_contains_fact_opaque(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+    success: bool,
+    expected_viewpoints: &[&str],
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_fact_opaque(event, subject_id, sn, success, expected_viewpoints);
 }
 
 /// Counts how many events belong to `subject_id`.
