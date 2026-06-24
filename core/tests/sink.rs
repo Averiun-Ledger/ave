@@ -11,6 +11,7 @@ use ave_common::{
 use ave_core::{config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
 use std::str::FromStr;
+use std::time::Duration;
 use futures::future::join_all;
 use serde_json::json;
 use test_log::test;
@@ -21,12 +22,14 @@ use crate::common::{
     emit_reject, emit_transfer, get_subject, node_running, sink_setup::{
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
         assert_event_is_fact_full, assert_event_is_reject,
-        assert_event_is_transfer, assert_sink_contains_confirm,
+        assert_event_is_transfer, assert_sink_blocked, assert_sink_contains_confirm,
         assert_sink_contains_create, assert_sink_contains_eol,
         assert_sink_contains_fact_full, assert_sink_contains_fact_opaque,
         assert_sink_contains_reject, assert_sink_contains_transfer,
-        count_events_for_subject, example_schema_governance_fact,
-        example_sink_config, governance_sink_config,
+        assert_sink_lagging, assert_sink_not_lagging, assert_sink_running,
+        assert_sink_unblocked, count_events_for_subject, example_schema_governance_fact,
+        example_sink_config, flapping_sink_config, governance_sink_config,
+        short_idle_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
         make_sink_entry, restart_config, restart_config_with_peers, sample_sinks,
         wait_for_sink_blocked, wait_for_sink_lagging_subjects,
@@ -236,6 +239,8 @@ async fn replay_single_subject_after_sink_loss() {
 
     // Wait until the worker has marked the sink as lagging for this subject.
     wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+    assert_sink_lagging(&node.api, "example-sink", 1).await;
+    assert_sink_unblocked(&node.api, "example-sink").await;
 
     // Bring the sink back online. The worker should automatically catch up.
     sink.set_mode(ResponseMode::Accept).await;
@@ -257,6 +262,7 @@ async fn replay_single_subject_after_sink_loss() {
         true,
         Some(json!({"ModOne": {"data": 7}})),
     );
+    assert_sink_not_lagging(&node.api, "example-sink").await;
 
     // Simulate data loss at the sink from SN 5 onwards.
     sink.remove_events_for_subject_from_sn(&subject_id.to_string(), 5)
@@ -298,6 +304,7 @@ async fn replay_single_subject_after_sink_loss() {
             Some(json!({"ModOne": {"data": i}})),
         );
     }
+    assert_sink_not_lagging(&node.api, "example-sink").await;
 }
 
 /// Replay events for multiple subjects and sinks in a single request.
@@ -1212,8 +1219,10 @@ async fn replay_endpoint_validation_and_errors() {
     .await
     .unwrap();
 
-    // Wait until the worker has marked the sink as blocked.
+    // Wait until the worker has marked the sink as blocked and confirm it via
+    // the API before attempting a replay.
     wait_for_sink_blocked(&node.api, "example-sink").await;
+    assert_sink_blocked(&node.api, "example-sink").await;
 
     let response = node
         .api
@@ -1312,21 +1321,14 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
         .await
         .expect("unblock on healthy sink should be a no-op");
 
-    // Wait until the worker has marked the sink as blocked.
+    // Wait until the worker has marked the sink as blocked and confirm the
+    // state through the API before unblocking it.
     wait_for_sink_blocked(&node.api, "example-sink").await;
 
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 0, "sink should not have stored any events");
 
-    let statuses = node.api.get_sinks_status().await.unwrap();
-    let example_status = statuses
-        .iter()
-        .find(|s| s.name == "example-sink")
-        .expect("example-sink status");
-    assert!(
-        example_status.blocked.is_some(),
-        "sink should be reported as blocked"
-    );
+    assert_sink_blocked(&node.api, "example-sink").await;
 
     // Recover the sink and unblock it.
     sink.set_mode(ResponseMode::Accept).await;
@@ -1364,15 +1366,8 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
         Some(json!({"ModOne": {"data": 3}})),
     );
 
-    let statuses = node.api.get_sinks_status().await.unwrap();
-    let example_status = statuses
-        .iter()
-        .find(|s| s.name == "example-sink")
-        .expect("example-sink status");
-    assert!(
-        example_status.blocked.is_none(),
-        "sink should be unblocked after unblock_sink"
-    );
+    // Confirm through the API that the sink is no longer blocked.
+    assert_sink_unblocked(&node.api, "example-sink").await;
 
     // Simulate partial loss in the sink from SN 2 and replay.
     sink.remove_events_for_subject_from_sn(&subject_id_str, 2)
@@ -1569,23 +1564,12 @@ async fn replay_after_sink_returns_bad_data() {
         "sink should not store the event that triggered the block"
     );
 
-    let statuses = node.api.get_sinks_status().await.unwrap();
-    let example_status = statuses
-        .iter()
-        .find(|s| s.name == "example-sink")
-        .expect("example-sink status");
+    // Confirm the block reason through the API before recovering.
+    let reason = assert_sink_blocked(&node.api, "example-sink").await;
     assert!(
-        example_status.blocked.is_some(),
-        "sink should be reported as blocked"
-    );
-    assert!(
-        example_status
-            .blocked
-            .as_ref()
-            .unwrap()
-            .contains("422"),
+        reason.to_lowercase().contains("422"),
         "block reason should mention the 422 error: {:?}",
-        example_status.blocked
+        reason
     );
 
     // Recover the sink and unblock it.
@@ -1622,6 +1606,9 @@ async fn replay_after_sink_returns_bad_data() {
         true,
         Some(json!({"ModOne": {"data": 3}})),
     );
+
+    // Confirm through the API that the sink is no longer blocked.
+    assert_sink_unblocked(&node.api, "example-sink").await;
 
     // Simulate partial loss in the sink from SN 2 and replay.
     sink.remove_events_for_subject_from_sn(&subject_id_str, 2)
@@ -1674,6 +1661,893 @@ async fn replay_after_sink_returns_bad_data() {
         3,
         true,
         Some(json!({"ModOne": {"data": 3}})),
+    );
+}
+
+/// Replay endpoint response shape and deduplication.
+///
+/// Covers Test 8 of `temporal/sink/plan_integration_tests.md`:
+/// - response contains exactly one processed item and three errors;
+/// - duplicate items are deduplicated to the smallest from_sn;
+/// - the valid item really re-sends events to the sink.
+#[test(tokio::test)]
+async fn replay_endpoint_response_shape() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with a sink before creating the subjects.
+    let sink = TestSink::start().await;
+    let sink_url = sink.url();
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        initial_keys,
+        initial_local_db,
+        initial_ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink_url, Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_one, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_one_str = subject_one.to_string();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_one.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let (subject_two, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_two_str = subject_two.to_string();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_two.clone(),
+            json!({"ModOne": {"data": i + 10}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(8, true).await;
+    let initial = sink.snapshot().await;
+    assert_eq!(initial.len(), 8);
+
+    let unknown_subject =
+        DigestIdentifier::new(HashAlgorithm::Blake3, vec![0u8; 32])
+            .unwrap()
+            .to_string();
+
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![
+                SinkReplayItem {
+                    sink: "example-sink".to_owned(),
+                    subject_id: subject_one_str.clone(),
+                    from_sn: 1,
+                },
+                // Duplicate: must be folded into the previous item at from_sn 1.
+                SinkReplayItem {
+                    sink: "example-sink".to_owned(),
+                    subject_id: subject_one_str.clone(),
+                    from_sn: 2,
+                },
+                // Missing sink.
+                SinkReplayItem {
+                    sink: "missing-sink".to_owned(),
+                    subject_id: subject_one_str.clone(),
+                    from_sn: 0,
+                },
+                // Unknown subject.
+                SinkReplayItem {
+                    sink: "example-sink".to_owned(),
+                    subject_id: unknown_subject.clone(),
+                    from_sn: 0,
+                },
+                // from_sn beyond last seen event.
+                SinkReplayItem {
+                    sink: "example-sink".to_owned(),
+                    subject_id: subject_two_str.clone(),
+                    from_sn: 10,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.processed.len(), 1);
+    assert_eq!(response.errors.len(), 3);
+
+    let processed = &response.processed[0];
+    assert_eq!(processed.sink, "example-sink");
+    assert_eq!(processed.subject_id, subject_one_str);
+    assert_eq!(processed.from_sn, 1);
+
+    for error in &response.errors {
+        assert!(
+            !error.reason.is_empty(),
+            "error reason must not be empty: {:?}",
+            error
+        );
+    }
+
+    // processed and errors must be disjoint by (sink, subject_id).
+    let processed_keys: std::collections::BTreeSet<_> = response
+        .processed
+        .iter()
+        .map(|p| (p.sink.as_str(), p.subject_id.as_str()))
+        .collect();
+    let error_keys: std::collections::BTreeSet<_> = response
+        .errors
+        .iter()
+        .map(|e| (e.sink.as_str(), e.subject_id.as_str()))
+        .collect();
+    let intersection: Vec<_> = processed_keys
+        .intersection(&error_keys)
+        .copied()
+        .collect();
+    assert!(
+        intersection.is_empty(),
+        "processed and errors must be disjoint, overlap: {:?}",
+        intersection
+    );
+
+    assert!(
+        response.errors.iter().any(|e| e.sink == "missing-sink"),
+        "missing-sink error expected"
+    );
+    assert!(
+        response
+            .errors
+            .iter()
+            .any(|e| e.subject_id == unknown_subject),
+        "unknown-subject error expected"
+    );
+    assert!(
+        response.errors.iter().any(|e| {
+            e.sink == "example-sink"
+                && e.subject_id == subject_two_str
+                && e.from_sn == 10
+        }),
+        "from_sn beyond last seen error expected"
+    );
+
+    // The valid replay re-sends S1 facts from SN 1 to SN 3.
+    sink.wait_for_count(11, true).await;
+    let after = sink.snapshot().await;
+    assert_eq!(after.len(), 11);
+
+    // Count S1 FactFull events after replay.
+    let s1_fact_count = after
+        .iter()
+        .filter(|e| {
+            e.subject_id() == subject_one_str
+                && matches!(e, IncomingSinkEvent::Full(_))
+                && e.sn() >= 1
+        })
+        .count();
+    assert_eq!(s1_fact_count, 6, "S1 should have 3 initial + 3 replayed facts");
+}
+
+/// Sink permanently dropped and manual recovery.
+///
+/// Covers Test 9 of `temporal/sink/plan_integration_tests.md`:
+/// - sink in `Drop` mode causes events to become lagging but not blocked;
+/// - replay while the sink is down is accepted but does not arrive;
+/// - after recovery the sink catches up all pending events in order.
+#[test(tokio::test)]
+async fn sink_permanent_failure_and_manual_recovery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with a healthy sink before creating the subject.
+    let sink = TestSink::start().await;
+    let sink_url = sink.url();
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        initial_keys,
+        initial_local_db,
+        initial_ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink_url, Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(3, true).await;
+    let initial = sink.snapshot().await;
+    assert_eq!(initial.len(), 3);
+    assert_event_is_create(&initial[0], &subject_id_str, 0);
+    assert_event_is_fact_full(
+        &initial[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &initial[2],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+
+    // Crash the sink: accept TCP but never respond.
+    sink.set_mode(ResponseMode::Drop).await;
+
+    for i in 3..=4 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Wait until the worker has marked the subject as lagging.
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+
+    // The sink must not have stored the two new events and must not be blocked
+    // because Drop is a transient failure.
+    let events = sink.snapshot().await;
+    assert_eq!(
+        events.len(),
+        3,
+        "sink should not store events while it is dropped"
+    );
+
+    // A transient Drop failure must not block the sink, but it must leave the
+    // subject lagging.
+    assert_sink_unblocked(&node.api, "example-sink").await;
+    assert_sink_lagging(&node.api, "example-sink", 1).await;
+
+    // Replay while the sink is still down: the request is accepted but events
+    // cannot be delivered yet.
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "example-sink".to_owned(),
+                subject_id: subject_id_str.clone(),
+                from_sn: 1,
+            }],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.processed.len(), 1);
+    assert_eq!(response.errors.len(), 0);
+    let processed = &response.processed[0];
+    assert_eq!(processed.sink, "example-sink");
+    assert_eq!(processed.subject_id, subject_id_str);
+    assert_eq!(processed.from_sn, 1);
+
+    // Give the worker a moment to attempt the replayed delivery; the sink
+    // should still not have received anything while in Drop mode.
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+    assert_sink_unblocked(&node.api, "example-sink").await;
+    assert_sink_lagging(&node.api, "example-sink", 1).await;
+    let events = sink.snapshot().await;
+    assert_eq!(
+        events.len(),
+        3,
+        "sink should not store events while replay is attempted during Drop"
+    );
+
+    // Recover the sink. The worker should deliver all pending events.
+    sink.set_mode(ResponseMode::Accept).await;
+
+    // Wait for the worker to deliver all pending events after recovery.
+    // The replay from SN 1 is merged with the existing cursor (SN 2), so the
+    // worker re-sends SN 1..4. SN 1 and 2 are therefore duplicated while SN 3
+    // and 4 are delivered for the first time, giving 7 stored events in total.
+    sink.wait_for_count(7, true).await;
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 7);
+
+    let sns: Vec<_> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 1, 2, 3, 4]);
+    assert_event_is_create(&events[0], &subject_id_str, 0);
+    assert_event_is_fact_full(
+        &events[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &events[2],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_event_is_fact_full(
+        &events[3],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &events[4],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_event_is_fact_full(
+        &events[5],
+        &subject_id_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 3}})),
+    );
+    assert_event_is_fact_full(
+        &events[6],
+        &subject_id_str,
+        4,
+        true,
+        Some(json!({"ModOne": {"data": 4}})),
+    );
+
+    // After recovery the sink must be healthy and up-to-date.
+    assert_sink_unblocked(&node.api, "example-sink").await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+}
+
+/// Flapping sink is blocked after one failed recovery.
+///
+/// Covers Test 10 of `temporal/sink/plan_integration_tests.md`:
+/// - healthcheck passes but delivery fails;
+/// - sink is blocked as flapping after max_recoveries_after_failure is exceeded;
+/// - unblock_sink restores delivery once the sink is healthy again.
+#[test(tokio::test)]
+async fn sink_flapping_blocks_after_repeated_recovery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with a sink configured to block after a single failed recovery.
+    let sink = TestSink::start().await;
+    let sink_url = sink.url();
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        keys: Some(initial_keys),
+        local_db: Some(initial_local_db),
+        ext_db: Some(initial_ext_db),
+        sinks: flapping_sink_config(sink_url, Some(governance_id.to_string())),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(3, true).await;
+    let initial = sink.snapshot().await;
+    assert_eq!(initial.len(), 3);
+    assert_event_is_create(&initial[0], &subject_id_str, 0);
+    assert_event_is_fact_full(
+        &initial[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &initial[2],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+
+    // Make the sink flap: healthcheck succeeds but event delivery fails.
+    sink.set_mode(ResponseMode::HealthOkDeliveryFail).await;
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Wait until the sink is blocked as flapping and confirm it via the API.
+    let reason = wait_for_sink_blocked(&node.api, "example-sink").await;
+    assert!(
+        reason.to_lowercase().contains("flapping"),
+        "block reason should mention flapping, got: {}",
+        reason
+    );
+    assert_sink_blocked(&node.api, "example-sink").await;
+
+    let events = sink.snapshot().await;
+    assert_eq!(
+        events.len(),
+        3,
+        "sink should not store the event that triggered flapping"
+    );
+
+    // Recover the sink: first put it back in Accept mode, then unblock it.
+    // The manual unblock triggers catch-up; because the sink is healthy again,
+    // the pending fact is delivered in the running node.
+    sink.set_mode(ResponseMode::Accept).await;
+    node.api.unblock_sink("example-sink".to_owned()).await.unwrap();
+
+    // Confirm through the API that the sink is no longer blocked.
+    assert_sink_unblocked(&node.api, "example-sink").await;
+
+    sink.wait_for_count(4, true).await;
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 4);
+    let sns: Vec<_> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+    assert_event_is_create(&events[0], &subject_id_str, 0);
+    assert_event_is_fact_full(
+        &events[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &events[2],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_event_is_fact_full(
+        &events[3],
+        &subject_id_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 3}})),
+    );
+}
+
+/// Recovery of sink state across node restarts.
+///
+/// Covers Test 11 of `temporal/sink/plan_integration_tests.md`:
+/// - a blocked sink is auto-unblocked on restart and catches up;
+/// - a subject left lagging before shutdown is caught up after restart.
+#[test(tokio::test)]
+async fn sink_recovery_across_node_restart() {
+    // Initial setup: bootstrap node with governance and schema Example.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_one, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_one_str = subject_one.to_string();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_one.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Part A — restart with an initially healthy sink, then block it, restart
+    // again and verify auto-unblock + catch-up.
+    let sink = TestSink::start().await;
+    let sink_url = sink.url();
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        keys: Some(initial_keys),
+        local_db: Some(initial_local_db),
+        ext_db: Some(initial_ext_db),
+        sinks: example_sink_config(sink_url, Some(governance_id.to_string())),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(3, true).await;
+    let initial = sink.snapshot().await;
+    assert_eq!(initial.len(), 3);
+    assert_event_is_create(&initial[0], &subject_one_str, 0);
+    assert_event_is_fact_full(
+        &initial[1],
+        &subject_one_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &initial[2],
+        &subject_one_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+
+    // Block the sink with a permanent client error.
+    sink.set_mode(ResponseMode::ClientError).await;
+    emit_fact(
+        &node.api,
+        subject_one.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let reason = wait_for_sink_blocked(&node.api, "example-sink").await;
+    assert!(
+        reason.to_lowercase().contains("422")
+            || reason.to_lowercase().contains("client"),
+        "block reason should mention 422/client error, got: {}",
+        reason
+    );
+    assert_sink_blocked(&node.api, "example-sink").await;
+
+    // Shut down the node while the sink is blocked.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Recover the sink and restart the node with the same configuration.
+    sink.set_mode(ResponseMode::Accept).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The restart must have auto-unblocked the sink.
+    assert_sink_unblocked(&node.api, "example-sink").await;
+
+    sink.wait_for_count(4, true).await;
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 4);
+    let sns: Vec<_> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+    assert_event_is_create(&events[0], &subject_one_str, 0);
+    assert_event_is_fact_full(
+        &events[3],
+        &subject_one_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 3}})),
+    );
+
+    // Part B — restart with the sink dropped, create a second subject, then
+    // recover the sink after another restart and verify catch-up.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    sink.set_mode(ResponseMode::Drop).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_two, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_two_str = subject_two.to_string();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_two.clone(),
+            json!({"ModOne": {"data": i + 10}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+    assert_sink_unblocked(&node.api, "example-sink").await;
+    assert_sink_lagging(&node.api, "example-sink", 1).await;
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    sink.set_mode(ResponseMode::Accept).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Total stored events: 4 from S1 + Create + 2 facts from S2 = 7.
+    sink.wait_for_count(7, true).await;
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 7);
+
+    let s2_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_two_str)
+        .collect();
+    assert_eq!(s2_events.len(), 3, "S2 should have Create + 2 facts");
+    assert_event_is_create(s2_events[0], &subject_two_str, 0);
+    assert_event_is_fact_full(
+        s2_events[1],
+        &subject_two_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 11}})),
+    );
+    assert_event_is_fact_full(
+        s2_events[2],
+        &subject_two_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 12}})),
+    );
+
+    // After catch-up the sink must be healthy and up-to-date.
+    assert_sink_unblocked(&node.api, "example-sink").await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+
+    // Part C — explicit idle shutdown and worker recreation. Restart with a
+    // very short idle timeout, deliver one event, wait for the worker to shut
+    // down, then deliver another event and verify the worker is recreated and
+    // the event is delivered.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    sink.set_mode(ResponseMode::Accept).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        short_idle_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Confirm the sink is up and unblocked before driving the idle timeout.
+    assert_sink_running(&node.api, "example-sink").await;
+    assert_sink_unblocked(&node.api, "example-sink").await;
+
+    // First event after restart: worker starts and delivers.
+    emit_fact(
+        &node.api,
+        subject_two.clone(),
+        json!({"ModOne": {"data": 13}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_count(8, true).await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+
+    // Wait longer than the worker idle timeout so the manager stops it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Second event: a fresh worker must be created to deliver it.
+    emit_fact(
+        &node.api,
+        subject_two.clone(),
+        json!({"ModOne": {"data": 14}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_count(9, true).await;
+
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 9);
+    let s2_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_two_str)
+        .collect();
+    assert_eq!(s2_events.len(), 5, "S2 should have Create + 4 facts");
+    assert_event_is_fact_full(
+        s2_events[3],
+        &subject_two_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 13}})),
+    );
+    assert_event_is_fact_full(
+        s2_events[4],
+        &subject_two_str,
+        4,
+        true,
+        Some(json!({"ModOne": {"data": 14}})),
     );
 }
 
@@ -1863,6 +2737,12 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     .await;
     witness_dirs.append(&mut witness_dirs2);
     node_running(&witness.api).await.unwrap();
+
+    // Confirm both sinks are up and unblocked before emitting facts.
+    assert_sink_running(&owner.api, "full-sink").await;
+    assert_sink_unblocked(&owner.api, "full-sink").await;
+    assert_sink_running(&witness.api, "opaque-sink").await;
+    assert_sink_unblocked(&witness.api, "opaque-sink").await;
 
     // Ensure the witness has the subject before emitting facts.
     get_subject(&witness.api, subject_id.clone(), Some(0), true)
@@ -2342,6 +3222,12 @@ async fn sink_non_fact_event_types_and_fields() {
     .await;
     new_owner_dirs.append(&mut new_owner_dirs2);
     node_running(&new_owner.api).await.unwrap();
+
+    // Confirm both sinks are up and unblocked before emitting lifecycle events.
+    assert_sink_running(&owner.api, "owner-sink").await;
+    assert_sink_unblocked(&owner.api, "owner-sink").await;
+    assert_sink_running(&new_owner.api, "new-owner-sink").await;
+    assert_sink_unblocked(&new_owner.api, "new-owner-sink").await;
 
     // Ensure new_owner has the subject before ownership changes.
     get_subject(&new_owner.api, subject_id.clone(), Some(0), true)

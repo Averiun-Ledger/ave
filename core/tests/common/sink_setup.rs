@@ -96,6 +96,55 @@ pub fn example_sink_config(
     )]
 }
 
+/// Returns a sink configuration designed to trigger flapping detection after
+/// one failed recovery.
+pub fn flapping_sink_config(url: String, governance_id: Option<String>) -> Vec<SinkConfigEntry> {
+    vec![SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: "example-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::All]),
+            url,
+            max_retries: 0,
+            request_timeout_ms: 500,
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            max_recoveries_after_failure: 1,
+            ..Default::default()
+        }],
+    }]
+}
+
+/// Returns a sink configuration with a very short worker idle timeout so the
+/// worker is stopped quickly when inactive. Used to test worker shutdown and
+/// recreation.
+pub fn short_idle_sink_config(
+    url: String,
+    governance_id: Option<String>,
+) -> Vec<SinkConfigEntry> {
+    vec![SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: "example-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::All]),
+            url,
+            max_retries: 0,
+            request_timeout_ms: 500,
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            sink_worker_idle_timeout_ms: 200,
+            sink_subject_worker_idle_timeout_ms: 200,
+            ..Default::default()
+        }],
+    }]
+}
+
 /// Poll `get_sinks_status` until `sink_name` is reported as blocked.
 /// Returns the block reason. Panics on timeout.
 pub async fn wait_for_sink_blocked(
@@ -161,6 +210,85 @@ pub async fn wait_for_sink_lagging_subjects(
         tokio::time::sleep(Duration::from_millis(300)).await;
         attempts += 1;
     }
+}
+
+/// Assert through `get_sinks_status` that `sink_name` is currently blocked.
+/// Returns the block reason. Panics if the sink is missing or not blocked.
+pub async fn assert_sink_blocked(api: &Api, sink_name: &str) -> String {
+    let statuses = api.get_sinks_status().await.unwrap();
+    let status = statuses
+        .iter()
+        .find(|s| s.name == sink_name)
+        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+    assert!(
+        status.blocked.is_some(),
+        "sink {} should be blocked, but it is not",
+        sink_name
+    );
+    status.blocked.clone().unwrap()
+}
+
+/// Assert through `get_sinks_status` that `sink_name` is currently not blocked.
+/// Panics if the sink is missing or still blocked.
+pub async fn assert_sink_unblocked(api: &Api, sink_name: &str) {
+    let statuses = api.get_sinks_status().await.unwrap();
+    let status = statuses
+        .iter()
+        .find(|s| s.name == sink_name)
+        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+    assert!(
+        status.blocked.is_none(),
+        "sink {} should not be blocked, but it is: {:?}",
+        sink_name,
+        status.blocked
+    );
+}
+
+/// Assert through `get_sinks_status` that `sink_name` has at least `min`
+/// lagging subjects. Panics if the sink is missing or has fewer.
+pub async fn assert_sink_lagging(api: &Api, sink_name: &str, min: usize) {
+    let statuses = api.get_sinks_status().await.unwrap();
+    let status = statuses
+        .iter()
+        .find(|s| s.name == sink_name)
+        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+    assert!(
+        status.lagging_subjects >= min,
+        "sink {} should have at least {} lagging subjects, has {}",
+        sink_name,
+        min,
+        status.lagging_subjects
+    );
+}
+
+/// Assert through `get_sinks_status` that `sink_name` has no lagging subjects.
+/// Panics if the sink is missing or still lagging.
+pub async fn assert_sink_not_lagging(api: &Api, sink_name: &str) {
+    let statuses = api.get_sinks_status().await.unwrap();
+    let status = statuses
+        .iter()
+        .find(|s| s.name == sink_name)
+        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+    assert_eq!(
+        status.lagging_subjects, 0,
+        "sink {} should have no lagging subjects, has {}",
+        sink_name, status.lagging_subjects
+    );
+}
+
+/// Assert through `get_sinks_status` that `sink_name` is running.
+/// Panics if the sink is missing or not running.
+pub async fn assert_sink_running(api: &Api, sink_name: &str) {
+    let statuses = api.get_sinks_status().await.unwrap();
+    let status = statuses
+        .iter()
+        .find(|s| s.name == sink_name)
+        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+    assert!(
+        status.running,
+        "sink {} should be running, but it is not",
+        sink_name
+    );
 }
 
 pub fn governance_with_transfer_roles_fact(

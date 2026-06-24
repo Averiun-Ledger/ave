@@ -29,6 +29,9 @@ pub enum ResponseMode {
     /// Never respond, simulating a crashed or unreachable sink. The HTTP
     /// connection will hang until the node's request timeout fires.
     Drop,
+    /// Healthcheck succeeds (`GET /events` returns 200) but event delivery
+    /// fails (`POST /events` returns 500). Used to test flapping detection.
+    HealthOkDeliveryFail,
 }
 
 struct TestSinkState {
@@ -169,6 +172,10 @@ impl TestSink {
                 // Never return: the connection hangs just like a crashed sink.
                 std::future::pending::<()>().await;
                 unreachable!()
+            }
+            ResponseMode::HealthOkDeliveryFail => {
+                // Healthcheck passes but delivery fails: simulate a flapping sink.
+                (StatusCode::INTERNAL_SERVER_ERROR, "delivery failed").into_response()
             }
         }
     }

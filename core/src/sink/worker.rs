@@ -593,6 +593,14 @@ impl Handler<SinkWorker> for SinkWorker {
             }
             SinkWorkerMessage::ClearBlocked => {
                 self.blocked = None;
+                // A manual unblock means the operator considers the sink ready to
+                // retry.  Clear the unhealthy state and any pending healthcheck
+                // so that catch-up requests sent after unblocking are accepted
+                // immediately instead of being ignored until a healthcheck runs.
+                self.healthcheck_state = HealthcheckState::Healthy;
+                if let Some(key) = self.pending_healthcheck.take() {
+                    ctx.cancel_timer(key);
+                }
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::Stop => {
