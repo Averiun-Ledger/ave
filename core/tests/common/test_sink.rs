@@ -1,13 +1,13 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use ave_common::IncomingSinkEvent;
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
-    Json, Router,
 };
-use ave_common::IncomingSinkEvent;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -111,9 +111,48 @@ impl TestSink {
         }
     }
 
+    /// Wait until `count` full (non-lightweight) events have been received.
+    pub async fn wait_for_full_count(&self, count: usize, timeout: bool) {
+        let mut attempts = 0;
+        loop {
+            let current = self
+                .state
+                .lock()
+                .await
+                .events
+                .iter()
+                .filter(|e| matches!(e, IncomingSinkEvent::Full(_)))
+                .count();
+            if current >= count {
+                return;
+            }
+            if timeout && attempts > 100 {
+                panic!(
+                    "test sink did not receive {} full events; received {}",
+                    count, current
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            attempts += 1;
+        }
+    }
+
     /// Return a snapshot of the events received so far.
     pub async fn snapshot(&self) -> Vec<IncomingSinkEvent> {
         self.state.lock().await.events.clone()
+    }
+
+    /// Return a snapshot of only the full (non-lightweight) events received so
+    /// far.
+    pub async fn full_snapshot(&self) -> Vec<IncomingSinkEvent> {
+        self.state
+            .lock()
+            .await
+            .events
+            .iter()
+            .filter(|e| matches!(e, IncomingSinkEvent::Full(_)))
+            .cloned()
+            .collect()
     }
 
     /// Remove all events received so far, useful to simulate data loss at the
@@ -148,18 +187,18 @@ impl TestSink {
         let mode = state.lock().await.mode;
         match mode {
             ResponseMode::Accept => {
-                // The integration tests focus on full payload delivery.
-                // Lightweight events are acknowledged but not stored.
-                if !matches!(event, IncomingSinkEvent::Light(_)) {
-                    state.lock().await.events.push(event);
-                }
+                // Store every event the sink is asked to accept, including
+                // lightweight events, so tests can verify partial filters.
+                state.lock().await.events.push(event);
                 StatusCode::OK.into_response()
             }
             ResponseMode::ServerError => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response()
+                (StatusCode::INTERNAL_SERVER_ERROR, "server error")
+                    .into_response()
             }
             ResponseMode::ClientError => {
-                (StatusCode::UNPROCESSABLE_ENTITY, "client error").into_response()
+                (StatusCode::UNPROCESSABLE_ENTITY, "client error")
+                    .into_response()
             }
             ResponseMode::Malformed => {
                 (StatusCode::OK, "this is not json").into_response()
@@ -175,7 +214,8 @@ impl TestSink {
             }
             ResponseMode::HealthOkDeliveryFail => {
                 // Healthcheck passes but delivery fails: simulate a flapping sink.
-                (StatusCode::INTERNAL_SERVER_ERROR, "delivery failed").into_response()
+                (StatusCode::INTERNAL_SERVER_ERROR, "delivery failed")
+                    .into_response()
             }
         }
     }

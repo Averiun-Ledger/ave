@@ -247,6 +247,11 @@ pub struct SinkManager {
     /// healthchecks using `healthcheck_intervals_secs` to detect recovery.
     #[serde(skip)]
     pending_healthchecks: HashMap<String, CancellationToken>,
+    /// Subjects for which a catch-up has been requested but not yet completed.
+    /// Prevents duplicate catch-up triggers from sending the same event twice
+    /// while the first catch-up is still in flight.
+    #[serde(skip)]
+    catch_up_in_flight: HashSet<(String, String)>, // (sink, subject_id)
 }
 
 impl std::fmt::Debug for SinkManager {
@@ -314,6 +319,7 @@ impl BorshDeserialize for SinkManager {
             is_governance: false, // default from BorshDeserialize, will be overridden by create_initial
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
+            catch_up_in_flight: HashSet::new(),
         })
     }
 }
@@ -346,6 +352,7 @@ impl PersistentActor for SinkManager {
             is_governance: params.is_governance,
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
+            catch_up_in_flight: HashSet::new(),
         }
     }
 
@@ -405,6 +412,7 @@ impl PersistentActor for SinkManager {
             is_governance: self.is_governance,
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
+            catch_up_in_flight: self.catch_up_in_flight.clone(),
         })
     }
 
@@ -663,7 +671,9 @@ impl Handler<SinkManager> for SinkManager {
                 reason,
             } => {
                 error!(msg_type = "DeliveryFailed", sink = %sink, subject_id = %subject_id, sn = %sn, reason = %reason, "Sink delivery failed");
-                self.try_insert_lagging(&sink, subject_id);
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id.clone()));
+                self.try_insert_lagging(&sink, subject_id.clone());
                 // If the sink has lagging subjects, schedule periodic healthchecks
                 // to detect when the sink recovers.  The worker will be idle and
                 // destroyed soon; the healthcheck timer recreates it periodically.
@@ -692,6 +702,8 @@ impl Handler<SinkManager> for SinkManager {
                     error = %error,
                     "Auth failure; event kept in lagging for retry"
                 );
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
                 if let Some(subjects) = self.lagging.get(&sink).cloned() {
                     let subjects: Vec<String> = subjects.into_iter().collect();
@@ -720,6 +732,7 @@ impl Handler<SinkManager> for SinkManager {
                     reason = %reason,
                     "Sink blocked due to permanent error; operator intervention required"
                 );
+                self.catch_up_in_flight.retain(|(s, _)| s != &sink);
                 if let Err(e) = self
                     .persist(
                         SinkManagerEvent::SinkBlocked {
@@ -738,6 +751,8 @@ impl Handler<SinkManager> for SinkManager {
                 subject_id,
                 sn,
             } => {
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id.clone()));
                 if let Err(e) = self
                     .handle_update_progress(
                         sink,
@@ -1157,6 +1172,8 @@ impl SinkManager {
             .get(&(sink.clone(), subject_id.clone()))
             .copied();
         let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
+        self.catch_up_in_flight
+            .remove(&(sink.clone(), subject_id.clone()));
 
         if cursor_sn.is_some_and(|cursor| cursor >= last_sn) {
             if let Some(set) = self.lagging.get_mut(&sink) {
@@ -1407,15 +1424,29 @@ impl SinkManager {
         self.cancel_worker_shutdown(&sink);
 
         for subject_id in subjects {
-            let from_sn = match self
+            let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
+            let cursor_sn = self
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
-                .copied()
-            {
+                .copied();
+            let from_sn = match cursor_sn {
                 Some(sn) => sn + 1,
                 None => 0,
             };
 
+            // If the cursor is already up-to-date, there is nothing to catch up.
+            if cursor_sn.is_some_and(|sn| sn >= last_sn) {
+                continue;
+            }
+
+            let in_flight_key = (sink.clone(), subject_id.clone());
+            if self.catch_up_in_flight.contains(&in_flight_key) {
+                continue;
+            }
+
+            self.catch_up_in_flight.insert(in_flight_key);
+
+            let subject_id_for_remove = subject_id.clone();
             if let Err(e) = worker_ref
                 .tell(SinkWorkerMessage::CatchUp {
                     subject_id,
@@ -1424,6 +1455,8 @@ impl SinkManager {
                 .await
             {
                 error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up request to worker");
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id_for_remove));
             }
         }
         Ok(())

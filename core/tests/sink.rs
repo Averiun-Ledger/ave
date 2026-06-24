@@ -3,40 +3,44 @@ mod common;
 use std::{collections::BTreeSet, sync::atomic::Ordering};
 
 use ave_common::{
+    SinkTypes,
     bridge::request::{SinkReplayItem, SinkReplayRequest, SinksQuery},
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     sink::{DataToSinkEvent, IncomingSinkEvent},
-    SinkTypes,
 };
 use ave_core::{config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
-use std::str::FromStr;
-use std::time::Duration;
 use futures::future::join_all;
 use serde_json::json;
+use std::str::FromStr;
+use std::time::Duration;
 use test_log::test;
 
 use crate::common::{
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
     create_subject, emit_confirm, emit_eol, emit_fact, emit_fact_viewpoints,
-    emit_reject, emit_transfer, get_subject, node_running, sink_setup::{
+    emit_reject, emit_transfer, get_subject, node_running,
+    sink_setup::{
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
         assert_event_is_fact_full, assert_event_is_reject,
-        assert_event_is_transfer, assert_sink_blocked, assert_sink_contains_confirm,
-        assert_sink_contains_create, assert_sink_contains_eol,
-        assert_sink_contains_fact_full, assert_sink_contains_fact_opaque,
+        assert_event_is_transfer, assert_no_duplicate_events,
+        assert_no_fact_full_events, assert_sink_blocked,
+        assert_sink_contains_confirm, assert_sink_contains_create,
+        assert_sink_contains_eol, assert_sink_contains_fact_full,
+        assert_sink_contains_fact_opaque, assert_sink_contains_light_fact,
         assert_sink_contains_reject, assert_sink_contains_transfer,
         assert_sink_lagging, assert_sink_not_lagging, assert_sink_running,
-        assert_sink_unblocked, count_events_for_subject, example_schema_governance_fact,
+        assert_sink_unblocked, assert_subject_sn_sequence,
+        count_events_for_subject, example_schema_governance_fact,
         example_sink_config, flapping_sink_config, governance_sink_config,
-        short_idle_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
-        make_sink_entry, restart_config, restart_config_with_peers, sample_sinks,
+        make_sink_entry, make_sink_entry_with_concurrency, restart_config,
+        restart_config_with_peers, sample_sinks, short_idle_sink_config,
         wait_for_sink_blocked, wait_for_sink_lagging_subjects,
         wait_for_sink_unblocked,
     },
     test_sink::{ResponseMode, TestSink},
-    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
 };
 use ave_network::RoutingNode;
 
@@ -143,7 +147,6 @@ async fn unknown_sink_returns_not_found() {
     );
 }
 
-
 /// Replay a single subject after the sink loses events.
 ///
 /// Covers Test 1 of `temporal/sink/plan_integration_tests.md`:
@@ -163,7 +166,8 @@ async fn replay_single_subject_after_sink_loss() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -325,7 +329,8 @@ async fn replay_multiple_subjects_and_sinks() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -380,14 +385,9 @@ async fn replay_multiple_subjects_and_sinks() {
     node_running(&node.api).await.unwrap();
 
     for i in 1..=2 {
-        emit_fact(
-            &node.api,
-            s1.clone(),
-            json!({"ModOne": {"data": i}}),
-            true,
-        )
-        .await
-        .unwrap();
+        emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": i}}), true)
+            .await
+            .unwrap();
         emit_fact(
             &node.api,
             s2.clone(),
@@ -435,8 +435,8 @@ async fn replay_multiple_subjects_and_sinks() {
         Some(json!({"ModOne": {"data": 12}})),
     );
 
-    sink_fact.wait_for_count(4, true).await;
-    let fact_events = sink_fact.snapshot().await;
+    sink_fact.wait_for_full_count(4, true).await;
+    let fact_events = sink_fact.full_snapshot().await;
     assert_eq!(fact_events.len(), 4);
     assert_sink_contains_fact_full(
         &fact_events,
@@ -467,9 +467,7 @@ async fn replay_multiple_subjects_and_sinks() {
         Some(json!({"ModOne": {"data": 12}})),
     );
 
-    sink_all
-        .remove_events_for_subject_from_sn(&s1_str, 1)
-        .await;
+    sink_all.remove_events_for_subject_from_sn(&s1_str, 1).await;
     sink_fact
         .remove_events_for_subject_from_sn(&s1_str, 1)
         .await;
@@ -551,15 +549,20 @@ async fn replay_multiple_subjects_and_sinks() {
     );
     // Only one Create per subject: replays started at SN 1.
     assert_eq!(
-        all_after.iter().filter(|e| e.event_type() == SinkTypes::Create).count(),
+        all_after
+            .iter()
+            .filter(|e| e.event_type() == SinkTypes::Create)
+            .count(),
         2
     );
 
-    sink_fact.wait_for_count(4, true).await;
-    let fact_after = sink_fact.snapshot().await;
+    sink_fact.wait_for_full_count(4, true).await;
+    let fact_after = sink_fact.full_snapshot().await;
     assert_eq!(fact_after.len(), 4);
     assert!(
-        !fact_after.iter().any(|e| e.event_type() == SinkTypes::Create),
+        !fact_after
+            .iter()
+            .any(|e| e.event_type() == SinkTypes::Create),
         "fact-only sink must not contain Create events"
     );
     assert_eq!(count_events_for_subject(&fact_after, &s1_str), 2);
@@ -602,16 +605,15 @@ async fn replay_multiple_subjects_and_sinks() {
 /// - replay re-delivers only the matching events.
 #[test(tokio::test)]
 async fn replay_filters_and_combinations() {
-    let (mut nodes, mut dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             ephemeral: vec![],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
 
     let mut owner = nodes.remove(0);
     let mut new_owner = nodes.remove(0);
@@ -631,15 +633,10 @@ async fn replay_filters_and_combinations() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &owner.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     let sink_specs = [
         ("sink-create", BTreeSet::from([SinkTypes::Create])),
@@ -650,9 +647,10 @@ async fn replay_filters_and_combinations() {
         ("sink-all", BTreeSet::from([SinkTypes::All])),
     ];
 
-    let sinks: Vec<TestSink> =
-        futures::future::join_all((0..sink_specs.len()).map(|_| TestSink::start()))
-            .await;
+    let sinks: Vec<TestSink> = futures::future::join_all(
+        (0..sink_specs.len()).map(|_| TestSink::start()),
+    )
+    .await;
 
     let sink_entries: Vec<SinkConfigEntry> = sink_specs
         .iter()
@@ -695,18 +693,19 @@ async fn replay_filters_and_combinations() {
     join_all(new_owner.handler.iter_mut()).await;
 
     let new_owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (new_owner, mut new_owner_dirs2) = create_node(restart_config_with_peers(
-        new_owner_keys,
-        new_owner_local_db,
-        new_owner_ext_db,
-        format!("/memory/{}", new_owner_port),
-        vec![RoutingNode {
-            peer_id: owner_peer_id,
-            address: vec![owner_address],
-        }],
-        vec![],
-    ))
-    .await;
+    let (new_owner, mut new_owner_dirs2) =
+        create_node(restart_config_with_peers(
+            new_owner_keys,
+            new_owner_local_db,
+            new_owner_ext_db,
+            format!("/memory/{}", new_owner_port),
+            vec![RoutingNode {
+                peer_id: owner_peer_id,
+                address: vec![owner_address],
+            }],
+            vec![],
+        ))
+        .await;
     new_owner_dirs.append(&mut new_owner_dirs2);
     node_running(&new_owner.api).await.unwrap();
 
@@ -755,7 +754,9 @@ async fn replay_filters_and_combinations() {
         .await
         .unwrap();
 
-    emit_reject(&owner.api, subject_id.clone(), true).await.unwrap();
+    emit_reject(&owner.api, subject_id.clone(), true)
+        .await
+        .unwrap();
 
     emit_eol(&new_owner.api, subject_id.clone(), true)
         .await
@@ -763,13 +764,13 @@ async fn replay_filters_and_combinations() {
 
     let subject_id_str = subject_id.to_string();
 
-    sinks[0].wait_for_count(1, true).await;
-    let create_events = sinks[0].snapshot().await;
+    sinks[0].wait_for_full_count(1, true).await;
+    let create_events = sinks[0].full_snapshot().await;
     assert_eq!(create_events.len(), 1);
     assert_event_is_create(&create_events[0], &subject_id_str, 0);
 
-    sinks[1].wait_for_count(2, true).await;
-    let fact_events = sinks[1].snapshot().await;
+    sinks[1].wait_for_full_count(2, true).await;
+    let fact_events = sinks[1].full_snapshot().await;
     assert_eq!(fact_events.len(), 2);
     assert_sink_contains_fact_full(
         &fact_events,
@@ -786,19 +787,19 @@ async fn replay_filters_and_combinations() {
         Some(json!({"ModThree": {"data": 50}})),
     );
 
-    sinks[2].wait_for_count(2, true).await;
-    let transfer_events = sinks[2].snapshot().await;
+    sinks[2].wait_for_full_count(2, true).await;
+    let transfer_events = sinks[2].full_snapshot().await;
     assert_eq!(transfer_events.len(), 2);
     assert_sink_contains_transfer(&transfer_events, &subject_id_str, 3);
     assert_sink_contains_transfer(&transfer_events, &subject_id_str, 5);
 
-    sinks[3].wait_for_count(1, true).await;
-    let confirm_events = sinks[3].snapshot().await;
+    sinks[3].wait_for_full_count(1, true).await;
+    let confirm_events = sinks[3].full_snapshot().await;
     assert_eq!(confirm_events.len(), 1);
     assert_sink_contains_confirm(&confirm_events, &subject_id_str, 4);
 
-    sinks[4].wait_for_count(1, true).await;
-    let reject_events = sinks[4].snapshot().await;
+    sinks[4].wait_for_full_count(1, true).await;
+    let reject_events = sinks[4].full_snapshot().await;
     assert_eq!(reject_events.len(), 1);
     assert_sink_contains_reject(&reject_events, &subject_id_str, 6);
 
@@ -858,13 +859,13 @@ async fn replay_filters_and_combinations() {
         .collect();
     assert_eq!(actual_items, expected_items);
 
-    sinks[0].wait_for_count(1, true).await;
-    let create_after = sinks[0].snapshot().await;
+    sinks[0].wait_for_full_count(1, true).await;
+    let create_after = sinks[0].full_snapshot().await;
     assert_eq!(create_after.len(), 1);
     assert_event_is_create(&create_after[0], &subject_id_str, 0);
 
-    sinks[1].wait_for_count(2, true).await;
-    let fact_after = sinks[1].snapshot().await;
+    sinks[1].wait_for_full_count(2, true).await;
+    let fact_after = sinks[1].full_snapshot().await;
     assert_eq!(fact_after.len(), 2);
     assert_event_is_fact_full(
         &fact_after[0],
@@ -881,19 +882,19 @@ async fn replay_filters_and_combinations() {
         Some(json!({"ModThree": {"data": 50}})),
     );
 
-    sinks[2].wait_for_count(2, true).await;
-    let transfer_after = sinks[2].snapshot().await;
+    sinks[2].wait_for_full_count(2, true).await;
+    let transfer_after = sinks[2].full_snapshot().await;
     assert_eq!(transfer_after.len(), 2);
     assert_event_is_transfer(&transfer_after[0], &subject_id_str, 3);
     assert_event_is_transfer(&transfer_after[1], &subject_id_str, 5);
 
-    sinks[3].wait_for_count(1, true).await;
-    let confirm_after = sinks[3].snapshot().await;
+    sinks[3].wait_for_full_count(1, true).await;
+    let confirm_after = sinks[3].full_snapshot().await;
     assert_eq!(confirm_after.len(), 1);
     assert_event_is_confirm(&confirm_after[0], &subject_id_str, 4);
 
-    sinks[4].wait_for_count(1, true).await;
-    let reject_after = sinks[4].snapshot().await;
+    sinks[4].wait_for_full_count(1, true).await;
+    let reject_after = sinks[4].full_snapshot().await;
     assert_eq!(reject_after.len(), 1);
     assert_event_is_reject(&reject_after[0], &subject_id_str, 6);
 
@@ -946,7 +947,8 @@ async fn replay_endpoint_validation_and_errors() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -1210,14 +1212,9 @@ async fn replay_endpoint_validation_and_errors() {
     wait_for_sink_unblocked(&node.api, "example-sink").await;
 
     sink.set_mode(ResponseMode::ClientError).await;
-    emit_fact(
-        &node.api,
-        subject_id,
-        json!({"ModOne": {"data": 3}}),
-        true,
-    )
-    .await
-    .unwrap();
+    emit_fact(&node.api, subject_id, json!({"ModOne": {"data": 3}}), true)
+        .await
+        .unwrap();
 
     // Wait until the worker has marked the sink as blocked and confirm it via
     // the API before attempting a replay.
@@ -1265,7 +1262,8 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -1288,7 +1286,7 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
             true,
         )
         .await
-            .unwrap();
+        .unwrap();
     }
 
     let subject_id_str = subject_id.to_string();
@@ -1477,7 +1475,8 @@ async fn replay_after_sink_returns_bad_data() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -1682,7 +1681,8 @@ async fn replay_endpoint_response_shape() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -1821,10 +1821,8 @@ async fn replay_endpoint_response_shape() {
         .iter()
         .map(|e| (e.sink.as_str(), e.subject_id.as_str()))
         .collect();
-    let intersection: Vec<_> = processed_keys
-        .intersection(&error_keys)
-        .copied()
-        .collect();
+    let intersection: Vec<_> =
+        processed_keys.intersection(&error_keys).copied().collect();
     assert!(
         intersection.is_empty(),
         "processed and errors must be disjoint, overlap: {:?}",
@@ -1865,7 +1863,10 @@ async fn replay_endpoint_response_shape() {
                 && e.sn() >= 1
         })
         .count();
-    assert_eq!(s1_fact_count, 6, "S1 should have 3 initial + 3 replayed facts");
+    assert_eq!(
+        s1_fact_count, 6,
+        "S1 should have 3 initial + 3 replayed facts"
+    );
 }
 
 /// Sink permanently dropped and manual recovery.
@@ -1886,7 +1887,8 @@ async fn sink_permanent_failure_and_manual_recovery() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -2097,7 +2099,8 @@ async fn sink_flapping_blocks_after_repeated_recovery() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -2199,7 +2202,10 @@ async fn sink_flapping_blocks_after_repeated_recovery() {
     // The manual unblock triggers catch-up; because the sink is healthy again,
     // the pending fact is delivered in the running node.
     sink.set_mode(ResponseMode::Accept).await;
-    node.api.unblock_sink("example-sink".to_owned()).await.unwrap();
+    node.api
+        .unblock_sink("example-sink".to_owned())
+        .await
+        .unwrap();
 
     // Confirm through the API that the sink is no longer blocked.
     assert_sink_unblocked(&node.api, "example-sink").await;
@@ -2251,7 +2257,8 @@ async fn sink_recovery_across_node_restart() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
     emit_fact(
         &node.api,
         governance_id.clone(),
@@ -2551,6 +2558,405 @@ async fn sink_recovery_across_node_restart() {
     );
 }
 
+/// Lightweight events and concurrent catch-up with limited concurrency.
+///
+/// Covers Test 12 of `temporal/sink/plan_integration_tests.md`:
+/// - sinks with partial filters receive `LightEvent` for non-matching event types;
+/// - `max_catch_up_concurrency: 1` still catches up multiple lagging subjects;
+/// - `max_catch_up_concurrency: 2` catches up multiple subjects without
+///   duplicates or ordering violations;
+/// - replay from SN 0 works with limited concurrency;
+/// - sinks with different filters do not interfere with each other.
+#[test(tokio::test)]
+async fn sink_light_events_and_concurrent_catch_up() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id_str = governance_id.to_string();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let create_only_sink = TestSink::start().await;
+    let create_only_conc2_sink = TestSink::start().await;
+    let all_sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        initial_keys,
+        initial_local_db,
+        initial_ext_db,
+        format!("/memory/{}", port),
+        vec![
+            make_sink_entry_with_concurrency(
+                "create-only",
+                create_only_sink.url(),
+                Some(governance_id_str.clone()),
+                BTreeSet::from([SinkTypes::Create]),
+                1,
+            ),
+            make_sink_entry_with_concurrency(
+                "create-only-conc2",
+                create_only_conc2_sink.url(),
+                Some(governance_id_str.clone()),
+                BTreeSet::from([SinkTypes::Create]),
+                2,
+            ),
+            make_sink_entry_with_concurrency(
+                "all",
+                all_sink.url(),
+                Some(governance_id_str.clone()),
+                BTreeSet::from([SinkTypes::All]),
+                1,
+            ),
+        ],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (s1, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let (s2, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let s1_str = s1.to_string();
+    let s2_str = s2.to_string();
+
+    for i in 1..=2 {
+        emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": i}}), true)
+            .await
+            .unwrap();
+        emit_fact(
+            &node.api,
+            s2.clone(),
+            json!({"ModOne": {"data": 10 + i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Part A — normal delivery with partial filters. The create-only sinks must
+    // receive Create events as full payloads and facts as lightweight events.
+    create_only_sink.wait_for_count(6, true).await;
+    let create_only_events = create_only_sink.snapshot().await;
+    assert_eq!(create_only_events.len(), 6);
+    assert_no_duplicate_events(&create_only_events);
+    assert_subject_sn_sequence(&create_only_events, &s1_str, 0, 2);
+    assert_subject_sn_sequence(&create_only_events, &s2_str, 0, 2);
+    assert_sink_contains_create(&create_only_events, &s1_str, 0);
+    assert_sink_contains_create(&create_only_events, &s2_str, 0);
+    assert_sink_contains_light_fact(
+        &create_only_events,
+        &s1_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &create_only_events,
+        &s1_str,
+        &governance_id_str,
+        2,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &create_only_events,
+        &s2_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &create_only_events,
+        &s2_str,
+        &governance_id_str,
+        2,
+        true,
+    );
+    assert_no_fact_full_events(&create_only_events);
+
+    // The conc2 sink must behave identically during normal delivery.
+    create_only_conc2_sink.wait_for_count(6, true).await;
+    let conc2_initial = create_only_conc2_sink.snapshot().await;
+    assert_eq!(conc2_initial.len(), 6);
+    assert_no_duplicate_events(&conc2_initial);
+    assert_subject_sn_sequence(&conc2_initial, &s1_str, 0, 2);
+    assert_subject_sn_sequence(&conc2_initial, &s2_str, 0, 2);
+    assert_sink_contains_create(&conc2_initial, &s1_str, 0);
+    assert_sink_contains_create(&conc2_initial, &s2_str, 0);
+    assert_sink_contains_light_fact(
+        &conc2_initial,
+        &s1_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &conc2_initial,
+        &s1_str,
+        &governance_id_str,
+        2,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &conc2_initial,
+        &s2_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &conc2_initial,
+        &s2_str,
+        &governance_id_str,
+        2,
+        true,
+    );
+    assert_no_fact_full_events(&conc2_initial);
+
+    // The all-events sink receives everything as full payloads.
+    all_sink.wait_for_count(6, true).await;
+    let all_events = all_sink.snapshot().await;
+    assert_eq!(all_events.len(), 6);
+    assert!(
+        all_events
+            .iter()
+            .all(|e| matches!(e, IncomingSinkEvent::Full(_))),
+        "all-events sink must only receive full payloads"
+    );
+    assert_sink_contains_create(&all_events, &s1_str, 0);
+    assert_sink_contains_create(&all_events, &s2_str, 0);
+    assert_sink_contains_fact_full(
+        &all_events,
+        &s1_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_sink_contains_fact_full(
+        &all_events,
+        &s1_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_sink_contains_fact_full(
+        &all_events,
+        &s2_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 11}})),
+    );
+    assert_sink_contains_fact_full(
+        &all_events,
+        &s2_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 12}})),
+    );
+
+    // Part B — make the create-only sinks return transient failures and emit a
+    // fact on each subject so both become lagging simultaneously. With
+    // max_catch_up_concurrency=1 the worker must still catch up both subjects
+    // once the sink comes back, and it must not deliver duplicate events.
+    create_only_sink.set_mode(ResponseMode::ServerError).await;
+    create_only_conc2_sink.set_mode(ResponseMode::ServerError).await;
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 3}}), true)
+        .await
+        .unwrap();
+    emit_fact(&node.api, s2.clone(), json!({"ModOne": {"data": 13}}), true)
+        .await
+        .unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "create-only", 2).await;
+    assert_sink_lagging(&node.api, "create-only", 2).await;
+    assert_sink_unblocked(&node.api, "create-only").await;
+    wait_for_sink_lagging_subjects(&node.api, "create-only-conc2", 2).await;
+
+    create_only_sink.set_mode(ResponseMode::Accept).await;
+    create_only_sink.wait_for_count(8, true).await;
+    let caught_up = create_only_sink.snapshot().await;
+    assert_eq!(caught_up.len(), 8, "catch-up must not deliver duplicates");
+    assert_no_duplicate_events(&caught_up);
+    assert_subject_sn_sequence(&caught_up, &s1_str, 0, 3);
+    assert_subject_sn_sequence(&caught_up, &s2_str, 0, 3);
+    assert_sink_contains_light_fact(
+        &caught_up,
+        &s1_str,
+        &governance_id_str,
+        3,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &caught_up,
+        &s2_str,
+        &governance_id_str,
+        3,
+        true,
+    );
+    assert_no_fact_full_events(&caught_up);
+    assert_sink_not_lagging(&node.api, "create-only").await;
+
+    // The all-events sink kept receiving events while the create-only sinks
+    // were failing; verify it has SN 3 for both subjects.
+    all_sink.wait_for_count(8, true).await;
+    let all_after_b = all_sink.snapshot().await;
+    assert_eq!(all_after_b.len(), 8);
+    assert_no_duplicate_events(&all_after_b);
+    assert_subject_sn_sequence(&all_after_b, &s1_str, 0, 3);
+    assert_subject_sn_sequence(&all_after_b, &s2_str, 0, 3);
+    assert_sink_contains_fact_full(
+        &all_after_b,
+        &s1_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 3}})),
+    );
+    assert_sink_contains_fact_full(
+        &all_after_b,
+        &s2_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 13}})),
+    );
+
+    // Part C — wipe the create-only sink and replay both subjects from SN 0.
+    // Even with max_catch_up_concurrency=1 both subjects must be recovered.
+    create_only_sink.clear().await;
+
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![
+                SinkReplayItem {
+                    sink: "create-only".to_owned(),
+                    subject_id: s1_str.clone(),
+                    from_sn: 0,
+                },
+                SinkReplayItem {
+                    sink: "create-only".to_owned(),
+                    subject_id: s2_str.clone(),
+                    from_sn: 0,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.processed.len(), 2);
+    assert!(response.errors.is_empty());
+
+    create_only_sink.wait_for_count(8, true).await;
+    let replayed = create_only_sink.snapshot().await;
+    assert_eq!(replayed.len(), 8);
+    assert_no_duplicate_events(&replayed);
+    assert_subject_sn_sequence(&replayed, &s1_str, 0, 3);
+    assert_subject_sn_sequence(&replayed, &s2_str, 0, 3);
+    assert_sink_contains_create(&replayed, &s1_str, 0);
+    assert_sink_contains_create(&replayed, &s2_str, 0);
+    assert_sink_contains_light_fact(
+        &replayed,
+        &s1_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &replayed,
+        &s1_str,
+        &governance_id_str,
+        2,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &replayed,
+        &s1_str,
+        &governance_id_str,
+        3,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &replayed,
+        &s2_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &replayed,
+        &s2_str,
+        &governance_id_str,
+        2,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &replayed,
+        &s2_str,
+        &governance_id_str,
+        3,
+        true,
+    );
+    assert_no_fact_full_events(&replayed);
+    assert_sink_not_lagging(&node.api, "create-only").await;
+
+    // Part D — recover the second create-only sink with
+    // max_catch_up_concurrency=2. Both subjects became lagging at SN 3
+    // simultaneously in Part B. With concurrency 2 the worker may catch up
+    // both subjects in parallel, but it must still deliver each event exactly
+    // once and preserve per-subject ordering.
+    create_only_conc2_sink.set_mode(ResponseMode::Accept).await;
+    create_only_conc2_sink.wait_for_count(8, true).await;
+    let conc2_events = create_only_conc2_sink.snapshot().await;
+    assert_eq!(conc2_events.len(), 8, "conc2 sink must receive all events");
+    assert_no_duplicate_events(&conc2_events);
+    assert_subject_sn_sequence(&conc2_events, &s1_str, 0, 3);
+    assert_subject_sn_sequence(&conc2_events, &s2_str, 0, 3);
+    assert_sink_contains_create(&conc2_events, &s1_str, 0);
+    assert_sink_contains_create(&conc2_events, &s2_str, 0);
+    assert_sink_contains_light_fact(
+        &conc2_events,
+        &s1_str,
+        &governance_id_str,
+        3,
+        true,
+    );
+    assert_sink_contains_light_fact(
+        &conc2_events,
+        &s2_str,
+        &governance_id_str,
+        3,
+        true,
+    );
+    assert_no_fact_full_events(&conc2_events);
+    assert_sink_not_lagging(&node.api, "create-only-conc2").await;
+    assert_sink_unblocked(&node.api, "create-only-conc2").await;
+}
+
 /// Replay governance events through a governance sink.
 ///
 /// Covers Test 3 of `temporal/sink/plan_integration_tests.md`:
@@ -2571,7 +2977,8 @@ async fn replay_governance_sink() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -2641,16 +3048,15 @@ async fn replay_governance_sink() {
 /// - every field of every event is explicitly checked.
 #[test(tokio::test)]
 async fn sink_fact_viewpoints_full_and_opaque() {
-    let (mut nodes, mut dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             ephemeral: vec![],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
 
     let mut owner = nodes.remove(0);
     let mut witness = nodes.remove(0);
@@ -2670,15 +3076,10 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &owner.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     let owner_sink = TestSink::start().await;
     let witness_sink = TestSink::start().await;
@@ -2905,7 +3306,10 @@ async fn sink_fact_viewpoints_full_and_opaque() {
                 assert_eq!(issuer, &owner_pk_str);
                 assert_eq!(owner, &owner_pk_str);
                 assert_eq!(payload, &json!({"ModOne": {"data": 1}}));
-                assert!(patch.is_some(), "successful fact must contain a patch");
+                assert!(
+                    patch.is_some(),
+                    "successful fact must contain a patch"
+                );
                 assert!(success);
                 assert!(error.is_none());
                 assert_eq!(*sn, 1u64);
@@ -2940,7 +3344,8 @@ async fn sink_fact_viewpoints_full_and_opaque() {
                 assert_eq!(owner, &owner_pk_str);
                 assert_eq!(payload, &json!({"ModThree": {"data": 50}}));
                 assert!(!success);
-                let err = error.as_ref().expect("failed fact must have an error");
+                let err =
+                    error.as_ref().expect("failed fact must have an error");
                 assert!(!err.is_empty());
                 assert!(patch.is_none());
                 assert_eq!(*sn, 2u64);
@@ -3126,16 +3531,15 @@ async fn sink_fact_viewpoints_full_and_opaque() {
 ///   ledger cleanup/resync.
 #[test(tokio::test)]
 async fn sink_non_fact_event_types_and_fields() {
-    let (mut nodes, mut dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             ephemeral: vec![],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
 
     let mut owner = nodes.remove(0);
     let mut new_owner = nodes.remove(0);
@@ -3155,15 +3559,10 @@ async fn sink_non_fact_event_types_and_fields() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &owner.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     let owner_sink = TestSink::start().await;
     let new_owner_sink = TestSink::start().await;
@@ -3203,23 +3602,24 @@ async fn sink_non_fact_event_types_and_fields() {
     join_all(new_owner.handler.iter_mut()).await;
 
     let new_owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (new_owner, mut new_owner_dirs2) = create_node(restart_config_with_peers(
-        new_owner_keys,
-        new_owner_local_db,
-        new_owner_ext_db,
-        format!("/memory/{}", new_owner_port),
-        vec![RoutingNode {
-            peer_id: owner_peer_id,
-            address: vec![owner_address],
-        }],
-        vec![make_sink_entry(
-            "new-owner-sink",
-            new_owner_sink.url(),
-            Some(governance_id.to_string()),
-            BTreeSet::from([SinkTypes::All]),
-        )],
-    ))
-    .await;
+    let (new_owner, mut new_owner_dirs2) =
+        create_node(restart_config_with_peers(
+            new_owner_keys,
+            new_owner_local_db,
+            new_owner_ext_db,
+            format!("/memory/{}", new_owner_port),
+            vec![RoutingNode {
+                peer_id: owner_peer_id,
+                address: vec![owner_address],
+            }],
+            vec![make_sink_entry(
+                "new-owner-sink",
+                new_owner_sink.url(),
+                Some(governance_id.to_string()),
+                BTreeSet::from([SinkTypes::All]),
+            )],
+        ))
+        .await;
     new_owner_dirs.append(&mut new_owner_dirs2);
     node_running(&new_owner.api).await.unwrap();
 
@@ -3294,7 +3694,8 @@ async fn sink_non_fact_event_types_and_fields() {
     assert_eq!(new_owner_events.len(), 7);
 
     let sns_owner: Vec<_> = owner_events.iter().map(|e| e.sn()).collect();
-    let sns_new_owner: Vec<_> = new_owner_events.iter().map(|e| e.sn()).collect();
+    let sns_new_owner: Vec<_> =
+        new_owner_events.iter().map(|e| e.sn()).collect();
     assert_eq!(sns_owner, vec![0, 1, 2, 3, 4, 5, 6]);
     assert_eq!(sns_new_owner, vec![0, 1, 2, 3, 4, 5, 6]);
 

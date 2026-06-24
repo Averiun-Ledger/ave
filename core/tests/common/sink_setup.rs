@@ -1,9 +1,12 @@
 use std::{collections::BTreeSet, time::Duration};
 
-use ave_common::{sink::DataToSinkEvent, IncomingSinkEvent, SinkTypes};
-use ave_core::{Api, config::{SinkConfigEntry, SinkServer, SinkTarget}};
+use ave_common::{IncomingSinkEvent, SinkTypes, sink::DataToSinkEvent};
+use ave_core::{
+    Api,
+    config::{SinkConfigEntry, SinkServer, SinkTarget},
+};
 use ave_network::NodeType;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::common::CreateNodeConfig;
 
@@ -65,6 +68,16 @@ pub fn make_sink_entry(
     governance_id: Option<String>,
     events: BTreeSet<SinkTypes>,
 ) -> SinkConfigEntry {
+    make_sink_entry_with_concurrency(server_name, url, governance_id, events, 2)
+}
+
+pub fn make_sink_entry_with_concurrency(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    max_catch_up_concurrency: usize,
+) -> SinkConfigEntry {
     SinkConfigEntry {
         target: SinkTarget::Schema {
             schema_id: "Example".to_owned(),
@@ -79,6 +92,7 @@ pub fn make_sink_entry(
             startup_healthcheck_delay_secs: 0,
             request_timeout_ms: 2000,
             connect_timeout_ms: 1000,
+            max_catch_up_concurrency,
             ..Default::default()
         }],
     }
@@ -98,7 +112,10 @@ pub fn example_sink_config(
 
 /// Returns a sink configuration designed to trigger flapping detection after
 /// one failed recovery.
-pub fn flapping_sink_config(url: String, governance_id: Option<String>) -> Vec<SinkConfigEntry> {
+pub fn flapping_sink_config(
+    url: String,
+    governance_id: Option<String>,
+) -> Vec<SinkConfigEntry> {
     vec![SinkConfigEntry {
         target: SinkTarget::Schema {
             schema_id: "Example".to_owned(),
@@ -147,10 +164,7 @@ pub fn short_idle_sink_config(
 
 /// Poll `get_sinks_status` until `sink_name` is reported as blocked.
 /// Returns the block reason. Panics on timeout.
-pub async fn wait_for_sink_blocked(
-    api: &Api,
-    sink_name: &str,
-) -> String {
+pub async fn wait_for_sink_blocked(api: &Api, sink_name: &str) -> String {
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
@@ -219,7 +233,9 @@ pub async fn assert_sink_blocked(api: &Api, sink_name: &str) -> String {
     let status = statuses
         .iter()
         .find(|s| s.name == sink_name)
-        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+        .unwrap_or_else(|| {
+            panic!("sink {} not found in status response", sink_name)
+        });
     assert!(
         status.blocked.is_some(),
         "sink {} should be blocked, but it is not",
@@ -235,7 +251,9 @@ pub async fn assert_sink_unblocked(api: &Api, sink_name: &str) {
     let status = statuses
         .iter()
         .find(|s| s.name == sink_name)
-        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+        .unwrap_or_else(|| {
+            panic!("sink {} not found in status response", sink_name)
+        });
     assert!(
         status.blocked.is_none(),
         "sink {} should not be blocked, but it is: {:?}",
@@ -251,7 +269,9 @@ pub async fn assert_sink_lagging(api: &Api, sink_name: &str, min: usize) {
     let status = statuses
         .iter()
         .find(|s| s.name == sink_name)
-        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+        .unwrap_or_else(|| {
+            panic!("sink {} not found in status response", sink_name)
+        });
     assert!(
         status.lagging_subjects >= min,
         "sink {} should have at least {} lagging subjects, has {}",
@@ -268,7 +288,9 @@ pub async fn assert_sink_not_lagging(api: &Api, sink_name: &str) {
     let status = statuses
         .iter()
         .find(|s| s.name == sink_name)
-        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+        .unwrap_or_else(|| {
+            panic!("sink {} not found in status response", sink_name)
+        });
     assert_eq!(
         status.lagging_subjects, 0,
         "sink {} should have no lagging subjects, has {}",
@@ -283,7 +305,9 @@ pub async fn assert_sink_running(api: &Api, sink_name: &str) {
     let status = statuses
         .iter()
         .find(|s| s.name == sink_name)
-        .unwrap_or_else(|| panic!("sink {} not found in status response", sink_name));
+        .unwrap_or_else(|| {
+            panic!("sink {} not found in status response", sink_name)
+        });
     assert!(
         status.running,
         "sink {} should be running, but it is not",
@@ -454,7 +478,12 @@ pub fn restart_config(
     sinks: Vec<SinkConfigEntry>,
 ) -> CreateNodeConfig {
     restart_config_with_peers(
-        keys, local_db, ext_db, listen_address, vec![], sinks,
+        keys,
+        local_db,
+        ext_db,
+        listen_address,
+        vec![],
+        sinks,
     )
 }
 
@@ -516,8 +545,7 @@ pub fn assert_event_is_fact_full(
                 assert_eq!(*s, success, "unexpected success flag at sn {}", sn);
                 if let Some(expected) = expected_payload {
                     assert_eq!(
-                        payload,
-                        &expected,
+                        payload, &expected,
                         "unexpected payload at sn {}",
                         sn
                     );
@@ -546,8 +574,10 @@ pub fn assert_event_is_fact_opaque(
                 ..
             } => {
                 assert_eq!(*s, success, "unexpected success flag at sn {}", sn);
-                let expected: Vec<String> =
-                    expected_viewpoints.iter().map(|v| (*v).to_owned()).collect();
+                let expected: Vec<String> = expected_viewpoints
+                    .iter()
+                    .map(|v| (*v).to_owned())
+                    .collect();
                 assert_eq!(
                     viewpoints, &expected,
                     "unexpected viewpoints at sn {}",
@@ -557,6 +587,38 @@ pub fn assert_event_is_fact_opaque(
             other => panic!("expected FactOpaque event, got {:?}", other),
         },
         _ => panic!("expected full opaque fact event"),
+    }
+}
+
+/// Asserts that `event` is a lightweight fact event for `subject_id` at `sn`
+/// with the expected success flag and governance identifier.
+pub fn assert_event_is_light_fact(
+    event: &IncomingSinkEvent,
+    subject_id: &str,
+    governance_id: &str,
+    sn: u64,
+    success: bool,
+) {
+    assert_eq!(event.subject_id(), subject_id);
+    assert_eq!(event.sn(), sn);
+    match event {
+        IncomingSinkEvent::Light(l) => {
+            assert_eq!(l.subject_id, subject_id, "unexpected subject_id");
+            assert_eq!(l.schema_id, "Example", "unexpected schema_id");
+            assert_eq!(
+                l.governance_id.as_ref().unwrap(),
+                governance_id,
+                "unexpected governance_id"
+            );
+            assert_eq!(l.sn, sn, "unexpected sn");
+            assert_eq!(l.event_type, SinkTypes::Fact, "unexpected event type");
+            assert_eq!(
+                l.success, success,
+                "unexpected success flag at sn {}",
+                sn
+            );
+        }
+        other => panic!("expected light fact event, got {:?}", other),
     }
 }
 
@@ -635,7 +697,26 @@ pub fn assert_sink_contains_fact_opaque(
     expected_viewpoints: &[&str],
 ) {
     let event = find_event(events, subject_id, sn);
-    assert_event_is_fact_opaque(event, subject_id, sn, success, expected_viewpoints);
+    assert_event_is_fact_opaque(
+        event,
+        subject_id,
+        sn,
+        success,
+        expected_viewpoints,
+    );
+}
+
+/// Asserts that `events` contains a lightweight fact event for `subject_id`
+/// at `sn` with the expected success flag and governance identifier.
+pub fn assert_sink_contains_light_fact(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    governance_id: &str,
+    sn: u64,
+    success: bool,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_light_fact(event, subject_id, governance_id, sn, success);
 }
 
 /// Counts how many events belong to `subject_id`.
@@ -643,7 +724,10 @@ pub fn count_events_for_subject(
     events: &[IncomingSinkEvent],
     subject_id: &str,
 ) -> usize {
-    events.iter().filter(|e| e.subject_id() == subject_id).count()
+    events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id)
+        .count()
 }
 
 pub fn assert_event_is_transfer(
@@ -740,4 +824,52 @@ pub fn assert_sink_contains_eol(
 ) {
     let event = find_event(events, subject_id, sn);
     assert_event_is_eol(event, subject_id, sn);
+}
+
+/// Asserts that `events` contains no duplicate `(subject_id, sn)` pairs.
+pub fn assert_no_duplicate_events(events: &[IncomingSinkEvent]) {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    for event in events {
+        let key = (event.subject_id().to_owned(), event.sn());
+        assert!(
+            seen.insert(key.clone()),
+            "duplicate event for subject {} sn {}",
+            key.0,
+            key.1
+        );
+    }
+}
+
+/// Asserts that, for each subject, the sequence of SNs in `events` is exactly
+/// `expected_from..=expected_to` in order.
+pub fn assert_subject_sn_sequence(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    expected_from: u64,
+    expected_to: u64,
+) {
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id)
+        .map(|e| e.sn())
+        .collect();
+    let expected: Vec<u64> = (expected_from..=expected_to).collect();
+    assert_eq!(
+        sns, expected,
+        "subject {} should have consecutive SNs from {} to {}",
+        subject_id, expected_from, expected_to
+    );
+}
+
+/// Asserts that none of the events in `events` is a `FactFull` payload.
+pub fn assert_no_fact_full_events(events: &[IncomingSinkEvent]) {
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            IncomingSinkEvent::Full(data)
+                if matches!(data.payload, DataToSinkEvent::FactFull { .. })
+        )),
+        "create-only sink must not contain FactFull events, only Create and LightEvent"
+    );
 }
