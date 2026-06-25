@@ -11,7 +11,7 @@ use ave_common::{
     },
     sink::{DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
 };
-use ave_core::{config::SinkConfigEntry, error::Error};
+use ave_core::{Api, config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
 use futures::future::join_all;
 use serde_json::json;
@@ -5407,4 +5407,162 @@ async fn sink_worker_idle_shutdown_and_recreate() {
     );
     assert_sink_running(&node.api, "example-sink").await;
     assert_sink_not_lagging(&node.api, "example-sink").await;
+}
+
+/// Poll `sink.full_snapshot()` until the event count stays at `expected` for
+/// several consecutive attempts. Panics if the count changes or on timeout.
+async fn assert_sink_count_stable(sink: &TestSink, expected: usize) {
+    let mut stable_attempts = 0;
+    let mut attempts = 0;
+    loop {
+        let events = sink.full_snapshot().await;
+        if events.len() == expected {
+            stable_attempts += 1;
+            if stable_attempts >= 5 {
+                return;
+            }
+        } else {
+            panic!(
+                "sink event count changed: expected stable {}, got {}",
+                expected,
+                events.len()
+            );
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for sink count to stabilize at {}", expected);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
+/// Poll `get_sinks_status` until `sink_name` has no lagging subjects.
+/// Panics on timeout.
+async fn wait_for_sink_not_lagging(api: &Api, sink_name: &str) {
+    let mut attempts = 0;
+    loop {
+        let statuses = api.get_sinks_status().await.unwrap();
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
+            if status.lagging_subjects == 0 {
+                return;
+            }
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for sink {} to have no lagging subjects", sink_name);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
+/// Test 18: EOL keeps cursor and stops delivery.
+///
+/// Covers Test 18 of `temporal/sink/plan_integration_tests.md`:
+/// - EOL is delivered as a normal event.
+/// - After EOL, no further deliveries are attempted for the subject.
+/// - The subject does not remain in lagging state.
+#[traced_test]
+#[tokio::test]
+async fn sink_eol_keeps_cursor_and_stops_delivery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Create subject and emit two facts.
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for data in [1, 2] {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(3, true).await;
+    let events_before_eol = sink.full_snapshot().await;
+    assert_eq!(
+        events_before_eol.len(),
+        3,
+        "Create + 2 facts should be delivered"
+    );
+    assert_subject_sn_sequence(&events_before_eol, &subject_id_str, 0, 2);
+
+    // Emit EOL and verify it is delivered as the next event.
+    emit_eol(&node.api, subject_id.clone(), true).await.unwrap();
+
+    sink.wait_for_count(4, true).await;
+    let events_after_eol = sink.full_snapshot().await;
+    assert_eq!(events_after_eol.len(), 4, "EOL should be delivered");
+    assert_subject_sn_sequence(&events_after_eol, &subject_id_str, 0, 3);
+    assert_sink_contains_eol(&events_after_eol, &subject_id_str, 3);
+
+    // Ensure no further events or retries are attempted for the subject.
+    assert_sink_count_stable(&sink, 4).await;
+    wait_for_sink_not_lagging(&node.api, "example-sink").await;
+    assert_sink_running(&node.api, "example-sink").await;
+
+    // After EOL the subject no longer exists, so emitting a new fact must fail
+    // and the sink must not receive any additional events.
+    let err = emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .expect_err("fact after EOL should fail because the subject is gone");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not active"),
+        "expected subject to be inactive after EOL, got {:?}",
+        err
+    );
+
+    assert_sink_count_stable(&sink, 4).await;
+    assert_sink_running(&node.api, "example-sink").await;
 }
