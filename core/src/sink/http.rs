@@ -82,23 +82,33 @@ pub struct SinkHttpClient {
 }
 
 impl SinkHttpClient {
-    pub fn new(server: SinkServer) -> Self {
+    pub fn new(server: SinkServer) -> Result<Self, SinkError> {
         let client = Client::builder()
             .timeout(Duration::from_millis(server.request_timeout_ms))
             .connect_timeout(Duration::from_millis(server.connect_timeout_ms))
             .build()
-            .unwrap_or_default();
+            .map_err(|e| SinkError::ClientBuild(e.to_string()))?;
 
         let password = std::env::var(sink_password_env_var(&server.server))
             .unwrap_or_default();
 
-        Self {
+        // If OAuth2 is configured, the password environment variable must exist.
+        if let Some(auth) = &server.auth
+            && auth.api_key.is_empty()
+            && !auth.auth_url.is_empty()
+            && !auth.username.is_empty()
+            && password.is_empty()
+        {
+            return Err(SinkError::Unauthorized);
+        }
+
+        Ok(Self {
             client,
             url_template: CompiledUrlTemplate::new(&server.url),
             password,
             cached_token: RwLock::new(None),
             server,
-        }
+        })
     }
 
     /// Send a lightweight GET request to verify the sink is reachable.

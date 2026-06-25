@@ -22,6 +22,7 @@ use crate::sink::http::SinkHttpClient;
 use crate::sink::manager::{
     SendResult, SinkManager, SinkManagerMessage, SinkWorkerError,
 };
+use crate::sink::SinkError;
 use ave_common::DataToSink;
 
 // ---------------------------------------------------------------------------
@@ -415,6 +416,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 from_sn,
             } => {
                 if let Some(ref _reason) = self.blocked {
+                    self.report_catch_up_rejected(subject_id, ctx).await;
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
@@ -422,6 +424,7 @@ impl Handler<SinkWorker> for SinkWorker {
                     self.healthcheck_state,
                     HealthcheckState::Unhealthy { .. }
                 ) {
+                    self.report_catch_up_rejected(subject_id, ctx).await;
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
@@ -930,9 +933,9 @@ impl SinkWorker {
         sink_name: String,
         server: SinkServer,
         is_governance: bool,
-    ) -> Self {
-        let client = Arc::new(SinkHttpClient::new(server.clone()));
-        Self {
+    ) -> Result<Self, SinkError> {
+        let client = Arc::new(SinkHttpClient::new(server.clone())?);
+        Ok(Self {
             sink_name,
             server,
             client,
@@ -946,16 +949,42 @@ impl SinkWorker {
             pending_child_shutdowns: HashMap::new(),
             pending_catch_ups: VecDeque::new(),
             is_governance,
+        })
+    }
+
+    /// Notify the manager that a catch-up request could not be started
+    /// because the sink is blocked or unhealthy. This clears the in-flight
+    /// flag so recovery can retry later.
+    async fn report_catch_up_rejected(
+        &self,
+        subject_id: String,
+        ctx: &mut ActorContext<Self>,
+    ) {
+        match ctx.get_parent::<SinkManager>().await {
+            Ok(parent) => {
+                if let Err(e) = parent
+                    .tell(SinkManagerMessage::CatchUpRejected {
+                        sink: self.sink_name.clone(),
+                        subject_id,
+                    })
+                    .await
+                {
+                    error!(msg_type = "ReportCatchUpRejected", sink = %self.sink_name, error = %e, "Failed to report catch-up rejected");
+                }
+            }
+            Err(e) => {
+                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent manager");
+            }
         }
     }
 
     /// Report idle state to parent manager.  The manager decides whether to
     /// stop this worker after a configurable timeout.
     ///
-    /// A worker with pending catch-ups is NOT idle: it still has work to do
-    /// once concurrency allows it, so it must remain alive.
+    /// A worker with pending or in-flight catch-ups is NOT idle: it still has
+    /// work to do, so it must remain alive.
     async fn report_idle(&self, ctx: &mut ActorContext<Self>) {
-        if !self.pending_catch_ups.is_empty() {
+        if !self.pending_catch_ups.is_empty() || !self.in_catch_up.is_empty() {
             return;
         }
         match ctx.get_parent::<SinkManager>().await {

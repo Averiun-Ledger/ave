@@ -204,6 +204,9 @@ impl TestSink {
                 (StatusCode::OK, "this is not json").into_response()
             }
             ResponseMode::Timeout(ms) => {
+                // Store the event before sleeping so the slow response still
+                // counts as a successful delivery.
+                state.lock().await.events.push(event);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 StatusCode::OK.into_response()
             }

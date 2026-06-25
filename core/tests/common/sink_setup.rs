@@ -135,6 +135,35 @@ pub fn flapping_sink_config(
     }]
 }
 
+/// Returns a sink configuration designed to test transient errors (5xx) and
+/// fast consecutive events. The short retry delay and limited retries let the
+/// test observe backoff and lagging without flapping.
+pub fn transient_error_sink_config(
+    url: String,
+    governance_id: Option<String>,
+) -> Vec<SinkConfigEntry> {
+    vec![SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: "example-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::All]),
+            url,
+            max_retries: 2,
+            request_timeout_ms: 500,
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            sink_worker_idle_timeout_ms: 60_000,
+            sink_subject_worker_idle_timeout_ms: 60_000,
+            retry_base_delay_ms: 100,
+            max_catch_up_concurrency: 1,
+            ..Default::default()
+        }],
+    }]
+}
+
 /// Returns a sink configuration with a very short worker idle timeout so the
 /// worker is stopped quickly when inactive. Used to test worker shutdown and
 /// recreation.
@@ -495,6 +524,44 @@ pub fn restart_config_with_peers(
     peers: Vec<ave_network::RoutingNode>,
     sinks: Vec<SinkConfigEntry>,
 ) -> CreateNodeConfig {
+    restart_config_with_peers_and_safe_mode(
+        keys,
+        local_db,
+        ext_db,
+        listen_address,
+        peers,
+        sinks,
+        false,
+    )
+}
+
+pub fn restart_config_safe_mode(
+    keys: ave_common::identity::keys::KeyPair,
+    local_db: std::path::PathBuf,
+    ext_db: std::path::PathBuf,
+    listen_address: String,
+    sinks: Vec<SinkConfigEntry>,
+) -> CreateNodeConfig {
+    restart_config_with_peers_and_safe_mode(
+        keys,
+        local_db,
+        ext_db,
+        listen_address,
+        vec![],
+        sinks,
+        true,
+    )
+}
+
+pub fn restart_config_with_peers_and_safe_mode(
+    keys: ave_common::identity::keys::KeyPair,
+    local_db: std::path::PathBuf,
+    ext_db: std::path::PathBuf,
+    listen_address: String,
+    peers: Vec<ave_network::RoutingNode>,
+    sinks: Vec<SinkConfigEntry>,
+    safe_mode: bool,
+) -> CreateNodeConfig {
     CreateNodeConfig {
         node_type: NodeType::Bootstrap,
         listen_address,
@@ -506,7 +573,7 @@ pub fn restart_config_with_peers(
         local_db: Some(local_db),
         ext_db: Some(ext_db),
         ledger_batch_size: None,
-        safe_mode: false,
+        safe_mode,
         sinks,
     }
 }
