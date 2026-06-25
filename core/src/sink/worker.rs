@@ -143,6 +143,10 @@ pub struct SinkWorker {
     pub server: SinkServer,
     client: Arc<SinkHttpClient>,
     last_activity: Instant,
+    /// `true` when the worker has already reported idle to the manager since the
+    /// last real activity. Prevents redundant `WorkerIdle` messages while the
+    /// manager is in the process of shutting the worker down.
+    idle_reported: bool,
     healthcheck_state: HealthcheckState,
     in_catch_up: HashSet<String>,
     blocked: Option<String>,
@@ -283,6 +287,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 }
 
                 self.last_activity = Instant::now();
+                self.idle_reported = false;
                 let (subject_id, _schema_id) =
                     data.payload.get_subject_schema();
 
@@ -374,6 +379,20 @@ impl Handler<SinkWorker> for SinkWorker {
                                 }
                             }
                         }
+                        // Schedule the next periodic healthcheck as long as the
+                        // sink remains unblocked.  This keeps the worker reporting
+                        // its idle state to the manager so inactive workers can be
+                        // shut down and recreated on demand.
+                        if self.blocked.is_none() {
+                            let delay_secs = self
+                                .server
+                                .healthcheck_intervals_secs
+                                .first()
+                                .copied()
+                                .unwrap_or(60);
+                            let delay_secs = crate::sink::add_jitter(delay_secs);
+                            self.schedule_healthcheck(ctx, delay_secs);
+                        }
                     }
                     Err(_) => {
                         let idx = match self.healthcheck_state {
@@ -447,6 +466,7 @@ impl Handler<SinkWorker> for SinkWorker {
 
                 self.in_catch_up.insert(subject_id.clone());
                 self.last_activity = Instant::now();
+                self.idle_reported = false;
 
                 let child_ref =
                     self.ensure_subject_worker(&subject_id, ctx).await?;
@@ -467,6 +487,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 result,
             } => {
                 self.last_activity = Instant::now();
+                self.idle_reported = false;
                 self.cancel_child_shutdown(ctx, &subject_id);
                 if let SendResult::Success = result {
                     self.recoveries_after_failure = 0;
@@ -519,6 +540,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 result,
             } => {
                 self.last_activity = Instant::now();
+                self.idle_reported = false;
                 self.cancel_child_shutdown(ctx, &subject_id);
                 if let SendResult::Success = result {
                     match ctx.get_parent::<SinkManager>().await {
@@ -866,6 +888,7 @@ impl SinkWorker {
             }
             self.in_catch_up.insert(subject_id.clone());
             self.last_activity = Instant::now();
+            self.idle_reported = false;
             match self.ensure_subject_worker(&subject_id, ctx).await {
                 Ok(child_ref) => {
                     if let Err(e) = child_ref
@@ -940,6 +963,7 @@ impl SinkWorker {
             server,
             client,
             last_activity: Instant::now(),
+            idle_reported: false,
             healthcheck_state: HealthcheckState::Healthy,
             in_catch_up: HashSet::new(),
             blocked: None,
@@ -982,11 +1006,17 @@ impl SinkWorker {
     /// stop this worker after a configurable timeout.
     ///
     /// A worker with pending or in-flight catch-ups is NOT idle: it still has
-    /// work to do, so it must remain alive.
-    async fn report_idle(&self, ctx: &mut ActorContext<Self>) {
+    /// work to do, so it must remain alive.  The report is sent at most once
+    /// per idle period to avoid duplicate shutdown timers while the manager is
+    /// stopping the worker.
+    async fn report_idle(&mut self, ctx: &mut ActorContext<Self>) {
         if !self.pending_catch_ups.is_empty() || !self.in_catch_up.is_empty() {
             return;
         }
+        if self.idle_reported {
+            return;
+        }
+        self.idle_reported = true;
         match ctx.get_parent::<SinkManager>().await {
             Ok(parent) => {
                 let _ = parent

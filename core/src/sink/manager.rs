@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, info_span, warn};
+use tracing::{debug, error, info, info_span, warn};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -962,11 +962,19 @@ impl SinkManager {
             .unwrap_or_else(default_sink_worker_idle_timeout_ms);
         let token = CancellationToken::new();
         let token_for_task = token.clone();
+        let sink_name_for_log = sink_name.clone();
         ctx.spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(shutdown_after_ms)) => {
                     // Only send Stop if the token was NOT cancelled.
                     if !token_for_task.is_cancelled() {
+                        debug!(
+                            msg_type = "SinkWorkerShutdown",
+                            sink = %sink_name_for_log,
+                            reason = "idle timeout",
+                            shutdown_after_ms = %shutdown_after_ms,
+                            "Sink worker shutting down after idle timeout"
+                        );
                         let _ = worker.tell(SinkWorkerMessage::Stop).await;
                     }
                 }

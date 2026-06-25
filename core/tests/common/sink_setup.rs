@@ -1,6 +1,9 @@
 use std::{collections::BTreeSet, time::Duration};
 
-use ave_common::{IncomingSinkEvent, SinkTypes, sink::DataToSinkEvent};
+use ave_common::{
+    IncomingSinkEvent, SinkTypes,
+    sink::{DataToSinkEvent, SinkAuthConfig},
+};
 use ave_core::{
     Api,
     config::{SinkConfigEntry, SinkServer, SinkTarget},
@@ -93,6 +96,33 @@ pub fn make_sink_entry_with_concurrency(
             request_timeout_ms: 2000,
             connect_timeout_ms: 1000,
             max_catch_up_concurrency,
+            ..Default::default()
+        }],
+    }
+}
+
+pub fn make_sink_entry_with_auth(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    auth: SinkAuthConfig,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            url,
+            auth: Some(auth),
+            max_retries: 0,
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            request_timeout_ms: 2000,
+            connect_timeout_ms: 1000,
             ..Default::default()
         }],
     }

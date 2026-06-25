@@ -9,7 +9,7 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
-    sink::{DataToSinkEvent, IncomingSinkEvent},
+    sink::{DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
 };
 use ave_core::{config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
@@ -17,7 +17,7 @@ use futures::future::join_all;
 use serde_json::json;
 use std::str::FromStr;
 use std::time::Duration;
-use test_log::test;
+use tracing_test::traced_test;
 
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
@@ -38,17 +38,19 @@ use crate::common::{
         count_events_for_subject, example_schema_governance_fact,
         example_sink_config, flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
-        make_sink_entry, make_sink_entry_with_concurrency, restart_config,
+        make_sink_entry, make_sink_entry_with_auth,
+        make_sink_entry_with_concurrency, restart_config,
         restart_config_safe_mode, restart_config_with_peers, sample_sinks,
         short_idle_sink_config, transient_error_sink_config,
         wait_for_sink_blocked, wait_for_sink_lagging_subjects,
         wait_for_sink_unblocked,
     },
-    test_sink::{ResponseMode, TestSink},
+    test_sink::{AuthResponseMode, ResponseMode, TestSink},
 };
 use ave_network::RoutingNode;
 
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_registry_populated_from_config() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _dirs) = create_node(CreateNodeConfig {
@@ -85,7 +87,8 @@ async fn sink_registry_populated_from_config() {
     );
 }
 
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn get_sinks_status_returns_configured_sinks() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _dirs) = create_node(CreateNodeConfig {
@@ -103,7 +106,8 @@ async fn get_sinks_status_returns_configured_sinks() {
     assert!(names.contains(&"schema-sink"));
 }
 
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn delete_sink_cursors_fails_outside_safe_mode() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _dirs) = create_node(CreateNodeConfig {
@@ -127,7 +131,8 @@ async fn delete_sink_cursors_fails_outside_safe_mode() {
     );
 }
 
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn unknown_sink_returns_not_found() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _dirs) = create_node(CreateNodeConfig {
@@ -158,7 +163,8 @@ async fn unknown_sink_returns_not_found() {
 /// - sink failure (simulated by dropping every connection);
 /// - automatic catch-up after the sink comes back;
 /// - manual replay from the first lost SN.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_single_subject_after_sink_loss() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -321,7 +327,8 @@ async fn replay_single_subject_after_sink_loss() {
 /// - one sink receives all event types (`All`);
 /// - a second sink receives only facts (`Fact`);
 /// - replay targets specific (sink, subject) pairs, respecting filters.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_multiple_subjects_and_sinks() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -607,7 +614,8 @@ async fn replay_multiple_subjects_and_sinks() {
 /// - sinks for Create, Fact, Transfer, Confirm, Reject and All;
 /// - each sink receives only the event types it subscribed to;
 /// - replay re-delivers only the matching events.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_filters_and_combinations() {
     let (mut nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -939,7 +947,8 @@ async fn replay_filters_and_combinations() {
 /// - unknown subject (`subject has no known events`);
 /// - `from_sn` beyond the last seen event;
 /// - duplicate items deduplicated to the smallest `from_sn`.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_endpoint_validation_and_errors() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -1254,7 +1263,8 @@ async fn replay_endpoint_validation_and_errors() {
 /// - blocked sink is unblocked and catches up automatically;
 /// - manual replay re-sends lost events;
 /// - `unblock_sink` is rejected in safe mode.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -1467,7 +1477,8 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
 /// - 422 response blocks the sink and the failed event is not stored;
 /// - unblock_sink recovers the sink and catch-up delivers the pending fact;
 /// - manual replay re-sends events from an intermediate SN.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_after_sink_returns_bad_data() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -1673,7 +1684,8 @@ async fn replay_after_sink_returns_bad_data() {
 /// - response contains exactly one processed item and three errors;
 /// - duplicate items are deduplicated to the smallest from_sn;
 /// - the valid item really re-sends events to the sink.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_endpoint_response_shape() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -1879,7 +1891,8 @@ async fn replay_endpoint_response_shape() {
 /// - sink in `Drop` mode causes events to become lagging but not blocked;
 /// - replay while the sink is down is accepted but does not arrive;
 /// - after recovery the sink catches up all pending events in order.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_permanent_failure_and_manual_recovery() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -2091,7 +2104,8 @@ async fn sink_permanent_failure_and_manual_recovery() {
 /// - healthcheck passes but delivery fails;
 /// - sink is blocked as flapping after max_recoveries_after_failure is exceeded;
 /// - unblock_sink restores delivery once the sink is healthy again.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_flapping_blocks_after_repeated_recovery() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -2248,7 +2262,8 @@ async fn sink_flapping_blocks_after_repeated_recovery() {
 /// Covers Test 11 of `temporal/sink/plan_integration_tests.md`:
 /// - a blocked sink is auto-unblocked on restart and catches up;
 /// - a subject left lagging before shutdown is caught up after restart.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_recovery_across_node_restart() {
     // Initial setup: bootstrap node with governance and schema Example.
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -2571,7 +2586,8 @@ async fn sink_recovery_across_node_restart() {
 ///   duplicates or ordering violations;
 /// - replay from SN 0 works with limited concurrency;
 /// - sinks with different filters do not interfere with each other.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_light_events_and_concurrent_catch_up() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -2966,7 +2982,8 @@ async fn sink_light_events_and_concurrent_catch_up() {
 /// Covers Test 3 of `temporal/sink/plan_integration_tests.md`:
 /// - normal delivery of Governance Create + FactFull;
 /// - manual replay from SN 0 after wiping the sink.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn replay_governance_sink() {
     let sink = TestSink::start().await;
 
@@ -3050,7 +3067,8 @@ async fn replay_governance_sink() {
 /// - successful and failed facts carry the correct `success`/`error` flags;
 /// - opaque facts do not leak payload, patch, issuer or error;
 /// - every field of every event is explicitly checked.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_fact_viewpoints_full_and_opaque() {
     let (mut nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -3533,7 +3551,8 @@ async fn sink_fact_viewpoints_full_and_opaque() {
 /// - every relevant field of each event type is checked;
 /// - the tracker has no viewpoints, so ownership changes do not require a
 ///   ledger cleanup/resync.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_non_fact_event_types_and_fields() {
     let (mut nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -4133,7 +4152,8 @@ async fn sink_non_fact_event_types_and_fields() {
 /// - a deleted subject no longer triggers deliveries to any sink;
 /// - the sink manager cleans up cursors and lagging state when the subject is
 ///   deleted (via `RemoveSubject`) and defensively via `SubjectNotFound`.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_subject_deletion_cleans_tracking() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -4409,7 +4429,8 @@ async fn sink_subject_deletion_cleans_tracking() {
 ///   blocking the sink;
 /// - events emitted while a slow delivery is in flight create a sequential gap
 ///   that is resolved by ordered catch-up.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_transient_errors_and_fast_events() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -4547,7 +4568,8 @@ async fn sink_transient_errors_and_fast_events() {
 /// - `delete_sink_cursors` works only in safe mode and cleans cursors/lagging;
 /// - `get_sinks` supports filters and ordering;
 /// - `get_sinks` and `get_sinks_status` reflect blocked sinks.
-#[test(tokio::test)]
+#[traced_test]
+#[tokio::test]
 async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -4979,4 +5001,410 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     let new_status = statuses.iter().find(|s| s.name == "new-sink").unwrap();
     assert!(new_status.blocked.is_some());
     assert!(new_status.lagging_subjects > 0);
+}
+
+/// Authentication for sinks: API key header, OAuth2 token refresh on 401, and
+/// persistent auth failures keeping the subject lagging without blocking the
+/// sink.
+///
+/// Covers Test 16 of `temporal/sink/plan_integration_tests.md`.
+#[traced_test]
+#[tokio::test]
+async fn sink_auth_token_refresh() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (s1, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            s1.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let s1_str = s1.to_string();
+
+    // Part A — API key authentication.
+    let api_key_sink = TestSink::start().await;
+    let api_key = "secret-key".to_owned();
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        initial_keys,
+        initial_local_db,
+        initial_ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "auth-sink",
+            api_key_sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthConfig {
+                auth_url: String::new(),
+                username: String::new(),
+                api_key: api_key.clone(),
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 3}}), true)
+        .await
+        .unwrap();
+
+    api_key_sink.wait_for_count(4, true).await;
+    let api_key_events = api_key_sink.full_snapshot().await;
+    assert_eq!(
+        api_key_events.len(),
+        4,
+        "API key sink should receive Create + 3 facts"
+    );
+    assert_subject_sn_sequence(&api_key_events, &s1_str, 0, 3);
+    assert_event_is_fact_full(
+        &api_key_events[3],
+        &s1_str,
+        3,
+        true,
+        Some(json!({"ModOne": {"data": 3}})),
+    );
+
+    let headers = api_key_sink.authorization_headers().await;
+    let expected_api_key = format!("Api-Key {}", api_key);
+    assert_eq!(
+        headers.len(),
+        api_key_events.len(),
+        "every delivered event should have a recorded Authorization header"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|h| h.as_ref().map(|s| s.as_str()) == Some(expected_api_key.as_str())),
+        "all events must carry the API key Authorization header"
+    );
+
+    // Part B — OAuth2 token refresh on 401.
+    let oauth_sink = TestSink::start().await;
+    let password = "oauth-password".to_owned();
+    // Match the environment variable name built by sink_password_env_var.
+    let password_env = "AVE_SINK_PASSWORD_AUTH_SINK".to_owned();
+    unsafe {
+        std::env::set_var(&password_env, &password);
+    }
+    assert_eq!(
+        std::env::var(&password_env).unwrap(),
+        password,
+        "password env var should be set"
+    );
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "auth-sink",
+            oauth_sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthConfig {
+                auth_url: oauth_sink.auth_url(),
+                username: "test-user".to_owned(),
+                api_key: String::new(),
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Wait for the worker's eager startup token fetch so the refresh count is deterministic.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while oauth_sink.auth_requests().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("worker should fetch a token eagerly on startup");
+
+    oauth_sink.set_mode(ResponseMode::UnauthorizedOnce).await;
+
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 4}}), true)
+        .await
+        .unwrap();
+
+    // Wait for the new fact to be delivered after the 401 refresh.
+    oauth_sink.wait_for_count(1, true).await;
+
+    let oauth_events = oauth_sink.full_snapshot().await;
+    assert_eq!(
+        oauth_events.len(),
+        1,
+        "OAuth2 sink should receive exactly one event (fact 4)"
+    );
+    assert_event_is_fact_full(
+        &oauth_events[0],
+        &s1_str,
+        4,
+        true,
+        Some(json!({"ModOne": {"data": 4}})),
+    );
+
+    let auth_requests = oauth_sink.auth_requests().await;
+    assert_eq!(
+        auth_requests.len(),
+        2,
+        "expected eager token fetch + refresh after 401"
+    );
+    assert!(
+        auth_requests.iter().any(|r| r.username == "test-user" && r.password == password),
+        "Token endpoint should receive correct credentials"
+    );
+
+    let headers = oauth_sink.authorization_headers().await;
+    assert_eq!(
+        headers.len(),
+        2,
+        "expected failed 401 request + successful retry with refreshed token"
+    );
+    assert_eq!(
+        headers.last().unwrap().as_deref(),
+        Some("Bearer test-access-token"),
+        "retried delivery must use the refreshed Bearer token"
+    );
+
+    // Part C — persistent auth failure keeps subject lagging, does not block sink.
+    oauth_sink.set_auth_mode(AuthResponseMode::TokenFailure).await;
+    oauth_sink.set_mode(ResponseMode::UnauthorizedAlways).await;
+
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 5}}), true)
+        .await
+        .unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "auth-sink", 1).await;
+    assert_sink_unblocked(&node.api, "auth-sink").await;
+
+    // The failed event must NOT have been delivered; cursor must not advance.
+    let oauth_events_after_failure = oauth_sink.full_snapshot().await;
+    assert_eq!(
+        oauth_events_after_failure.len(),
+        1,
+        "persistent auth failure must not deliver the new fact"
+    );
+    assert!(
+        !oauth_events_after_failure.iter().any(|e| e.sn() == 5),
+        "SN 5 should not reach the sink while auth keeps failing"
+    );
+    assert_eq!(
+        count_events_for_subject(&oauth_events_after_failure, &s1_str),
+        1,
+        "subject should only have the previously delivered SN 4 in the sink"
+    );
+
+    unsafe {
+        std::env::remove_var(&password_env);
+    }
+}
+
+
+
+/// Poll `condition` until it returns `true`. Panics on timeout.
+/// Follows the same timing pattern as the other `wait_for_*` helpers.
+async fn wait_for_condition<F>(mut condition: F)
+where
+    F: FnMut() -> bool,
+{
+    let mut attempts = 0;
+    loop {
+        if condition() {
+            return;
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for condition");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
+/// Covers Test 17 of `temporal/sink/plan_integration_tests.md`:
+/// - a `SinkWorker` is shut down by the manager after the configured idle timeout;
+/// - a new event forces the manager to create a fresh worker;
+/// - delivery continues correctly after the recreation.
+#[traced_test]
+#[tokio::test]
+async fn sink_worker_idle_shutdown_and_recreate() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        short_idle_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Create the subject AFTER configuring the idle sink so the worker has no
+    // pending catch-up and can become idle cleanly.
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    // First fact: creates the worker and is delivered.
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_count(2, true).await;
+    let events_after_first = sink.full_snapshot().await;
+    assert_eq!(
+        events_after_first.len(),
+        2,
+        "Create + first fact should be delivered"
+    );
+    assert_subject_sn_sequence(&events_after_first, &subject_id_str, 0, 1);
+    assert_event_is_fact_full(
+        &events_after_first[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_sink_running(&node.api, "example-sink").await;
+
+    // Wait (with polling) until the manager logs that it has stopped the worker.
+    // Using a condition avoids hardcoding an exact delay: Tokio scheduling is
+    // not deterministic across machines, and the idle timeout is reached after
+    // a periodic healthcheck plus the configured shutdown delay.
+    wait_for_condition(|| logs_contain("SinkWorkerShutdown")).await;
+
+    // The sink should still have only the first two events.
+    let events_during_idle = sink.full_snapshot().await;
+    assert_eq!(
+        events_during_idle.len(),
+        2,
+        "no events should be delivered while the worker is idle"
+    );
+
+    // Verify that the manager actually decided to shut the worker down. This is
+    // an internal implementation detail, so it is checked through the production
+    // log instead of through the public API.
+    logs_assert(|lines: &[&str]| {
+        let found = lines.iter().any(|line| {
+            line.contains("SinkWorkerShutdown")
+                && line.contains("idle timeout")
+                && line.contains("example-sink")
+        });
+        if found {
+            Ok(())
+        } else {
+            Err("expected SinkWorkerShutdown log for example-sink".to_owned())
+        }
+    });
+
+    // Second fact: forces the manager to create a fresh worker and deliver.
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_count(3, true).await;
+    let events_after_second = sink.full_snapshot().await;
+    assert_eq!(
+        events_after_second.len(),
+        3,
+        "second fact should be delivered by a fresh worker"
+    );
+    assert_subject_sn_sequence(&events_after_second, &subject_id_str, 0, 2);
+    assert_event_is_fact_full(
+        &events_after_second[2],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_sink_running(&node.api, "example-sink").await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
 }

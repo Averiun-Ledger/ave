@@ -4,10 +4,11 @@ use ave_common::IncomingSinkEvent;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
 };
+use serde::Deserialize;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -32,11 +33,42 @@ pub enum ResponseMode {
     /// Healthcheck succeeds (`GET /events` returns 200) but event delivery
     /// fails (`POST /events` returns 500). Used to test flapping detection.
     HealthOkDeliveryFail,
+    /// Return HTTP 401 on the first delivery request, then accept subsequent
+    /// ones. Used to test OAuth2 token refresh.
+    UnauthorizedOnce,
+    /// Always return HTTP 401. Used to test persistent auth failures.
+    UnauthorizedAlways,
+}
+
+/// Response mode of the test sink's OAuth2 token endpoint.
+#[derive(Debug, Clone, Copy)]
+pub enum AuthResponseMode {
+    /// Return a valid OAuth2 token.
+    TokenSuccess,
+    /// Return HTTP 401 to simulate invalid credentials.
+    TokenFailure,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: i64,
 }
 
 struct TestSinkState {
     events: Vec<IncomingSinkEvent>,
     mode: ResponseMode,
+    auth_mode: AuthResponseMode,
+    auth_requests: Vec<AuthRequest>,
+    authorization_headers: Vec<Option<String>>,
+    unauthorized_once_consumed: bool,
 }
 
 /// A real HTTP sink used by integration tests.
@@ -55,9 +87,14 @@ impl TestSink {
         let state = Arc::new(Mutex::new(TestSinkState {
             events: Vec::new(),
             mode: ResponseMode::Accept,
+            auth_mode: AuthResponseMode::TokenSuccess,
+            auth_requests: Vec::new(),
+            authorization_headers: Vec::new(),
+            unauthorized_once_consumed: false,
         }));
         let app = Router::new()
             .route("/events", post(Self::receive).get(Self::health))
+            .route("/auth/token", post(Self::auth))
             .with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -87,9 +124,18 @@ impl TestSink {
         format!("http://{}/events", self.addr)
     }
 
-    /// Change the response mode for subsequent requests.
+    pub fn auth_url(&self) -> String {
+        format!("http://{}/auth/token", self.addr)
+    }
+
+    /// Change the response mode for subsequent `/events` requests.
     pub async fn set_mode(&self, mode: ResponseMode) {
         self.state.lock().await.mode = mode;
+    }
+
+    /// Change the response mode for subsequent `/auth/token` requests.
+    pub async fn set_auth_mode(&self, mode: AuthResponseMode) {
+        self.state.lock().await.auth_mode = mode;
     }
 
     /// Wait until `count` events have been received.
@@ -180,50 +226,112 @@ impl TestSink {
             .retain(|e| !(e.subject_id() == subject_id && e.sn() >= from_sn));
     }
 
+    /// Return a snapshot of all `/auth/token` requests received so far.
+    pub async fn auth_requests(&self) -> Vec<AuthRequest> {
+        self.state.lock().await.auth_requests.clone()
+    }
+
+    /// Return a snapshot of the `Authorization` headers received on `/events`,
+    /// in request order. `None` means the header was absent.
+    pub async fn authorization_headers(&self) -> Vec<Option<String>> {
+        self.state.lock().await.authorization_headers.clone()
+    }
+
     async fn receive(
         State(state): State<Arc<Mutex<TestSinkState>>>,
+        headers: HeaderMap,
         Json(event): Json<IncomingSinkEvent>,
     ) -> Response {
-        let mode = state.lock().await.mode;
-        match mode {
+        let auth_header = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+
+        let mut guard = state.lock().await;
+        guard.authorization_headers.push(auth_header);
+
+        match guard.mode {
             ResponseMode::Accept => {
                 // Store every event the sink is asked to accept, including
                 // lightweight events, so tests can verify partial filters.
-                state.lock().await.events.push(event);
+                guard.events.push(event);
                 StatusCode::OK.into_response()
             }
             ResponseMode::ServerError => {
+                drop(guard);
                 (StatusCode::INTERNAL_SERVER_ERROR, "server error")
                     .into_response()
             }
             ResponseMode::ClientError => {
+                drop(guard);
                 (StatusCode::UNPROCESSABLE_ENTITY, "client error")
                     .into_response()
             }
             ResponseMode::Malformed => {
+                drop(guard);
                 (StatusCode::OK, "this is not json").into_response()
             }
             ResponseMode::Timeout(ms) => {
                 // Store the event before sleeping so the slow response still
                 // counts as a successful delivery.
-                state.lock().await.events.push(event);
+                guard.events.push(event);
+                drop(guard);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 StatusCode::OK.into_response()
             }
             ResponseMode::Drop => {
                 // Never return: the connection hangs just like a crashed sink.
+                drop(guard);
                 std::future::pending::<()>().await;
                 unreachable!()
             }
             ResponseMode::HealthOkDeliveryFail => {
-                // Healthcheck passes but delivery fails: simulate a flapping sink.
+                drop(guard);
                 (StatusCode::INTERNAL_SERVER_ERROR, "delivery failed")
                     .into_response()
+            }
+            ResponseMode::UnauthorizedOnce => {
+                if !guard.unauthorized_once_consumed {
+                    guard.unauthorized_once_consumed = true;
+                    drop(guard);
+                    (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+                } else {
+                    guard.events.push(event);
+                    StatusCode::OK.into_response()
+                }
+            }
+            ResponseMode::UnauthorizedAlways => {
+                drop(guard);
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
             }
         }
     }
 
     async fn health() -> StatusCode {
         StatusCode::OK
+    }
+
+    async fn auth(
+        State(state): State<Arc<Mutex<TestSinkState>>>,
+        Json(req): Json<AuthRequest>,
+    ) -> Response {
+        let mut guard = state.lock().await;
+        guard.auth_requests.push(req);
+
+        match guard.auth_mode {
+            AuthResponseMode::TokenSuccess => {
+                let token = TokenResponse {
+                    access_token: "test-access-token".to_owned(),
+                    token_type: "Bearer".to_owned(),
+                    expires_in: 3600,
+                };
+                drop(guard);
+                (StatusCode::OK, Json(token)).into_response()
+            }
+            AuthResponseMode::TokenFailure => {
+                drop(guard);
+                (StatusCode::UNAUTHORIZED, "invalid credentials").into_response()
+            }
+        }
     }
 }
