@@ -3,7 +3,7 @@ mod common;
 use std::{collections::BTreeSet, sync::atomic::Ordering};
 
 use ave_common::{
-    SinkTypes,
+    SinkTarget, SinkTypes,
     bridge::request::{SinkReplayItem, SinkReplayRequest, SinksQuery},
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey,
@@ -4535,4 +4535,448 @@ async fn sink_transient_errors_and_fast_events() {
     }
     assert_sink_not_lagging(&node.api, "example-sink").await;
     assert_sink_unblocked(&node.api, "example-sink").await;
+}
+
+
+/// Configuration changes, safe-mode cursor deletion, advanced `get_sinks` filters,
+/// and blocked-sink visibility.
+///
+/// Covers Test 15 of `temporal/sink/plan_integration_tests.md`:
+/// - adding a sink between restarts triggers automatic historical catch-up;
+/// - removing a sink from config leaves a residual registry entry;
+/// - `delete_sink_cursors` works only in safe mode and cleans cursors/lagging;
+/// - `get_sinks` supports filters and ordering;
+/// - `get_sinks` and `get_sinks_status` reflect blocked sinks.
+#[test(tokio::test)]
+async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (s1, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            s1.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let initial_keys = node.keys.clone();
+    let initial_local_db = dirs[0].path().to_path_buf();
+    let initial_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Part A — restart without any sinks configured for Example.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        initial_keys.clone(),
+        initial_local_db.clone(),
+        initial_ext_db.clone(),
+        format!("/memory/{}", port),
+        governance_sink_config("http://localhost:9000".to_owned()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let sinks = node.api.get_sinks(SinksQuery::default()).await.unwrap();
+    let example_sinks: Vec<_> = sinks
+        .iter()
+        .filter(|s| {
+            s.target
+                .as_ref()
+                .map(|t| matches!(t, SinkTarget::Schema { schema_id, .. } if schema_id == "Example"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        example_sinks.len(),
+        0,
+        "no Example sinks should be configured"
+    );
+
+    // Part A cont. — restart with new-sink (Example) and gov-sink.
+    let new_sink = TestSink::start().await;
+    let gov_sink = TestSink::start().await;
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![
+            make_sink_entry(
+                "new-sink",
+                new_sink.url(),
+                Some(governance_id.to_string()),
+                BTreeSet::from([SinkTypes::All]),
+            ),
+            governance_sink_config(gov_sink.url()).into_iter().next().unwrap(),
+        ],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // new-sink must catch up Create + 3 facts automatically.
+    new_sink.wait_for_count(4, true).await;
+    let new_events = new_sink.snapshot().await;
+    assert_eq!(new_events.len(), 4);
+
+    // get_sinks_status includes both sinks as running.
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    let status_names: Vec<_> =
+        statuses.iter().map(|s| s.name.as_str()).collect();
+    assert!(status_names.contains(&"new-sink"));
+    assert!(status_names.contains(&"gov-sink"));
+    let new_status = statuses.iter().find(|s| s.name == "new-sink").unwrap();
+    assert!(new_status.running, "new-sink should be running");
+    assert!(new_status.in_config, "new-sink should be in config");
+    let gov_status = statuses.iter().find(|s| s.name == "gov-sink").unwrap();
+    assert!(gov_status.running, "gov-sink should be running");
+    assert!(gov_status.in_config, "gov-sink should be in config");
+
+    // Filter by target=schema -> only new-sink.
+    let schema_sinks = node
+        .api
+        .get_sinks(SinksQuery {
+            target: Some("schema".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let schema_names: Vec<_> =
+        schema_sinks.iter().map(|s| s.name.as_str()).collect();
+    assert!(schema_names.contains(&"new-sink"));
+    assert!(!schema_names.contains(&"gov-sink"));
+
+    // Filter by schema_id=Example -> only new-sink.
+    let example_query = node
+        .api
+        .get_sinks(SinksQuery {
+            schema_id: Some("Example".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(example_query.len(), 1);
+    assert_eq!(example_query[0].name, "new-sink");
+
+    // Part B — advanced filters and ordering.
+    let by_name = node
+        .api
+        .get_sinks(SinksQuery {
+            name: Some("new-sink".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(by_name.len(), 1);
+    assert_eq!(by_name[0].name, "new-sink");
+
+    let by_gov = node
+        .api
+        .get_sinks(SinksQuery {
+            governance_id: Some(governance_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let by_gov_names: Vec<_> =
+        by_gov.iter().map(|s| s.name.as_str()).collect();
+    assert!(by_gov_names.contains(&"new-sink"));
+    // gov-sink targets the node-level governance schema and has governance_id=None,
+    // so it is not returned by a filter on the subject governance_id.
+    assert!(!by_gov_names.contains(&"gov-sink"));
+
+    let schema_in_config = node
+        .api
+        .get_sinks(SinksQuery {
+            target: Some("schema".to_owned()),
+            in_config: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(schema_in_config.len(), 1);
+    assert_eq!(schema_in_config[0].name, "new-sink");
+
+    let all_sinks = node.api.get_sinks(SinksQuery::default()).await.unwrap();
+    let sorted_names: Vec<_> =
+        all_sinks.iter().map(|s| s.name.clone()).collect();
+    // get_sinks sorts first by manager key (governance:* < node) then by name.
+    assert_eq!(
+        sorted_names,
+        vec!["new-sink", "gov-sink"],
+        "sinks should be sorted by manager then name"
+    );
+
+    // Part C — remove new-sink from config, keep gov-sink.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(gov_sink.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // new-sink appears as residual (in_config=false).
+    let residuals = node
+        .api
+        .get_sinks(SinksQuery {
+            in_config: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let residual_names: Vec<_> =
+        residuals.iter().map(|s| s.name.as_str()).collect();
+    assert!(residual_names.contains(&"new-sink"));
+    let residual = residuals.iter().find(|s| s.name == "new-sink").unwrap();
+    assert!(!residual.in_config);
+
+    // get_sinks_status does not include new-sink (only in_config sinks).
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    let status_names: Vec<_> =
+        statuses.iter().map(|s| s.name.as_str()).collect();
+    assert!(!status_names.contains(&"new-sink"));
+    assert!(
+        statuses.iter().all(|s| s.in_config),
+        "get_sinks_status should only return in_config sinks"
+    );
+
+    // Filter running=false includes the residual new-sink.
+    let not_running = node
+        .api
+        .get_sinks(SinksQuery {
+            running: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let not_running_names: Vec<_> =
+        not_running.iter().map(|s| s.name.as_str()).collect();
+    assert!(not_running_names.contains(&"new-sink"));
+
+    // Part D — safe mode cleanup.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config_safe_mode(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(gov_sink.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // delete_sink_cursors on missing sink returns SinkNotFound.
+    let err = node
+        .api
+        .delete_sink_cursors("missing-sink".to_owned())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::SinkNotFound(_)),
+        "expected SinkNotFound, got {:?}",
+        err
+    );
+
+    // delete_sink_cursors on residual new-sink removes it from registry.
+    node.api
+        .delete_sink_cursors("new-sink".to_owned())
+        .await
+        .unwrap();
+    let residuals = node
+        .api
+        .get_sinks(SinksQuery {
+            in_config: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !residuals.iter().any(|s| s.name == "new-sink"),
+        "new-sink residual should be removed"
+    );
+
+    // delete_sink_cursors on in-config gov-sink keeps it but clears cursors/lagging.
+    node.api
+        .delete_sink_cursors("gov-sink".to_owned())
+        .await
+        .unwrap();
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    let gov_status = statuses.iter().find(|s| s.name == "gov-sink").unwrap();
+    assert_eq!(gov_status.lagging_subjects, 0);
+    assert!(gov_status.blocked.is_none());
+
+    // Restart in normal mode with a fresh gov-sink URL to prove catch-up
+    // from SN 0 after its cursors were deleted in safe mode.
+    let gov_sink2 = TestSink::start().await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(gov_sink2.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let residuals = node
+        .api
+        .get_sinks(SinksQuery {
+            in_config: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !residuals.iter().any(|s| s.name == "new-sink"),
+        "new-sink should not reappear after deletion"
+    );
+
+    // gov-sink2 must receive the governance events from SN 0 because the
+    // previous gov-sink cursors were deleted.
+    gov_sink2.wait_for_full_count(2, true).await;
+    let gov_events: Vec<_> = gov_sink2
+        .full_snapshot()
+        .await
+        .into_iter()
+        .filter(|e| e.subject_id() == governance_id.to_string())
+        .collect();
+    let gov_sns: Vec<_> = gov_events.iter().map(|e| e.sn()).collect();
+    assert_eq!(
+        gov_sns,
+        vec![0, 1],
+        "gov-sink should catch up governance from SN 0 after cursor deletion"
+    );
+
+    // Part E — blocked sink visibility + catch-up from SN 0 after deletion.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    new_sink.set_mode(ResponseMode::Accept).await;
+    new_sink.clear().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "new-sink",
+            new_sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // new-sink must replay all S1 events from SN 0 because its cursors were
+    // deleted in safe mode.
+    new_sink.wait_for_count(4, true).await;
+    let s1_events: Vec<_> = new_sink
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|e| e.subject_id() == s1.to_string())
+        .collect();
+    let s1_sns: Vec<_> = s1_events.iter().map(|e| e.sn()).collect();
+    assert_eq!(
+        s1_sns,
+        vec![0, 1, 2, 3],
+        "new-sink should catch up S1 from SN 0 after cursor deletion"
+    );
+
+    // Switch to 422 client error and emit a fact to block the sink.
+    new_sink.set_mode(ResponseMode::ClientError).await;
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 4}}), true)
+        .await
+        .unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "new-sink", 1).await;
+
+    let blocked_info = node
+        .api
+        .get_sinks(SinksQuery {
+            name: Some("new-sink".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked_info.len(), 1);
+    assert!(
+        blocked_info[0].blocked.is_some(),
+        "new-sink should be reported as blocked"
+    );
+
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    let new_status = statuses.iter().find(|s| s.name == "new-sink").unwrap();
+    assert!(new_status.blocked.is_some());
+    assert!(new_status.lagging_subjects > 0);
 }

@@ -98,6 +98,10 @@ pub enum SinkManagerMessage {
     ReplayEvents {
         requests: Vec<SinkReplayItem>,
     },
+    /// Node has finished starting all its children. Governance sinks can now
+    /// start workers and catch-up because governance actors are guaranteed to
+    /// be available.
+    StartupReady,
 }
 
 impl Message for SinkManagerMessage {}
@@ -541,44 +545,13 @@ impl Actor for SinkManager {
             });
         };
 
-        if !safe_mode {
-            for sink_name in
-                self.sink_servers.keys().cloned().collect::<Vec<_>>()
-            {
-                match self.ensure_worker(&sink_name, ctx).await {
-                    Ok(_) => {
-                        info!(msg_type = "StartWorker", sink = %sink_name, "SinkWorker started");
-                    }
-                    Err(e) => {
-                        error!(msg_type = "StartWorker", sink = %sink_name, error = %e, "Failed to start SinkWorker");
-                    }
-                }
-            }
-
-            // Trigger catch-up for any subjects that are behind. This is
-            // essential when a new sink is added to the configuration: all
-            // existing subjects will have no cursor for it and must be brought
-            // up to date incrementally.
-            let lagging: Vec<(String, Vec<String>)> = self
-                .lagging
-                .iter()
-                .map(|(sink, subjects)| {
-                    (sink.clone(), subjects.iter().cloned().collect())
-                })
-                .collect();
-            for (sink_name, subjects) in lagging {
-                if let Err(e) = self
-                    .handle_request_catch_up(sink_name.clone(), subjects, ctx)
-                    .await
-                {
-                    error!(
-                        msg_type = "StartupCatchUp",
-                        sink = %sink_name,
-                        error = %e,
-                        "Failed to trigger startup catch-up"
-                    );
-                }
-            }
+        // Tracker sink managers live under a Governance actor, which is only
+        // created after the governance itself is up, so they can start workers
+        // and catch-up immediately. The node-level governance sink manager is
+        // created before the SubjectManager has bootstrapped governances, so it
+        // must wait for Node::StartupReady.
+        if !safe_mode && !self.is_governance {
+            self.start_workers_and_catch_up(ctx).await;
         }
 
         info!(
@@ -591,6 +564,7 @@ impl Actor for SinkManager {
 
         Ok(())
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +644,9 @@ impl Handler<SinkManager> for SinkManager {
             SinkManagerMessage::ReplayEvents { requests } => {
                 let response = self.handle_replay_events(requests, ctx).await?;
                 return Ok(SinkManagerResponse::ReplayResult(response));
+            }
+            SinkManagerMessage::StartupReady => {
+                self.handle_startup_ready(ctx).await?;
             }
         }
         Ok(SinkManagerResponse::Ok)
@@ -753,6 +730,9 @@ impl Handler<SinkManager> for SinkManager {
                 // Cancel any periodic healthcheck: the sink is now blocked and
                 // will not recover until the operator unblocks it.
                 self.cancel_healthcheck(&sink);
+                // Keep the subject lagging so it is retried when the operator
+                // unblocks the sink.
+                self.try_insert_lagging(&sink, subject_id);
                 if let Err(e) = self
                     .persist(
                         SinkManagerEvent::SinkBlocked {
@@ -854,6 +834,74 @@ impl SinkManager {
                 self.try_insert_lagging(&sink_name, subject_id);
             }
         }
+    }
+
+    /// Start workers for every configured sink and trigger catch-up for any
+    /// subjects that are behind. Errors are logged but not propagated, because
+    /// a single failing sink or catch-up must not prevent the manager from
+    /// starting the rest.
+    async fn start_workers_and_catch_up(&mut self, ctx: &mut ActorContext<Self>) {
+        for sink_name in self.sink_servers.keys().cloned().collect::<Vec<_>>() {
+            if let Err(e) = self.ensure_worker(&sink_name, ctx).await {
+                error!(
+                    msg_type = "StartWorker",
+                    sink = %sink_name,
+                    error = %e,
+                    "Failed to start SinkWorker"
+                );
+            }
+        }
+
+        // Trigger catch-up for any subjects that are behind. This is
+        // essential when a new sink is added to the configuration: all
+        // existing subjects will have no cursor for it and must be brought
+        // up to date incrementally.
+        let lagging: Vec<(String, Vec<String>)> = self
+            .lagging
+            .iter()
+            .map(|(sink, subjects)| {
+                (sink.clone(), subjects.iter().cloned().collect())
+            })
+            .collect();
+        for (sink_name, subjects) in lagging {
+            if let Err(e) = self
+                .handle_request_catch_up(sink_name.clone(), subjects, ctx)
+                .await
+            {
+                error!(
+                    msg_type = "StartupCatchUp",
+                    sink = %sink_name,
+                    error = %e,
+                    "Failed to trigger startup catch-up"
+                );
+            }
+        }
+    }
+
+    /// Start workers and trigger catch-up for the node-level governance sink
+    /// manager. This is called by Node once all children (including
+    /// SubjectManager and its governances) have been started, so catch-up
+    /// queries can find the governance actors.
+    async fn handle_startup_ready(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if !safe_mode {
+            self.start_workers_and_catch_up(ctx).await;
+        }
+
+        Ok(())
     }
 
     async fn ensure_worker(

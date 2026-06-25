@@ -32,7 +32,8 @@ use crate::{
     model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
     sink::{
-        SinkManager, SinkManagerInitParams, SinkRegistry, SinkRegistryMessage,
+        SinkManager, SinkManagerInitParams, SinkManagerMessage, SinkRegistry,
+        SinkRegistryMessage, SinkRegistryResponse,
     },
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
@@ -1063,6 +1064,30 @@ impl Actor for Node {
             return Err(e);
         }
 
+        // All node children (including SubjectManager and its governances) are
+        // now started. Notify the governance sink manager so it can start
+        // workers and trigger catch-up safely.
+        let node_sink_manager = ctx
+            .get_child::<SinkManager>("node_sink_manager")
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "NodeSinkManager not found at end of pre_start"
+                );
+                e
+            })?;
+        node_sink_manager
+            .tell(SinkManagerMessage::StartupReady)
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "Failed to notify NodeSinkManager of startup readiness"
+                );
+                e
+            })?;
+
         Ok(())
     }
 }
@@ -1639,6 +1664,7 @@ async fn populate_sink_registry(
     use std::collections::HashSet;
 
     let mut seen = HashSet::new();
+    let mut config_names = HashSet::new();
     for entry in sinks {
         let crate::config::SinkTarget::Schema {
             schema_id,
@@ -1653,6 +1679,7 @@ async fn populate_sink_registry(
                 error!(%msg);
                 return Err(ActorError::Functional { description: msg });
             }
+            config_names.insert(server.server.clone());
             registry
                 .tell(SinkRegistryMessage::RegisterSink {
                     name: server.server.clone(),
@@ -1663,5 +1690,33 @@ async fn populate_sink_registry(
                 .await?;
         }
     }
+
+    // Mark any previously-configured sinks that are no longer present as
+    // residuals (from_config=false) so operators can still inspect and clean
+    // them up. Sinks that have no persisted state will typically be removed by
+    // safe-mode cleanup; until then they remain visible in the registry.
+    let existing = match registry.ask(SinkRegistryMessage::GetSinkRegistry).await? {
+        SinkRegistryResponse::Registry(registrations) => registrations,
+        other => {
+            error!(response = ?other, "Unexpected response from SinkRegistry");
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node/sink_registry"),
+                expected: "Registry".to_owned(),
+            });
+        }
+    };
+    for reg in existing {
+        if !config_names.contains(&reg.name) && reg.from_config {
+            registry
+                .tell(SinkRegistryMessage::RegisterSink {
+                    name: reg.name,
+                    schema_id: reg.schema_id,
+                    governance_id: reg.governance_id,
+                    from_config: false,
+                })
+                .await?;
+        }
+    }
+
     Ok(())
 }
