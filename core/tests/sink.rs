@@ -163,13 +163,36 @@ async fn unknown_sink_returns_not_found() {
     );
 }
 
-/// Replay a single subject after the sink loses events.
+/// Test 1: `replay_single_subject_after_sink_loss`.
 ///
-/// Covers Test 1 of `temporal/sink/plan_integration_tests.md`:
-/// - normal delivery of Create + facts;
-/// - sink failure (simulated by dropping every connection);
-/// - automatic catch-up after the sink comes back;
-/// - manual replay from the first lost SN.
+/// **Objective:** replay a subject's events to a sink after a partial loss.
+///
+/// **Setup:**
+/// - Node with `example-sink` for schema `Example`, events `All`.
+/// - Create subject `S1`.
+/// - Emit 5 facts (`ModOne` with data 1..5), waiting for confirmation.
+/// - Verify the sink received 6 events: Create + 5 FactFull.
+///
+/// **Simulate loss:**
+/// - Stop the `TestSink`.
+/// - Emit 2 more facts (`ModOne` with data 6, 7). Because the sink is down, the
+///   events become `lagging`.
+/// - Bring the `TestSink` back up.
+/// - Verify the sink receives the 2 pending events (automatic catch-up).
+///
+/// **Manual replay:**
+/// - Delete all sink events from SN 5 onwards (simulate loss in the sink).
+/// - Call `api.replay_sink_events(SinkReplayRequest { requests: vec![{sink:
+///   "example-sink", subject_id: S1, from_sn: 5}] })`.
+/// - Wait and verify the sink receives events with SN 5, 6, 7 (Create is SN 0,
+///   FactFull SN 1..7; from_sn=5 re-sends SN 5..7).
+///
+/// **Verifications:**
+/// - All events have the correct `subject_id`.
+/// - SNs are consecutive and in order: `[0, 1, 2, 3, 4, 5, 6, 7]`.
+/// - Payloads match.
+/// - The replay response has `processed.len() == 1`, empty `errors`, and
+///   `processed` contains exactly the requested item.
 #[traced_test]
 #[tokio::test]
 async fn replay_single_subject_after_sink_loss() {
@@ -328,12 +351,34 @@ async fn replay_single_subject_after_sink_loss() {
     assert_sink_not_lagging(&node.api, "example-sink").await;
 }
 
-/// Replay events for multiple subjects and sinks in a single request.
+/// Test 2: `replay_multiple_subjects_and_sinks`.
 ///
-/// Covers Test 2 of `temporal/sink/plan_integration_tests.md`:
-/// - one sink receives all event types (`All`);
-/// - a second sink receives only facts (`Fact`);
-/// - replay targets specific (sink, subject) pairs, respecting filters.
+/// **Objective:** replay events from several subjects to several sinks in a
+/// single call.
+///
+/// **Setup:**
+/// - Node with two sinks:
+///   - `example-sink-all` for schema `Example`, events `{All}`.
+///   - `example-sink-fact` for schema `Example`, events `{Fact}`.
+/// - Create subjects `S1` and `S2`.
+/// - Emit facts on both.
+/// - Verify that `example-sink-all` receives Create + Fact, and
+///   `example-sink-fact` receives only Fact.
+///
+/// **Replay:**
+/// - Delete events in both sinks for `S1` from SN 1.
+/// - Call replay with:
+///   - `{sink: "example-sink-all", subject_id: S1, from_sn: 1}`
+///   - `{sink: "example-sink-fact", subject_id: S1, from_sn: 1}`
+///   - `{sink: "example-sink-all", subject_id: S2, from_sn: 1}`
+/// - Verify that each sink receives the corresponding events.
+///
+/// **Verifications:**
+/// - `example-sink-all` has replayed events for S1 and S2 (S1: Create + 2
+///   facts; S2: 2 additional facts on top of the existing ones).
+/// - `example-sink-fact` has only replayed the Facts for S1.
+/// - Response has 3 processed, 0 errors, and `processed` contains exactly the
+///   3 requested items.
 #[traced_test]
 #[tokio::test]
 async fn replay_multiple_subjects_and_sinks() {
@@ -615,12 +660,42 @@ async fn replay_multiple_subjects_and_sinks() {
     );
 }
 
-/// Replay respects per-sink event filters.
+/// Test 4: `replay_filters_and_combinations`.
 ///
-/// Covers Test 4 of `temporal/sink/plan_integration_tests.md`:
-/// - sinks for Create, Fact, Transfer, Confirm, Reject and All;
-/// - each sink receives only the event types it subscribed to;
-/// - replay re-delivers only the matching events.
+/// **Objective:** test event-filter combinations in sinks.
+///
+/// **Setup:**
+/// - Node with 6 sinks for schema `Example`:
+///   - `sink-create`: `{Create}`
+///   - `sink-fact`: `{Fact}`
+///   - `sink-transfer`: `{Transfer}`
+///   - `sink-confirm`: `{Confirm}`
+///   - `sink-reject`: `{Reject}`
+///   - `sink-all`: `{All}`
+/// - Create subject.
+/// - Emit:
+///   - 2 facts (one successful and one failed, to verify that `Fact` includes
+///     both);
+///   - 2 transfers (the first to a new owner, the second back, so the first can
+///     be confirmed and the second rejected);
+///   - 1 confirm;
+///   - 1 reject;
+///   - 1 EOL.
+/// - Verify that each sink receives only what it is configured for.
+///
+/// **Replay:**
+/// - Delete each sink's cursor.
+/// - Call replay for each sink with `from_sn: 0`.
+/// - Verify correct re-sending according to filters.
+///
+/// **Verifications:**
+/// - `sink-create` only receives Create (SN 0).
+/// - `sink-fact` receives the 2 Facts (successful SN 1 and failed SN 2).
+/// - `sink-transfer` receives the 2 Transfers (SN 3 and SN 5).
+/// - `sink-confirm` receives Confirm (SN 4).
+/// - `sink-reject` receives Reject (SN 6).
+/// - `sink-all` receives the 8 events in order: Create, Fact, Fact, Transfer,
+///   Confirm, Transfer, Reject, EOL.
 #[traced_test]
 #[tokio::test]
 async fn replay_filters_and_combinations() {
@@ -944,16 +1019,31 @@ async fn replay_filters_and_combinations() {
     assert_event_is_eol(&all_after[7], &subject_id_str, 7);
 }
 
-/// Replay endpoint validations and error cases.
+/// Test 5: `replay_endpoint_validation_and_errors`.
 ///
-/// Covers Test 5 of `temporal/sink/plan_integration_tests.md`:
-/// - safe mode rejection;
-/// - blocked sink;
-/// - missing sink (`SinkNotFound`);
-/// - sink registered but not configured in the manager (residual);
-/// - unknown subject (`subject has no known events`);
-/// - `from_sn` beyond the last seen event;
-/// - duplicate items deduplicated to the smallest `from_sn`.
+/// **Objective:** exercise all endpoint validations.
+///
+/// **Cases in a single test:**
+/// - Calling in safe mode → `SafeMode` error.
+/// - Blocked sink → item in `errors` with reason "sink is blocked".
+///   - A `422 Unprocessable Entity` response is used to block the sink
+///     (non-transient error).
+///   - Verify `sink`, `subject_id`, `from_sn`, and `reason` of the error.
+/// - Sink does not exist in the registry → item in `errors` with `SinkNotFound`.
+///   - Verify `sink`, `subject_id`, `from_sn`, and the error message.
+/// - Sink exists in the registry but is not configured in the sink manager →
+///   item in `errors` with reason "sink is not configured".
+///   - Advanced case: force it by removing the sink from config after it was
+///     active (residual in manager without servers).
+/// - Subject does not exist → item in `errors` with "subject has no known events".
+///   - Verify unknown `subject_id` and `from_sn`.
+/// - `from_sn` greater than last_seen → item in `errors` with "from_sn beyond the
+///   last seen event".
+///   - Verify the requested `from_sn` and the actual `last_seen`.
+/// - Duplicate items with different `from_sn` → deduplicate to the oldest one,
+///   a single `processed` item.
+///   - Verify that `processed` contains exactly one item with the lowest
+///     `from_sn` and that `errors` is empty.
 #[traced_test]
 #[tokio::test]
 async fn replay_endpoint_validation_and_errors() {
@@ -1262,13 +1352,44 @@ async fn replay_endpoint_validation_and_errors() {
     assert_eq!(blocked.reason, "sink is blocked");
 }
 
-/// Sink starts late and unblock edge cases.
+/// Test 6: `replay_when_sink_starts_late_and_unblock_edge_cases`.
 ///
-/// Covers Test 6 of `temporal/sink/plan_integration_tests.md`:
-/// - sink configured after events have been emitted;
-/// - `unblock_sink` is a no-op on a healthy sink;
-/// - blocked sink is unblocked and catches up automatically;
-/// - manual replay re-sends lost events;
+/// **Objective:** the sink does not exist when events are emitted, it is started
+/// later, replay works, and the `unblock_sink` edge cases are covered (no-op and
+/// safe mode). Exercises `unblock_sink` and `replay_sink_events`.
+///
+/// **Setup:**
+/// - Create a node **without** sinks configured for `Example`.
+/// - Create governance and add schema `Example`.
+/// - Create subject and emit 3 facts.
+///
+/// **Sequence (realistic alternative):**
+/// - Restart the node with a sink configured to point to a `TestSink` that
+///   initially returns `422 Unprocessable Entity` (simulates the remote server
+///   not being ready yet).
+/// - Call `api.unblock_sink("example-sink")` **before** the worker decides it is
+///   blocked; verify it returns `Ok(())` (no-op on a healthy sink).
+/// - The sink worker marks the sink as blocked.
+/// - Change `TestSink` to `Accept` mode.
+/// - Unblock the sink with `api.unblock_sink("example-sink")`.
+/// - Verify the sink receives Create + 3 facts via automatic catch-up.
+/// - Delete all sink events from SN 2.
+/// - Call replay `{sink: "example-sink", subject_id, from_sn: 2}`.
+/// - Verify the sink has Create + 3 facts again with consecutive SNs
+///   `[0, 1, 2, 3]`.
+/// - Restart the node in `safe_mode: true` with the same sink configured.
+/// - Call `api.unblock_sink("example-sink")` and verify it returns
+///   `Error::SafeMode`.
+///
+/// **Verifications:**
+/// - `unblock_sink` on a non-blocked sink is a valid no-op.
+/// - Before unblocking, the sink has not stored any event.
+/// - After unblocking and setting the sink to `Accept`, 4 events are received
+///   with the correct payloads.
+/// - The replay response has `processed.len() == 1`, empty `errors`, and the
+///   item contains `from_sn: 2`.
+/// - After the replay the full sequence is `[0, 1, 2, 3]`.
+/// - `api.get_sinks_status()` shows the sink as unblocked after unblocking.
 /// - `unblock_sink` is rejected in safe mode.
 #[traced_test]
 #[tokio::test]
@@ -1477,13 +1598,45 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
     );
 }
 
-/// Replay after the sink returns bad data (422) and gets blocked.
+/// Test 7: `replay_after_sink_returns_bad_data`.
 ///
-/// Covers Test 7 of `temporal/sink/plan_integration_tests.md`:
-/// - normal delivery of Create + 2 facts;
-/// - 422 response blocks the sink and the failed event is not stored;
-/// - unblock_sink recovers the sink and catch-up delivers the pending fact;
-/// - manual replay re-sends events from an intermediate SN.
+/// **Objective:** the sink returns bad data, becomes blocked, is unblocked, and
+/// replay works. Exercises `unblock_sink` and `replay_sink_events`.
+///
+/// **Implementation note:** HTTP 500 is a transient error in this
+/// implementation, so `422 Unprocessable Entity` is used to force blocking (a
+/// non-transient error). The `TestSink` `Malformed` mode returns HTTP 200, which
+/// the worker treats as success, so it is not used for blocking.
+///
+/// **Setup:**
+/// - Bootstrap node without sinks, create governance and schema `Example`.
+/// - Restart the node with an `example-sink` pointing to a `TestSink` in
+///   `Accept` mode.
+/// - Create subject and emit 2 facts.
+/// - Verify the sink receives Create + 2 facts (3 events).
+///
+/// **Sequence:**
+/// - Configure `TestSink` to respond `422 Unprocessable Entity`.
+/// - Emit a third fact → the worker marks the sink as blocked.
+/// - Verify the sink still has only 3 events.
+/// - Change `TestSink` to `Accept` mode.
+/// - Unblock the sink with `api.unblock_sink("example-sink")`.
+/// - Verify automatic catch-up of the third fact (4 events total).
+/// - Delete sink events from SN 2.
+/// - Call replay `{sink: "example-sink", subject_id, from_sn: 2}`.
+/// - Verify the sink has Create + 3 facts again with consecutive SNs
+///   `[0, 1, 2, 3]`.
+///
+/// **Verifications:**
+/// - The 2 initial facts arrive correctly with their payloads.
+/// - After the 422 error the sink does not store the failed event and becomes
+///   blocked.
+/// - `api.get_sinks_status()` shows the sink as blocked with a non-empty reason
+///   before unblocking.
+/// - After unblocking and setting the sink to `Accept`, 4 events are received.
+/// - The replay response has `processed.len() == 1`, empty `errors`, and the
+///   item contains `from_sn: 2`.
+/// - After the replay the full sequence is `[0, 1, 2, 3]`.
 #[traced_test]
 #[tokio::test]
 async fn replay_after_sink_returns_bad_data() {
@@ -1685,12 +1838,38 @@ async fn replay_after_sink_returns_bad_data() {
     );
 }
 
-/// Replay endpoint response shape and deduplication.
+/// Test 8: `replay_endpoint_response_shape`.
 ///
-/// Covers Test 8 of `temporal/sink/plan_integration_tests.md`:
-/// - response contains exactly one processed item and three errors;
-/// - duplicate items are deduplicated to the smallest from_sn;
-/// - the valid item really re-sends events to the sink.
+/// **Objective:** verify that the endpoint response has the expected shape and
+/// that the valid item actually re-sends events.
+///
+/// **Setup:**
+/// - Bootstrap node, create governance and schema `Example`.
+/// - Restart with an `example-sink`.
+/// - Create two subjects `S1` and `S2` and emit 3 facts in each.
+/// - Verify the sink receives 8 events (2 Create + 6 FactFull).
+///
+/// **Sequence:**
+/// - Call replay with a mix of 5 items:
+///   - Valid: `{example-sink, S1, from_sn: 1}`.
+///   - Valid duplicate: `{example-sink, S1, from_sn: 2}` (must be deduplicated
+///     to `from_sn` 1).
+///   - Invalid: `{missing-sink, S1, from_sn: 0}` (sink does not exist).
+///   - Invalid: `{example-sink, no-such-subject, from_sn: 0}` (subject does not
+///     exist).
+///   - Invalid: `{example-sink, S2, from_sn: 10}` (`from_sn` beyond
+///     `last_seen`).
+///
+/// **Verifications:**
+/// - `processed.len() == 1` and contains exactly `{example-sink, S1, from_sn:
+///   1}`.
+/// - `errors.len() == 3`.
+/// - Each error has a non-empty `reason`.
+/// - `processed` and `errors` are disjoint by `(sink, subject_id)`.
+/// - The three expected errors are present: sink not found, unknown subject,
+///   and `from_sn` out of range.
+/// - After the replay the sink receives 11 events in total: 8 original + 3
+///   replayed facts from S1.
 #[traced_test]
 #[tokio::test]
 async fn replay_endpoint_response_shape() {
@@ -1892,12 +2071,42 @@ async fn replay_endpoint_response_shape() {
     );
 }
 
-/// Sink permanently dropped and manual recovery.
+/// Test 9: `sink_permanent_failure_and_manual_recovery`.
 ///
-/// Covers Test 9 of `temporal/sink/plan_integration_tests.md`:
-/// - sink in `Drop` mode causes events to become lagging but not blocked;
-/// - replay while the sink is down is accepted but does not arrive;
-/// - after recovery the sink catches up all pending events in order.
+/// **Cases covered:** sink permanently down, events in `lagging`, replay while
+/// the sink is down, manual recovery, and automatic catch-up.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`, restart with sink
+///   `example-sink`.
+/// - Create subject `S1` and emit 2 facts.
+/// - Verify initial delivery (Create + 2 facts).
+///
+/// **Sequence:**
+/// 1. Change `TestSink` to `Drop` mode (never responds).
+/// 2. Emit 2 more facts.
+/// 3. Wait long enough for the worker to exhaust retries and mark the subject
+///    as `lagging`.
+/// 4. Verify the sink **has not** received the new events and that it is **not**
+///    blocked (Drop is a transient error).
+/// 5. Call replay `{example-sink, S1, from_sn: 1}` while the sink is still down.
+/// 6. Verify the replay appears in `processed` but the events do not physically
+///    reach the sink yet.
+/// 7. Change `TestSink` to `Accept` mode.
+/// 8. Verify the sink receives all pending events by automatic catch-up. The
+///    replay from SN 1 is merged with the existing cursor (SN 2), so the worker
+///    re-sends SN 1..4; SN 1 and 2 therefore appear duplicated in `TestSink`
+///    while SN 3 and 4 arrive for the first time. `TestSink` ends with 7 events
+///    and SNs `[0, 1, 2, 1, 2, 3, 4]`.
+///
+/// **Verifications:**
+/// - The sink does not advance its cursor while it is down.
+/// - `lagging` contains the subject (can be checked via `GetDetailedStatus` or
+///   indirectly by verifying that subsequent catch-up delivers all events).
+/// - The sink never reaches `blocked` state.
+/// - After manual recovery all pending events are delivered in order; `TestSink`
+///   does not deduplicate, so events already delivered that fall inside the
+///   replay range appear duplicated.
 #[traced_test]
 #[tokio::test]
 async fn sink_permanent_failure_and_manual_recovery() {
@@ -2105,12 +2314,49 @@ async fn sink_permanent_failure_and_manual_recovery() {
     assert_sink_not_lagging(&node.api, "example-sink").await;
 }
 
-/// Flapping sink is blocked after one failed recovery.
+/// Test 10: `sink_flapping_blocks_after_repeated_recovery`.
 ///
-/// Covers Test 10 of `temporal/sink/plan_integration_tests.md`:
-/// - healthcheck passes but delivery fails;
-/// - sink is blocked as flapping after max_recoveries_after_failure is exceeded;
-/// - unblock_sink restores delivery once the sink is healthy again.
+/// **Cases covered:** *flapping* (healthcheck OK but delivery fails), permanent
+/// blocking after exceeding `max_recoveries_after_failure`, and real recovery
+/// via `unblock_sink` while hot once the sink becomes healthy again.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with `example-sink` configured with
+///   `max_recoveries_after_failure: 1`, `healthcheck_intervals_secs: [1]`,
+///   `request_timeout_ms: 500`, `max_retries: 0`.
+/// - Create subject `S1`, emit 2 facts, verify initial delivery.
+///
+/// **Sequence:**
+/// 1. Configure `TestSink` in `HealthOkDeliveryFail` mode: the `GET /events`
+///    endpoint returns `200 OK`, but `POST /events` returns `500 Internal Server
+///    Error`.
+/// 2. Emit a third fact. The worker tries to deliver it, fails (transient
+///    error), transitions to `Unhealthy`, and schedules a healthcheck.
+/// 3. The healthcheck passes (`200 OK`), the worker recovers, tries catch-up,
+///    and fails again. Since `max_recoveries_after_failure` is 1, the sink
+///    blocks with reason `"sink flapping: healthcheck OK but delivery fails"`.
+/// 4. Verify the sink has exactly 3 events (it did not receive the third fact).
+/// 5. Change `TestSink` to `Accept` mode to simulate the remote sink being
+///    healthy now.
+/// 6. Call `api.unblock_sink("example-sink")` and verify the call succeeds.
+///    Check in `get_sinks_status` that the sink is no longer marked as
+///    `blocked` at manager level.
+/// 7. Verify the sink receives Create + 3 facts with SNs `[0, 1, 2, 3]`: the
+///    manual unblock triggers catch-up and, because the sink is healthy, the
+///    pending fact is delivered on the running node.
+///
+/// **Verifications:**
+/// - After a failed recovery the sink becomes `blocked`.
+/// - The block reason contains `"flapping"`.
+/// - Before unblocking the sink has exactly 3 events.
+/// - `api.unblock_sink` on a sink blocked due to flapping returns `Ok(())` and
+///   `get_sinks_status` no longer reports it as blocked.
+/// - After making the sink healthy and unblocking it, the pending fact is
+///   delivered hot and the sink ends with 4 events SN `[0, 1, 2, 3]`.
+///
+/// > **Implementation note:** the `HealthOkDeliveryFail` mode must be added to
+/// > `TestSink`.
 #[traced_test]
 #[tokio::test]
 async fn sink_flapping_blocks_after_repeated_recovery() {
@@ -2264,11 +2510,50 @@ async fn sink_flapping_blocks_after_repeated_recovery() {
     );
 }
 
-/// Recovery of sink state across node restarts.
+/// Test 11: `sink_recovery_across_node_restart`.
 ///
-/// Covers Test 11 of `temporal/sink/plan_integration_tests.md`:
-/// - a blocked sink is auto-unblocked on restart and catches up;
-/// - a subject left lagging before shutdown is caught up after restart.
+/// **Cases covered:** auto-unblock of blocked sinks in `pre_start`, rebuild of
+/// `lagging` after restart, worker recreation, and automatic catch-up.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Create subject `S1` and emit 2 facts.
+///
+/// **Part A — restart with blocked sink:**
+/// 1. Restart the node with `example-sink` in `Accept` mode.
+/// 2. Verify initial delivery of Create + 2 facts.
+/// 3. Change `TestSink` to `ClientError` mode (`422`).
+/// 4. Emit a third fact; wait for the sink to block.
+/// 5. Stop the node (`token.cancel()` + `join_all`).
+/// 6. Change `TestSink` to `Accept` mode.
+/// 7. Restart the node with the same config and persistence.
+/// 8. Verify that `pre_start` automatically unblocks the sink and that catch-up
+///    delivers the third fact.
+///
+/// **Part B — restart with subject in `lagging`:**
+/// 1. Restart the node with `example-sink` in `Drop` mode.
+/// 2. Create subject `S2` and emit 2 facts (they will not be delivered).
+/// 3. Stop the node.
+/// 4. Change `TestSink` to `Accept` mode.
+/// 5. Restart the node.
+/// 6. Verify the sink receives Create + 2 facts for `S2` via automatic
+///    catch-up.
+///
+/// **Part C — worker recreation after idle shutdown:**
+/// 1. Restart the node with `example-sink` configured with
+///    `sink_worker_idle_timeout_ms: 200` and
+///    `sink_subject_worker_idle_timeout_ms: 200`.
+/// 2. Emit a fact on `S2`; verify the sink receives it (the worker starts).
+/// 3. Wait more than 200 ms for the manager to stop the worker due to
+///    inactivity.
+/// 4. Emit another fact on `S2`; verify the sink receives it, showing that the
+///    manager created a new worker after the idle shutdown.
+///
+/// **Verifications:**
+/// - After restart a previously blocked sink appears as unblocked.
+/// - Subjects in `lagging` are detected in `pre_start` and catch-up is run.
+/// - Workers are recreated correctly after the idle shutdown (events are
+///   delivered before and after the idle timeout).
 #[traced_test]
 #[tokio::test]
 async fn sink_recovery_across_node_restart() {
@@ -2584,15 +2869,55 @@ async fn sink_recovery_across_node_restart() {
     );
 }
 
-/// Lightweight events and concurrent catch-up with limited concurrency.
+/// Test 12: `sink_light_events_and_concurrent_catch_up`.
 ///
-/// Covers Test 12 of `temporal/sink/plan_integration_tests.md`:
-/// - sinks with partial filters receive `LightEvent` for non-matching event types;
-/// - `max_catch_up_concurrency: 1` still catches up multiple lagging subjects;
-/// - `max_catch_up_concurrency: 2` catches up multiple subjects without
-///   duplicates or ordering violations;
-/// - replay from SN 0 works with limited concurrency;
-/// - sinks with different filters do not interfere with each other.
+/// **Cases covered:** lightweight event delivery (`LightEvent`), limited
+/// catch-up concurrency (`max_catch_up_concurrency`), multiple subjects lagging
+/// simultaneously, recovery without delivering duplicate events, validation with
+/// concurrency greater than 1.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with three sinks:
+///   - `create-only`: events `{Create}`, `max_catch_up_concurrency: 1`.
+///   - `create-only-conc2`: events `{Create}`, `max_catch_up_concurrency: 2`.
+///   - `all`: events `{All}`, `max_catch_up_concurrency: 1`.
+/// - Create subjects `S1` and `S2`.
+///
+/// **Sequence:**
+/// 1. Emit 2 facts on each subject.
+/// 2. Verify that `create-only` receives exactly 2 full `Create` events and 4
+///    `LightEvent` of type `Fact` (2 per subject); verify the same for
+///    `create-only-conc2` at the end of the test (after recovery).
+/// 3. Verify that `all` receives 2 `Create` + 4 `FactFull` (6 events).
+/// 4. Put `create-only` and `create-only-conc2` in `ServerError` mode and emit
+///    one fact on each subject; both subjects must become `lagging` in both
+///    sinks.
+/// 5. Put `create-only` back in `Accept` mode; verify that, with
+///    `max_catch_up_concurrency: 1`, both subjects recover and **no duplicate
+///    events are delivered** (exactly 8 events: 2 `Create` + 6 `LightEvent`).
+/// 6. Delete all events from `create-only`.
+/// 7. Call replay for `create-only` with both subjects from `from_sn: 0` in the
+///    same request.
+/// 8. Verify that, even with concurrency 1, both subjects end up recovered: 2
+///    `Create` + 4 `LightEvent`.
+/// 9. **Part D — repeat recovery in `create-only-conc2`**. Put
+///    `create-only-conc2` in `Accept` mode (it is still lagging from step 4).
+///    Verify that, with `max_catch_up_concurrency: 2`, both subjects recover
+///    without duplicates: exactly 8 events, 2 `Create` + 6 `LightEvent`, and no
+///    repeated `(subject_id, sn)`.
+///
+/// **Verifications:**
+/// - `LightEvent` contains the correct `subject_id`, `schema_id`, `sn`,
+///   `event_type`, and `success`.
+/// - The partial-filter sink does not receive full payloads for events it did
+///   not request.
+/// - `max_catch_up_concurrency` limits but does not prevent recovery of all
+///   subjects.
+/// - Simultaneous catch-up of several subjects does not produce duplicate
+///   deliveries, both with concurrency 1 and concurrency 2.
+/// - Within each subject the SNs are consecutive and no `(subject_id, sn)` is
+///   repeated.
 #[traced_test]
 #[tokio::test]
 async fn sink_light_events_and_concurrent_catch_up() {
@@ -2984,11 +3309,27 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_sink_unblocked(&node.api, "create-only-conc2").await;
 }
 
-/// Replay governance events through a governance sink.
+/// Test 3: `replay_governance_sink`.
 ///
-/// Covers Test 3 of `temporal/sink/plan_integration_tests.md`:
-/// - normal delivery of Governance Create + FactFull;
-/// - manual replay from SN 0 after wiping the sink.
+/// **Objective:** replay governance events to a governance sink.
+///
+/// **Setup:**
+/// - Node with `gov-sink` target `governance`, events `All`.
+/// - Create governance (SN 0).
+/// - Emit a governance fact that adds a schema (SN 1).
+/// - Verify that `gov-sink` receives both events.
+///
+/// **Replay:**
+/// - Delete all events from `gov-sink`.
+/// - Call replay with `{sink: "gov-sink", subject_id: governance_id, from_sn:
+///   0}`.
+/// - Verify the sink receives governance Create + FactFull.
+///
+/// **Verifications:**
+/// - The sink receives Create (SN 0) and FactFull (SN 1) in order.
+/// - After the replay, the full sequence is `[0, 1]`.
+/// - The replay response has `processed.len() == 1`, empty `errors`, and
+///   `processed` contains exactly the requested item.
 #[traced_test]
 #[tokio::test]
 async fn replay_governance_sink() {
@@ -3066,14 +3407,79 @@ async fn replay_governance_sink() {
     );
 }
 
-/// Facts with viewpoints are delivered as FactFull or FactOpaque depending on
-/// the witness grants.
+/// Test 19A: `sink_fact_viewpoints_full_and_opaque`.
 ///
-/// Covers Test 19A of `temporal/sink/plan_integration_tests.md`:
-/// - Create, FactFull and FactOpaque are delivered;
-/// - successful and failed facts carry the correct `success`/`error` flags;
-/// - opaque facts do not leak payload, patch, issuer or error;
-/// - every field of every event is explicitly checked.
+/// **Objective:** verify that facts with viewpoints are delivered as `FactFull`
+/// to nodes with full visibility and as `FactOpaque` to nodes without viewpoint
+/// grants, including the `success/error` flag on failed facts. All fields of
+/// `DataToSink` and `DataToSinkEvent` are checked explicitly.
+///
+/// > This test covers the viewpoint gap detected during review. It is separated
+/// > from the non-fact lifecycle because a node that receives `FactOpaque`
+/// > cannot emit transfer/confirm/EOL events without first cleaning and
+/// > resynchronizing the ledger.
+///
+/// **Setup:**
+/// - Two nodes: `Owner` (index 0) and `Witness` (index 1).
+/// - Governance with schema `Example` declaring viewpoints `["agua",
+///   "basura"]`.
+/// - Roles:
+///   - `Owner`: member, creator/evaluator/validator/issuer/witness of the schema.
+///   - `Witness`: member, gov witness and schema witness of the schema.
+///   - Empty viewpoint grant for `Witness` in the creator entry, so it receives
+///     `FactOpaque`.
+/// - Each node has a sink configured to receive events `{All}`:
+///   - `full-sink` on Owner.
+///   - `opaque-sink` on Witness.
+///
+/// **Sequence:**
+/// 1. Owner creates subject `S1`.
+/// 2. Owner emits a fact with viewpoint `["agua"]` and payload
+///    `{"ModOne":{"data":1}}` (success).
+/// 3. Owner emits a fact with viewpoint `["agua"]` and payload
+///    `{"ModThree":{"data":50}}` (failure forced by the contract).
+/// 4. Owner emits a fact without viewpoints and payload `{"ModTwo":{"data":2}}`
+///    (success).
+///
+/// **Verifications on `full-sink` (Owner):**
+/// - 4 events are received with consecutive SNs `[0, 1, 2, 3]`.
+/// - **Create (SN 0):** `governance_id`, `subject_id`, `owner`, `schema_id ==
+///   Example`, `namespace`, `sn == 0`, `gov_version`, `state` with
+///   `one/two/three == 0`.
+/// - **FactFull (SN 1):** `governance_id`, `subject_id`, `schema_id ==
+///   Example`, `viewpoints == ["agua"]`, `issuer == owner_pk`, `owner ==
+///   owner_pk`, `payload == {"ModOne":{"data":1}}`, `patch` is `Some(...)`,
+///   `success == true`, `error == None`, `sn == 1`, matching `gov_version`.
+/// - **FactFull (SN 2):** `governance_id`, `subject_id`, `schema_id ==
+///   Example`, `viewpoints == ["agua"]`, `payload == {"ModThree":{"data":50}}`,
+///   `patch == None`, `success == false`, non-empty `error`, `sn == 2`,
+///   matching `gov_version`.
+/// - **FactFull (SN 3):** `governance_id`, `subject_id`, `schema_id ==
+///   Example`, `viewpoints == []`, `payload == {"ModTwo":{"data":2}}`, `patch`
+///   is `Some(...)`, `success == true`, `sn == 3`, matching `gov_version`.
+///
+/// **Verifications on `opaque-sink` (Witness):**
+/// - 4 events are received with consecutive SNs `[0, 1, 2, 3]`.
+/// - **Create (SN 0):** same as in `full-sink`.
+/// - **FactOpaque (SN 1):** `governance_id`, `subject_id`, `schema_id ==
+///   Example`, `viewpoints == ["agua"]`, `owner == owner_pk`, `success ==
+///   true`, `sn == 1`, matching `gov_version`. Does **not** contain `payload`,
+///   `patch`, `issuer`, or `error`.
+/// - **FactOpaque (SN 2):** `governance_id`, `subject_id`, `schema_id ==
+///   Example`, `viewpoints == ["agua"]`, `success == false`, `sn == 2`,
+///   matching `gov_version`. Does **not** contain `payload`, `patch`, `issuer`,
+///   or `error`.
+/// - **FactFull (SN 3):** `governance_id`, `subject_id`, `schema_id ==
+///   Example`, `viewpoints == []`, `payload == {"ModTwo":{"data":2}}`, `patch`
+///   is `Some(...)`, `success == true`, `sn == 3`, matching `gov_version`.
+///   Facts without viewpoints are public, so the witness also receives them in
+///   full.
+///
+/// **Implementation notes:**
+/// - The `EXAMPLE_CONTRACT` already supports `ModOne`, `ModTwo`, `ModThree`,
+///   and the failure rule for `ModThree { data: 50 }`.
+/// - For Witness to receive `FactOpaque`, its viewpoint grant in the creator
+///   entry must be `[]` and it must not have `AllViewpoints`.
 #[traced_test]
 #[tokio::test]
 async fn sink_fact_viewpoints_full_and_opaque() {
@@ -3551,13 +3957,55 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     }
 }
 
-/// Non-fact sink event types and field checks.
+/// Test 19B: `sink_non_fact_event_types_and_fields`.
 ///
-/// Covers Test 19B of `temporal/sink/plan_integration_tests.md`:
-/// - Create, Transfer, Confirm, Reject and EOL are delivered;
-/// - every relevant field of each event type is checked;
-/// - the tracker has no viewpoints, so ownership changes do not require a
-///   ledger cleanup/resync.
+/// **Objective:** verify that all non-fact events (`Transfer`, `Confirm`,
+/// `Reject`, `EOL`) reach the sink with all their fields correct, using a
+/// tracker without viewpoints to avoid partial-ledger issues when changing
+/// owner. All fields of `DataToSink` and `DataToSinkEvent` are checked
+/// explicitly.
+///
+/// **Setup:**
+/// - Two nodes: `Owner` (index 0) and `NewOwner` (index 1).
+/// - Governance with schema `Example` **without** viewpoints.
+/// - Roles:
+///   - `Owner`: member, creator/evaluator/validator/issuer/witness of the schema.
+///   - `NewOwner`: member, gov witness, schema witness, and creator of the schema.
+/// - Each node has a sink configured to receive events `{All}`.
+///
+/// **Sequence:**
+/// 1. Owner creates subject `S1`.
+/// 2. Owner emits a successful fact (`ModOne`) to have a reference SN 1.
+/// 3. Owner transfers `S1` to NewOwner.
+/// 4. NewOwner confirms the transfer.
+/// 5. NewOwner transfers `S1` back to Owner.
+/// 6. Owner rejects the transfer.
+/// 7. NewOwner emits `EOL` for `S1` (it remains owner after the reject).
+///
+/// **Verifications on both sinks:**
+/// - 7 events are received with consecutive SNs `[0, 1, 2, 3, 4, 5, 6]`.
+/// - **Create (SN 0):** correct fields (`governance_id`, `subject_id`,
+///   `owner`, `schema_id`, `namespace`, `sn`, `gov_version`, `state`).
+/// - **FactFull (SN 1):** `governance_id`, `subject_id`, `schema_id`,
+///   `viewpoints == []`, `issuer`, `owner`, `payload`, `patch`, `success ==
+///   true`, `error == None`, `sn`, `gov_version`.
+/// - **Transfer (SN 2):** `governance_id`, `subject_id`, `schema_id`, `owner ==
+///   owner_pk`, `new_owner == new_owner_pk`, `success == true`, `error ==
+///   None`, `sn`, `gov_version`.
+/// - **Confirm (SN 3):** `governance_id`, `subject_id`, `schema_id`, `sn`,
+///   `patch == None`, `success == true`, `error == None`, `gov_version`,
+///   `name_old_owner == None` (the `name_old_owner` field only applies to
+///   governance confirms).
+/// - **Transfer (SN 4):** `governance_id`, `subject_id`, `schema_id`, `owner ==
+///   new_owner_pk`, `new_owner == owner_pk`, `success == true`, `error ==
+///   None`, `sn`, `gov_version`.
+/// - **Reject (SN 5):** `governance_id`, `subject_id`, `schema_id`, `sn == 5`,
+///   matching `gov_version`.
+/// - **EOL (SN 6):** `governance_id`, `subject_id`, `schema_id`, `sn == 6`,
+///   matching `gov_version`.
+/// - Every full event (`DataToSink`) has `public_key`,
+///   `event_request_timestamp`, `event_ledger_timestamp`, and `sink_timestamp`
+///   greater than 0.
 #[traced_test]
 #[tokio::test]
 async fn sink_non_fact_event_types_and_fields() {
@@ -4151,14 +4599,48 @@ async fn sink_non_fact_event_types_and_fields() {
     }
 }
 
-/// Deleting a subject removes it from sink tracking (cursors and lagging)
-/// for all sinks.
+/// Test 13: `sink_subject_deletion_cleans_tracking`.
 ///
-/// Covers Test 13 of `temporal/sink/plan_integration_tests.md`:
-/// - `delete_subject` requires safe mode;
-/// - a deleted subject no longer triggers deliveries to any sink;
-/// - the sink manager cleans up cursors and lagging state when the subject is
-///   deleted (via `RemoveSubject`) and defensively via `SubjectNotFound`.
+/// **Cases covered:** subject deletion and cleanup of cursors/lagging in all
+/// sinks; `delete_subject` requires safe mode; subsequent governance activity
+/// does not re-trigger deliveries for a deleted subject.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with two sinks (`example-sink` and `example-sink-2`) pointing to
+///   separate `TestSink`s, both with events `{All}`.
+/// - Create subject `S1` and emit 2 facts.
+/// - Verify initial delivery in both sinks (Create + 2 FactFull, no duplicates,
+///   consecutive SNs).
+///
+/// **Sequence:**
+/// 1. Put both sinks in `ServerError` mode and emit a third fact on `S1` to
+///    leave the subject `lagging` in both sinks. This persists cursor/lagging
+///    state that must be cleaned up after deletion.
+/// 2. Verify that `api.delete_subject(S1)` outside safe mode returns
+///    `Error::SafeMode`.
+/// 3. Restart the node in `safe_mode: true`.
+/// 4. Call `api.delete_subject(S1)` and verify it returns `"Tracker deleted
+///    successfully"`.
+/// 5. Observe that `SinkManager` receives the `RemoveSubject` message and
+///    removes the subject from all sinks during deletion.
+/// 6. Restart the node in normal mode with both sinks in `Accept` mode.
+/// 7. Emit a governance fact (add a member) to keep the node active and check
+///    that no further deliveries for `S1` are attempted.
+/// 8. Call `replay_sink_events` for both sinks and `S1` from `from_sn: 0`.
+///    Since the subject no longer exists, each item must be returned in
+///    `errors` with reason `"subject has no known events"`.
+///
+/// **Verifications:**
+/// - Both sinks still have exactly the 3 original `S1` events and do not
+///   receive new events after deletion.
+/// - `get_sinks_status` reports `lagging_subjects: 0` for both sinks.
+/// - No sink is blocked.
+/// - The replay for the deleted subject is not processed and reports
+///   `"subject has no known events"` for both sinks.
+/// - The cursors and `lagging` state for `S1` are cleaned up (both by the
+///   `RemoveSubject` message during `delete_subject` and by the defensive
+///   handling of `SubjectNotFound` if the worker attempted catch-up).
 #[traced_test]
 #[tokio::test]
 async fn sink_subject_deletion_cleans_tracking() {
@@ -4429,13 +4911,58 @@ async fn sink_subject_deletion_cleans_tracking() {
     }
 }
 
-/// Transient errors, retry backoff, and sequential gaps during fast events.
+/// Test 14: `sink_transient_errors_and_fast_events`.
 ///
-/// Covers Test 14 of `temporal/sink/plan_integration_tests.md`:
-/// - HTTP 5xx errors are retried and eventually become `lagging` without
-///   blocking the sink;
-/// - events emitted while a slow delivery is in flight create a sequential gap
-///   that is resolved by ordered catch-up.
+/// **Cases covered:** transient HTTP errors (5xx) with retries and backoff,
+/// sequential gap in `NotifyNewEvent`, and events arriving while a catch-up is
+/// in progress.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with `example-sink` configured with `max_retries: 2`,
+///   `retry_base_delay_ms: 100`, `request_timeout_ms: 500`,
+///   `sink_worker_idle_timeout_ms: 60_000`.
+/// - Create subject `S1`.
+///
+/// **Part A — retries on transient error:**
+/// 1. Change `TestSink` to `ServerError` mode (`500 Internal Server Error`).
+/// 2. Emit a fact on `S1` synchronously (`wait=true`).
+/// 3. The worker retries up to 2 times with backoff; finally it marks the
+///    subject as `lagging` without blocking the sink.
+/// 4. Verify the sink did not receive the fact (still 1 event: Create) and that
+///    the sink is **not** `blocked`.
+/// 5. Change `TestSink` to `Accept`.
+/// 6. Verify the fact arrives via automatic catch-up (2 events: Create SN 0 +
+///    Fact SN 1).
+///
+/// **Part B — sequential gap and concurrent catch-up:**
+/// 1. Put the sink in `Timeout(150)` mode (responds slowly but successfully).
+///    The previous events from Part A are kept so the node cursor and sink
+///    state remain consistent.
+/// 2. Emit 3 facts **asynchronously** (`wait=false`) followed by one
+///    synchronous fact (`wait=true`).
+/// 3. Because the sink takes 150 ms per event and the async ones arrive
+///    quickly, the manager detects a sequential gap (the cursor does not
+///    advance until the first slow event finishes) and marks the subject as
+///    `lagging`.
+/// 4. Verify that, once the sink finishes, **all** events are delivered in
+///    order `[0, 1, 2, 3, 4, 5]`: Create SN 0 + 5 consecutive facts, no
+///    duplicates.
+///
+/// **Verifications:**
+/// - A sink with 5xx errors does not block; it enters `lagging`.
+/// - Retries respect `max_retries` and do not advance the cursor.
+/// - The sequential gap forces ordered catch-up.
+/// - Events emitted during catch-up are included in the same queue and
+///   delivered in order.
+/// - No duplicates: each `(subject_id, sn)` appears only once.
+/// - After recovery the sink is neither `blocked` nor `lagging`.
+///
+/// **Implementation note:** the test uses the helpers
+/// `wait_for_sink_lagging_subjects`, `assert_sink_unblocked`,
+/// `assert_sink_not_lagging`, `assert_no_duplicate_events`, and
+/// `assert_subject_sn_sequence`, following the timeout/retry pattern of the
+/// other sink tests.
 #[traced_test]
 #[tokio::test]
 async fn sink_transient_errors_and_fast_events() {
@@ -4566,15 +5093,105 @@ async fn sink_transient_errors_and_fast_events() {
 }
 
 
-/// Configuration changes, safe-mode cursor deletion, advanced `get_sinks` filters,
-/// and blocked-sink visibility.
+/// Test 15: `sink_config_changes_safe_mode_get_sinks_and_blocked`.
 ///
-/// Covers Test 15 of `temporal/sink/plan_integration_tests.md`:
-/// - adding a sink between restarts triggers automatic historical catch-up;
-/// - removing a sink from config leaves a residual registry entry;
-/// - `delete_sink_cursors` works only in safe mode and cleans cursors/lagging;
-/// - `get_sinks` supports filters and ordering;
-/// - `get_sinks` and `get_sinks_status` reflect blocked sinks.
+/// **Cases covered:** adding a sink in config between restarts, removing a sink
+/// from config (residual state in `SinkRegistry`), cursor deletion in safe mode,
+/// advanced `get_sinks` filters, ordering, and blocked sink visibility.
+/// Exercises `get_sinks`, `get_sinks_status`, and `delete_sink_cursors`.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Create subject `S1` and emit 3 facts.
+///
+/// **Part A — add sink on restart:**
+/// 1. Restart the node with a single `gov-sink` pointing to a non-existent URL
+///    (no sinks configured for `Example`).
+/// 2. Verify that `api.get_sinks(SinksQuery::default())` does not return sinks
+///    for `Example`.
+/// 3. Restart again with two sinks:
+///   - `new-sink` pointing to a `TestSink` in `Accept` mode (target schema
+///     `Example`).
+///   - `gov-sink` pointing to a `TestSink` in `Accept` mode (target
+///     `governance`).
+/// 4. Verify that `new-sink` receives Create + 3 facts via automatic catch-up.
+/// 5. Verify that `api.get_sinks_status()` includes `new-sink` and `gov-sink`
+///    with `running: true` and `in_config: true`.
+/// 6. Verify that `api.get_sinks(SinksQuery { target:
+///    Some("schema".to_owned()), .. })` includes `new-sink` and not `gov-sink`.
+/// 7. Verify that `api.get_sinks(SinksQuery { schema_id:
+///    Some("Example".to_owned()), .. })` includes `new-sink`.
+///
+/// **Part B — advanced filters and ordering:**
+/// 1. Verify that `api.get_sinks(SinksQuery { name:
+///    Some("new-sink".to_owned()), .. })` returns only `new-sink`.
+/// 2. Verify that `api.get_sinks(SinksQuery { governance_id:
+///    Some(governance_id.to_string()), .. })` returns `new-sink` (its target
+///    `Example` belongs to that governance) and **not** `gov-sink` (its target
+///    is the node-level governance schema with `governance_id: None`).
+/// 3. Verify that `api.get_sinks(SinksQuery { target:
+///    Some("schema".to_owned()), in_config: Some(true), .. })` returns only
+///    `new-sink`.
+/// 4. Verify that `api.get_sinks(SinksQuery::default())` returns the sinks
+///    sorted by `manager` and `name`.
+///
+/// **Part C — remove sink from config:**
+/// 1. Restart the node **without** the `new-sink` that had cursors (keeping
+///    `gov-sink`).
+/// 2. Call `api.get_sinks(SinksQuery { in_config: Some(false), .. })` and
+///    verify that `new-sink` still appears with `in_config: false`.
+/// 3. Verify that `api.get_sinks_status()` does not include `new-sink` and that
+///    all returned sinks have `in_config: true`.
+/// 4. Verify that `api.get_sinks(SinksQuery { running: Some(false), .. })`
+///    includes `new-sink`.
+///
+/// **Part D — cleanup in safe mode:**
+/// 1. Restart the node in `safe_mode: true`.
+/// 2. Call `api.delete_sink_cursors("missing-sink")` and verify it returns
+///    `Error::SinkNotFound`.
+/// 3. Call `api.delete_sink_cursors("new-sink")` (residual sink) and verify it
+///    disappears from the registry.
+/// 4. Call `api.delete_sink_cursors("gov-sink")` (in-config sink) and verify it
+///    still appears in `get_sinks_status` with `lagging_subjects == 0` and
+///    `blocked: None`.
+/// 5. Restart in normal mode.
+/// 6. Call `api.get_sinks(SinksQuery { in_config: Some(false), .. })` and
+///    verify that `new-sink` no longer appears.
+/// 7. If `new-sink` is added back, it will do full catch-up from SN 0.
+/// 8. If `gov-sink` is added back, it will also do full catch-up from SN 0
+///    because its cursors were deleted.
+///
+/// > **Production fixes derived from this test:**
+/// > - `populate_sink_registry` now marks sinks that are in the registry but no
+/// >   longer in config as residual (`from_config: false`), allowing `get_sinks`
+/// >   to return them with `in_config: false`).
+/// > - When a sink blocks, the manager now inserts the subject into `lagging`,
+/// >   so `get_sinks_status` reflects `lagging_subjects > 0` and subsequent
+/// >   unblocking retries delivery.
+///
+/// **Part E — blocked sink in `get_sinks` and `get_sinks_status`:**
+/// 1. Restart the node with `new-sink` configured to point to a `TestSink` in
+///    `Accept` mode.
+/// 2. Change the `TestSink` to `422 Unprocessable Entity` mode.
+/// 3. Emit a fact on `S1` and wait for the sink to block.
+/// 4. Verify that `api.get_sinks(SinksQuery { name:
+///    Some("new-sink".to_owned()), .. })` returns the sink with `blocked:
+///    Some(reason)`.
+/// 5. Verify that `api.get_sinks_status()` shows `new-sink` with `blocked:
+///    Some(reason)` and `lagging_subjects > 0`.
+///
+/// **Verifications:**
+/// - A new in-config sink performs automatic historical catch-up.
+/// - A sink removed from config persists in the registry as residual
+///   (`in_config: false`).
+/// - `delete_sink_cursors` returns `SinkNotFound` for a non-existent sink.
+/// - `delete_sink_cursors` clears cursors and `lagging` state and, if the sink
+///   is not in config, removes it from the registry.
+/// - `get_sinks` distinguishes between in-config and residual sinks and
+///   supports filters by `name`, `governance_id`, and combinations.
+/// - `get_sinks` respects ordering by `manager` and `name`.
+/// - `get_sinks` and `get_sinks_status` correctly reflect a blocked sink.
+/// - `get_sinks_status` only shows configured sinks.
 #[traced_test]
 #[tokio::test]
 async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
@@ -4713,6 +5330,19 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     assert!(schema_names.contains(&"new-sink"));
     assert!(!schema_names.contains(&"gov-sink"));
 
+    // Filter by target=governance -> only gov-sink.
+    let gov_sinks = node
+        .api
+        .get_sinks(SinksQuery {
+            target: Some("governance".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let gov_names: Vec<_> = gov_sinks.iter().map(|s| s.name.as_str()).collect();
+    assert!(gov_names.contains(&"gov-sink"));
+    assert!(!gov_names.contains(&"new-sink"));
+
     // Filter by schema_id=Example -> only new-sink.
     let example_query = node
         .api
@@ -4763,6 +5393,31 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         .unwrap();
     assert_eq!(schema_in_config.len(), 1);
     assert_eq!(schema_in_config[0].name, "new-sink");
+
+    // Combined filter with three criteria -> only new-sink.
+    let combined = node
+        .api
+        .get_sinks(SinksQuery {
+            target: Some("schema".to_owned()),
+            in_config: Some(true),
+            running: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(combined.len(), 1);
+    assert_eq!(combined[0].name, "new-sink");
+
+    // Filter that matches nothing -> empty result.
+    let empty = node
+        .api
+        .get_sinks(SinksQuery {
+            name: Some("no-such-sink".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(empty.is_empty(), "query with no matches should return empty list");
 
     let all_sinks = node.api.get_sinks(SinksQuery::default()).await.unwrap();
     let sorted_names: Vec<_> =
@@ -5010,11 +5665,53 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     assert!(new_status.lagging_subjects > 0);
 }
 
-/// Authentication for sinks: API key header, OAuth2 token refresh on 401, and
-/// persistent auth failures keeping the subject lagging without blocking the
-/// sink.
+/// Test 16: `sink_auth_token_refresh`.
 ///
-/// Covers Test 16 of `temporal/sink/plan_integration_tests.md`.
+/// **Cases covered:** API key authentication, OAuth2 token refresh on
+/// `401/403`, and recovery after auth errors.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Start a `TestSink` that, in addition to `/events`, exposes `POST
+///   /auth/token` to simulate the OAuth2 endpoint.
+/// - Configure a sink with `auth.auth_url`, `auth.username`, and read the
+///   password from `AVE_SINK_PASSWORD_AUTH_SINK`.
+///
+/// **Part A — API key:**
+/// 1. Configure a sink with `auth.api_key: "secret-key"`.
+/// 2. Emit a fact.
+/// 3. Verify that `TestSink` receives the header `Authorization: Api-Key
+///    secret-key` and the fact.
+///
+/// **Part B — OAuth2 + refresh on 401:**
+/// 1. Configure a sink with OAuth2.
+/// 2. The first request to `/events` returns `401 Unauthorized`.
+/// 3. The worker must call `/auth/token`, obtain a token, and retry delivery
+///    with `Authorization: Bearer <token>`.
+/// 4. The second request to `/events` returns `200 OK`.
+/// 5. Verify the fact is delivered correctly.
+///
+/// **Part C — persistent auth failure:**
+/// 1. Configure invalid credentials.
+/// 2. Emit a fact.
+/// 3. Verify the subject enters `lagging` (`AuthFailed` error) but the sink
+///    **does not** block.
+///
+/// **Verifications:**
+/// - API key is sent in the correct header.
+/// - OAuth2 refreshes the token on 401 and retries.
+/// - Auth errors do not block the sink; they remain in `lagging` for retry.
+///
+/// > **Implementation note:** the sink is named `auth-sink`, so the environment
+/// > variable loaded by the worker is `AVE_SINK_PASSWORD_AUTH_SINK` (format
+/// > `AVE_SINK_PASSWORD_{{SERVER_UPPER}}` with `-` replaced by `_`).
+/// > **Production fixes derived from this test:**
+/// > - `TestSink` now exposes `POST /auth/token` and records received requests.
+/// > - `TestSink` supports `UnauthorizedOnce` (401 on first delivery, then 200)
+/// >   and `UnauthorizedAlways` (persistent 401) modes to exercise OAuth2
+/// >   refresh and auth failures.
+/// > - `make_sink_entry_with_auth` allows configuring `SinkAuthConfig` (API key
+/// >   or OAuth2) in tests.
 #[traced_test]
 #[tokio::test]
 async fn sink_auth_token_refresh() {
@@ -5274,10 +5971,30 @@ where
     }
 }
 
-/// Covers Test 17 of `temporal/sink/plan_integration_tests.md`:
-/// - a `SinkWorker` is shut down by the manager after the configured idle timeout;
-/// - a new event forces the manager to create a fresh worker;
-/// - delivery continues correctly after the recreation.
+/// Test 17: `sink_worker_idle_shutdown_and_recreate`.
+///
+/// **Cases covered:** `SinkWorker` lifecycle (idle timeout, shutdown by the
+/// manager, and recreation on new events).
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with `example-sink` configured with
+///   `sink_worker_idle_timeout_ms: 200`, `sink_subject_worker_idle_timeout_ms:
+///   200`, and `request_timeout_ms: 500`.
+/// - Create subject `S1`.
+///
+/// **Sequence:**
+/// 1. Emit a fact and verify it reaches the sink.
+/// 2. Wait ≥300 ms for the worker to go idle and the manager to stop it
+///    (`WorkerIdle` + `Stop`).
+/// 3. Emit a second fact.
+/// 4. Verify the second fact reaches the sink correctly.
+///
+/// **Verifications:**
+/// - The sink receives both facts.
+/// - After the idle period the worker shuts down without errors.
+/// - The new event forces the creation of a fresh worker that delivers
+///   correctly.
 #[traced_test]
 #[tokio::test]
 async fn sink_worker_idle_shutdown_and_recreate() {
@@ -5462,12 +6179,30 @@ async fn wait_for_sink_not_lagging(api: &Api, sink_name: &str) {
     }
 }
 
-/// Test 18: EOL keeps cursor and stops delivery.
+/// Test 18: `sink_eol_keeps_cursor_and_stops_delivery`.
 ///
-/// Covers Test 18 of `temporal/sink/plan_integration_tests.md`:
-/// - EOL is delivered as a normal event.
-/// - After EOL, no further deliveries are attempted for the subject.
-/// - The subject does not remain in lagging state.
+/// **Cases covered:** `EOL` event is treated as a normal event (not as
+/// `SubjectNotFound`) and, after it, no further deliveries are attempted for
+/// that subject.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with `example-sink`.
+/// - Create subject `S1` and emit 2 facts.
+/// - Verify initial delivery.
+///
+/// **Sequence:**
+/// 1. Emit `EOL` for `S1`.
+/// 2. Verify the sink receives the `EOL` event with the correct SN.
+/// 3. Wait a few seconds and verify that no further deliveries are attempted
+///    for `S1` (no new events appear in the sink and `lagging` is not
+///    incremented for that subject).
+///
+/// **Verifications:**
+/// - `EOL` is delivered as one more event.
+/// - After `EOL` the cursor stays at the last SN and there are no retries or
+///   new deliveries.
+/// - The subject does not appear in `lagging` indefinitely.
 #[traced_test]
 #[tokio::test]
 async fn sink_eol_keeps_cursor_and_stops_delivery() {
@@ -5574,28 +6309,57 @@ async fn sink_eol_keeps_cursor_and_stops_delivery() {
     assert_sink_running(&node.api, "example-sink").await;
 }
 
-/// Test 20: unsuccessful transfer and governance confirm.
+/// Test 20: `sink_unsuccessful_transfer_and_governance_confirm`.
 ///
-/// Covers Test 20 of `temporal/sink/plan_integration_tests.md`:
-/// - a `Transfer` whose evaluation fails is delivered with `success: false` and
-///   a non-empty error;
-/// - a `Confirm` whose evaluation fails is delivered with `success: false`, no
-///   patch and a non-empty error;
-/// - all other fields (`owner`, `new_owner`, `name_old_owner`, `sn`,
-///   `gov_version`) remain coherent.
+/// **Objective:** complement Tests 19A/19B by covering the two `success: false`
+/// variants for non-fact events delivered by sinks:
+/// - `Transfer` whose evaluation fails and is delivered with `success: false`
+///   and non-empty `error`.
+/// - Governance `Confirm` (`GovConfirm`) whose evaluation fails and is
+///   delivered with `success: false`, non-empty `error`, and `patch: None`.
 ///
-/// The original plan proposed a tracker subject with a contract that rejects
-/// transfers and a governance fact left in failed approval. In practice a
-/// tracker cannot emit a `Confirm` event (only governance does), and a failed
-/// governance approval does not produce a ledger event at all. Therefore this
-/// test exercises both event types on the governance subject itself, which is
-/// the only subject that can generate both a failed `Transfer` and a failed
-/// `Confirm` with the current APIs:
-///   - a failed transfer to a public key that is not a governance member;
-///   - a successful transfer that makes NewOwner the owner;
-///   - a successful confirm that transfers ownership back to Owner;
-///   - a failed confirm from Owner that tries to use the reserved name
-///     "Owner" for the old owner.
+/// **Setup:**
+/// - Bootstrap node, governance with schema `Example`, and two members (`Owner`
+///   and `NewOwner`).
+/// - Both nodes have sinks configured on the governance itself.
+///
+/// **Sequence:**
+/// 1. Transfer governance to a public key that is not a member → the `Transfer`
+///    event (SN 2) reaches the sink with `success: false`, `owner` = Owner,
+///    `new_owner` = unknown key, and `gov_version` = 1.
+/// 2. Transfer governance from Owner to NewOwner → the `Transfer` event (SN 3)
+///    reaches the sink with `success: true`, `owner` = Owner, `new_owner` =
+///    NewOwner, and `gov_version` = 1.
+/// 3. Confirm from NewOwner renaming the old owner as `"OldOwner"` → the
+///    `Confirm` event (SN 4) reaches the sink with `success: true`,
+///    `name_old_owner` = `"OldOwner"`, `patch` present, and `gov_version` = 2.
+/// 4. Transfer governance from NewOwner to Owner → the `Transfer` event (SN 5)
+///    reaches the sink with `success: true`, `owner` = NewOwner, `new_owner` =
+///    Owner, and `gov_version` = 3.
+/// 5. Confirm from Owner using `"Owner"` as `name_old_owner` (reserved word) →
+///    the `Confirm` event (SN 6) reaches the sink with `success: false`,
+///    `name_old_owner` = `"Owner"`, non-empty `error`, `patch: None`, and
+///    `gov_version` = 4.
+///
+/// **Verifications:**
+/// - Both sinks receive exactly the 7 events with consecutive SNs from 0 to 6.
+/// - `Transfer { success: false, error: Some(...), owner, new_owner, sn,
+///   gov_version }` serializes and delivers correctly.
+/// - `Transfer { success: true, error: None, owner, new_owner, sn, gov_version
+///   }` serializes and delivers correctly for successful transfers.
+/// - `Confirm { success: true, error: None, patch: Some(...), name_old_owner,
+///   sn, gov_version }` serializes and delivers correctly.
+/// - `Confirm { success: false, error: Some(...), patch: None, name_old_owner,
+///   sn, gov_version }` serializes and delivers correctly.
+/// - The `owner`, `new_owner`, `name_old_owner`, `sn`, and `gov_version` fields
+///   are consistent in each event.
+///
+/// > **Note:** although the original plan proposed a tracker with a contract
+/// > that failed on transfer, a tracker cannot generate `Confirm` events (only
+/// > governance emits them) and a failed governance approval does not produce
+/// > any ledger event. Therefore this test uses the governance itself as the
+/// > subject, which is the only subject capable of generating both a failed
+/// > `Transfer` and a failed `Confirm` with the current APIs.
 #[traced_test]
 #[tokio::test]
 async fn sink_unsuccessful_transfer_and_governance_confirm() {
@@ -5884,18 +6648,48 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
 }
 
 
-/// Test 21: `get_sink_events` reconstructs formatted sink events directly from
-/// the ledger without requiring a configured sink.
+/// Test 21: `sink_get_events_reconstructs_events`.
 ///
-/// Covers Test 21 of `temporal/sink/plan_integration_tests.md`:
-/// - the endpoint returns `DataToSink` events (Create + FactFull) for a tracker;
-/// - failed facts have `success: false` and no patch;
-/// - successful facts have `success: true` and a non-empty patch;
-/// - pagination by `limit` works;
-/// - range by `to_sn` works;
-/// - invalid `limit: 0` and invalid `from_sn > to_sn` return descriptive errors;
-/// - querying an unknown subject returns a controlled error;
-/// - the same checks work for the governance subject.
+/// **Objective:** exercise the `get_sink_events` endpoint (`GET
+/// /sink-events/{subject_id}`) ensuring it reconstructs sink-formatted events
+/// directly from the ledger, without depending on a sink having received them.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Create tracker `S1` of schema `Example`.
+/// - Emit 3 facts on `S1` (one failed with `ModThree { data: 50 }` and two
+///   successful).
+///
+/// **Sequence:**
+/// 1. Before configuring any sink, call `api.get_sink_events(S1, { from_sn: 0,
+///    to_sn: None, limit: 100 })`.
+/// 2. Verify it returns the 4 events (Create + 3 FactFull) with the correct
+///    fields.
+/// 3. Test pagination by `limit`: call with `from_sn: 1, limit: 2` and verify
+///    it returns only SN 1 and 2.
+/// 4. Test range by `to_sn`: call with `from_sn: 1, to_sn: Some(2)` and verify
+///    it returns SN 1 and 2.
+/// 5. Call with `limit: 0` and verify it returns the error "Replay limit must
+///    be greater than zero".
+/// 6. Call with `from_sn: 5, to_sn: Some(3)` and verify it returns the error
+///    "Replay range requires from_sn <= to_sn".
+/// 7. Call with a non-existent `subject_id` and verify it returns a controlled
+///    error (`MissingResource` because the node cannot find the subject actor).
+/// 8. Repeat steps 1-4 for the governance itself (its `Create` + schema
+///    configuration `FactFull`).
+///
+/// **Verifications:**
+/// - `SinkEventsPage.events` contains `DataToSink` with the expected SNs and in
+///   order.
+/// - The failed fact has `success: false` and non-empty `error`.
+/// - Successful facts have `success: true` and non-empty `patch`.
+/// - Pagination by `limit` and `to_sn` works correctly.
+/// - Range and zero-limit errors are returned with descriptive messages.
+/// - An unknown `subject_id` produces a controlled error.
+/// - Works for both trackers and governances.
+///
+/// > **Implementation note:** this test can be added to `core/tests/sink.rs` or
+/// > to a new file `core/tests/sink_events.rs`.
 #[traced_test]
 #[tokio::test]
 async fn sink_get_events_reconstructs_events() {
@@ -6205,20 +6999,47 @@ async fn sink_get_events_reconstructs_events() {
 }
 
 
-/// Test 22: manual replay executed while an automatic catch-up is in flight.
+/// Test 22: `replay_during_active_catch_up`.
 ///
-/// Covers Test 22 of `temporal/sink/plan_integration_tests.md`:
-/// - events emitted while the sink is failing end up in `lagging`;
-/// - starting a manual replay while automatic catch-up is running must not lose
-///   events;
-/// - a new event emitted during the overlapping catch-up/replay is also
-///   delivered;
-/// - the final set of delivered SNs is `{0, 1, 2, 3}` in order.
+/// **Cases covered:** manual replay executed while an automatic catch-up is in
+/// flight; no events should be lost. Raw delivery may contain duplicates caused
+/// by contention, so the test verifies that, after deduplicating by
+/// `(subject_id, sn)`, the sequence is complete and ordered.
 ///
-/// Note: `TestSink` stores every raw HTTP delivery, so when automatic catch-up
-/// and a manual replay overlap they may both attempt to send the same event.
-/// The sink consumer is expected to be idempotent; this test verifies that no
-/// SN is lost and that the deduplicated sequence is complete and ordered.
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Restart with `example-sink` configured with
+///   `max_catch_up_concurrency: 1`, `request_timeout_ms: 2_000`, `max_retries:
+///   0`.
+/// - Create subject `S1`.
+///
+/// **Sequence:**
+/// 1. Change `TestSink` to `ServerError` mode (`500 Internal Server Error`).
+/// 2. Emit 2 facts on `S1` synchronously (`wait=true`). Both become `lagging`.
+/// 3. Change `TestSink` to `Timeout(500)` mode (responds successfully but takes
+///    500 ms per event).
+/// 4. Immediately call `api.replay_sink_events` for `example-sink` and `S1`
+///    from `from_sn: 0`.
+/// 5. While automatic catch-up and replay are in flight, emit a third fact on
+///    `S1` **asynchronously** (`wait=false`).
+/// 6. Wait for the sink to finish receiving events.
+///
+/// **Verifications:**
+/// - The sink receives at least the 4 distinct events: `Create` (SN 0) + 3
+///   `FactFull` (SN 1, 2, 3).
+/// - The SNs within `S1` are consecutive and, after deduplicating by
+///   `(subject_id, sn)`, none are missing.
+/// - The deduplicated delivery order is `[0, 1, 2, 3]`.
+/// - After a stabilization period no new SNs appear.
+///
+/// > **Implementation note:** `TestSink` stores each raw HTTP delivery, so when
+/// > automatic catch-up and manual replay overlap duplicate deliveries may
+/// > occur. The test uses `wait_for_distinct_sn_count` to wait until it has the
+/// > 4 distinct SNs for the subject, deduplicates by `(subject_id, sn)`, and
+/// > verifies that no event is lost and that the final sequence is complete and
+/// > ordered. Completely avoiding duplicates in this contention scenario would
+/// > require the `SinkManager` to coordinate cursor rewind with in-flight
+/// > catch-ups.
 #[traced_test]
 #[tokio::test]
 async fn replay_during_active_catch_up() {

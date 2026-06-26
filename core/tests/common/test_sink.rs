@@ -2,11 +2,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use ave_common::IncomingSinkEvent;
 use axum::{
-    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
+    Json, Router,
 };
 use serde::Deserialize;
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -21,8 +21,6 @@ pub enum ResponseMode {
     ServerError,
     /// Return HTTP 422 without storing the event (non-transient failure).
     ClientError,
-    /// Return HTTP 200 with a non-JSON body without storing the event.
-    Malformed,
     /// Wait `ms` milliseconds before returning HTTP 200, simulating a slow or
     /// unresponsive sink. When `ms` is larger than the sink's configured
     /// `request_timeout_ms`, the worker will see a timeout.
@@ -186,8 +184,8 @@ impl TestSink {
     /// Wait until `count` distinct `(subject_id, sn)` pairs have been received.
     ///
     /// Unlike `wait_for_count`, this tolerates duplicate HTTP deliveries of the
-    /// same event and only returns once at least `count` unique sequence numbers
-    /// are present for `subject_id`.
+    /// same event and only returns once at least `count` unique sequence
+    /// numbers are present for `subject_id`.
     pub async fn wait_for_distinct_sn_count(
         &self,
         subject_id: &str,
@@ -244,13 +242,6 @@ impl TestSink {
         self.state.lock().await.events.clear();
     }
 
-    /// Remove the last `n` events received so far.
-    pub async fn remove_last(&self, n: usize) {
-        let mut state = self.state.lock().await;
-        let len = state.events.len();
-        state.events.truncate(len.saturating_sub(n));
-    }
-
     /// Remove events for `subject_id` with SN >= `from_sn`.
     pub async fn remove_events_for_subject_from_sn(
         &self,
@@ -303,10 +294,6 @@ impl TestSink {
                 drop(guard);
                 (StatusCode::UNPROCESSABLE_ENTITY, "client error")
                     .into_response()
-            }
-            ResponseMode::Malformed => {
-                drop(guard);
-                (StatusCode::OK, "this is not json").into_response()
             }
             ResponseMode::Timeout(ms) => {
                 // Store the event before sleeping so the slow response still
@@ -367,7 +354,8 @@ impl TestSink {
             }
             AuthResponseMode::TokenFailure => {
                 drop(guard);
-                (StatusCode::UNAUTHORIZED, "invalid credentials").into_response()
+                (StatusCode::UNAUTHORIZED, "invalid credentials")
+                    .into_response()
             }
         }
     }

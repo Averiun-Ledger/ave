@@ -1,10 +1,9 @@
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper,
     bridge::request::{AbortsQuery, ApprovalStateRes, EventsQuery},
     identity::{
+        keys::{Ed25519Signer, KeyPair},
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         Signature, Signed,
-        keys::{Ed25519Signer, KeyPair},
     },
     request::{
         ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
@@ -15,15 +14,16 @@ use ave_common::{
         RequestState, SubjectDB, TrackerEventVisibilityRangeDB,
         TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
     },
+    Namespace, SchemaType, ValueWrapper,
 };
 use ave_core::{
-    Api,
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
         AveInternalDBFeatureConfig, Config, GovernanceSyncConfig,
         RebootSyncConfig, SinkConfigEntry, SyncConfig, TrackerSyncConfig,
         UpdateSyncConfig,
     },
+    Api,
 };
 use ave_network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;

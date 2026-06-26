@@ -1,15 +1,15 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
-    IncomingSinkEvent, SinkTypes,
     sink::{DataToSink, DataToSinkEvent, SinkAuthConfig},
+    IncomingSinkEvent, SinkTypes,
 };
 use ave_core::{
-    Api,
     config::{SinkConfigEntry, SinkServer, SinkTarget},
+    Api,
 };
 use ave_network::NodeType;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::common::CreateNodeConfig;
 
@@ -510,7 +510,11 @@ pub fn governance_with_viewpoints_fact(witness_key: &str) -> serde_json::Value {
 }
 
 pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
-    vec![make_governance_sink_entry("gov-sink", url, BTreeSet::from([SinkTypes::All]))]
+    vec![make_governance_sink_entry(
+        "gov-sink",
+        url,
+        BTreeSet::from([SinkTypes::All]),
+    )]
 }
 
 pub fn make_governance_sink_entry(
@@ -754,7 +758,8 @@ pub fn sample_sinks() -> Vec<SinkConfigEntry> {
     ]
 }
 
-/// Returns the first event in `events` matching `subject_id` and `sn`, or panics.
+/// Returns the first event in `events` matching `subject_id` and `sn`, or
+/// panics.
 fn find_event<'a>(
     events: &'a [IncomingSinkEvent],
     subject_id: &str,
@@ -932,67 +937,6 @@ pub fn assert_sink_contains_eol(
 }
 
 /// Asserts that the event at `(subject_id, sn)` is a `Transfer` with the
-/// expected success flag and a non-empty error when it failed.
-pub fn assert_sink_contains_transfer_with_success(
-    events: &[IncomingSinkEvent],
-    subject_id: &str,
-    sn: u64,
-    expected_success: bool,
-) {
-    let event = find_event(events, subject_id, sn);
-    assert_event_is_transfer(event, subject_id, sn);
-    match event {
-        IncomingSinkEvent::Full(data) => match &data.payload {
-            DataToSinkEvent::Transfer { success, error, .. } => {
-                assert_eq!(*success, expected_success);
-                if expected_success {
-                    assert!(error.is_none(), "successful transfer should have no error");
-                } else {
-                    assert!(
-                        error.is_some() && !error.as_ref().unwrap().is_empty(),
-                        "failed transfer should have a non-empty error"
-                    );
-                }
-            }
-            other => panic!("expected Transfer, got {:?}", other),
-        },
-        _ => panic!("expected full event"),
-    }
-}
-
-/// Asserts that the event at `(subject_id, sn)` is a `Confirm` with the
-/// expected success flag. Failed confirms must have a non-empty error and no
-/// patch; successful confirms must have no error.
-pub fn assert_sink_contains_confirm_with_success(
-    events: &[IncomingSinkEvent],
-    subject_id: &str,
-    sn: u64,
-    expected_success: bool,
-) {
-    let event = find_event(events, subject_id, sn);
-    assert_event_is_confirm(event, subject_id, sn);
-    match event {
-        IncomingSinkEvent::Full(data) => match &data.payload {
-            DataToSinkEvent::Confirm { success, error, patch, .. } => {
-                assert_eq!(*success, expected_success);
-                if expected_success {
-                    assert!(error.is_none(), "successful confirm should have no error");
-                    assert!(patch.is_some(), "successful confirm should have a patch");
-                } else {
-                    assert!(
-                        error.is_some() && !error.as_ref().unwrap().is_empty(),
-                        "failed confirm should have a non-empty error"
-                    );
-                    assert!(patch.is_none(), "failed confirm should have no patch");
-                }
-            }
-            other => panic!("expected Confirm, got {:?}", other),
-        },
-        _ => panic!("expected full event"),
-    }
-}
-
-/// Asserts that the event at `(subject_id, sn)` is a `Transfer` with the
 /// expected success flag, owner, new owner and governance version. Failed
 /// transfers must have a non-empty error.
 pub fn assert_sink_contains_transfer_with_owners(
@@ -1017,7 +961,11 @@ pub fn assert_sink_contains_transfer_with_owners(
                 ..
             } => {
                 assert_eq!(*success, expected_success);
-                assert_eq!(owner, expected_owner, "unexpected owner at SN {}", sn);
+                assert_eq!(
+                    owner, expected_owner,
+                    "unexpected owner at SN {}",
+                    sn
+                );
                 assert_eq!(
                     new_owner, expected_new_owner,
                     "unexpected new_owner at SN {}",
@@ -1029,7 +977,10 @@ pub fn assert_sink_contains_transfer_with_owners(
                     sn
                 );
                 if expected_success {
-                    assert!(error.is_none(), "successful transfer should have no error");
+                    assert!(
+                        error.is_none(),
+                        "successful transfer should have no error"
+                    );
                 } else {
                     assert!(
                         error.is_some() && !error.as_ref().unwrap().is_empty(),
@@ -1080,14 +1031,23 @@ pub fn assert_sink_contains_confirm_with_name(
                     sn
                 );
                 if expected_success {
-                    assert!(error.is_none(), "successful confirm should have no error");
-                    assert!(patch.is_some(), "successful confirm should have a patch");
+                    assert!(
+                        error.is_none(),
+                        "successful confirm should have no error"
+                    );
+                    assert!(
+                        patch.is_some(),
+                        "successful confirm should have a patch"
+                    );
                 } else {
                     assert!(
                         error.is_some() && !error.as_ref().unwrap().is_empty(),
                         "failed confirm should have a non-empty error"
                     );
-                    assert!(patch.is_none(), "failed confirm should have no patch");
+                    assert!(
+                        patch.is_none(),
+                        "failed confirm should have no patch"
+                    );
                 }
             }
             other => panic!("expected Confirm, got {:?}", other),
@@ -1215,8 +1175,13 @@ pub fn assert_data_to_sink_is_fact_full(
                 assert_eq!(*payload, expected);
             }
             if expected_success {
-                assert!(error.is_none(), "successful fact should have no error");
-                let patch = patch.as_ref().expect("successful fact should have a patch");
+                assert!(
+                    error.is_none(),
+                    "successful fact should have no error"
+                );
+                let patch = patch
+                    .as_ref()
+                    .expect("successful fact should have a patch");
                 assert!(
                     !patch.is_null()
                         && !matches!(patch, Value::Array(a) if a.is_empty())
