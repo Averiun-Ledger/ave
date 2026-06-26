@@ -183,6 +183,43 @@ impl TestSink {
         }
     }
 
+    /// Wait until `count` distinct `(subject_id, sn)` pairs have been received.
+    ///
+    /// Unlike `wait_for_count`, this tolerates duplicate HTTP deliveries of the
+    /// same event and only returns once at least `count` unique sequence numbers
+    /// are present for `subject_id`.
+    pub async fn wait_for_distinct_sn_count(
+        &self,
+        subject_id: &str,
+        count: usize,
+        timeout: bool,
+    ) {
+        use std::collections::HashSet;
+        let mut attempts = 0;
+        loop {
+            let state = self.state.lock().await;
+            let distinct: HashSet<u64> = state
+                .events
+                .iter()
+                .filter(|e| e.subject_id() == subject_id)
+                .map(|e| e.sn())
+                .collect();
+            let current = distinct.len();
+            drop(state);
+            if current >= count {
+                return;
+            }
+            if timeout && attempts > 100 {
+                panic!(
+                    "test sink did not receive {} distinct SNs for {}; received {}",
+                    count, subject_id, current
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            attempts += 1;
+        }
+    }
+
     /// Return a snapshot of the events received so far.
     pub async fn snapshot(&self) -> Vec<IncomingSinkEvent> {
         self.state.lock().await.events.clone()

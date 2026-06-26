@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
     IncomingSinkEvent, SinkTypes,
-    sink::{DataToSinkEvent, SinkAuthConfig},
+    sink::{DataToSink, DataToSinkEvent, SinkAuthConfig},
 };
 use ave_core::{
     Api,
@@ -510,14 +510,22 @@ pub fn governance_with_viewpoints_fact(witness_key: &str) -> serde_json::Value {
 }
 
 pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
-    vec![SinkConfigEntry {
+    vec![make_governance_sink_entry("gov-sink", url, BTreeSet::from([SinkTypes::All]))]
+}
+
+pub fn make_governance_sink_entry(
+    server_name: &str,
+    url: String,
+    events: BTreeSet<SinkTypes>,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
         target: SinkTarget::Schema {
             schema_id: "governance".to_owned(),
             governance_id: None,
         },
         servers: vec![SinkServer {
-            server: "gov-sink".to_owned(),
-            events: BTreeSet::from([SinkTypes::All]),
+            server: server_name.to_owned(),
+            events,
             url,
             max_retries: 0,
             healthcheck_intervals_secs: vec![1],
@@ -526,7 +534,7 @@ pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
             connect_timeout_ms: 1000,
             ..Default::default()
         }],
-    }]
+    }
 }
 
 pub fn restart_config(
@@ -923,6 +931,187 @@ pub fn assert_sink_contains_eol(
     assert_event_is_eol(event, subject_id, sn);
 }
 
+/// Asserts that the event at `(subject_id, sn)` is a `Transfer` with the
+/// expected success flag and a non-empty error when it failed.
+pub fn assert_sink_contains_transfer_with_success(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+    expected_success: bool,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_transfer(event, subject_id, sn);
+    match event {
+        IncomingSinkEvent::Full(data) => match &data.payload {
+            DataToSinkEvent::Transfer { success, error, .. } => {
+                assert_eq!(*success, expected_success);
+                if expected_success {
+                    assert!(error.is_none(), "successful transfer should have no error");
+                } else {
+                    assert!(
+                        error.is_some() && !error.as_ref().unwrap().is_empty(),
+                        "failed transfer should have a non-empty error"
+                    );
+                }
+            }
+            other => panic!("expected Transfer, got {:?}", other),
+        },
+        _ => panic!("expected full event"),
+    }
+}
+
+/// Asserts that the event at `(subject_id, sn)` is a `Confirm` with the
+/// expected success flag. Failed confirms must have a non-empty error and no
+/// patch; successful confirms must have no error.
+pub fn assert_sink_contains_confirm_with_success(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+    expected_success: bool,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_confirm(event, subject_id, sn);
+    match event {
+        IncomingSinkEvent::Full(data) => match &data.payload {
+            DataToSinkEvent::Confirm { success, error, patch, .. } => {
+                assert_eq!(*success, expected_success);
+                if expected_success {
+                    assert!(error.is_none(), "successful confirm should have no error");
+                    assert!(patch.is_some(), "successful confirm should have a patch");
+                } else {
+                    assert!(
+                        error.is_some() && !error.as_ref().unwrap().is_empty(),
+                        "failed confirm should have a non-empty error"
+                    );
+                    assert!(patch.is_none(), "failed confirm should have no patch");
+                }
+            }
+            other => panic!("expected Confirm, got {:?}", other),
+        },
+        _ => panic!("expected full event"),
+    }
+}
+
+/// Asserts that the event at `(subject_id, sn)` is a `Transfer` with the
+/// expected success flag, owner, new owner and governance version. Failed
+/// transfers must have a non-empty error.
+pub fn assert_sink_contains_transfer_with_owners(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+    expected_success: bool,
+    expected_owner: &str,
+    expected_new_owner: &str,
+    expected_gov_version: u64,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_transfer(event, subject_id, sn);
+    match event {
+        IncomingSinkEvent::Full(data) => match &data.payload {
+            DataToSinkEvent::Transfer {
+                owner,
+                new_owner,
+                success,
+                error,
+                gov_version,
+                ..
+            } => {
+                assert_eq!(*success, expected_success);
+                assert_eq!(owner, expected_owner, "unexpected owner at SN {}", sn);
+                assert_eq!(
+                    new_owner, expected_new_owner,
+                    "unexpected new_owner at SN {}",
+                    sn
+                );
+                assert_eq!(
+                    *gov_version, expected_gov_version,
+                    "unexpected gov_version at SN {}",
+                    sn
+                );
+                if expected_success {
+                    assert!(error.is_none(), "successful transfer should have no error");
+                } else {
+                    assert!(
+                        error.is_some() && !error.as_ref().unwrap().is_empty(),
+                        "failed transfer should have a non-empty error"
+                    );
+                }
+            }
+            other => panic!("expected Transfer, got {:?}", other),
+        },
+        _ => panic!("expected full event"),
+    }
+}
+
+/// Asserts that the event at `(subject_id, sn)` is a `Confirm` with the
+/// expected success flag, old-owner name and governance version. Successful
+/// confirms must have a patch and no error; failed confirms must have a
+/// non-empty error and no patch.
+pub fn assert_sink_contains_confirm_with_name(
+    events: &[IncomingSinkEvent],
+    subject_id: &str,
+    sn: u64,
+    expected_success: bool,
+    expected_name_old_owner: Option<&str>,
+    expected_gov_version: u64,
+) {
+    let event = find_event(events, subject_id, sn);
+    assert_event_is_confirm(event, subject_id, sn);
+    match event {
+        IncomingSinkEvent::Full(data) => match &data.payload {
+            DataToSinkEvent::Confirm {
+                success,
+                error,
+                patch,
+                gov_version,
+                name_old_owner,
+                ..
+            } => {
+                assert_eq!(*success, expected_success);
+                assert_eq!(
+                    name_old_owner.as_deref(),
+                    expected_name_old_owner,
+                    "unexpected name_old_owner at SN {}",
+                    sn
+                );
+                assert_eq!(
+                    *gov_version, expected_gov_version,
+                    "unexpected gov_version at SN {}",
+                    sn
+                );
+                if expected_success {
+                    assert!(error.is_none(), "successful confirm should have no error");
+                    assert!(patch.is_some(), "successful confirm should have a patch");
+                } else {
+                    assert!(
+                        error.is_some() && !error.as_ref().unwrap().is_empty(),
+                        "failed confirm should have a non-empty error"
+                    );
+                    assert!(patch.is_none(), "failed confirm should have no patch");
+                }
+            }
+            other => panic!("expected Confirm, got {:?}", other),
+        },
+        _ => panic!("expected full event"),
+    }
+}
+
+/// Returns a vector with only the first occurrence of each `(subject_id, sn)`
+/// pair, preserving input order.
+pub fn deduplicate_events_by_sn(
+    events: &[IncomingSinkEvent],
+) -> Vec<IncomingSinkEvent> {
+    let mut seen = std::collections::HashSet::new();
+    events
+        .iter()
+        .filter(|e| {
+            let key = (e.subject_id().to_owned(), e.sn());
+            seen.insert(key)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Asserts that `events` contains no duplicate `(subject_id, sn)` pairs.
 pub fn assert_no_duplicate_events(events: &[IncomingSinkEvent]) {
     use std::collections::HashSet;
@@ -969,4 +1158,98 @@ pub fn assert_no_fact_full_events(events: &[IncomingSinkEvent]) {
         )),
         "create-only sink must not contain FactFull events, only Create and LightEvent"
     );
+}
+
+fn data_to_sink_subject_sn(data: &DataToSink) -> (String, u64) {
+    match &data.payload {
+        DataToSinkEvent::Create { subject_id, sn, .. }
+        | DataToSinkEvent::FactFull { subject_id, sn, .. }
+        | DataToSinkEvent::FactOpaque { subject_id, sn, .. }
+        | DataToSinkEvent::Transfer { subject_id, sn, .. }
+        | DataToSinkEvent::Confirm { subject_id, sn, .. }
+        | DataToSinkEvent::Reject { subject_id, sn, .. }
+        | DataToSinkEvent::Eol { subject_id, sn, .. } => {
+            (subject_id.clone(), *sn)
+        }
+    }
+}
+
+/// Asserts that `data` is a `Create` event for `(subject_id, sn)`.
+pub fn assert_data_to_sink_is_create(
+    data: &DataToSink,
+    subject_id: &str,
+    sn: u64,
+) {
+    let (actual_subject_id, actual_sn) = data_to_sink_subject_sn(data);
+    assert_eq!(actual_subject_id, subject_id);
+    assert_eq!(actual_sn, sn);
+    assert!(
+        matches!(data.payload, DataToSinkEvent::Create { .. }),
+        "expected Create event, got {:?}",
+        data.payload
+    );
+}
+
+/// Asserts that `data` is a `FactFull` event for `(subject_id, sn)` with the
+/// expected success flag and payload.
+pub fn assert_data_to_sink_is_fact_full(
+    data: &DataToSink,
+    subject_id: &str,
+    sn: u64,
+    expected_success: bool,
+    expected_payload: Option<Value>,
+) {
+    let (actual_subject_id, actual_sn) = data_to_sink_subject_sn(data);
+    assert_eq!(actual_subject_id, subject_id);
+    assert_eq!(actual_sn, sn);
+    match &data.payload {
+        DataToSinkEvent::FactFull {
+            success,
+            payload,
+            patch,
+            error,
+            ..
+        } => {
+            assert_eq!(*success, expected_success);
+            if let Some(expected) = expected_payload {
+                assert_eq!(*payload, expected);
+            }
+            if expected_success {
+                assert!(error.is_none(), "successful fact should have no error");
+                let patch = patch.as_ref().expect("successful fact should have a patch");
+                assert!(
+                    !patch.is_null()
+                        && !matches!(patch, Value::Array(a) if a.is_empty())
+                        && !matches!(patch, Value::Object(o) if o.is_empty()),
+                    "successful fact should have a non-empty patch, got {:?}",
+                    patch
+                );
+            } else {
+                assert!(
+                    error.is_some() && !error.as_ref().unwrap().is_empty(),
+                    "failed fact should have a non-empty error"
+                );
+                assert!(patch.is_none(), "failed fact should have no patch");
+            }
+        }
+        other => panic!("expected FactFull, got {:?}", other),
+    }
+}
+
+/// Asserts the metadata fields of a `SinkEventsPage`.
+pub fn assert_sink_events_page(
+    page: &ave_common::response::SinkEventsPage,
+    expected_from_sn: u64,
+    expected_to_sn: Option<u64>,
+    expected_limit: u64,
+    expected_has_more: bool,
+    expected_next_sn: Option<u64>,
+    expected_events_len: usize,
+) {
+    assert_eq!(page.from_sn, expected_from_sn);
+    assert_eq!(page.to_sn, expected_to_sn);
+    assert_eq!(page.limit, expected_limit);
+    assert_eq!(page.has_more, expected_has_more);
+    assert_eq!(page.next_sn, expected_next_sn);
+    assert_eq!(page.events.len(), expected_events_len);
 }

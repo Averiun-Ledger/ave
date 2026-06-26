@@ -4,14 +4,17 @@ use std::{collections::BTreeSet, sync::atomic::Ordering};
 
 use ave_common::{
     SinkTarget, SinkTypes,
-    bridge::request::{SinkReplayItem, SinkReplayRequest, SinksQuery},
+    bridge::request::{
+        ApprovalStateRes, SinkEventsQuery, SinkReplayItem, SinkReplayRequest,
+        SinksQuery,
+    },
     identity::{
-        DigestIdentifier, HashAlgorithm, PublicKey,
+        DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
     sink::{DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
 };
-use ave_core::{Api, config::SinkConfigEntry, error::Error};
+use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
 use futures::future::join_all;
 use serde_json::json;
@@ -22,22 +25,26 @@ use tracing_test::traced_test;
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
-    create_subject, emit_confirm, emit_eol, emit_fact, emit_fact_viewpoints,
-    emit_reject, emit_transfer, get_subject, node_running,
+    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
+    emit_fact_viewpoints, emit_reject, emit_transfer, get_subject, node_running,
     sink_setup::{
+        assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
         assert_event_is_fact_full, assert_event_is_reject,
         assert_event_is_transfer, assert_no_duplicate_events,
         assert_no_fact_full_events, assert_sink_blocked,
-        assert_sink_contains_confirm, assert_sink_contains_create,
-        assert_sink_contains_eol, assert_sink_contains_fact_full,
-        assert_sink_contains_fact_opaque, assert_sink_contains_light_fact,
-        assert_sink_contains_reject, assert_sink_contains_transfer,
-        assert_sink_lagging, assert_sink_not_lagging, assert_sink_running,
-        assert_sink_unblocked, assert_subject_sn_sequence,
-        count_events_for_subject, example_schema_governance_fact,
-        example_sink_config, flapping_sink_config, governance_sink_config,
+        assert_sink_contains_confirm, assert_sink_contains_confirm_with_name,
+        assert_sink_contains_create, assert_sink_contains_eol,
+        assert_sink_contains_fact_full, assert_sink_contains_fact_opaque,
+        assert_sink_contains_light_fact, assert_sink_contains_reject,
+        assert_sink_contains_transfer, assert_sink_contains_transfer_with_owners,
+        assert_sink_events_page, assert_sink_lagging, assert_sink_not_lagging,
+        assert_sink_running, assert_sink_unblocked, assert_subject_sn_sequence,
+        count_events_for_subject, deduplicate_events_by_sn,
+        example_schema_governance_fact, example_sink_config,
+        flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
+        make_governance_sink_entry,
         make_sink_entry, make_sink_entry_with_auth,
         make_sink_entry_with_concurrency, restart_config,
         restart_config_safe_mode, restart_config_with_peers, sample_sinks,
@@ -5565,4 +5572,824 @@ async fn sink_eol_keeps_cursor_and_stops_delivery() {
 
     assert_sink_count_stable(&sink, 4).await;
     assert_sink_running(&node.api, "example-sink").await;
+}
+
+/// Test 20: unsuccessful transfer and governance confirm.
+///
+/// Covers Test 20 of `temporal/sink/plan_integration_tests.md`:
+/// - a `Transfer` whose evaluation fails is delivered with `success: false` and
+///   a non-empty error;
+/// - a `Confirm` whose evaluation fails is delivered with `success: false`, no
+///   patch and a non-empty error;
+/// - all other fields (`owner`, `new_owner`, `name_old_owner`, `sn`,
+///   `gov_version`) remain coherent.
+///
+/// The original plan proposed a tracker subject with a contract that rejects
+/// transfers and a governance fact left in failed approval. In practice a
+/// tracker cannot emit a `Confirm` event (only governance does), and a failed
+/// governance approval does not produce a ledger event at all. Therefore this
+/// test exercises both event types on the governance subject itself, which is
+/// the only subject that can generate both a failed `Transfer` and a failed
+/// `Confirm` with the current APIs:
+///   - a failed transfer to a public key that is not a governance member;
+///   - a successful transfer that makes NewOwner the owner;
+///   - a successful confirm that transfers ownership back to Owner;
+///   - a failed confirm from Owner that tries to use the reserved name
+///     "Owner" for the old owner.
+#[traced_test]
+#[tokio::test]
+async fn sink_unsuccessful_transfer_and_governance_confirm() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let mut owner = nodes.remove(0);
+    let mut new_owner = nodes.remove(0);
+
+    let mut owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+    let mut new_owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&new_owner.api]).await;
+
+    // Add NewOwner as a governance member/witness and schema creator so it can
+    // receive and confirm governance transfers.
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let governance_id_str = governance_id.to_string();
+    let owner_pk_str = owner.api.public_key();
+
+    let owner_sink = TestSink::start().await;
+    let new_owner_sink = TestSink::start().await;
+
+    // Restart owner with a sink attached to the governance subject.
+    let owner_keys = owner.keys.clone();
+    let owner_local_db = owner_dirs[0].path().to_path_buf();
+    let owner_ext_db = owner_dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (owner, mut owner_dirs2) = create_node(restart_config(
+        owner_keys,
+        owner_local_db,
+        owner_ext_db,
+        format!("/memory/{}", owner_port),
+        vec![make_governance_sink_entry(
+            "owner-sink",
+            owner_sink.url(),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    owner_dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    // Restart new_owner with a sink, peered to the new owner address.
+    let owner_peer_id = owner.api.peer_id().to_string();
+    let owner_address = owner.listen_address.clone();
+
+    let new_owner_keys = new_owner.keys.clone();
+    let new_owner_local_db = new_owner_dirs[0].path().to_path_buf();
+    let new_owner_ext_db = new_owner_dirs[1].path().to_path_buf();
+    new_owner.token.cancel();
+    join_all(new_owner.handler.iter_mut()).await;
+
+    let new_owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_owner, mut new_owner_dirs2) =
+        create_node(restart_config_with_peers(
+            new_owner_keys,
+            new_owner_local_db,
+            new_owner_ext_db,
+            format!("/memory/{}", new_owner_port),
+            vec![RoutingNode {
+                peer_id: owner_peer_id,
+                address: vec![owner_address],
+            }],
+            vec![make_governance_sink_entry(
+                "new-owner-sink",
+                new_owner_sink.url(),
+                BTreeSet::from([SinkTypes::All]),
+            )],
+        ))
+        .await;
+    new_owner_dirs.append(&mut new_owner_dirs2);
+    node_running(&new_owner.api).await.unwrap();
+
+    assert_sink_running(&owner.api, "owner-sink").await;
+    assert_sink_unblocked(&owner.api, "owner-sink").await;
+    assert_sink_running(&new_owner.api, "new-owner-sink").await;
+    assert_sink_unblocked(&new_owner.api, "new-owner-sink").await;
+
+    // Ensure new_owner has the governance subject before ownership changes.
+    get_subject(&new_owner.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 0: Create.
+    // SN 1: governance fact that adds NewOwner.
+    // SN 2: failed transfer to a public key that is not a governance member.
+    let unknown_key = KeyPair::generate(KeyPairAlgorithm::Ed25519)
+        .unwrap()
+        .public_key();
+    emit_transfer(&owner.api, governance_id.clone(), unknown_key.clone(), true)
+        .await
+        .unwrap();
+
+    // SN 3: successful transfer Owner -> NewOwner.
+    let new_owner_pk = PublicKey::from_str(&new_owner.api.public_key()).unwrap();
+    emit_transfer(&owner.api, governance_id.clone(), new_owner_pk.clone(), true)
+        .await
+        .unwrap();
+
+    get_subject(&new_owner.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // SN 4: successful GovConfirm from NewOwner, renaming the old owner to
+    // "OldOwner" so it remains a governance witness and can be synchronized.
+    emit_confirm(
+        &new_owner.api,
+        governance_id.clone(),
+        Some("OldOwner".to_owned()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Synchronize Owner so its sink can receive the confirmed event.
+    owner
+        .api
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(new_owner_pk.clone()),
+        )
+        .await
+        .unwrap();
+    owner
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&owner.api, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // SN 5: successful transfer NewOwner -> Owner.
+    let owner_pk = PublicKey::from_str(&owner_pk_str).unwrap();
+    emit_transfer(&new_owner.api, governance_id.clone(), owner_pk, true)
+        .await
+        .unwrap();
+
+    get_subject(&owner.api, governance_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // SN 6: failed GovConfirm from Owner using the reserved name "Owner" as
+    // name_old_owner. The evaluation must reject the reserved word.
+    emit_confirm(
+        &owner.api,
+        governance_id.clone(),
+        Some("Owner".to_owned()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Wait for all events on both sinks.
+    owner_sink.wait_for_count(7, true).await;
+    new_owner_sink.wait_for_count(7, true).await;
+
+    let owner_events = owner_sink.snapshot().await;
+    let new_owner_events = new_owner_sink.snapshot().await;
+
+    assert_eq!(owner_events.len(), 7);
+    assert_eq!(new_owner_events.len(), 7);
+
+    assert_subject_sn_sequence(&owner_events, &governance_id_str, 0, 6);
+    assert_subject_sn_sequence(&new_owner_events, &governance_id_str, 0, 6);
+
+    let owner_pk_str = owner.api.public_key();
+    let new_owner_pk_str = new_owner.api.public_key();
+    let unknown_key_str = unknown_key.to_string();
+
+    assert_sink_contains_create(&owner_events, &governance_id_str, 0);
+    assert_sink_contains_transfer_with_owners(
+        &owner_events,
+        &governance_id_str,
+        2,
+        false,
+        &owner_pk_str,
+        &unknown_key_str,
+        1,
+    );
+    assert_sink_contains_transfer_with_owners(
+        &owner_events,
+        &governance_id_str,
+        3,
+        true,
+        &owner_pk_str,
+        &new_owner_pk_str,
+        1,
+    );
+    assert_sink_contains_confirm_with_name(
+        &owner_events,
+        &governance_id_str,
+        4,
+        true,
+        Some("OldOwner"),
+        2,
+    );
+    assert_sink_contains_transfer_with_owners(
+        &owner_events,
+        &governance_id_str,
+        5,
+        true,
+        &new_owner_pk_str,
+        &owner_pk_str,
+        3,
+    );
+    assert_sink_contains_confirm_with_name(
+        &owner_events,
+        &governance_id_str,
+        6,
+        false,
+        Some("Owner"),
+        4,
+    );
+
+    assert_sink_contains_create(&new_owner_events, &governance_id_str, 0);
+    assert_sink_contains_transfer_with_owners(
+        &new_owner_events,
+        &governance_id_str,
+        2,
+        false,
+        &owner_pk_str,
+        &unknown_key_str,
+        1,
+    );
+    assert_sink_contains_transfer_with_owners(
+        &new_owner_events,
+        &governance_id_str,
+        3,
+        true,
+        &owner_pk_str,
+        &new_owner_pk_str,
+        1,
+    );
+    assert_sink_contains_confirm_with_name(
+        &new_owner_events,
+        &governance_id_str,
+        4,
+        true,
+        Some("OldOwner"),
+        2,
+    );
+    assert_sink_contains_transfer_with_owners(
+        &new_owner_events,
+        &governance_id_str,
+        5,
+        true,
+        &new_owner_pk_str,
+        &owner_pk_str,
+        3,
+    );
+    assert_sink_contains_confirm_with_name(
+        &new_owner_events,
+        &governance_id_str,
+        6,
+        false,
+        Some("Owner"),
+        4,
+    );
+
+    // Ensure no further events or retries are attempted.
+    assert_sink_count_stable(&owner_sink, 7).await;
+    assert_sink_count_stable(&new_owner_sink, 7).await;
+    assert_sink_not_lagging(&owner.api, "owner-sink").await;
+    assert_sink_not_lagging(&new_owner.api, "new-owner-sink").await;
+}
+
+
+/// Test 21: `get_sink_events` reconstructs formatted sink events directly from
+/// the ledger without requiring a configured sink.
+///
+/// Covers Test 21 of `temporal/sink/plan_integration_tests.md`:
+/// - the endpoint returns `DataToSink` events (Create + FactFull) for a tracker;
+/// - failed facts have `success: false` and no patch;
+/// - successful facts have `success: true` and a non-empty patch;
+/// - pagination by `limit` works;
+/// - range by `to_sn` works;
+/// - invalid `limit: 0` and invalid `from_sn > to_sn` return descriptive errors;
+/// - querying an unknown subject returns a controlled error;
+/// - the same checks work for the governance subject.
+#[traced_test]
+#[tokio::test]
+async fn sink_get_events_reconstructs_events() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    let gov_request_id = emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_approve(
+        &node.api,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        gov_request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (tracker_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let tracker_id_str = tracker_id.to_string();
+
+    // SN 1: successful fact.
+    emit_fact(
+        &node.api,
+        tracker_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // SN 2: failed fact (contract rejects ModThree with data 50).
+    emit_fact(
+        &node.api,
+        tracker_id.clone(),
+        json!({"ModThree": {"data": 50}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // SN 3: successful fact.
+    emit_fact(
+        &node.api,
+        tracker_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Step 1: retrieve all events for the tracker.
+    let page = node
+        .api
+        .get_sink_events(
+            tracker_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(0),
+                to_sn: None,
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_sink_events_page(&page, 0, None, 100, false, None, 4);
+    assert_data_to_sink_is_create(&page.events[0], &tracker_id_str, 0);
+    assert_data_to_sink_is_fact_full(
+        &page.events[1],
+        &tracker_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_data_to_sink_is_fact_full(
+        &page.events[2],
+        &tracker_id_str,
+        2,
+        false,
+        Some(json!({"ModThree": {"data": 50}})),
+    );
+    assert_data_to_sink_is_fact_full(
+        &page.events[3],
+        &tracker_id_str,
+        3,
+        true,
+        Some(json!({"ModTwo": {"data": 2}})),
+    );
+
+    // Step 3: pagination by limit.
+    let page = node
+        .api
+        .get_sink_events(
+            tracker_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(1),
+                to_sn: None,
+                limit: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_sink_events_page(&page, 1, None, 2, true, Some(3), 2);
+    assert_data_to_sink_is_fact_full(
+        &page.events[0],
+        &tracker_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_data_to_sink_is_fact_full(
+        &page.events[1],
+        &tracker_id_str,
+        2,
+        false,
+        Some(json!({"ModThree": {"data": 50}})),
+    );
+
+    // Step 4: range by to_sn.
+    let page = node
+        .api
+        .get_sink_events(
+            tracker_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(1),
+                to_sn: Some(2),
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_sink_events_page(&page, 1, Some(2), 100, false, None, 2);
+    assert_data_to_sink_is_fact_full(
+        &page.events[0],
+        &tracker_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_data_to_sink_is_fact_full(
+        &page.events[1],
+        &tracker_id_str,
+        2,
+        false,
+        Some(json!({"ModThree": {"data": 50}})),
+    );
+
+    // Step 5: limit 0 returns a descriptive error.
+    let err = node
+        .api
+        .get_sink_events(
+            tracker_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(0),
+                to_sn: None,
+                limit: Some(0),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    match err {
+        Error::ActorError(msg) => assert!(
+            msg.contains("Replay limit must be greater than zero"),
+            "unexpected error message: {}",
+            msg
+        ),
+        other => panic!("expected ActorError, got {:?}", other),
+    }
+
+    // Step 6: from_sn > to_sn returns a descriptive error.
+    let err = node
+        .api
+        .get_sink_events(
+            tracker_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(5),
+                to_sn: Some(3),
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    match err {
+        Error::ActorError(msg) => assert!(
+            msg.contains("Replay range requires from_sn <= to_sn"),
+            "unexpected error message: {}",
+            msg
+        ),
+        other => panic!("expected ActorError, got {:?}", other),
+    }
+
+    // Step 7: unknown subject returns a controlled error.
+    let missing_id =
+        DigestIdentifier::new(HashAlgorithm::Blake3, vec![0u8; 32]).unwrap();
+    let err = node
+        .api
+        .get_sink_events(
+            missing_id,
+            SinkEventsQuery {
+                from_sn: Some(0),
+                to_sn: None,
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, Error::MissingResource { .. }),
+        "expected MissingResource for unknown subject, got {:?}",
+        err
+    );
+
+    // Step 8: repeat the retrieval checks for the governance subject.
+    let governance_id_str = governance_id.to_string();
+
+    let page = node
+        .api
+        .get_sink_events(
+            governance_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(0),
+                to_sn: None,
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_sink_events_page(&page, 0, None, 100, false, None, 2);
+    assert_data_to_sink_is_create(&page.events[0], &governance_id_str, 0);
+    assert_data_to_sink_is_fact_full(
+        &page.events[1],
+        &governance_id_str,
+        1,
+        true,
+        None,
+    );
+
+    let page = node
+        .api
+        .get_sink_events(
+            governance_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(1),
+                to_sn: None,
+                limit: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_sink_events_page(&page, 1, None, 1, false, None, 1);
+    assert_data_to_sink_is_fact_full(
+        &page.events[0],
+        &governance_id_str,
+        1,
+        true,
+        None,
+    );
+
+    let page = node
+        .api
+        .get_sink_events(
+            governance_id.clone(),
+            SinkEventsQuery {
+                from_sn: Some(0),
+                to_sn: Some(1),
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_sink_events_page(&page, 0, Some(1), 100, false, None, 2);
+    assert_data_to_sink_is_create(&page.events[0], &governance_id_str, 0);
+    assert_data_to_sink_is_fact_full(
+        &page.events[1],
+        &governance_id_str,
+        1,
+        true,
+        None,
+    );
+}
+
+
+/// Test 22: manual replay executed while an automatic catch-up is in flight.
+///
+/// Covers Test 22 of `temporal/sink/plan_integration_tests.md`:
+/// - events emitted while the sink is failing end up in `lagging`;
+/// - starting a manual replay while automatic catch-up is running must not lose
+///   events;
+/// - a new event emitted during the overlapping catch-up/replay is also
+///   delivered;
+/// - the final set of delivered SNs is `{0, 1, 2, 3}` in order.
+///
+/// Note: `TestSink` stores every raw HTTP delivery, so when automatic catch-up
+/// and a manual replay overlap they may both attempt to send the same event.
+/// The sink consumer is expected to be idempotent; this test verifies that no
+/// SN is lost and that the deduplicated sequence is complete and ordered.
+#[traced_test]
+#[tokio::test]
+async fn replay_during_active_catch_up() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart the node with the sink configured for slow, single-concurrency
+    // catch-up. This matches the plan's "restart with sink" step.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_concurrency(
+            "example-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    assert_sink_running(&node.api, "example-sink").await;
+    assert_sink_unblocked(&node.api, "example-sink").await;
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    // Step 1: sink returns 500 for every event.
+    sink.set_mode(ResponseMode::ServerError).await;
+
+    // Step 2: emit two facts synchronously; they become lagging.
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert_sink_lagging(&node.api, "example-sink", 1).await;
+
+    // Step 3: sink now succeeds but takes 500 ms per event.
+    sink.set_mode(ResponseMode::Timeout(500)).await;
+
+    // Step 4: start a manual replay from SN 0 while automatic catch-up is also
+    // trying to deliver the lagging events.
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "example-sink".to_owned(),
+                subject_id: subject_id_str.clone(),
+                from_sn: 0,
+            }],
+        })
+        .await
+        .unwrap();
+    assert!(response.errors.is_empty());
+    assert_eq!(response.processed.len(), 1);
+
+    // Step 5: emit a third fact asynchronously while both catch-ups are in
+    // flight.
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModThree": {"data": 3}}),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Step 6: wait until the sink has received at least the 4 distinct SNs for
+    // this subject, tolerating duplicate HTTP deliveries caused by overlapping
+    // catch-up and replay.
+    sink.wait_for_distinct_sn_count(&subject_id_str, 4, true)
+        .await;
+
+    // Allow any in-flight retries to settle, then verify stability.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let raw_events = sink.snapshot().await;
+    let events = deduplicate_events_by_sn(&raw_events);
+
+    // The raw sink may receive duplicate deliveries when automatic catch-up
+    // and manual replay overlap; the important guarantee is that every SN is
+    // present and the deduplicated sequence is complete and ordered.
+    assert!(
+        events.len() >= 4,
+        "deduplicated events should contain at least 4 entries, got {}",
+        events.len()
+    );
+
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    let expected_sns: Vec<u64> = vec![0, 1, 2, 3];
+    assert_eq!(
+        sns, expected_sns,
+        "deduplicated delivery order should be consecutive"
+    );
+
+    assert_event_is_create(&events[0], &subject_id_str, 0);
+    assert_event_is_fact_full(
+        &events[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_event_is_fact_full(
+        &events[2],
+        &subject_id_str,
+        2,
+        true,
+        Some(json!({"ModTwo": {"data": 2}})),
+    );
+    assert_event_is_fact_full(
+        &events[3],
+        &subject_id_str,
+        3,
+        true,
+        Some(json!({"ModThree": {"data": 3}})),
+    );
+
+    // Stability: after waiting, no new distinct SNs appear.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let raw_events_later = sink.snapshot().await;
+    let events_later = deduplicate_events_by_sn(&raw_events_later);
+    let sns_later: Vec<u64> = events_later.iter().map(|e| e.sn()).collect();
+    assert_eq!(
+        sns_later, expected_sns,
+        "distinct SNs should remain stable after settling"
+    );
 }
