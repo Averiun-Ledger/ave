@@ -17,12 +17,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info_span, warn};
 
 use crate::config::SinkServer;
+use crate::sink::SinkError;
 use crate::sink::extract_sn;
 use crate::sink::http::SinkHttpClient;
 use crate::sink::manager::{
     SendResult, SinkManager, SinkManagerMessage, SinkWorkerError,
 };
-use crate::sink::SinkError;
 use ave_common::DataToSink;
 
 // ---------------------------------------------------------------------------
@@ -390,7 +390,8 @@ impl Handler<SinkWorker> for SinkWorker {
                                 .first()
                                 .copied()
                                 .unwrap_or(60);
-                            let delay_secs = crate::sink::add_jitter(delay_secs);
+                            let delay_secs =
+                                crate::sink::add_jitter(delay_secs);
                             self.schedule_healthcheck(ctx, delay_secs);
                         }
                     }

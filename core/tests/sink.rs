@@ -26,7 +26,8 @@ use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
     create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
-    emit_fact_viewpoints, emit_reject, emit_transfer, get_subject, node_running,
+    emit_fact_viewpoints, emit_reject, emit_transfer, get_subject,
+    node_running,
     sink_setup::{
         assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
@@ -37,15 +38,15 @@ use crate::common::{
         assert_sink_contains_create, assert_sink_contains_eol,
         assert_sink_contains_fact_full, assert_sink_contains_fact_opaque,
         assert_sink_contains_light_fact, assert_sink_contains_reject,
-        assert_sink_contains_transfer, assert_sink_contains_transfer_with_owners,
-        assert_sink_events_page, assert_sink_lagging, assert_sink_not_lagging,
-        assert_sink_running, assert_sink_unblocked, assert_subject_sn_sequence,
+        assert_sink_contains_transfer,
+        assert_sink_contains_transfer_with_owners, assert_sink_events_page,
+        assert_sink_lagging, assert_sink_not_lagging, assert_sink_running,
+        assert_sink_unblocked, assert_subject_sn_sequence,
         count_events_for_subject, deduplicate_events_by_sn,
         example_schema_governance_fact, example_sink_config,
         flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
-        make_governance_sink_entry,
-        make_sink_entry, make_sink_entry_with_auth,
+        make_governance_sink_entry, make_sink_entry, make_sink_entry_with_auth,
         make_sink_entry_with_concurrency, restart_config,
         restart_config_safe_mode, restart_config_with_peers, sample_sinks,
         short_idle_sink_config, transient_error_sink_config,
@@ -3137,7 +3138,9 @@ async fn sink_light_events_and_concurrent_catch_up() {
     // max_catch_up_concurrency=1 the worker must still catch up both subjects
     // once the sink comes back, and it must not deliver duplicate events.
     create_only_sink.set_mode(ResponseMode::ServerError).await;
-    create_only_conc2_sink.set_mode(ResponseMode::ServerError).await;
+    create_only_conc2_sink
+        .set_mode(ResponseMode::ServerError)
+        .await;
     emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 3}}), true)
         .await
         .unwrap();
@@ -4707,14 +4710,9 @@ async fn sink_subject_deletion_cleans_tracking() {
     let s1_str = s1.to_string();
 
     for i in 1..=2 {
-        emit_fact(
-            &node.api,
-            s1.clone(),
-            json!({"ModOne": {"data": i}}),
-            true,
-        )
-        .await
-        .unwrap();
+        emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": i}}), true)
+            .await
+            .unwrap();
     }
 
     // Both sinks must receive the initial Create + 2 facts.
@@ -5000,7 +4998,10 @@ async fn sink_transient_errors_and_fast_events() {
         initial_local_db,
         initial_ext_db,
         format!("/memory/{}", port),
-        transient_error_sink_config(sink.url(), Some(governance_id.to_string())),
+        transient_error_sink_config(
+            sink.url(),
+            Some(governance_id.to_string()),
+        ),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -5056,14 +5057,9 @@ async fn sink_transient_errors_and_fast_events() {
     sink.set_mode(ResponseMode::Timeout(150)).await;
 
     for i in 2..=4 {
-        emit_fact(
-            &node.api,
-            s1.clone(),
-            json!({"ModOne": {"data": i}}),
-            false,
-        )
-        .await
-        .unwrap();
+        emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": i}}), false)
+            .await
+            .unwrap();
     }
     emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 5}}), true)
         .await
@@ -5091,7 +5087,6 @@ async fn sink_transient_errors_and_fast_events() {
     assert_sink_not_lagging(&node.api, "example-sink").await;
     assert_sink_unblocked(&node.api, "example-sink").await;
 }
-
 
 /// Test 15: `sink_config_changes_safe_mode_get_sinks_and_blocked`.
 ///
@@ -5223,14 +5218,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
             .unwrap();
 
     for i in 1..=3 {
-        emit_fact(
-            &node.api,
-            s1.clone(),
-            json!({"ModOne": {"data": i}}),
-            true,
-        )
-        .await
-        .unwrap();
+        emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": i}}), true)
+            .await
+            .unwrap();
     }
 
     let initial_keys = node.keys.clone();
@@ -5291,7 +5281,10 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
                 Some(governance_id.to_string()),
                 BTreeSet::from([SinkTypes::All]),
             ),
-            governance_sink_config(gov_sink.url()).into_iter().next().unwrap(),
+            governance_sink_config(gov_sink.url())
+                .into_iter()
+                .next()
+                .unwrap(),
         ],
     ))
     .await;
@@ -5375,8 +5368,7 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         })
         .await
         .unwrap();
-    let by_gov_names: Vec<_> =
-        by_gov.iter().map(|s| s.name.as_str()).collect();
+    let by_gov_names: Vec<_> = by_gov.iter().map(|s| s.name.as_str()).collect();
     assert!(by_gov_names.contains(&"new-sink"));
     // gov-sink targets the node-level governance schema and has governance_id=None,
     // so it is not returned by a filter on the subject governance_id.
@@ -5417,7 +5409,10 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         })
         .await
         .unwrap();
-    assert!(empty.is_empty(), "query with no matches should return empty list");
+    assert!(
+        empty.is_empty(),
+        "query with no matches should return empty list"
+    );
 
     let all_sinks = node.api.get_sinks(SinksQuery::default()).await.unwrap();
     let sorted_names: Vec<_> =
@@ -5743,14 +5738,9 @@ async fn sink_auth_token_refresh() {
             .unwrap();
 
     for i in 1..=2 {
-        emit_fact(
-            &node.api,
-            s1.clone(),
-            json!({"ModOne": {"data": i}}),
-            true,
-        )
-        .await
-        .unwrap();
+        emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": i}}), true)
+            .await
+            .unwrap();
     }
 
     let s1_str = s1.to_string();
@@ -5814,9 +5804,8 @@ async fn sink_auth_token_refresh() {
         "every delivered event should have a recorded Authorization header"
     );
     assert!(
-        headers
-            .iter()
-            .all(|h| h.as_ref().map(|s| s.as_str()) == Some(expected_api_key.as_str())),
+        headers.iter().all(|h| h.as_ref().map(|s| s.as_str())
+            == Some(expected_api_key.as_str())),
         "all events must carry the API key Authorization header"
     );
 
@@ -5901,7 +5890,9 @@ async fn sink_auth_token_refresh() {
         "expected eager token fetch + refresh after 401"
     );
     assert!(
-        auth_requests.iter().any(|r| r.username == "test-user" && r.password == password),
+        auth_requests
+            .iter()
+            .any(|r| r.username == "test-user" && r.password == password),
         "Token endpoint should receive correct credentials"
     );
 
@@ -5918,7 +5909,9 @@ async fn sink_auth_token_refresh() {
     );
 
     // Part C — persistent auth failure keeps subject lagging, does not block sink.
-    oauth_sink.set_auth_mode(AuthResponseMode::TokenFailure).await;
+    oauth_sink
+        .set_auth_mode(AuthResponseMode::TokenFailure)
+        .await;
     oauth_sink.set_mode(ResponseMode::UnauthorizedAlways).await;
 
     emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 5}}), true)
@@ -5949,8 +5942,6 @@ async fn sink_auth_token_refresh() {
         std::env::remove_var(&password_env);
     }
 }
-
-
 
 /// Poll `condition` until it returns `true`. Panics on timeout.
 /// Follows the same timing pattern as the other `wait_for_*` helpers.
@@ -6153,7 +6144,10 @@ async fn assert_sink_count_stable(sink: &TestSink, expected: usize) {
             );
         }
         if attempts > 100 {
-            panic!("timeout waiting for sink count to stabilize at {}", expected);
+            panic!(
+                "timeout waiting for sink count to stabilize at {}",
+                expected
+            );
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         attempts += 1;
@@ -6172,7 +6166,10 @@ async fn wait_for_sink_not_lagging(api: &Api, sink_name: &str) {
             }
         }
         if attempts > 100 {
-            panic!("timeout waiting for sink {} to have no lagging subjects", sink_name);
+            panic!(
+                "timeout waiting for sink {} to have no lagging subjects",
+                sink_name
+            );
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         attempts += 1;
@@ -6474,10 +6471,16 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         .unwrap();
 
     // SN 3: successful transfer Owner -> NewOwner.
-    let new_owner_pk = PublicKey::from_str(&new_owner.api.public_key()).unwrap();
-    emit_transfer(&owner.api, governance_id.clone(), new_owner_pk.clone(), true)
-        .await
-        .unwrap();
+    let new_owner_pk =
+        PublicKey::from_str(&new_owner.api.public_key()).unwrap();
+    emit_transfer(
+        &owner.api,
+        governance_id.clone(),
+        new_owner_pk.clone(),
+        true,
+    )
+    .await
+    .unwrap();
 
     get_subject(&new_owner.api, governance_id.clone(), Some(3), true)
         .await
@@ -6646,7 +6649,6 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
     assert_sink_not_lagging(&owner.api, "owner-sink").await;
     assert_sink_not_lagging(&new_owner.api, "new-owner-sink").await;
 }
-
 
 /// Test 21: `sink_get_events_reconstructs_events`.
 ///
@@ -6997,7 +6999,6 @@ async fn sink_get_events_reconstructs_events() {
         None,
     );
 }
-
 
 /// Test 22: `replay_during_active_catch_up`.
 ///

@@ -564,7 +564,6 @@ impl Actor for SinkManager {
 
         Ok(())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -636,7 +635,8 @@ impl Handler<SinkManager> for SinkManager {
                     .await?;
             }
             SinkManagerMessage::CatchUpRejected { sink, subject_id } => {
-                self.catch_up_in_flight.remove(&(sink.clone(), subject_id.clone()));
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id.clone()));
                 // Ensure the subject is marked as lagging so recovery will retry
                 // the catch-up once the sink becomes available again.
                 self.try_insert_lagging(&sink, subject_id);
@@ -840,7 +840,10 @@ impl SinkManager {
     /// subjects that are behind. Errors are logged but not propagated, because
     /// a single failing sink or catch-up must not prevent the manager from
     /// starting the rest.
-    async fn start_workers_and_catch_up(&mut self, ctx: &mut ActorContext<Self>) {
+    async fn start_workers_and_catch_up(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) {
         for sink_name in self.sink_servers.keys().cloned().collect::<Vec<_>>() {
             if let Err(e) = self.ensure_worker(&sink_name, ctx).await {
                 error!(
@@ -1754,8 +1757,7 @@ impl SinkManager {
 
         // Clear any in-flight catch-up for the deleted subject so it does not
         // block future catch-ups for other subjects.
-        self.catch_up_in_flight
-            .retain(|(_, sid)| sid != subject_id);
+        self.catch_up_in_flight.retain(|(_, sid)| sid != subject_id);
 
         Ok(())
     }

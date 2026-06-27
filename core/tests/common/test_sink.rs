@@ -2,11 +2,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use ave_common::IncomingSinkEvent;
 use axum::{
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
-    Json, Router,
 };
 use serde::Deserialize;
 use tokio::{sync::Mutex, task::JoinHandle};

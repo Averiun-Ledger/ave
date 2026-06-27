@@ -35,6 +35,9 @@ fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
             | ("delete", "/subjects/{subject_id}/sync-peers")
             | ("delete", "/maintenance/subjects/{subject_id}")
             | ("patch", "/approval/{subject_id}")
+            | ("post", "/sinks/replay")
+            | ("post", "/sinks/{sink_name}/unblock")
+            | ("delete", "/sinks/{sink_name}")
     )
 }
 
@@ -177,6 +180,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
         safe_mode: false,
         node_type: "Bootstrap".to_string(),
         persistence: None,
+        sinks_config: None,
     };
     let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
@@ -261,6 +265,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
         safe_mode: true,
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
+        sinks_config: None,
     };
     let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 
@@ -285,6 +290,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
         safe_mode: false,
         node_type: "Bootstrap".to_string(),
         persistence: None,
+        sinks_config: None,
     };
     let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
@@ -428,6 +434,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
         safe_mode: true,
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
+        sinks_config: None,
     };
     let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 

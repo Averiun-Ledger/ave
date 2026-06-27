@@ -1132,8 +1132,14 @@ async fn test_manager_role_endpoints_access() {
     // But NOT to Node-Keys or Admin-* resources
 
     // Manager has node_request:all, node_subject:all, node_system:all, node_management:get
+    // but NOT node_sink.
     let manager_overrides: &[(&str, &str, bool)] = &[
+        ("get", "/sinks", false),
+        ("get", "/sinks/status", false),
         ("get", "/sink-events/{subject_id}", false),
+        ("post", "/sinks/{sink_name}/unblock", false),
+        ("delete", "/sinks/{sink_name}", false),
+        ("post", "/sinks/replay", false),
         ("delete", "/maintenance/subjects/{subject_id}", false),
     ];
 

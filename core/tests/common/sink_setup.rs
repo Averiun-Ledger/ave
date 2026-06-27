@@ -1,15 +1,15 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
-    sink::{DataToSink, DataToSinkEvent, SinkAuthConfig},
     IncomingSinkEvent, SinkTypes,
+    sink::{DataToSink, DataToSinkEvent, SinkAuthConfig},
 };
 use ave_core::{
-    config::{SinkConfigEntry, SinkServer, SinkTarget},
     Api,
+    config::{SinkConfigEntry, SinkServer, SinkTarget},
 };
 use ave_network::NodeType;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::common::CreateNodeConfig;
 

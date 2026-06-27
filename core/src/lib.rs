@@ -1892,6 +1892,22 @@ impl Api {
         subject_id: DigestIdentifier,
         query: SinkEventsQuery,
     ) -> Result<SinkEventsPage, Error> {
+        if let Some(limit) = query.limit {
+            if limit == 0 {
+                return Err(Error::InvalidQueryParams(
+                    "limit must be greater than zero".to_owned(),
+                ));
+            }
+        }
+        if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn) {
+            if from_sn > to_sn {
+                return Err(Error::InvalidQueryParams(
+                    "from_sn cannot be greater than to_sn".to_owned(),
+                ));
+            }
+        }
+
+        let subject_id_str = subject_id.to_string();
         let response = self
             .node
             .ask(NodeMessage::GetSinkEvents {
@@ -1903,7 +1919,12 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to replay sink events");
-                Error::from(e)
+                match e {
+                    ActorError::NotFound { .. } => {
+                        Error::SubjectNotFound(subject_id_str.clone())
+                    }
+                    _ => Error::from(e),
+                }
             })?;
 
         match response {

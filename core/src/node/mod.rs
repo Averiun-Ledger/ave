@@ -1695,7 +1695,10 @@ async fn populate_sink_registry(
     // residuals (from_config=false) so operators can still inspect and clean
     // them up. Sinks that have no persisted state will typically be removed by
     // safe-mode cleanup; until then they remain visible in the registry.
-    let existing = match registry.ask(SinkRegistryMessage::GetSinkRegistry).await? {
+    let existing = match registry
+        .ask(SinkRegistryMessage::GetSinkRegistry)
+        .await?
+    {
         SinkRegistryResponse::Registry(registrations) => registrations,
         other => {
             error!(response = ?other, "Unexpected response from SinkRegistry");
