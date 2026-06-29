@@ -602,7 +602,7 @@ pub mod tests {
     use tokio::sync::mpsc;
 
     use crate::{
-        EventRequest, Node, NodeMessage, NodeResponse, Signed,
+        EventRequest, NetworkMessage, Node, NodeMessage, NodeResponse, Signed,
         evaluation::tests::wait_request,
         governance::{
             Governance, GovernanceMessage, GovernanceResponse,
@@ -620,6 +620,7 @@ pub mod tests {
         },
         system::tests::create_system,
     };
+    use ave_network::CommandHelper as NetworkCommandHelper;
 
     async fn get_subject_state(
         db: &Arc<ExternalDB>,
@@ -673,6 +674,14 @@ pub mod tests {
         }
     }
 
+    fn spawn_dummy_network(
+        mut receiver: mpsc::Receiver<NetworkCommandHelper<NetworkMessage>>,
+    ) {
+        tokio::spawn(async move {
+            while receiver.recv().await.is_some() {}
+        });
+    }
+
     pub async fn create_gov() -> (
         SystemRef,
         ActorRef<Node>,
@@ -686,7 +695,8 @@ pub mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
 
-        let (command_sender, _command_receiver) = mpsc::channel(10);
+        let (command_sender, command_receiver) = mpsc::channel(10);
+        spawn_dummy_network(command_receiver);
         let network = Arc::new(NetworkSender::new(command_sender));
 
         system.add_helper("network", network.clone()).await;

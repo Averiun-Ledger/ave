@@ -1895,14 +1895,14 @@ impl Api {
         if let Some(limit) = query.limit {
             if limit == 0 {
                 return Err(Error::InvalidQueryParams(
-                    "limit must be greater than zero".to_owned(),
+                    "Replay limit must be greater than zero".to_owned(),
                 ));
             }
         }
         if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn) {
             if from_sn > to_sn {
                 return Err(Error::InvalidQueryParams(
-                    "from_sn cannot be greater than to_sn".to_owned(),
+                    "Replay range requires from_sn <= to_sn".to_owned(),
                 ));
             }
         }

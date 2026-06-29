@@ -6875,12 +6875,12 @@ async fn sink_get_events_reconstructs_events() {
         .unwrap_err();
 
     match err {
-        Error::ActorError(msg) => assert!(
+        Error::InvalidQueryParams(msg) => assert!(
             msg.contains("Replay limit must be greater than zero"),
             "unexpected error message: {}",
             msg
         ),
-        other => panic!("expected ActorError, got {:?}", other),
+        other => panic!("expected InvalidQueryParams, got {:?}", other),
     }
 
     // Step 6: from_sn > to_sn returns a descriptive error.
@@ -6898,12 +6898,12 @@ async fn sink_get_events_reconstructs_events() {
         .unwrap_err();
 
     match err {
-        Error::ActorError(msg) => assert!(
+        Error::InvalidQueryParams(msg) => assert!(
             msg.contains("Replay range requires from_sn <= to_sn"),
             "unexpected error message: {}",
             msg
         ),
-        other => panic!("expected ActorError, got {:?}", other),
+        other => panic!("expected InvalidQueryParams, got {:?}", other),
     }
 
     // Step 7: unknown subject returns a controlled error.
@@ -6923,8 +6923,8 @@ async fn sink_get_events_reconstructs_events() {
         .unwrap_err();
 
     assert!(
-        matches!(err, Error::MissingResource { .. }),
-        "expected MissingResource for unknown subject, got {:?}",
+        matches!(err, Error::SubjectNotFound(_)),
+        "expected SubjectNotFound for unknown subject, got {:?}",
         err
     );
 
