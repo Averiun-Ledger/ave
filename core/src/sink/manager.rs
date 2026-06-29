@@ -30,6 +30,7 @@ use ave_common::sink::{
 };
 
 use crate::db::Storable;
+use crate::metrics::try_core_metrics;
 use crate::sink::extract_sn;
 use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
 use crate::system::ConfigHelper;
@@ -407,6 +408,26 @@ impl PersistentActor for SinkManager {
                 inner.blocked_sinks.remove(sink);
             }
         }
+
+        if let Some(metrics) = try_core_metrics() {
+            match event {
+                SinkManagerEvent::SinkBlocked { sink, .. } => {
+                    metrics.set_sink_blocked(sink, true);
+                }
+                SinkManagerEvent::SinkUnblocked { sink }
+                | SinkManagerEvent::SinkCursorsDeleted { sink } => {
+                    metrics.set_sink_blocked(sink, false);
+                    if matches!(
+                        event,
+                        SinkManagerEvent::SinkCursorsDeleted { .. }
+                    ) {
+                        metrics.set_sink_lagging_subjects(sink, 0);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         Ok(state)
     }
 
@@ -657,6 +678,23 @@ impl Handler<SinkManager> for SinkManager {
         error: SinkWorkerError,
         ctx: &mut ActorContext<SinkManager>,
     ) {
+        if let Some(metrics) = try_core_metrics() {
+            match &error {
+                SinkWorkerError::DeliveryFailed { sink, .. } => {
+                    metrics.observe_sink_event(sink, "delivery_failed");
+                }
+                SinkWorkerError::AuthFailed { sink, .. } => {
+                    metrics.observe_sink_event(sink, "auth_failed");
+                }
+                SinkWorkerError::Blocked { sink, .. } => {
+                    metrics.observe_sink_event(sink, "blocked");
+                }
+                SinkWorkerError::SubjectNotFound { sink, .. } => {
+                    metrics.observe_sink_event(sink, "subject_not_found");
+                }
+            }
+        }
+
         match error {
             SinkWorkerError::DeliveryFailed {
                 sink,
@@ -797,17 +835,32 @@ impl SinkManager {
     }
 
     fn try_insert_lagging(&mut self, sink: &str, subject_id: String) {
-        self.lagging
-            .entry(sink.to_string())
-            .or_default()
-            .insert(subject_id);
+        let set = self.lagging.entry(sink.to_string()).or_default();
+        set.insert(subject_id);
+        if let Some(metrics) = try_core_metrics() {
+            metrics.set_sink_lagging_subjects(sink, set.len() as i64);
+        }
+    }
+
+    fn remove_lagging_subject(&mut self, sink: &str, subject_id: &str) {
+        if let Some(set) = self.lagging.get_mut(sink) {
+            set.remove(subject_id);
+            if set.is_empty() {
+                self.lagging.remove(sink);
+            }
+        }
+        if let Some(metrics) = try_core_metrics() {
+            let count =
+                self.lagging.get(sink).map(|s| s.len() as i64).unwrap_or(0);
+            metrics.set_sink_lagging_subjects(sink, count);
+        }
     }
 
     fn rebuild_lagging(&mut self) {
         self.lagging.clear();
         let active_sinks: Vec<String> =
             self.active_sinks.iter().cloned().collect();
-        for sink_name in active_sinks {
+        for sink_name in &active_sinks {
             let mut outdated = Vec::new();
             let last_seen: Vec<(String, u64)> = self
                 .last_seen
@@ -832,6 +885,17 @@ impl SinkManager {
             }
             for subject_id in outdated {
                 self.try_insert_lagging(&sink_name, subject_id);
+            }
+        }
+
+        if let Some(metrics) = try_core_metrics() {
+            for sink_name in active_sinks {
+                let count = self
+                    .lagging
+                    .get(&sink_name)
+                    .map(|s| s.len() as i64)
+                    .unwrap_or(0);
+                metrics.set_sink_lagging_subjects(&sink_name, count);
             }
         }
     }
@@ -1165,6 +1229,17 @@ impl SinkManager {
         result: SendResult,
         ctx: &mut ActorContext<SinkManager>,
     ) -> Result<(), ActorError> {
+        if let Some(metrics) = try_core_metrics() {
+            match result {
+                SendResult::Success => {
+                    metrics.observe_sink_event(&sink, "success")
+                }
+                SendResult::SubjectNotFound => {
+                    metrics.observe_sink_event(&sink, "subject_not_found");
+                }
+            }
+        }
+
         match result {
             SendResult::Success => {
                 self.persist(
@@ -1188,13 +1263,8 @@ impl SinkManager {
                     .get(&sink)
                     .map(|s| s.contains(&subject_id))
                     .unwrap_or(false);
-                if sn >= last_sn
-                    && let Some(set) = self.lagging.get_mut(&sink)
-                {
-                    set.remove(&subject_id);
-                    if set.is_empty() {
-                        self.lagging.remove(&sink);
-                    }
+                if sn >= last_sn && is_lagging {
+                    self.remove_lagging_subject(&sink, &subject_id);
                 } else if is_lagging && sn < last_sn {
                     // The subject is lagging and a new event just advanced the
                     // cursor. Start catch-up from the next SN so any events
@@ -1222,12 +1292,7 @@ impl SinkManager {
                 // MED-2: Subject was deleted — clean up tracking state.
                 // EOL does NOT trigger this; EOL events are delivered normally.
                 info!(msg_type = "SubjectNotFound", sink = %sink, subject_id = %subject_id, "Removing deleted subject from lagging/cursors");
-                if let Some(set) = self.lagging.get_mut(&sink) {
-                    set.remove(&subject_id);
-                    if set.is_empty() {
-                        self.lagging.remove(&sink);
-                    }
-                }
+                self.remove_lagging_subject(&sink, &subject_id);
                 // Persistent state is only mutated in apply().
                 self.persist(
                     SinkManagerEvent::CursorRemoved {
@@ -1264,12 +1329,7 @@ impl SinkManager {
             .remove(&(sink.clone(), subject_id.clone()));
 
         if cursor_sn.is_some_and(|cursor| cursor >= last_sn) {
-            if let Some(set) = self.lagging.get_mut(&sink) {
-                set.remove(&subject_id);
-                if set.is_empty() {
-                    self.lagging.remove(&sink);
-                }
-            }
+            self.remove_lagging_subject(&sink, &subject_id);
         } else if !self.blocked_sinks.contains_key(&sink) {
             // last_seen moved forward while catch-up was running; keep going.
             info!(

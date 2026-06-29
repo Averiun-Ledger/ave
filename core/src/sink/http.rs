@@ -1,7 +1,7 @@
 //! HTTP delivery logic for a single external sink.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::Client;
@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::config::{SinkServer, TokenResponse};
+use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
 use ave_common::{DataToSink, LightEvent};
 
@@ -214,16 +215,20 @@ impl SinkHttpClient {
         payload: Vec<u8>,
     ) -> Result<(), SinkError> {
         let mut last_err = None;
+        let sink_name = &self.server.server;
 
         for attempt in 0..=self.server.max_retries {
             if attempt > 0 {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_sink_retry(sink_name);
+                }
                 let base_delay =
                     self.server.retry_base_delay_ms * (1_u64 << (attempt - 1));
                 let delay = crate::sink::add_jitter(base_delay);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
 
-            match self.send_once(url, &payload).await {
+            match self.timed_send_once(url, &payload).await {
                 Ok(()) => {
                     return Ok(());
                 }
@@ -239,7 +244,7 @@ impl SinkHttpClient {
                         return Err(e);
                     }
                     // Retry once with fresh auth.
-                    match self.send_once(url, &payload).await {
+                    match self.timed_send_once(url, &payload).await {
                         Ok(()) => {
                             return Ok(());
                         }
@@ -258,6 +263,33 @@ impl SinkHttpClient {
             message: "Max retries exceeded".to_owned(),
             retryable: false,
         }))
+    }
+
+    async fn timed_send_once(
+        &self,
+        url: &str,
+        payload: &[u8],
+    ) -> Result<(), SinkError> {
+        let start = Instant::now();
+        let result = self.send_once(url, payload).await;
+        let duration = start.elapsed();
+
+        if let Some(metrics) = try_core_metrics() {
+            let result_label = match &result {
+                Ok(()) => "success",
+                Err(e) if e.is_auth_recoverable() => "auth",
+                Err(e) if e.is_transient() => "transient",
+                Err(SinkError::Shutdown) => "shutdown",
+                Err(_) => "permanent",
+            };
+            metrics.observe_sink_request_duration(
+                &self.server.server,
+                result_label,
+                duration,
+            );
+        }
+
+        result
     }
 
     async fn send_once(

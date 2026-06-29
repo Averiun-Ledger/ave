@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, histogram::Histogram},
+    metrics::{
+        counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+    },
     registry::Registry,
 };
 
@@ -50,6 +52,17 @@ struct SchemaEventLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SinkNameLabels {
+    sink: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SinkResultLabels {
+    sink: String,
+    result: &'static str,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
@@ -72,6 +85,12 @@ pub struct CoreMetrics {
     tracker_sync_updates: Family<TrackerSyncUpdateLabels, Counter>,
     protocol_events: Family<ProtocolEventLabels, Counter>,
     schema_events: Family<SchemaEventLabels, Counter>,
+    sink_events: Family<SinkResultLabels, Counter>,
+    sink_delivery_retries: Family<SinkNameLabels, Counter>,
+    sink_request_duration_seconds:
+        Family<SinkResultLabels, Histogram, fn() -> Histogram>,
+    sink_blocked: Family<SinkNameLabels, Gauge>,
+    sink_lagging_subjects: Family<SinkNameLabels, Gauge>,
 }
 
 static CORE_METRICS: OnceLock<Arc<CoreMetrics>> = OnceLock::new();
@@ -137,6 +156,16 @@ impl CoreMetrics {
             tracker_sync_updates: Family::default(),
             protocol_events: Family::default(),
             schema_events: Family::default(),
+            sink_events: Family::default(),
+            sink_delivery_retries: Family::default(),
+            sink_request_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+                    5.0, 10.0,
+                ])
+            }),
+            sink_blocked: Family::default(),
+            sink_lagging_subjects: Family::default(),
         }
     }
 
@@ -210,6 +239,31 @@ impl CoreMetrics {
             "core_schema_events",
             "Evaluation and validation schema actor events labeled by actor and result.",
             self.schema_events.clone(),
+        );
+        registry.register(
+            "core_sink_events",
+            "Sink events delivered or failed, labeled by sink and result.",
+            self.sink_events.clone(),
+        );
+        registry.register(
+            "core_sink_delivery_retries",
+            "Sink delivery retry attempts, labeled by sink.",
+            self.sink_delivery_retries.clone(),
+        );
+        registry.register(
+            "core_sink_request_duration_seconds",
+            "Sink HTTP request duration, labeled by sink and result.",
+            self.sink_request_duration_seconds.clone(),
+        );
+        registry.register(
+            "core_sink_blocked",
+            "Whether a sink is currently blocked (1) or not (0).",
+            self.sink_blocked.clone(),
+        );
+        registry.register(
+            "core_sink_lagging_subjects",
+            "Number of subjects currently lagging behind for a sink.",
+            self.sink_lagging_subjects.clone(),
         );
     }
 
@@ -336,6 +390,53 @@ impl CoreMetrics {
             .get_or_create(&SchemaEventLabels { actor, result })
             .inc();
     }
+
+    pub fn observe_sink_event(&self, sink: &str, result: &'static str) {
+        self.sink_events
+            .get_or_create(&SinkResultLabels {
+                sink: sink.to_owned(),
+                result,
+            })
+            .inc();
+    }
+
+    pub fn observe_sink_retry(&self, sink: &str) {
+        self.sink_delivery_retries
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .inc();
+    }
+
+    pub fn observe_sink_request_duration(
+        &self,
+        sink: &str,
+        result: &'static str,
+        duration: Duration,
+    ) {
+        self.sink_request_duration_seconds
+            .get_or_create(&SinkResultLabels {
+                sink: sink.to_owned(),
+                result,
+            })
+            .observe(Self::seconds(duration));
+    }
+
+    pub fn set_sink_blocked(&self, sink: &str, blocked: bool) {
+        self.sink_blocked
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(if blocked { 1 } else { 0 });
+    }
+
+    pub fn set_sink_lagging_subjects(&self, sink: &str, count: i64) {
+        self.sink_lagging_subjects
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(count);
+    }
 }
 
 pub fn register(registry: &mut Registry) -> Arc<CoreMetrics> {
@@ -363,7 +464,7 @@ mod tests {
             .lines()
             .find_map(|line| {
                 if line.starts_with(name) {
-                    line.split_whitespace().nth(1)?.parse::<f64>().ok()
+                    line.split_whitespace().last()?.parse::<f64>().ok()
                 } else {
                     None
                 }
@@ -563,6 +664,108 @@ mod tests {
                 "core_contract_memory_peak_bytes_count{result=\"error\"}"
             ),
             1.0
+        );
+    }
+
+    #[test]
+    fn core_metrics_expose_sink_series() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        metrics.observe_sink_event("gov-sink", "success");
+        metrics.observe_sink_event("gov-sink", "success");
+        metrics.observe_sink_event("schema-sink", "delivery_failed");
+        metrics.observe_sink_event("schema-sink", "auth_failed");
+        metrics.observe_sink_event("schema-sink", "blocked");
+        metrics.observe_sink_event("schema-sink", "subject_not_found");
+
+        metrics.observe_sink_retry("schema-sink");
+        metrics.observe_sink_retry("schema-sink");
+
+        metrics.observe_sink_request_duration(
+            "gov-sink",
+            "success",
+            Duration::from_millis(12),
+        );
+        metrics.observe_sink_request_duration(
+            "schema-sink",
+            "transient",
+            Duration::from_millis(250),
+        );
+
+        metrics.set_sink_blocked("schema-sink", true);
+        metrics.set_sink_lagging_subjects("schema-sink", 3);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_events_total{sink=\"gov-sink\",result=\"success\"}"
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_events_total{sink=\"schema-sink\",result=\"delivery_failed\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_events_total{sink=\"schema-sink\",result=\"auth_failed\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_events_total{sink=\"schema-sink\",result=\"blocked\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_events_total{sink=\"schema-sink\",result=\"subject_not_found\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_delivery_retries_total{sink=\"schema-sink\"}"
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_request_duration_seconds_count{sink=\"gov-sink\",result=\"success\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_request_duration_seconds_count{sink=\"schema-sink\",result=\"transient\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(&text, "core_sink_blocked{sink=\"schema-sink\"}"),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_lagging_subjects{sink=\"schema-sink\"}"
+            ),
+            3.0
         );
     }
 }
