@@ -51,14 +51,14 @@ Default SQLite-based runtime:
 
 ```toml
 [dependencies]
-ave-core = "0.11.0"
+ave-core = "0.12.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-core = { version = "0.11.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
+ave-core = { version = "0.12.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
 ```
 
 ## Bootstrap example

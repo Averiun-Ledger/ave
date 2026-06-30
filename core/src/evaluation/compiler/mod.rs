@@ -171,6 +171,7 @@ impl CompilerSupport {
     }
 
     fn vendor_dir_for_contract() -> PathBuf {
+
         PathBuf::from(".")
             .join("..")
             .join("..")

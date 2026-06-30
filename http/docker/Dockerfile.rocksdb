@@ -211,4 +211,5 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 RUN rustup target add wasm32-unknown-unknown
 COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
 COPY --from=builder-arm64 /contracts /contracts
+
 CMD ["ave-http"]

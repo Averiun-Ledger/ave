@@ -1,6 +1,6 @@
 [package]
 name = "ave-network"
-version = "0.9.1"
+version = "0.10.0"
 edition.workspace = true
 authors.workspace = true
 description = "Averiun Ledger peer-to-peer networking layer"

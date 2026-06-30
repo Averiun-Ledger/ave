@@ -43,13 +43,13 @@ Versions currently declared by this workspace:
 
 | Package | Version |
 |---|---:|
-| `ave` | `0.11.0` |
+| `ave` | `0.12.0` |
 | `ave-identity` | `0.3.0` |
 | `ave-common` | `0.9.0` |
-| `ave-network` | `0.9.1` |
-| `ave-core` | `0.11.0` |
-| `ave-bridge` | `0.11.0` |
-| `ave-http` | `0.11.0` |
+| `ave-network` | `0.10.0` |
+| `ave-core` | `0.12.0` |
+| `ave-bridge` | `0.12.0` |
+| `ave-http` | `0.12.0` |
 | `ave-common` (npm TypeScript package) | `0.9.0` |
 
 ## How the pieces fit together
@@ -208,14 +208,14 @@ If you prefer to depend on the aggregate crate instead of individual workspace c
 
 ```toml
 [dependencies]
-ave = "0.11.0"
+ave = "0.12.0"
 ```
 
 Enable the HTTP layer re-export only when you need it:
 
 ```toml
 [dependencies]
-ave = { version = "0.11.0", features = ["http"] }
+ave = { version = "0.12.0", features = ["http"] }
 ```
 
 ## Open source
