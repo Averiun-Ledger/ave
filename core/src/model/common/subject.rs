@@ -4,17 +4,28 @@ use ave_actors::{
 use std::future::Future;
 
 use ave_common::{
+    Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, PublicKey},
     request::EventRequest,
 };
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+use crate::model::common::{OwnerContext, TrackerParams, TrackerPeers};
 
 use crate::{
     approval::persist::{ApprPersist, ApprPersistMessage},
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
+        data::MemberName,
+        model::{
+            HashThisRole, ProtocolTypes, Quorum, RoleTypes, RolesSchema,
+            RolesTrackerSchemas, WitnessesData,
+        },
         witnesses_register::{
-            TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterMessage,
+            HiSnLimit, TrackerDeliveryRange, TransferData, WitnessStatus,
+            WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,
         },
     },
@@ -55,6 +66,273 @@ where
         GovernanceResponse::Governance(gov_data) => Ok(*gov_data),
         _ => Err(ActorError::UnexpectedResponse {
             expected: "GovernanceResponse::Governance".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn has_role<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    role_query: HashThisRole,
+) -> Result<bool, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::HasRole {
+            governance_id: governance_id.clone(),
+            role_query,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::Bool(result) => Ok(result),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::Bool".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_witnesses<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    data: WitnessesData,
+) -> Result<HashSet<PublicKey>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetWitnesses {
+            governance_id: governance_id.clone(),
+            data,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::Witnesses(witnesses) => Ok(witnesses),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::Witnesses".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_schema_viewpoints<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    schema_id: SchemaType,
+) -> Result<Option<BTreeSet<String>>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetSchemaViewpoints {
+            governance_id: governance_id.clone(),
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::SchemaViewpoints(viewpoints) => Ok(viewpoints),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::SchemaViewpoints".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_quorum_and_signers<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    protocol: ProtocolTypes,
+    schema_id: SchemaType,
+    namespace: Namespace,
+) -> Result<(HashSet<PublicKey>, Quorum), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetQuorumAndSigners {
+            governance_id: governance_id.clone(),
+            protocol,
+            schema_id,
+            namespace,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::QuorumAndSigners(signers, quorum) => {
+            Ok((signers, quorum))
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::QuorumAndSigners".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_init_state<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    schema_id: SchemaType,
+) -> Result<Option<ValueWrapper>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetInitState {
+            governance_id: governance_id.clone(),
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::InitState(init_state) => Ok(init_state),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::InitState".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_signers<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    role: RoleTypes,
+    schema_id: SchemaType,
+    namespace: Namespace,
+) -> Result<(HashSet<PublicKey>, bool), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetSigners {
+            governance_id: governance_id.clone(),
+            role,
+            schema_id,
+            namespace,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::Signers(signers, any) => Ok((signers, any)),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::Signers".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_members<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> Result<BTreeMap<MemberName, PublicKey>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetMembers {
+            governance_id: governance_id.clone(),
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::Members(members) => Ok(members),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::Members".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_schema_roles<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    schema_id: SchemaType,
+) -> Result<Option<RolesSchema>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetSchemaRoles {
+            governance_id: governance_id.clone(),
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::SchemaRoles(roles) => Ok(roles),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::SchemaRoles".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn get_tracker_roles<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> Result<RolesTrackerSchemas, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}",
+        governance_id
+    ));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetTrackerRoles {
+            governance_id: governance_id.clone(),
+        })
+        .await?;
+
+    match response {
+        GovernanceResponse::TrackerRoles(roles) => Ok(roles),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::TrackerRoles".to_owned(),
             path,
         }),
     }
@@ -528,11 +806,16 @@ pub async fn get_tracker_window<A>(
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
     node: PublicKey,
-    namespace: String,
-    schema_id: ave_common::SchemaType,
-    actual_sn: Option<u64>,
+    sender: PublicKey,
+    params: TrackerParams,
 ) -> Result<
-    (Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+    (
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        bool,
+        Vec<TrackerDeliveryRange>,
+    ),
     ActorError,
 >
 where
@@ -550,22 +833,182 @@ where
         .ask(WitnessesRegisterMessage::GetTrackerWindow {
             subject_id: subject_id.clone(),
             node,
-            namespace,
-            schema_id,
-            actual_sn,
+            sender,
+            namespace: params.namespace,
+            schema_id: params.schema_id,
+            actual_sn: params.actual_sn,
         })
         .await?;
 
     match response {
         WitnessesRegisterResponse::TrackerWindow {
             sn,
+            transfer_sn,
             clear_sn,
             is_all,
             ranges,
-        } => Ok((sn, clear_sn, is_all, ranges)),
+        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
+        }),
+    }
+}
+
+pub async fn get_tracker_window_from_ledger<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    ledger: Vec<Ledger>,
+    node: PublicKey,
+    sender: PublicKey,
+    params: TrackerParams,
+) -> Result<
+    (
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        bool,
+        Vec<TrackerDeliveryRange>,
+    ),
+    ActorError,
+>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerWindowFromLedger {
+            subject_id: subject_id.clone(),
+            ledger,
+            node,
+            sender,
+            namespace: params.namespace,
+            schema_id: params.schema_id,
+            actual_sn: params.actual_sn,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::TrackerWindow {
+            sn,
+            transfer_sn,
+            clear_sn,
+            is_all,
+            ranges,
+        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
+        }),
+    }
+}
+
+pub async fn check_witness_status_and_window<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    transfer_data: Option<TransferData>,
+    peers: TrackerPeers,
+    params: TrackerParams,
+    owner_ctx: OwnerContext,
+) -> Result<
+    (
+        WitnessStatus,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        bool,
+        Vec<TrackerDeliveryRange>,
+    ),
+    ActorError,
+>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
+            subject_id: subject_id.clone(),
+            transfer_data,
+            node: peers.node,
+            sender: peers.sender,
+            namespace: params.namespace,
+            schema_id: params.schema_id,
+            actual_sn: params.actual_sn,
+            owner: owner_ctx.owner,
+            owner_gov_version: owner_ctx.gov_version,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::WitnessStatusAndWindow {
+            status,
+            sn,
+            transfer_sn,
+            clear_sn,
+            is_all,
+            ranges,
+        } => Ok((status, sn, transfer_sn, clear_sn, is_all, ranges)),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::WitnessStatusAndWindow"
+                .to_string(),
+        }),
+    }
+}
+
+pub async fn check_simulated_transfer_hi_sn_limit<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    transfer_event: Ledger,
+    node: PublicKey,
+    namespace: String,
+    schema_id: ave_common::SchemaType,
+) -> Result<HiSnLimit, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::SimulateTransferHiSnLimit {
+            subject_id: subject_id.clone(),
+            transfer_event: Box::new(transfer_event),
+            node,
+            namespace,
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::WitnessStatus(status) => {
+            Ok(status.hi_sn_limit)
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::WitnessStatus".to_string(),
         }),
     }
 }

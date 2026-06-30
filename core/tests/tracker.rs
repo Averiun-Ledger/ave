@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, str::FromStr, sync::atomic::Ordering};
+use std::{
+    collections::BTreeSet, str::FromStr, sync::atomic::Ordering, time::Duration,
+};
 
 mod common;
 
@@ -293,7 +295,7 @@ async fn manual_distribution() {
     );
 
     new_other_witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -1586,7 +1588,7 @@ async fn test_subject_transfer_event_1() {
 
     // autorizar para recibir copias del nuevo sujeto
     future_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -1838,7 +1840,7 @@ async fn test_subject_transfer_event_2() {
 
     // autorizar para recibir copias del nuevo sujeto
     future_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -1908,7 +1910,7 @@ async fn test_subject_transfer_event_2() {
     );
 
     old_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -2186,7 +2188,7 @@ async fn test_subject_transfer_event_3() {
 
     // autorizar para recibir copias del nuevo sujeto
     future_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -2315,7 +2317,7 @@ async fn test_subject_transfer_event_3() {
         .unwrap();
 
     old_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&owner_governance.public_key()).unwrap(),
@@ -2571,7 +2573,7 @@ async fn test_dynamic_witnesses_1() {
     }});
 
     witness
-        .auth_subject(governance_id.clone(), AuthWitness::None)
+        .authorize_governance(governance_id.clone(), AuthWitness::None)
         .await
         .unwrap();
 
@@ -2819,7 +2821,7 @@ async fn test_dynamic_witnesses_2() {
     }});
 
     new_witness
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness.public_key()).unwrap(),
@@ -2829,7 +2831,7 @@ async fn test_dynamic_witnesses_2() {
         .unwrap();
 
     new_witness
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness.public_key()).unwrap(),
@@ -3110,7 +3112,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         .unwrap();
 
     owner_governance
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&creator.public_key()).unwrap(),
@@ -5098,4 +5100,630 @@ async fn test_tracker_fact_viewpoints_reject_invalid_values() {
             .unwrap();
     assert_eq!(state.subject_id, plain_subject_id.to_string());
     assert_eq!(state.sn, 0);
+}
+
+#[test(tokio::test)]
+// E11: Emisor no tiene el subject (tracker o gov)
+//
+// Qué se prueba:
+//   Si un nodo intenta actuar como emisor para un subject que no tiene
+//   en su DB, `build_distribution_batch` / `build_last_sn_offer` / `check_witness`
+//   retorna `SubjectNotFound`.
+//
+// Setup sugerido:
+//   1. Nodo A tiene el subject; nodo B no.
+//   2. B intenta responder a una solicitud de ledger de A.
+//   3. O bien: B intenta emitir un `DistributionLedgerRes` manual.
+//   4. Verificar `SubjectNotFound`.
+//
+// Prioridad: ALTA.
+async fn test_emisor_subject_not_found() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = &nodes[0].api;
+    let stranger = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![stranger]).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 1
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Stranger no tiene el subject en su DB
+    assert!(
+        stranger
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    // Stranger intenta manual_distribution del subject que no tiene
+    // Debe fallar porque no es owner ni ha rechazado el transfer
+    let result = stranger.manual_distribution(subject_id.clone()).await;
+    assert!(result.is_err());
+}
+
+#[test(tokio::test)]
+// E13: Emisor tracker — receptor actualizado más allá de window del emisor
+//
+// Qué se prueba:
+//   Owner tiene subject hasta SN=15. Witness W tiene SN=10.
+//   W no puede sincronizar más allá de SN=10 porque su witness window
+//   fue cerrada al eliminarlo de creator witnesses.
+//   `build_distribution_batch` o `get_tracker_window` retorna
+//   `ActualSnBiggerThanWitness`.
+//
+// Setup:
+//   1. Crear owner + witness W.
+//   2. W es governance witness y creator witness explícito.
+//   3. Owner crea subject y emite facts 1..=10 (SN=10).
+//   4. W obtiene el subject en SN=10.
+//   5. Owner emite gobernanza que elimina a W de creator witnesses.
+//   6. Owner emite facts 11..=15 (SN=15).
+//   7. W se apaga y se reinicia con las mismas DBs.
+//   8. W se autentica con owner e intenta update_subject.
+//   9. W permanece en SN=10 porque su witness window está cerrada.
+//
+// Prioridad: ALTA.
+async fn test_emisor_actual_sn_bigger_than_witness_tracker() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes[0].api.clone();
+    let witness = nodes[1].api.clone();
+    let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&witness]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 1,
+                                "witnesses": [
+                                    {
+                                        "name": "AveNode2",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Owner emits facts 1..=10 (subject reaches SN=10)
+    for i in 1..=10 {
+        let json = json!({
+            "ModOne": {
+                "data": i,
+            }
+        });
+        emit_fact(&owner, subject_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    // W obtains the subject at SN=10
+    let _ = get_subject(&witness, subject_id.clone(), Some(10), true)
+        .await
+        .unwrap();
+
+    // Owner emits a governance fact that removes W from creator witnesses
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Owner emits more facts 11..=15 (subject reaches SN=15)
+    for i in 11..=15 {
+        let json = json!({
+            "ModOne": {
+                "data": i,
+            }
+        });
+        emit_fact(&owner, subject_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    // W is shut down
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    // W is restarted with the SAME local_db and ext_db preserved
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (restarted_witness, _dirs2) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    let restarted_api = restarted_witness.api.clone();
+    node_running(&restarted_api).await.unwrap();
+
+    // W authenticates with owner for the subject
+    restarted_api
+        .authorize_governance(subject_id.clone(), AuthWitness::One(owner_pk))
+        .await
+        .unwrap();
+
+    // W attempts update_subject
+    restarted_api
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
+
+    // After a short sleep, verify that W is still at SN=10 (not 15)
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state = restarted_api
+        .get_subject_state(subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 10);
+}
+
+#[test(tokio::test)]
+// E14: Governance witness removed from governance witnesses cannot sync further updates.
+//
+// Qué se prueba:
+//   W es testigo de gobernanza y obtiene la gobernanza hasta SN=10.
+//   El owner emite un evento que elimina a W de los testigos de gobernanza.
+//   El owner continúa emitiendo hasta SN=15. W se reinicia con sus DBs
+//   preservadas, pero al intentar sincronizar es rechazado porque ya no
+//   es miembro. W se queda en SN=10.
+//
+// Setup:
+//   1. Crear governance.
+//   2. Añadir W como miembro y testigo de gobernanza.
+//   3. Emitir eventos hasta SN=10.
+//   4. W obtiene la gobernanza en SN=10.
+//   5. Owner elimina a W de los testigos de gobernanza.
+//   6. Owner emite más eventos hasta SN=15.
+//   7. W se apaga.
+//   8. W se reinicia con las mismas DBs.
+//   9. W intenta sincronizar pero es rechazado.
+//   10. W sigue en SN=10.
+//
+// Nota: El caso `ActualSnBiggerThanWitness` para governance no es
+// implementable en tests de integración puros sin manipulación de DB
+// (documentado en temporal/unimplementable-tests.md como E05/X12).
+// Este test verifica el escenario más cercano: un testigo de gobernanza
+// que es removido y pierde acceso a actualizaciones futuras.
+//
+// Prioridad: ALTA.
+async fn test_emisor_actual_sn_bigger_than_witness_gov() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes[0].api.clone();
+    let witness = nodes[1].api.clone();
+    let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&witness]).await;
+
+    // Add W as governance member and witness
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2"
+                    ]
+                }
+            }
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Emit more governance events until SN=10 (9 more facts)
+    for i in 2..=10 {
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let node = format!("fake{}", i);
+
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": node,
+                        "key": keys.public_key()
+                    },
+                ]
+            },
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    let _ = get_subject(&witness, governance_id.clone(), Some(10), true)
+        .await
+        .unwrap();
+
+    // Owner emits governance fact that removes W from governance witnesses
+    let json = json!({
+        "members": {
+            "remove": ["AveNode2"]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Owner emits more events until governance reaches SN=15 (4 more facts)
+    for i in 11..=14 {
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let node = format!("fake{}", i);
+
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": node,
+                        "key": keys.public_key()
+                    },
+                ]
+            },
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    // W authenticates with owner for the governance
+    witness
+        .authorize_governance(governance_id.clone(), AuthWitness::One(owner_pk))
+        .await
+        .unwrap();
+
+    // W attempts update_subject
+    witness.update_subject(governance_id.clone()).await.unwrap();
+
+    // After a short sleep, verify W still has SN=10 (not 15)
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state = witness
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 10);
+}
+
+#[test(tokio::test)]
+// E15: Emisor no tiene acceso de witness para tracker
+//
+// Qué se prueba:
+//   Emisor es witness de la gobernanza pero NO tiene acceso de witness
+//   para el tracker específico (ej: namespace no coincide). El owner
+//   rechaza con `SenderNoAccess` cuando W intenta sincronizarse.
+//
+// Setup:
+//   1. Governance con witness W que tiene acceso solo a namespace="Spain".
+//   2. Tracker con namespace="France".
+//   3. W intenta obtener el tracker.
+//   4. `SenderNoAccess`.
+//
+// Prioridad: ALTA.
+async fn test_emisor_sender_no_access() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = &nodes[0].api;
+    let witness_spain = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![witness_spain]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": witness_spain.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2"
+                    ]
+                }
+            },
+            "tracker_schemas": {
+                "add": {
+                    "witness": [
+                        {
+                            "name": "AveNode2",
+                            "namespace": ["Spain"]
+                        }
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": ["France"],
+                                "quantity": 1
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "France", true)
+            .await
+            .unwrap();
+
+    // W no debe tener el subject (namespace France no coincide con Spain)
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        witness_spain
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    // W se autentica con owner para el subject
+    let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
+    witness_spain
+        .authorize_governance(subject_id.clone(), AuthWitness::One(owner_pk))
+        .await
+        .unwrap();
+
+    // W intenta update_subject
+    witness_spain
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
+
+    // Tras un tiempo, W sigue sin tener el subject
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        witness_spain
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    // Owner intenta manual_distribution → debe fallar porque no hay witnesses elegibles
+    let result = owner.manual_distribution(subject_id.clone()).await;
+    assert!(result.is_err());
 }

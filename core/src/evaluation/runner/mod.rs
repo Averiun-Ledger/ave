@@ -10,8 +10,8 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
-    schematype::ReservedWords,
+    ContractData, ContractResultData, Namespace, SchemaType, ValueWrapper,
+    identity::PublicKey, schematype::ReservedWords,
 };
 use borsh::{BorshDeserialize, to_vec};
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{Span, debug, error, info_span};
 use types::{ContractResult, RunnerResult};
-use wasmtime::{Module, Store};
+use wasmtime::{Module, Store, Trap};
 
 use crate::{
     evaluation::runner::{error::RunnerError, types::EvaluateInfo},
@@ -467,29 +467,62 @@ impl Runner {
                 details: e.to_string(),
             })?;
 
-        let result_ptr = contract_entrypoint
-            .call(
-                &mut store,
-                (
-                    state_ptr,
-                    init_state_ptr,
-                    event_ptr,
-                    if is_owner { 1 } else { 0 },
-                ),
-            )
-            .map_err(|e| RunnerError::WasmError {
-                operation: "call entrypoint",
-                details: e.to_string(),
-            })?;
+        let call_result = contract_entrypoint.call(
+            &mut store,
+            (
+                state_ptr,
+                init_state_ptr,
+                event_ptr,
+                if is_owner { 1 } else { 0 },
+            ),
+        );
 
-        let result = Self::get_result(&store, result_ptr)?;
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: result.final_state,
-            },
-            vec![],
-        ))
+        // Collect resource metrics regardless of success or failure.
+        let remaining = store.get_fuel().unwrap_or(0);
+        let fuel_consumed = MAX_FUEL.saturating_sub(remaining);
+        let memory_bytes = instance
+            .get_memory(&mut store, "memory")
+            .map(|m| m.size(&store) * 64 * 1024)
+            .unwrap_or(0);
+
+        match call_result {
+            Ok(result_ptr) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_fuel_consumed(
+                        "success",
+                        fuel_consumed,
+                    );
+                    metrics
+                        .observe_contract_memory_peak("success", memory_bytes);
+                }
+
+                let result = Self::get_result(&store, result_ptr)?;
+                Ok((
+                    RunnerResult {
+                        approval_required: false,
+                        final_state: result.final_state,
+                    },
+                    vec![],
+                ))
+            }
+            Err(e) => {
+                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel)
+                    && let Some(metrics) = try_core_metrics()
+                {
+                    metrics.observe_contract_fuel_exhausted();
+                }
+
+                if let Some(metrics) = try_core_metrics() {
+                    metrics
+                        .observe_contract_fuel_consumed("error", fuel_consumed);
+                    metrics.observe_contract_memory_peak("error", memory_bytes);
+                }
+                Err(RunnerError::WasmError {
+                    operation: "call entrypoint",
+                    details: e.to_string(),
+                })
+            }
+        }
     }
 
     async fn execute_fact_gov(
@@ -1530,14 +1563,27 @@ impl Runner {
     ) -> Result<(MemoryManager, u32, u32, u32), RunnerError> {
         let mut context = MemoryManager::from_limits(limits);
 
-        let state_bytes =
-            to_vec(&state).map_err(|e| RunnerError::SerializationError {
+        let state_data =
+            ContractData::from_json_value(&state.0).map_err(|e| {
+                RunnerError::SerializationError {
+                    context: "serialize state to JSON bytes",
+                    details: e.to_string(),
+                }
+            })?;
+        let state_bytes = to_vec(&state_data).map_err(|e| {
+            RunnerError::SerializationError {
                 context: "serialize state",
                 details: e.to_string(),
-            })?;
+            }
+        })?;
         let state_ptr = context.add_data_raw(&state_bytes)?;
 
-        let init_state_bytes = to_vec(&init_state).map_err(|e| {
+        let init_state_data = ContractData::from_json_value(&init_state.0)
+            .map_err(|e| RunnerError::SerializationError {
+                context: "serialize init_state to JSON bytes",
+                details: e.to_string(),
+            })?;
+        let init_state_bytes = to_vec(&init_state_data).map_err(|e| {
             RunnerError::SerializationError {
                 context: "serialize init_state",
                 details: e.to_string(),
@@ -1545,11 +1591,19 @@ impl Runner {
         })?;
         let init_state_ptr = context.add_data_raw(&init_state_bytes)?;
 
-        let event_bytes =
-            to_vec(&event).map_err(|e| RunnerError::SerializationError {
+        let event_data =
+            ContractData::from_json_value(&event.0).map_err(|e| {
+                RunnerError::SerializationError {
+                    context: "serialize event to JSON bytes",
+                    details: e.to_string(),
+                }
+            })?;
+        let event_bytes = to_vec(&event_data).map_err(|e| {
+            RunnerError::SerializationError {
                 context: "serialize event",
                 details: e.to_string(),
-            })?;
+            }
+        })?;
         let event_ptr = context.add_data_raw(&event_bytes)?;
 
         Ok((
@@ -1566,16 +1620,28 @@ impl Runner {
     ) -> Result<ContractResult, RunnerError> {
         let bytes = store.data().read_data(pointer as usize)?;
 
-        let contract_result: ContractResult =
+        let contract_result: ContractResultData =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
                 RunnerError::SerializationError {
-                    context: "deserialize ContractResult",
+                    context: "deserialize ContractResultData",
                     details: e.to_string(),
                 }
             })?;
 
         if contract_result.success {
-            Ok(contract_result)
+            let final_state_json = contract_result
+                .final_state
+                .to_json_value()
+                .map_err(|e| RunnerError::SerializationError {
+                    context: "parse final_state JSON",
+                    details: e.to_string(),
+                })?;
+
+            Ok(ContractResult {
+                final_state: ValueWrapper(final_state_json),
+                success: true,
+                error: String::new(),
+            })
         } else {
             Err(RunnerError::ContractFailed {
                 details: format!(
@@ -1611,6 +1677,9 @@ impl Actor for Runner {
     type Event = ();
     type Message = RunnerMessage;
     type Response = RunnerResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1626,7 +1695,7 @@ impl NotPersistentActor for Runner {}
 impl Handler<Self> for Runner {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RunnerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {

@@ -87,6 +87,42 @@ pub struct SinkEventsQuery {
     pub limit: Option<u64>,
 }
 
+/// Single replay request: resend events for one subject to one sink starting
+/// at `from_sn` up to the last seen event.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayItem {
+    pub sink: String,
+    pub subject_id: String,
+    pub from_sn: u64,
+}
+
+/// Request body for the manual sink replay endpoint.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayRequest {
+    pub requests: Vec<SinkReplayItem>,
+}
+
+/// Query parameters for listing sinks.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinksQuery {
+    pub name: Option<String>,
+    pub target: Option<String>,
+    pub schema_id: Option<String>,
+    pub governance_id: Option<String>,
+    pub in_config: Option<bool>,
+    pub running: Option<bool>,
+}
+
 /// Pagination filters for abort queries.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
@@ -318,4 +354,71 @@ pub struct BridgeConfirmRequest {
     /// Subject identifier
     pub subject_id: String,
     pub name_old_owner: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subject_query_deserialize_missing_fields() {
+        // Both fields are optional; JSON with none of them should succeed.
+        let decoded: SubjectQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded.active, None);
+        assert_eq!(decoded.schema_id, None);
+
+        // Only active provided.
+        let decoded: SubjectQuery =
+            serde_json::from_str(r#"{"active":false}"#).unwrap();
+        assert_eq!(decoded.active, Some(false));
+        assert_eq!(decoded.schema_id, None);
+    }
+
+    #[test]
+    fn test_events_query_deserialize_with_time_range() {
+        let json = r#"{
+            "quantity": 5,
+            "page": 2,
+            "reverse": true,
+            "event_request_ts": {
+                "from": "2024-01-01T00:00:00Z",
+                "to": "2024-12-31T23:59:59Z"
+            },
+            "event_type": "fact"
+        }"#;
+        let decoded: EventsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.quantity, Some(5));
+        assert_eq!(decoded.page, Some(2));
+        assert!(decoded.reverse.unwrap());
+        assert!(matches!(decoded.event_type, Some(EventRequestType::Fact)));
+        let range = decoded.event_request_ts.unwrap();
+        assert_eq!(range.from, Some("2024-01-01T00:00:00Z".to_string()));
+        assert_eq!(range.to, Some("2024-12-31T23:59:59Z".to_string()));
+    }
+
+    #[test]
+    fn test_bridge_event_request_deserialize_fact_with_viewpoints() {
+        let json = r#"{
+            "event": "fact",
+            "data": {
+                "subject_id": "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s",
+                "payload": {"k": "v"},
+                "viewpoints": ["vp1", "vp2"]
+            }
+        }"#;
+        let decoded: BridgeEventRequest = serde_json::from_str(json).unwrap();
+        match decoded {
+            BridgeEventRequest::Fact(req) => {
+                assert_eq!(
+                    req.subject_id,
+                    "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                );
+                assert_eq!(
+                    req.viewpoints,
+                    vec!["vp1".to_string(), "vp2".to_string()]
+                );
+            }
+            other => panic!("expected Fact, got {:?}", other),
+        }
+    }
 }

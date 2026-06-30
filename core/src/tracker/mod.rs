@@ -10,31 +10,29 @@ use crate::{
             WitnessesRegisterResponse,
         },
     },
-    helpers::{db::ExternalDB, sink::AveSink},
+    model::sink::{SinkDataEvent, SubjectSinkEvent},
     model::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
-            TrackerVisibilityMode, TrackerVisibilityState, emit_fail,
-            get_last_event, purge_storage,
+            TrackerVisibilityMode, TrackerVisibilityState, crash_system,
+            get_last_event, purge_storage, remove_verified_transfer,
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    sink::{SinkManager, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
-        SubjectMetadata,
-        error::SubjectError,
-        sinkdata::{SinkData, SinkDataMessage},
+        SubjectMetadata, error::SubjectError,
     },
     validation::request::LastData,
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
-    Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
 };
 use ave_common::{
-    Namespace, ValueWrapper,
+    DataToSink, Namespace, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
     response::SubjectDB,
@@ -47,17 +45,10 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Tracker {
-    #[serde(skip)]
-    pub our_key: Arc<PublicKey>,
-    #[serde(skip)]
-    pub service: bool,
-    #[serde(skip)]
-    pub only_clear_events: bool,
-    #[serde(skip)]
-    pub hash: Option<HashAlgorithm>,
-
+#[derive(
+    Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize,
+)]
+pub struct TrackerState {
     pub subject_metadata: SubjectMetadata,
     pub governance_id: DigestIdentifier,
     /// The namespace of the subject.
@@ -67,6 +58,40 @@ pub struct Tracker {
     pub visibility_mode: TrackerVisibilityMode,
     /// The current status of the subject.
     pub properties: ValueWrapper,
+}
+
+#[derive(Debug)]
+pub struct Tracker {
+    pub our_key: Arc<PublicKey>,
+    pub service: bool,
+    pub only_clear_events: bool,
+    pub hash: Option<HashAlgorithm>,
+    pub state: Arc<TrackerState>,
+}
+
+impl Clone for Tracker {
+    fn clone(&self) -> Self {
+        Self {
+            our_key: self.our_key.clone(),
+            service: self.service,
+            only_clear_events: self.only_clear_events,
+            hash: self.hash,
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl std::ops::Deref for Tracker {
+    type Target = TrackerState;
+    fn deref(&self) -> &TrackerState {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for Tracker {
+    fn deref_mut(&mut self) -> &mut TrackerState {
+        Arc::make_mut(&mut self.state)
+    }
 }
 
 #[derive(Default)]
@@ -90,56 +115,6 @@ impl From<&Metadata> for TrackerInit {
     }
 }
 
-impl BorshSerialize for Tracker {
-    fn serialize<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
-        BorshSerialize::serialize(&self.subject_metadata, writer)?;
-        BorshSerialize::serialize(&self.governance_id, writer)?;
-        BorshSerialize::serialize(&self.namespace, writer)?;
-        BorshSerialize::serialize(&self.genesis_gov_version, writer)?;
-        BorshSerialize::serialize(&self.visibility_mode, writer)?;
-        BorshSerialize::serialize(&self.properties, writer)?;
-
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for Tracker {
-    fn deserialize_reader<R: std::io::Read>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        // Deserialize the persisted fields
-        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
-        let governance_id = DigestIdentifier::deserialize_reader(reader)?;
-        let namespace = Namespace::deserialize_reader(reader)?;
-        let genesis_gov_version = u64::deserialize_reader(reader)?;
-        let visibility_mode =
-            TrackerVisibilityMode::deserialize_reader(reader)?;
-        let properties = ValueWrapper::deserialize_reader(reader)?;
-
-        // Create a default/placeholder KeyPair for 'owner'
-        // This will be replaced by the actual owner during actor initialization
-        let our_key = Arc::new(PublicKey::default());
-        let hash = None;
-
-        Ok(Self {
-            service: false,
-            only_clear_events: false,
-            hash,
-            our_key,
-            subject_metadata,
-            governance_id,
-            namespace,
-            genesis_gov_version,
-            visibility_mode,
-            properties,
-        })
-    }
-}
-
 #[async_trait]
 impl Subject for Tracker {
     async fn update_sn(
@@ -158,7 +133,9 @@ impl Subject for Tracker {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 sn: self.subject_metadata.sn,
             })
-            .await
+            .await?;
+
+        Ok(())
     }
 
     async fn eol(
@@ -224,7 +201,7 @@ impl Subject for Tracker {
                 )))
                 .await?;
 
-            let _response = subject_register
+            let _ = subject_register
                 .ask(SubjectRegisterMessage::UpdateSubject {
                     new_owner,
                     old_owner: self.subject_metadata.owner.clone(),
@@ -291,47 +268,6 @@ impl Subject for Tracker {
         get_last_event(ctx).await
     }
 
-    fn apply_patch(
-        &mut self,
-        json_patch: ValueWrapper,
-    ) -> Result<(), ActorError> {
-        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
-            .map_err(|e| {
-                let error = SubjectError::PatchConversionFailed {
-                    details: e.to_string(),
-                };
-                error!(
-                    error = %e,
-                    subject_id = %self.subject_metadata.subject_id,
-                    "Failed to convert patch from JSON"
-                );
-                ActorError::Functional {
-                    description: error.to_string(),
-                }
-            })?;
-
-        patch(&mut self.properties.0, &patch_json).map_err(|e| {
-            let error = SubjectError::PatchApplicationFailed {
-                details: e.to_string(),
-            };
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                "Failed to apply patch to properties"
-            );
-            ActorError::Functional {
-                description: error.to_string(),
-            }
-        })?;
-
-        debug!(
-            subject_id = %self.subject_metadata.subject_id,
-            "Patch applied successfully"
-        );
-
-        Ok(())
-    }
-
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -372,14 +308,89 @@ impl Subject for Tracker {
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             let subject_db = self.build_subject_db(ctx).await?;
-            Self::publish_sink(
-                ctx,
-                SinkDataMessage::UpdateState(Box::new(subject_db)),
-            )
-            .await?;
+            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(
+                Box::new(subject_db),
+            )));
 
             self.update_sn(ctx).await?;
         }
+
+        Ok(())
+    }
+
+    fn our_key(&self) -> std::sync::Arc<ave_common::identity::PublicKey> {
+        self.our_key.clone()
+    }
+
+    async fn notify_reliable_sinks(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        data: DataToSink,
+    ) -> Result<(), ActorError> {
+        let gov_id = self.governance_id.to_string();
+        let manager_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/sink_manager",
+            gov_id
+        ));
+        match ctx.system().get_actor::<SinkManager>(&manager_path).await {
+            Ok(manager) => {
+                if let Err(e) = manager
+                    .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
+                    .await
+                {
+                    error!(error = %e, "Failed to notify SinkManager");
+                }
+            }
+            Err(e) => {
+                debug!(error = %e, path = %manager_path, "SinkManager not found");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TrackerState {
+    const fn is_full(&self) -> bool {
+        matches!(self.visibility_mode, TrackerVisibilityMode::Full)
+    }
+
+    fn apply_patch_inner(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError> {
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
+                );
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
+
+        patch(&mut self.properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
 
         Ok(())
     }
@@ -409,10 +420,6 @@ impl Tracker {
         };
 
         (stored_visibility, event_visibility)
-    }
-
-    const fn is_full(&self) -> bool {
-        matches!(self.visibility_mode, TrackerVisibilityMode::Full)
     }
 
     async fn record_visibility_event(
@@ -589,7 +596,7 @@ impl Tracker {
                 )))
                 .await?;
 
-            let _response = subject_register
+            let _ = subject_register
                 .ask(SubjectRegisterMessage::CreateSubject {
                     creator: self.subject_metadata.owner.clone(),
                     subject_id: self.subject_metadata.subject_id.clone(),
@@ -662,7 +669,7 @@ impl Tracker {
                 ctx,
                 &first,
                 hash,
-                Metadata::from(self.clone()),
+                Metadata::from(&*self),
             )
             .await
             {
@@ -693,7 +700,7 @@ impl Tracker {
                 first.get_issuer_event_request_timestamp();
             let event_request = first.get_event_request();
 
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: Some(self.governance_id.to_string()),
@@ -713,6 +720,7 @@ impl Tracker {
                         &first.protocols,
                         &self.properties.0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 event_request,
             )
@@ -745,7 +753,7 @@ impl Tracker {
                 ctx,
                 Self::verify_new_ledger_event_args(
                     &event,
-                    Metadata::from(self.clone()),
+                    Metadata::from(&*self),
                     actual_ledger_hash,
                     last_data,
                     hash,
@@ -786,6 +794,12 @@ impl Tracker {
                                 event.gov_version,
                             )
                             .await?;
+                            remove_verified_transfer(
+                                ctx,
+                                &self.governance_id,
+                                &self.subject_metadata.subject_id,
+                            )
+                            .await?;
                         }
                         EventRequest::Reject(..) => {
                             self.reject(ctx, event.gov_version).await?;
@@ -824,7 +838,7 @@ impl Tracker {
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: Some(self.governance_id.to_string()),
@@ -844,6 +858,7 @@ impl Tracker {
                         &event.protocols,
                         &self.properties.0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 event_request,
             )
@@ -870,6 +885,7 @@ pub enum TrackerMessage {
     GetLastLedger,
     PurgeStorage,
     UpdateLedger { events: Vec<Ledger> },
+    GetSinkEvents { from_sn: u64, batch_size: usize },
 }
 
 impl Message for TrackerMessage {}
@@ -886,7 +902,7 @@ pub enum TrackerResponse {
     LastLedger {
         ledger_event: Box<Option<Ledger>>,
     },
-    Sn(u64),
+    SinkEvents(Vec<DataToSink>),
     Ok,
 }
 impl Response for TrackerResponse {}
@@ -896,6 +912,9 @@ impl Actor for Tracker {
     type Event = Ledger;
     type Message = TrackerMessage;
     type Response = TrackerResponse;
+    type SinkEvent = SubjectSinkEvent;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -929,55 +948,6 @@ impl Actor for Tracker {
             return Ok(());
         }
 
-        let our_key = self.our_key.clone();
-
-        if self.subject_metadata.active {
-            let Some(ext_db): Option<Arc<ExternalDB>> =
-                ctx.system().get_helper("ext_db").await
-            else {
-                error!("External database helper not found");
-                return Err(ActorError::Helper {
-                    name: "ext_db".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
-
-            let Some(ave_sink): Option<AveSink> =
-                ctx.system().get_helper("sink").await
-            else {
-                error!("Sink helper not found");
-                return Err(ActorError::Helper {
-                    name: "sink".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
-
-            let sink_actor = match ctx
-                .create_child(
-                    "sink_data",
-                    SinkData {
-                        public_key: our_key.to_string(),
-                    },
-                )
-                .await
-            {
-                Ok(actor) => actor,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to create sink_data child"
-                    );
-                    return Err(e);
-                }
-            };
-            let sink =
-                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-            ctx.system().run_sink(sink).await;
-
-            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-            ctx.system().run_sink(sink).await;
-        }
-
         Ok(())
     }
 }
@@ -986,7 +956,7 @@ impl Actor for Tracker {
 impl Handler<Self> for Tracker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: TrackerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerResponse, ActorError> {
@@ -1002,9 +972,9 @@ impl Handler<Self> for Tracker {
                     ledger_event: Box::new(ledger_event),
                 })
             }
-            TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
-                Box::new(Metadata::from(self.clone())),
-            )),
+            TrackerMessage::GetMetadata => {
+                Ok(TrackerResponse::Metadata(Box::new(Metadata::from(&*self))))
+            }
             TrackerMessage::PurgeStorage => {
                 purge_storage(ctx).await?;
 
@@ -1015,6 +985,14 @@ impl Handler<Self> for Tracker {
                 );
 
                 Ok(TrackerResponse::Ok)
+            }
+            TrackerMessage::GetSinkEvents {
+                from_sn,
+                batch_size,
+            } => {
+                let events =
+                    self.get_sink_events(ctx, from_sn, batch_size).await?;
+                Ok(TrackerResponse::SinkEvents(events))
             }
             TrackerMessage::UpdateLedger { events } => {
                 let events_count = events.len();
@@ -1049,46 +1027,23 @@ impl Handler<Self> for Tracker {
     }
 
     async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        let event_for_publish = event.clone();
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 error = %e,
                 subject_id = %self.subject_metadata.subject_id,
                 sn = self.subject_metadata.sn,
                 "Failed to persist event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
 
-        if let Err(e) = ctx.publish_event(event.clone()).await {
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                sn = self.subject_metadata.sn,
-                "Failed to publish event"
-            );
-            emit_fail(ctx, e).await;
-        } else {
-            debug!(
-                subject_id = %self.subject_metadata.subject_id,
-                sn = self.subject_metadata.sn,
-                "Event persisted and published successfully"
-            );
-        }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
+        ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
+        debug!(
             subject_id = %self.subject_metadata.subject_id,
             sn = self.subject_metadata.sn,
-            error = %error,
-            "Child fault in tracker"
+            "Event persisted and published successfully"
         );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
@@ -1104,15 +1059,7 @@ pub struct InitParamsTracker {
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
     type InitParams = InitParamsTracker;
-
-    fn update(&mut self, state: Self) {
-        self.properties = state.properties;
-        self.visibility_mode = state.visibility_mode;
-        self.governance_id = state.governance_id;
-        self.namespace = state.namespace;
-        self.genesis_gov_version = state.genesis_gov_version;
-        self.subject_metadata = state.subject_metadata;
-    }
+    type State = TrackerState;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let init = params.data.unwrap_or_default();
@@ -1122,16 +1069,23 @@ impl PersistentActor for Tracker {
             only_clear_events: params.only_clear_events,
             hash: Some(params.hash),
             our_key: params.public_key,
-            subject_metadata: init.subject_metadata,
-            properties: init.properties,
-            genesis_gov_version: init.genesis_gov_version,
-            governance_id: init.governance_id,
-            namespace: init.namespace,
-            visibility_mode: TrackerVisibilityMode::Full,
+            state: Arc::new(TrackerState {
+                subject_metadata: init.subject_metadata,
+                properties: init.properties,
+                genesis_gov_version: init.genesis_gov_version,
+                governance_id: init.governance_id,
+                namespace: init.namespace,
+                visibility_mode: TrackerVisibilityMode::Full,
+            }),
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match &event.protocols {
             Protocols::Create {
                 validation,
@@ -1141,7 +1095,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker create apply"
                     );
@@ -1155,14 +1109,14 @@ impl PersistentActor for Tracker {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
-                    self.subject_metadata = SubjectMetadata::new(metadata);
-                    self.properties = metadata.properties.clone();
-                    self.visibility_mode = TrackerVisibilityMode::Full;
+                    inner.subject_metadata = SubjectMetadata::new(metadata);
+                    inner.properties = metadata.properties.clone();
+                    inner.visibility_mode = TrackerVisibilityMode::Full;
 
                     debug!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
-                        sn = self.subject_metadata.sn,
+                        subject_id = %inner.subject_metadata.subject_id,
+                        sn = inner.subject_metadata.sn,
                         "Applied create event"
                     );
                 } else {
@@ -1173,7 +1127,7 @@ impl PersistentActor for Tracker {
                     return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
                 }
 
-                return Ok(());
+                return Ok(state);
             }
             Protocols::TrackerFactFull {
                 evaluation,
@@ -1184,7 +1138,7 @@ impl PersistentActor for Tracker {
                 else {
                     error!(
                         event_type = "Fact",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker fact apply"
                     );
@@ -1196,17 +1150,17 @@ impl PersistentActor for Tracker {
                 };
 
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
-                    if self.is_full() {
-                        self.apply_patch(eval_res.patch)?;
+                    if inner.is_full() {
+                        inner.apply_patch_inner(eval_res.patch)?;
                         debug!(
                             event_type = "Fact",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Applied fact event with patch"
                         );
                     } else {
                         debug!(
                             event_type = "Fact",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Tracker is not in full mode, fact patch not applied"
                         );
                     }
@@ -1214,11 +1168,11 @@ impl PersistentActor for Tracker {
             }
             Protocols::TrackerFactOpaque { evaluation, .. } => {
                 if evaluation.is_ok() {
-                    self.visibility_mode = TrackerVisibilityMode::Opaque;
+                    inner.visibility_mode = TrackerVisibilityMode::Opaque;
                 }
                 debug!(
                     event_type = "FactOpaque",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied tracker opaque fact event"
                 );
             }
@@ -1232,7 +1186,7 @@ impl PersistentActor for Tracker {
                 else {
                     error!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker transfer apply"
                     );
@@ -1244,23 +1198,23 @@ impl PersistentActor for Tracker {
                 };
 
                 if evaluation.evaluator_response_ok().is_some() {
-                    if self.is_full()
+                    if inner.is_full()
                         && let Some(eval_res) =
                             evaluation.evaluator_response_ok()
                     {
-                        self.apply_patch(eval_res.patch)?;
-                    } else if !self.is_full() {
+                        inner.apply_patch_inner(eval_res.patch)?;
+                    } else if !inner.is_full() {
                         debug!(
                             event_type = "Transfer",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Tracker is not in full mode, transfer patch not applied"
                         );
                     }
-                    self.subject_metadata.new_owner =
+                    inner.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         new_owner = %transfer_request.new_owner,
                         "Applied transfer event"
                     );
@@ -1271,7 +1225,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker confirm apply"
                     );
@@ -1282,19 +1236,19 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                if let Some(new_owner) = self.subject_metadata.new_owner.take()
+                if let Some(new_owner) = inner.subject_metadata.new_owner.take()
                 {
-                    self.subject_metadata.owner = new_owner.clone();
+                    inner.subject_metadata.owner = new_owner.clone();
                     debug!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         new_owner = %new_owner,
                         "Applied confirm event"
                     );
                 } else {
                     error!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         "New owner is None in confirm event"
                     );
                     return Err(ActorError::Functional {
@@ -1308,7 +1262,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "Reject",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker reject apply"
                     );
@@ -1319,10 +1273,10 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                self.subject_metadata.new_owner = None;
+                inner.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied reject event"
                 );
             }
@@ -1331,7 +1285,7 @@ impl PersistentActor for Tracker {
                 } else {
                     error!(
                         event_type = "EOL",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for tracker eol apply"
                     );
@@ -1341,16 +1295,16 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                self.subject_metadata.active = false;
+                inner.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied EOL event"
                 );
             }
             _ => {
                 error!(
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Invalid protocol data for Tracker"
                 );
                 return Err(ActorError::Functional {
@@ -1361,11 +1315,19 @@ impl PersistentActor for Tracker {
             }
         }
 
-        self.subject_metadata.sn += 1;
-        self.subject_metadata.prev_ledger_event_hash =
+        inner.subject_metadata.sn += 1;
+        inner.subject_metadata.prev_ledger_event_hash =
             event.prev_ledger_event_hash.clone();
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        self.state.clone()
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state = state;
     }
 }
 

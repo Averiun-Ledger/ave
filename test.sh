@@ -35,9 +35,9 @@ PARALLEL_JOBS="${PARALLEL_JOBS:-$(nproc)}"
 read -r -d '' MATRIX <<'EOF'
 ave-identity|--all-features
 ave-network|--all-features
-ave-core|--no-default-features --features sqlite,ext-sqlite,test;--no-default-features --features rocksdb,ext-sqlite,test
-ave-bridge|--no-default-features --features sqlite,ext-sqlite,test;--no-default-features --features rocksdb,ext-sqlite,test
-ave-http|--no-default-features --features sqlite,ext-sqlite,prometheus,test;--no-default-features --features rocksdb,ext-sqlite,prometheus,test
+ave-core|--no-default-features --features rocksdb,ext-sqlite,test;--no-default-features --features sqlite,ext-sqlite,test
+ave-bridge|--no-default-features --features rocksdb,ext-sqlite,test;--no-default-features --features sqlite,ext-sqlite,test
+ave-http|--no-default-features --features rocksdb,ext-sqlite,prometheus,test;--no-default-features --features sqlite,ext-sqlite,prometheus,test
 EOF
 
 # Global state

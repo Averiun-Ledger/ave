@@ -7,7 +7,7 @@ use crate::{
     governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
     model::common::{
-        emit_fail,
+        crash_system,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
         purge_storage,
         subject::get_metadata,
@@ -183,12 +183,11 @@ impl ApprPersist {
 
         let subject_id = request.content().subject_id.clone();
         if self.node_key == *self.our_key {
-            let subject_id = ctx.path().parent().key();
             let approval_actor = ctx
                 .system()
                 .get_actor::<Approval>(&ActorPath::from(&format!(
                     "/user/request/{}/approval",
-                    subject_id
+                    ctx.path().parent().key()
                 )))
                 .await;
             if let Ok(approval_actor) = approval_actor {
@@ -225,7 +224,7 @@ impl ApprPersist {
                 })
                 .await
             {
-                return Err(emit_fail(ctx, e).await);
+                return Err(crash_system(ctx, e).await);
             };
         }
 
@@ -342,6 +341,9 @@ impl Actor for ApprPersist {
     type Event = ApprPersistEvent;
     type Message = ApprPersistMessage;
     type Response = ApprPersistResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -354,9 +356,13 @@ impl Actor for ApprPersist {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("approver", Some(prefix.clone()), false, ctx)
+            .init_store(
+                "approver",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
@@ -373,7 +379,7 @@ impl Actor for ApprPersist {
 impl Handler<Self> for ApprPersist {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ApprPersistMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ApprPersistResponse, ActorError> {
@@ -494,7 +500,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to send approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     debug!(
@@ -533,7 +539,7 @@ impl Handler<Self> for ApprPersist {
                                     error = %e,
                                     "Failed to send approval response"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
 
                             ApprovalState::Accepted
@@ -584,7 +590,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to resend approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
 
                     debug!(
@@ -644,7 +650,7 @@ impl Handler<Self> for ApprPersist {
                                 error = %e,
                                 "Failed to check governance"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     };
 
@@ -664,7 +670,7 @@ impl Handler<Self> for ApprPersist {
                                 error = %e,
                                 "Failed to send approval abort response"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
 
                         return Ok(ApprPersistResponse::Ok);
@@ -705,7 +711,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to send approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     debug!(
@@ -726,7 +732,7 @@ impl Handler<Self> for ApprPersist {
                         let e = ActorError::FunctionalCritical {
                             description: "Can not get state".to_owned(),
                         };
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     let response = if ApprovalState::Accepted == state {
@@ -749,7 +755,7 @@ impl Handler<Self> for ApprPersist {
                                 description: "Can not get approve request"
                                     .to_owned(),
                             };
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         };
 
                     if let Err(e) = self
@@ -767,7 +773,7 @@ impl Handler<Self> for ApprPersist {
                             error = %e,
                             "Failed to resend approval response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
 
                     debug!(
@@ -787,14 +793,9 @@ impl Handler<Self> for ApprPersist {
         event: ApprPersistEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(error = %e, "Failed to persist event");
-            emit_fail(ctx, e).await;
-        };
-
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(error = %e, "Failed to publish event");
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
     }
 }
@@ -804,13 +805,7 @@ impl Handler<Self> for ApprPersist {
 impl PersistentActor for ApprPersist {
     type Persistence = LightPersistence;
     type InitParams = InitApprPersist;
-
-    fn update(&mut self, state: Self) {
-        self.request_id = state.request_id;
-        self.version = state.version;
-        self.state = state.state;
-        self.request = state.request;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let Self::InitParams {
@@ -834,7 +829,12 @@ impl PersistentActor for ApprPersist {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             ApprPersistEvent::ChangeState { state, .. } => {
                 debug!(
@@ -842,7 +842,7 @@ impl PersistentActor for ApprPersist {
                     new_state = ?state,
                     "Approval state changed"
                 );
-                self.state = Some(state.clone());
+                inner.state = Some(state.clone());
             }
             ApprPersistEvent::SafeState {
                 request,
@@ -858,14 +858,26 @@ impl PersistentActor for ApprPersist {
                     new_state = ?state,
                     "Approval state saved"
                 );
-                self.version = *version;
-                self.request_id.clone_from(request_id);
-                self.request = Some(*request.clone());
-                self.state = Some(state.clone());
+                inner.version = *version;
+                inner.request_id.clone_from(request_id);
+                inner.request = Some(*request.clone());
+                inner.state = Some(state.clone());
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.request_id.clone_from(&state.request_id);
+        self.version = state.version;
+        self.state.clone_from(&state.state);
+        self.request.clone_from(&state.request);
     }
 }
 

@@ -16,7 +16,7 @@ use crate::{
     governance::{data::GovernanceData, model::Schema},
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
-        emit_fail,
+        crash_system,
         node::{SignTypesNode, get_sign},
     },
     subject::RequestSubjectData,
@@ -37,7 +37,7 @@ use ave_network::ComunicateInfo;
 use json_patch::diff;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 
@@ -523,6 +523,9 @@ impl Actor for EvalWorker {
     type Event = ();
     type Message = EvalWorkerMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -538,7 +541,7 @@ impl NotPersistentActor for EvalWorker {}
 impl Handler<Self> for EvalWorker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvalWorkerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -564,7 +567,7 @@ impl Handler<Self> for EvalWorker {
                                 error = %e,
                                 "Failed to create evaluation response"
                             );
-                            return Err(emit_fail(
+                            return Err(crash_system(
                                 ctx,
                                 ActorError::FunctionalCritical {
                                     description: e.to_string(),
@@ -588,7 +591,7 @@ impl Handler<Self> for EvalWorker {
                                 error = %e,
                                 "Failed to send response to evaluation actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
 
                         debug!(
@@ -647,7 +650,7 @@ impl Handler<Self> for EvalWorker {
                             }
                             return Err(e);
                         } else {
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                 };
@@ -670,7 +673,7 @@ impl Handler<Self> for EvalWorker {
                                 error = %e,
                                 "Failed to build error response"
                             );
-                            return Err(emit_fail(
+                            return Err(crash_system(
                                 ctx,
                                 ActorError::FunctionalCritical {
                                     description: e.to_string(),
@@ -688,7 +691,7 @@ impl Handler<Self> for EvalWorker {
                                 error = %e,
                                 "Internal error during evaluation"
                             );
-                            return Err(emit_fail(
+                            return Err(crash_system(
                                 ctx,
                                 ActorError::FunctionalCritical {
                                     description: e.to_string(),
@@ -731,7 +734,7 @@ impl Handler<Self> for EvalWorker {
                         error = %e,
                         "Failed to send response to network"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 };
 
                 debug!(
@@ -749,22 +752,5 @@ impl Handler<Self> for EvalWorker {
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            governance_id = %self.governance_id,
-            gov_version = self.gov_version,
-            sn = self.sn,
-            node_key = %self.node_key,
-            error = %error,
-            "Child fault in evaluation worker"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

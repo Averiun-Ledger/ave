@@ -11,7 +11,7 @@ use crate::{
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::{
         common::{
-            check_quorum_signers, emit_fail, get_actual_roles_register,
+            check_quorum_signers, crash_system, get_actual_roles_register,
             get_validation_roles_register,
             node::{SignTypesNode, get_sign},
         },
@@ -45,7 +45,7 @@ use json_patch::{Patch, patch};
 use std::collections::BTreeSet;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 
@@ -1096,6 +1096,9 @@ impl Actor for ValiWorker {
     type Event = ();
     type Message = ValiWorkerMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1111,7 +1114,7 @@ impl NotPersistentActor for ValiWorker {}
 impl Handler<Self> for ValiWorker {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ValiWorkerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -1131,7 +1134,7 @@ impl Handler<Self> for ValiWorker {
                             if matches!(e, ValidatorError::OutOfVersion) {
                                 ValidationRes::Reboot
                             } else {
-                                return Err(emit_fail(
+                                return Err(crash_system(
                                     ctx,
                                     ActorError::FunctionalCritical {
                                         description: e.to_string(),
@@ -1155,7 +1158,7 @@ impl Handler<Self> for ValiWorker {
                             error = %e,
                             "Failed to sign validator response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -1227,7 +1230,7 @@ impl Handler<Self> for ValiWorker {
 
                             return Err(e);
                         } else {
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                 };
@@ -1247,7 +1250,7 @@ impl Handler<Self> for ValiWorker {
                                     "Internal error during validation"
                                 );
 
-                                return Err(emit_fail(
+                                return Err(crash_system(
                                     ctx,
                                     ActorError::FunctionalCritical {
                                         description: e.to_string(),
@@ -1277,7 +1280,7 @@ impl Handler<Self> for ValiWorker {
                             error = %e,
                             "Failed to sign validation response"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -1311,7 +1314,7 @@ impl Handler<Self> for ValiWorker {
                         error = %e,
                         "Failed to send response to network"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 } else {
                     debug!(
                         msg_type = "NetworkRequest",
@@ -1328,22 +1331,5 @@ impl Handler<Self> for ValiWorker {
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            node_key = %self.node_key,
-            governance_id = %self.governance_id,
-            gov_version = self.gov_version,
-            sn = self.sn,
-            error = %error,
-            "Child fault in validation worker"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

@@ -12,8 +12,8 @@ use ave_actors::{RocksDbManager, RocksDbStore};
 
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
+use std::sync::Arc;
 
-#[derive(Clone)]
 pub enum Database {
     #[cfg(feature = "rocksdb")]
     RocksDb(RocksDbManager),
@@ -26,6 +26,20 @@ impl Database {
         config: &AveInternalDBConfig,
         spec: Option<MachineSpec>,
     ) -> Result<Self, StoreError> {
+        // Passive permission check before opening the database
+        #[cfg(feature = "rocksdb")]
+        #[allow(irrefutable_let_patterns)]
+        if let AveInternalDBFeatureConfig::Rocksdb { path } = &config.db {
+            check_dir_writable(path)
+                .map_err(|e| StoreError::CreateStore { reason: e })?;
+        }
+        #[cfg(feature = "sqlite")]
+        #[allow(irrefutable_let_patterns)]
+        if let AveInternalDBFeatureConfig::Sqlite { path } = &config.db {
+            check_dir_writable(path)
+                .map_err(|e| StoreError::CreateStore { reason: e })?;
+        }
+
         match &config.db {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { path } => {
@@ -41,6 +55,52 @@ impl Database {
             }
         }
     }
+}
+
+/// Check that a directory exists and is writable.
+/// If it does not exist, check the nearest existing ancestor.
+fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
+    let target = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!(
+                "'{}' exists but is not a directory",
+                path.display()
+            ));
+        }
+        path
+    } else {
+        let mut ancestor = path;
+        while !ancestor.exists() {
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => {
+                    return Err(format!(
+                        "'{}' does not exist and has no existing parent",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if !ancestor.is_dir() {
+            return Err(format!(
+                "ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            ));
+        }
+        ancestor
+    };
+
+    let test_file = target.join(".ave_write_test");
+    match std::fs::File::create(&test_file) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(e) => {
+            return Err(format!("'{}' is not writable: {e}", target.display()));
+        }
+    }
+
+    Ok(())
 }
 
 impl DbManager<DbCollection, DbCollection> for Database {
@@ -82,13 +142,40 @@ impl DbManager<DbCollection, DbCollection> for Database {
         }
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         match self {
             #[cfg(feature = "rocksdb")]
             Database::RocksDb(manager) => manager.stop(),
             #[cfg(feature = "sqlite")]
             Self::SQLite(manager) => manager.stop(),
         }
+    }
+}
+
+impl DbManager<DbCollection, DbCollection> for Arc<Database> {
+    fn create_collection(
+        &self,
+        name: &str,
+        prefix: &str,
+    ) -> Result<DbCollection, StoreError> {
+        self.as_ref().create_collection(name, prefix)
+    }
+
+    fn create_state(
+        &self,
+        name: &str,
+        prefix: &str,
+    ) -> Result<DbCollection, StoreError> {
+        self.as_ref().create_state(name, prefix)
+    }
+
+    fn stop(self) -> Result<(), StoreError>
+    where
+        Self: Sized,
+    {
+        // The real shutdown is performed on the owned `Database` after removing
+        // this helper from the actor system.
+        Ok(())
     }
 }
 
@@ -230,7 +317,7 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Gets database
-        let db = match ctx.system().get_helper::<Database>("store").await {
+        let db = match ctx.system().get_helper::<Arc<Database>>("store").await {
             Some(db) => db,
             None => {
                 return Err(ActorError::Helper {
@@ -258,7 +345,8 @@ where
         };
 
         // Start store
-        self.start_store(name, prefix, ctx, db, encrypt_key).await?;
+        self.start_store(name, prefix.as_deref(), ctx, db.clone(), encrypt_key)
+            .await?;
         Ok(())
     }
 }

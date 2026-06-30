@@ -217,86 +217,86 @@ mod tests {
     use crate::keys::{DSA, Ed25519Signer};
 
     #[test]
-    fn test_signature_to_string() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let message = b"Hello, World!";
-
-        let signature = signer.sign(message).unwrap();
-        let sig_str = signature.to_string();
-
-        // Should be able to parse back
-        let parsed: SignatureIdentifier = sig_str.parse().unwrap();
-        assert_eq!(signature, parsed);
-    }
-
-    #[test]
-    fn test_signature_verify_wrong_message() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let message = b"Hello, World!";
-
-        let signature = signer.sign(message).unwrap();
-        let public_key = signer.public_key();
-
-        // Should fail with wrong message
-        let result = signature.verify(b"Wrong message", public_key.as_bytes());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_signature_bytes_roundtrip() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let message = b"Test data";
-
-        let signature = signer.sign(message).unwrap();
-        let bytes = signature.to_bytes();
-
-        // First byte should be algorithm identifier 'E'
-        assert_eq!(bytes[0], b'E');
-
-        // Should parse back correctly
-        let parsed = SignatureIdentifier::from_bytes(&bytes).unwrap();
-        assert_eq!(signature, parsed);
-    }
-
-    #[test]
-    fn test_algorithm_detection() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let message = b"Test data";
-
-        let signature = signer.sign(message).unwrap();
-        let sig_str = signature.to_string();
-
-        // Parse should automatically detect Ed25519
-        let parsed: SignatureIdentifier = sig_str.parse().unwrap();
-        assert_eq!(parsed.algorithm(), DSAlgorithm::Ed25519);
-    }
-
-    #[test]
-    fn test_serde_serialization() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let message = b"Test serialization";
-
-        let signature = signer.sign(message).unwrap();
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&signature).unwrap();
-
-        // Deserialize back
-        let deserialized: SignatureIdentifier =
-            serde_json::from_str(&json).unwrap();
-
-        assert_eq!(signature, deserialized);
-    }
-
-    #[test]
-    fn test_invalid_signature_length() {
-        // Create an invalid signature with wrong length
-        let invalid_sig = SignatureIdentifier::new(
-            DSAlgorithm::Ed25519,
-            vec![0u8; 32], // Only 32 bytes instead of 64
+    fn test_signature_identifier_from_str_invalid_algorithm() {
+        let err = "Xabc123".parse::<SignatureIdentifier>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::UnknownAlgorithm(_)),
+            "expected UnknownAlgorithm, got {:?}",
+            err
         );
+    }
 
-        // SignatureIdentifier::new should catch this
-        assert!(invalid_sig.is_err());
+    #[test]
+    fn test_signature_identifier_from_str_invalid_base64() {
+        let err = "E!!!".parse::<SignatureIdentifier>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::Base64DecodeError(_)),
+            "expected Base64DecodeError, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_from_bytes_empty() {
+        let err = SignatureIdentifier::from_bytes(&[]).unwrap_err();
+        match err {
+            CryptoError::InvalidSignatureFormat(msg) => {
+                assert_eq!(msg, "Empty bytes");
+            }
+            other => panic!("expected InvalidSignatureFormat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_from_bytes_invalid_length() {
+        // Valid identifier 'E' (0x45) for Ed25519, but wrong signature length
+        let err =
+            SignatureIdentifier::from_bytes(&[0x45, 1, 2, 3]).unwrap_err();
+        match err {
+            CryptoError::InvalidDataLength { expected, actual } => {
+                assert_eq!(expected, 65); // 1 prefix + 64 signature
+                assert_eq!(actual, 4);
+            }
+            other => panic!("expected InvalidDataLength, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_invalid_public_key_length() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let message = b"Hello";
+        let sig = signer.sign(message).unwrap();
+        let err = sig.verify(message, &[1, 2, 3]).unwrap_err();
+        match err {
+            CryptoError::InvalidPublicKey(msg) => {
+                assert!(msg.contains("Invalid public key length"));
+            }
+            other => panic!("expected InvalidPublicKey, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_invalid_signature_length() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let message = b"Hello";
+        let sig = signer.sign(message).unwrap();
+
+        // Serialize via Borsh, then manually truncate the inner bytes to 32.
+        // Borsh layout: [algorithm (1), vec_len (4 u32 little-endian), sig_bytes (64)] = 69 bytes.
+        let mut bytes = borsh::to_vec(&sig).unwrap();
+        bytes[1..5].copy_from_slice(&(32u32).to_le_bytes());
+        bytes.truncate(1 + 4 + 32);
+        let corrupted: SignatureIdentifier = borsh::from_slice(&bytes).unwrap();
+
+        let public_key = signer.public_key();
+        let err = corrupted
+            .verify(message, public_key.as_bytes())
+            .unwrap_err();
+        match err {
+            CryptoError::InvalidSignatureFormat(msg) => {
+                assert!(msg.contains("Invalid signature length"));
+            }
+            other => panic!("expected InvalidSignatureFormat, got {:?}", other),
+        }
     }
 }

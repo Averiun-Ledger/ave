@@ -7,7 +7,7 @@ use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
-    auth::{Auth, AuthMessage},
+    auth::{SubjectAccess, SubjectAccessMessage},
     helpers::network::service::NetworkSender,
     model::event::LedgerSeal,
     node::SubjectData,
@@ -142,11 +142,14 @@ pub async fn try_to_update<A>(
 where
     A: Actor + Handler<A>,
 {
-    let auth_path = ActorPath::from("/user/node/auth");
-    let auth_actor = ctx.system().get_actor::<Auth>(&auth_path).await?;
+    let access_path = ActorPath::from("/user/node/auth");
+    let access_actor = ctx
+        .system()
+        .get_actor::<SubjectAccess>(&access_path)
+        .await?;
 
-    auth_actor
-        .tell(AuthMessage::Update {
+    access_actor
+        .tell(SubjectAccessMessage::Update {
             subject_id,
             objective,
             strict: false,
@@ -170,6 +173,7 @@ pub async fn update_ledger_network(
         actual_sn: Some(data.sn),
         target_sn: None,
         subject_id: data.subject_id,
+        already_verified_transfer_sn: None,
     };
 
     let info = ComunicateInfo {

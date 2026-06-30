@@ -238,47 +238,22 @@ mod tests {
     }
 
     #[test]
-    fn test_public_key_serde() {
-        let signer = Ed25519Signer::generate().unwrap();
-
-        let public_key =
-            PublicKey::new(DSAlgorithm::Ed25519, signer.public_key_bytes())
-                .unwrap();
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&public_key).unwrap();
-
-        // Deserialize back
-        let deserialized: PublicKey = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(public_key, deserialized);
+    fn test_public_key_from_str_invalid_algorithm() {
+        let err = "Xabc123".parse::<PublicKey>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::UnknownAlgorithm(_)),
+            "expected UnknownAlgorithm, got {:?}",
+            err
+        );
     }
 
     #[test]
-    fn test_default_public_key() {
-        let default_key = PublicKey::default();
-
-        // Should have Ed25519 algorithm
-        assert_eq!(default_key.algorithm(), DSAlgorithm::Ed25519);
-
-        // Should have empty bytes
-        assert_eq!(default_key.as_bytes().len(), 0);
-
-        // Should be marked as empty
-        assert!(default_key.is_empty());
-    }
-
-    #[test]
-    fn test_is_empty() {
-        // Default key should be empty
-        let empty_key = PublicKey::default();
-        assert!(empty_key.is_empty());
-
-        // Real key should not be empty
-        let signer = Ed25519Signer::generate().unwrap();
-        let real_key =
-            PublicKey::new(DSAlgorithm::Ed25519, signer.public_key_bytes())
-                .unwrap();
-        assert!(!real_key.is_empty());
+    fn test_public_key_from_str_invalid_base64() {
+        let err = "E!!!".parse::<PublicKey>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::Base64DecodeError(_)),
+            "expected Base64DecodeError, got {:?}",
+            err
+        );
     }
 }

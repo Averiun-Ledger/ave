@@ -14,19 +14,21 @@ use crate::{
 use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
-        UpdateSubjectQuery,
+        FirstEndEvents, GovQuery, SinkEventsQuery, SinkReplayRequest,
+        SubjectQuery, UpdateSubjectQuery,
     },
-    response::{ApprovalEntry, RequestData, RequestInfoExtend},
+    response::{
+        ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
+    },
 };
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::ApprovalStateRes,
+        bridge::request::{ApprovalStateRes, SinksQuery},
         response::{
             GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
             RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
-            SubjectDB, SubjsData, TransferSubject,
+            SinkInfo, SinkStatusInfo, SubjectDB, SubjsData, TransferSubject,
         },
     },
     http::ProxyConfig,
@@ -450,123 +452,463 @@ pub async fn get_pending_transfers(
     Ok(Json(bridge.get_pending_transfers().await?))
 }
 
+///////// Sink
+////////////////////////////
+
+/// List all sinks
+///
+/// Returns a complete view of every sink instance known to the node,
+/// including configuration, runtime state and whether it is currently running.
+/// Supports filtering by name, target type, schema, governance and status.
+#[utoipa::path(
+    get,
+    path = "/sinks",
+    operation_id = "getSinks",
+    tag = "Sink",
+    params(SinksQuery),
+    responses(
+        (status = 200, description = "List of sink information", body = [SinkInfo]),
+        (status = 400, description = "Invalid query parameter", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sinks(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Query(query): Query<SinksQuery>,
+) -> Result<Json<Vec<SinkInfo>>, HttpError> {
+    Ok(Json(bridge.get_sinks(query).await?))
+}
+
+/// Get sinks status
+///
+/// Quick view of all configured sinks, showing only the context needed to
+/// identify blocked sinks and their current state.
+#[utoipa::path(
+    get,
+    path = "/sinks/status",
+    operation_id = "getSinksStatus",
+    tag = "Sink",
+    responses(
+        (status = 200, description = "List of configured sink statuses", body = [SinkStatusInfo]),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sinks_status(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<Vec<SinkStatusInfo>>, HttpError> {
+    Ok(Json(bridge.get_sinks_status().await?))
+}
+
+/// Unblock a sink
+///
+/// Unblocks a sink that was blocked due to a permanent error. Not available
+/// while the node is running in safe mode.
+#[utoipa::path(
+    post,
+    path = "/sinks/{sink_name}/unblock",
+    operation_id = "unblockSink",
+    tag = "Sink",
+    params(
+        ("sink_name" = String, Path, description = "Sink name")
+    ),
+    responses(
+        (status = 200, description = "Sink unblocked successfully"),
+        (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn unblock_sink(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(sink_name): Path<String>,
+) -> Result<StatusCode, HttpError> {
+    bridge.unblock_sink(sink_name).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete a sink's persisted cursors
+///
+/// Removes all cursors, lagging tracking and blocked state for the given sink.
+/// The sink manager is located through the sink registry, so only the sink
+/// name is required. Only available while the node is running in safe mode.
+#[utoipa::path(
+    delete,
+    path = "/sinks/{sink_name}",
+    operation_id = "deleteSinkCursors",
+    tag = "Sink",
+    params(
+        ("sink_name" = String, Path, description = "Sink name")
+    ),
+    responses(
+        (status = 200, description = "Sink cursors deleted successfully"),
+        (status = 404, description = "Sink not found in registry", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn delete_sink_cursors(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(sink_name): Path<String>,
+) -> Result<StatusCode, HttpError> {
+    bridge.delete_sink_cursors(sink_name).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Manually replay events to sinks
+///
+/// Resends events for the given subject/sink pairs starting at `from_sn` up to
+/// the last seen event. This is useful when a sink has lost a few events and
+/// the operator wants to recover them without deleting the entire cursor
+/// history. Only available while the node is not running in safe mode.
+#[utoipa::path(
+    post,
+    path = "/sinks/replay",
+    operation_id = "replaySinkEvents",
+    tag = "Sink",
+    request_body = SinkReplayRequest,
+    responses(
+        (status = 200, description = "Replay request processed", body = SinkReplayResponse),
+        (status = 400, description = "Invalid request or safe mode enabled", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn replay_sink_events(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Json(request): Json<SinkReplayRequest>,
+) -> Result<Json<SinkReplayResponse>, HttpError> {
+    Ok(Json(bridge.replay_sink_events(request).await?))
+}
+
 ///////// Auth
 ////////////////////////////
 
-/// Set witnesses for a subject
+/// Authorize a governance
 ///
-/// Configures the witness public keys authorized to approve events for the specified subject.
+/// Adds the specified subject to the governance allowlist and optionally
+/// configures sync peers (witnesses) for it.
 #[utoipa::path(
     put,
-    path = "/auth/{subject_id}",
-    operation_id = "putAuthSubject",
-    tag = "Authorization",
+    path = "/governances/{subject_id}/authorize",
+    operation_id = "authorizeGovernance",
+    tag = "SubjectAccess",
     params(
         ("subject_id" = String, Path, description = "Subject identifier")
     ),
     request_body = Vec<String>,
     responses(
-        (status = 200, description = "Witnesses set for subject", body = String),
+        (status = 200, description = "Governance authorized", body = String),
         (status = 400, description = "Invalid subject ID or public key", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
-pub async fn put_auth_subject(
+pub async fn authorize_governance(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Json(witnesses): Json<Vec<String>>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.put_auth_subject(subject_id, witnesses).await?))
+    Ok(Json(
+        bridge.authorize_governance(subject_id, witnesses).await?,
+    ))
 }
 
-/// List all authorized subjects
+/// Disauthorize a governance
 ///
-/// Returns the IDs of all subjects with authorization rules configured.
-#[utoipa::path(
-    get,
-    path = "/auth",
-    operation_id = "getAllAuthSubjects",
-    tag = "Authorization",
-    responses(
-        (status = 200, description = "List of subject IDs with authorization rules", body = Vec<String>),
-        (status = 500, description = "Internal server error", body = ErrorResponse),
-    ),
-    security(("api_key" = []))
-)]
-pub async fn get_all_auth_subjects(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Result<Json<Vec<String>>, HttpError> {
-    Ok(Json(bridge.get_all_auth_subjects().await?))
-}
-
-/// Get witnesses for a subject
-///
-/// Returns the set of witness public keys configured for the specified subject.
-#[utoipa::path(
-    get,
-    path = "/auth/{subject_id}",
-    operation_id = "getWitnessesSubject",
-    tag = "Authorization",
-    params(
-        ("subject_id" = String, Path, description = "Subject identifier")
-    ),
-    responses(
-        (status = 200, description = "Set of witness public keys", body = Vec<String>),
-        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
-        (status = 404, description = "Witnesses not found for subject", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse),
-    ),
-    security(("api_key" = []))
-)]
-pub async fn get_witnesses_subject(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<HashSet<String>>, HttpError> {
-    Ok(Json(bridge.get_witnesses_subject(subject_id).await?))
-}
-
-/// Delete authorization for a subject
-///
-/// Removes all authorization rules for the specified subject.
+/// Removes the specified subject from the governance allowlist.
 #[utoipa::path(
     delete,
-    path = "/auth/{subject_id}",
-    operation_id = "deleteAuthSubject",
-    tag = "Authorization",
+    path = "/governances/{subject_id}/authorize",
+    operation_id = "disauthorizeGovernance",
+    tag = "SubjectAccess",
     params(
         ("subject_id" = String, Path, description = "Subject identifier")
     ),
     responses(
-        (status = 200, description = "Authorization rules deleted", body = String),
+        (status = 200, description = "Governance disauthorized", body = String),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
-        (status = 404, description = "Subject not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
-pub async fn delete_auth_subject(
+pub async fn disauthorize_governance(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.delete_auth_subject(subject_id).await?))
+    Ok(Json(bridge.disauthorize_governance(subject_id).await?))
+}
+
+/// List all authorized governances
+///
+/// Returns the IDs of all governances currently in the allowlist.
+#[utoipa::path(
+    get,
+    path = "/governances/authorized",
+    operation_id = "getAuthorizedGovernances",
+    tag = "SubjectAccess",
+    responses(
+        (status = 200, description = "List of authorized governance IDs", body = Vec<String>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn authorized_governances(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<Vec<String>>, HttpError> {
+    Ok(Json(bridge.authorized_governances().await?))
+}
+
+/// Check if a governance is authorized
+///
+/// Returns whether the specified subject is in the governance allowlist.
+#[utoipa::path(
+    get,
+    path = "/governances/{subject_id}/authorized",
+    operation_id = "isGovernanceAuthorized",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Authorization status", body = bool),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn is_governance_authorized(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<bool>, HttpError> {
+    Ok(Json(bridge.is_governance_authorized(subject_id).await?))
+}
+
+/// Ban a tracker
+///
+/// Adds the specified subject to the tracker banlist, preventing its
+/// events from being accepted or synchronized.
+#[utoipa::path(
+    put,
+    path = "/trackers/{subject_id}/ban",
+    operation_id = "banTracker",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Tracker banned", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn ban_tracker(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.ban_tracker(subject_id).await?))
+}
+
+/// Unban a tracker
+///
+/// Removes the specified subject from the tracker banlist.
+#[utoipa::path(
+    put,
+    path = "/trackers/{subject_id}/unban",
+    operation_id = "unbanTracker",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Tracker unbanned", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn unban_tracker(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.unban_tracker(subject_id).await?))
+}
+
+/// List all banned trackers
+///
+/// Returns the IDs of all subjects currently in the tracker banlist.
+#[utoipa::path(
+    get,
+    path = "/trackers/banned",
+    operation_id = "getBannedTrackers",
+    tag = "SubjectAccess",
+    responses(
+        (status = 200, description = "List of banned tracker IDs", body = Vec<String>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn banned_trackers(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<Vec<String>>, HttpError> {
+    Ok(Json(bridge.banned_trackers().await?))
+}
+
+/// Check if a tracker is banned
+///
+/// Returns whether the specified subject is in the tracker banlist.
+#[utoipa::path(
+    get,
+    path = "/trackers/{subject_id}/banned",
+    operation_id = "isTrackerBanned",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Ban status", body = bool),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn is_tracker_banned(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<bool>, HttpError> {
+    Ok(Json(bridge.is_tracker_banned(subject_id).await?))
+}
+
+/// Get sync peers for a subject
+///
+/// Returns the set of sync peer public keys configured for the specified subject.
+#[utoipa::path(
+    get,
+    path = "/subjects/{subject_id}/sync-peers",
+    operation_id = "getSyncPeers",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Set of sync peer public keys", body = Vec<String>),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Sync peers not found for subject", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sync_peers(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<HashSet<String>>, HttpError> {
+    Ok(Json(bridge.get_sync_peers(subject_id).await?))
+}
+
+/// Add sync peers for a subject
+///
+/// Adds the given public keys as sync peers for the specified subject.
+#[utoipa::path(
+    put,
+    path = "/subjects/{subject_id}/sync-peers",
+    operation_id = "addSyncPeers",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    request_body = Vec<String>,
+    responses(
+        (status = 200, description = "Sync peers added", body = String),
+        (status = 400, description = "Invalid subject ID or public key", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn add_sync_peer(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+    Json(peers): Json<Vec<String>>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.add_sync_peer(subject_id, peers).await?))
+}
+
+/// Remove sync peers for a subject
+///
+/// Removes the given public keys from the sync peers of the specified subject.
+#[utoipa::path(
+    delete,
+    path = "/subjects/{subject_id}/sync-peers",
+    operation_id = "removeSyncPeers",
+    tag = "SubjectAccess",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    request_body = Vec<String>,
+    responses(
+        (status = 200, description = "Sync peers removed", body = String),
+        (status = 400, description = "Invalid subject ID or public key", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn remove_sync_peer(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+    Json(peers): Json<Vec<String>>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.remove_sync_peer(subject_id, peers).await?))
+}
+
+/// List subjects with sync peers
+///
+/// Returns the IDs of all subjects that have at least one sync peer configured.
+#[utoipa::path(
+    get,
+    path = "/sync-peers",
+    operation_id = "getSubjectsWithSyncPeers",
+    tag = "SubjectAccess",
+    responses(
+        (status = 200, description = "List of subject IDs with sync peers", body = Vec<String>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn subjects_with_sync_peers(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<Vec<String>>, HttpError> {
+    Ok(Json(bridge.subjects_with_sync_peers().await?))
 }
 
 /// Trigger subject update
 ///
 /// Triggers a manual synchronization update for the specified subject.
-/// By default the updater can use both explicitly authorized auth nodes and
+/// By default the updater can use both explicitly configured sync peers and
 /// witnesses discovered from governance. When `strict=true`, it only contacts
-/// nodes explicitly configured in the subject auth.
+/// nodes explicitly configured as sync peers for the subject.
 #[utoipa::path(
     post,
     path = "/update/{subject_id}",
     operation_id = "postUpdateSubject",
-    tag = "Authorization",
+    tag = "SubjectAccess",
     params(
         ("subject_id" = String, Path, description = "Subject identifier"),
         UpdateSubjectQuery
@@ -1042,10 +1384,23 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/request", get_all_request_state, require NodeRequest Get);
         $callback!($($args)*, get, "/request/{request_id}", get_request_state, require NodeRequest Get);
         $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
-        $callback!($($args)*, get, "/auth", get_all_auth_subjects, require NodeSubject Get);
-        $callback!($($args)*, put, "/auth/{subject_id}", put_auth_subject, require NodeSubject Put);
-        $callback!($($args)*, get, "/auth/{subject_id}", get_witnesses_subject, require NodeSubject Get);
-        $callback!($($args)*, delete, "/auth/{subject_id}", delete_auth_subject, require NodeSubject Delete);
+        $callback!($($args)*, get, "/sinks", get_sinks, require NodeSink Get);
+        $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
+        $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
+        $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);
+        $callback!($($args)*, post, "/sinks/replay", replay_sink_events, require NodeSink Post);
+        $callback!($($args)*, put, "/governances/{subject_id}/authorize", authorize_governance, require NodeSubject Put);
+        $callback!($($args)*, delete, "/governances/{subject_id}/authorize", disauthorize_governance, require NodeSubject Delete);
+        $callback!($($args)*, get, "/governances/authorized", authorized_governances, require NodeSubject Get);
+        $callback!($($args)*, get, "/governances/{subject_id}/authorized", is_governance_authorized, require NodeSubject Get);
+        $callback!($($args)*, put, "/trackers/{subject_id}/ban", ban_tracker, require NodeSubject Put);
+        $callback!($($args)*, put, "/trackers/{subject_id}/unban", unban_tracker, require NodeSubject Put);
+        $callback!($($args)*, get, "/trackers/banned", banned_trackers, require NodeSubject Get);
+        $callback!($($args)*, get, "/trackers/{subject_id}/banned", is_tracker_banned, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/sync-peers", get_sync_peers, require NodeSubject Get);
+        $callback!($($args)*, put, "/subjects/{subject_id}/sync-peers", add_sync_peer, require NodeSubject Put);
+        $callback!($($args)*, delete, "/subjects/{subject_id}/sync-peers", remove_sync_peer, require NodeSubject Delete);
+        $callback!($($args)*, get, "/sync-peers", subjects_with_sync_peers, require NodeSubject Get);
         $callback!($($args)*, post, "/update/{subject_id}", post_update_subject, require NodeSubject Post);
         $callback!($($args)*, delete, "/maintenance/subjects/{subject_id}", delete_subject, require NodeMaintenance Delete);
         $callback!($($args)*, post, "/manual-distribution/{subject_id}", post_manual_distribution, require NodeSubject Post);
@@ -1500,7 +1855,7 @@ mod tests {
             .route("/request", post(ok_handler).get(ok_handler))
             .route("/request/123", get(ok_handler))
             .route("/manual-distribution/abc", post(ok_handler))
-            .route("/auth/abc", delete(ok_handler))
+            .route("/governances/abc/authorize", delete(ok_handler))
             .route("/approval/abc", get(ok_handler).patch(ok_handler))
             .route("/peer-id", get(ok_handler))
             .layer(middleware::from_fn(permission_layer))

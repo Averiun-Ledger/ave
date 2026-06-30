@@ -4,14 +4,13 @@
 
 use ave_bridge::{
     AveExternalDBConfig, AveInternalDBConfig, HttpConfig, ProxyConfig,
-    SelfSignedCertConfig,
+    SelfSignedCertConfig, SinkConfigEntry, SinkTarget,
     auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -56,11 +55,18 @@ impl From<ave_bridge::MachineSpec> for MachineSpecHttp {
 
 impl From<ave_bridge::config::Config> for ConfigHttp {
     fn from(value: ave_bridge::config::Config) -> Self {
+        let sinks = SinkConfigHttp {
+            sinks: value
+                .sinks
+                .into_iter()
+                .map(SinkConfigEntryHttp::from)
+                .collect(),
+        };
         Self {
             node: AveConfigHttp::from(value.node),
             keys_path: value.keys_path.to_string_lossy().to_string(),
             logging: LoggingHttp::from(value.logging),
-            sink: SinkConfigHttp::from(value.sink),
+            sink: sinks,
             auth: AuthConfigHttp::from(value.auth),
             http: HttpConfigHttp::from(value.http),
         }
@@ -655,28 +661,65 @@ impl From<ave_bridge::LoggingOutput> for LoggingOutputHttp {
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkConfigHttp {
-    /// Map of sink configurations by name
-    pub sinks: BTreeMap<String, Vec<SinkServerHttp>>,
-    /// Authentication method for sinks
-    pub auth: String,
-    /// Username for sink authentication
-    pub username: String,
+    /// List of sink configuration entries. Each entry pairs a target with the
+    /// servers that deliver events for that target.
+    pub sinks: Vec<SinkConfigEntryHttp>,
 }
 
-impl From<ave_bridge::SinkConfig> for SinkConfigHttp {
-    fn from(value: ave_bridge::SinkConfig) -> Self {
-        Self {
-            sinks: value
-                .sinks
-                .into_iter()
-                .map(|(k, v)| {
-                    (k, v.into_iter().map(SinkServerHttp::from).collect())
-                })
-                .collect(),
-            auth: value.auth,
-            username: value.username,
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTargetHttp {
+    /// Every sink targets a schema. Use `"governance"` as `schema_id` for
+    /// node-level governance sinks; in that case `governance_id` must be
+    /// `None`.
+    Schema {
+        schema_id: String,
+        /// Governance to which this sink applies. Must be `None` when
+        /// `schema_id` is `"governance"`; mandatory otherwise.
+        governance_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SinkConfigEntryHttp {
+    pub target: SinkTargetHttp,
+    pub servers: Vec<SinkServerHttp>,
+}
+
+impl From<SinkTarget> for SinkTargetHttp {
+    fn from(value: SinkTarget) -> Self {
+        let SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = value;
+        Self::Schema {
+            schema_id,
+            governance_id,
         }
     }
+}
+
+impl From<SinkConfigEntry> for SinkConfigEntryHttp {
+    fn from(value: SinkConfigEntry) -> Self {
+        Self {
+            target: value.target.into(),
+            servers: value
+                .servers
+                .into_iter()
+                .map(SinkServerHttp::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SinkAuthConfigHttp {
+    /// OAuth2 / token endpoint URL
+    pub auth_url: String,
+    /// Username for the token endpoint
+    pub username: String,
+    /// API key for Api-Key header authentication
+    pub api_key: String,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -687,16 +730,8 @@ pub struct SinkServerHttp {
     pub events: Vec<String>,
     /// URL endpoint for the sink
     pub url: String,
-    /// Whether authentication is required for this sink
-    pub auth: bool,
-    /// Parallel sends allowed for this sink
-    pub concurrency: usize,
-    /// Maximum queued events for this sink
-    pub queue_capacity: usize,
-    /// Queue policy when the sink queue is full
-    pub queue_policy: String,
-    /// Routing strategy across sink workers
-    pub routing_strategy: String,
+    /// Per-sink authentication configuration
+    pub auth: Option<SinkAuthConfigHttp>,
     /// TCP connect timeout in milliseconds
     pub connect_timeout_ms: u64,
     /// Request timeout in milliseconds
@@ -711,25 +746,11 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             server: value.server,
             events: value.events.into_iter().map(|e| e.to_string()).collect(),
             url: value.url,
-            auth: value.auth,
-            concurrency: value.concurrency,
-            queue_capacity: value.queue_capacity,
-            queue_policy: match value.queue_policy {
-                ave_bridge::SinkQueuePolicy::DropOldest => {
-                    "drop_oldest".to_owned()
-                }
-                ave_bridge::SinkQueuePolicy::DropNewest => {
-                    "drop_newest".to_owned()
-                }
-            },
-            routing_strategy: match value.routing_strategy {
-                ave_bridge::SinkRoutingStrategy::OrderedBySubject => {
-                    "ordered_by_subject".to_owned()
-                }
-                ave_bridge::SinkRoutingStrategy::UnorderedRoundRobin => {
-                    "unordered_round_robin".to_owned()
-                }
-            },
+            auth: value.auth.map(|a| SinkAuthConfigHttp {
+                auth_url: a.auth_url,
+                username: a.username,
+                api_key: a.api_key,
+            }),
             connect_timeout_ms: value.connect_timeout_ms,
             request_timeout_ms: value.request_timeout_ms,
             max_retries: value.max_retries,

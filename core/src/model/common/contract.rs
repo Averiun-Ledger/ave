@@ -205,40 +205,48 @@ impl MemoryManager {
         Ok(current_len)
     }
 
-    pub fn write_byte(
-        &mut self,
-        start_ptr: usize,
-        offset: usize,
-        data: u8,
-    ) -> Result<(), ContractError> {
-        // Security check: validate pointer exists in allocation map
-        let len = self
-            .map
-            .get(&start_ptr)
-            .ok_or(ContractError::InvalidPointer { pointer: start_ptr })?;
-
-        // Security check: validate write is within bounds
-        if offset >= *len {
-            return Err(ContractError::WriteOutOfBounds { offset, size: *len });
-        }
-
-        self.memory[start_ptr + offset] = data;
-        Ok(())
-    }
-
-    pub fn read_byte(&self, ptr: usize) -> Result<u8, ContractError> {
-        if ptr >= self.memory.len() {
-            return Err(ContractError::InvalidPointer { pointer: ptr });
-        }
-        Ok(self.memory[ptr])
-    }
-
     pub fn read_data(&self, ptr: usize) -> Result<&[u8], ContractError> {
         let len = self
             .map
             .get(&ptr)
             .ok_or(ContractError::InvalidPointer { pointer: ptr })?;
         Ok(&self.memory[ptr..ptr + len])
+    }
+
+    /// Reads a slice of bytes from the host buffer starting at `ptr`.
+    pub fn read_bytes(
+        &self,
+        ptr: usize,
+        len: usize,
+    ) -> Result<&[u8], ContractError> {
+        let end = ptr
+            .checked_add(len)
+            .ok_or(ContractError::InvalidPointer { pointer: ptr })?;
+        if end > self.memory.len() {
+            return Err(ContractError::InvalidPointer { pointer: ptr });
+        }
+        Ok(&self.memory[ptr..end])
+    }
+
+    /// Writes a slice of bytes into a previously allocated host buffer at `ptr`.
+    pub fn write_bytes(
+        &mut self,
+        ptr: usize,
+        data: &[u8],
+    ) -> Result<(), ContractError> {
+        let len = self
+            .map
+            .get(&ptr)
+            .copied()
+            .ok_or(ContractError::InvalidPointer { pointer: ptr })?;
+        if data.len() > len {
+            return Err(ContractError::WriteOutOfBounds {
+                offset: data.len(),
+                size: len,
+            });
+        }
+        self.memory[ptr..ptr + data.len()].copy_from_slice(data);
+        Ok(())
     }
 
     pub fn get_pointer_len(&self, ptr: usize) -> isize {
@@ -253,9 +261,7 @@ impl MemoryManager {
         bytes: &[u8],
     ) -> Result<usize, ContractError> {
         let ptr = self.alloc(bytes.len())?;
-        for (index, byte) in bytes.iter().enumerate() {
-            self.memory[ptr + index] = *byte;
-        }
+        self.memory[ptr..ptr + bytes.len()].copy_from_slice(bytes);
         Ok(ptr)
     }
 }
@@ -346,42 +352,64 @@ pub fn generate_linker(
     linker
         .func_wrap(
             "env",
-            "write_byte",
+            "read_bytes",
             |mut caller: Caller<'_, MemoryManager>,
-             ptr: u32,
-             offset: u32,
-             data: u32|
+             src_ptr: i32,
+             dst_ptr: i32,
+             len: i32|
              -> Result<(), WasmError> {
-                caller
-                    .data_mut()
-                    .write_byte(ptr as usize, offset as usize, data as u8)
-                    .map_err(WasmError::from)
+                let bytes = caller
+                    .data()
+                    .read_bytes(src_ptr as usize, len as usize)
+                    .map_err(WasmError::from)?
+                    .to_vec();
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| ContractError::LinkerError {
+                        function: "read_bytes",
+                        details: "memory export not found".to_string(),
+                    })?;
+                memory
+                    .write(&mut caller, dst_ptr as usize, &bytes)
+                    .map_err(WasmError::from)?;
+                Ok(())
             },
         )
         .map_err(|e| ContractError::LinkerError {
-            function: "write_byte",
+            function: "read_bytes",
             details: e.to_string(),
         })?;
 
     linker
         .func_wrap(
             "env",
-            "read_byte",
-            |caller: Caller<'_, MemoryManager>,
-             index: i32|
-             -> Result<u32, WasmError> {
-                let ptr = usize::try_from(index).map_err(|_| {
-                    ContractError::InvalidPointer { pointer: 0 }
-                })?;
+            "write_bytes",
+            |mut caller: Caller<'_, MemoryManager>,
+             dst_ptr: i32,
+             src_ptr: i32,
+             len: i32|
+             -> Result<(), WasmError> {
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| ContractError::LinkerError {
+                        function: "write_bytes",
+                        details: "memory export not found".to_string(),
+                    })?;
+                let mut buf = vec![0u8; len as usize];
+                memory
+                    .read(&caller, src_ptr as usize, &mut buf)
+                    .map_err(WasmError::from)?;
                 caller
-                    .data()
-                    .read_byte(ptr)
-                    .map(|b| b as u32)
-                    .map_err(WasmError::from)
+                    .data_mut()
+                    .write_bytes(dst_ptr as usize, &buf)
+                    .map_err(WasmError::from)?;
+                Ok(())
             },
         )
         .map_err(|e| ContractError::LinkerError {
-            function: "read_byte",
+            function: "write_bytes",
             details: e.to_string(),
         })?;
 

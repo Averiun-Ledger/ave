@@ -12,14 +12,14 @@ use crate::{
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
+            abort_req, crash_system, send_reboot_to_req, take_random_signers,
         },
         event::{EvaluationData, EvaluationResponse},
     },
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 
@@ -334,6 +334,9 @@ impl Actor for Evaluation {
     type Event = ();
     type Message = EvaluationMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -347,7 +350,7 @@ impl Actor for Evaluation {
 impl Handler<Self> for Evaluation {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvaluationMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -365,7 +368,7 @@ impl Handler<Self> for Evaluation {
                             error = %e,
                             "Failed to create evaluation request hash"
                         );
-                        return Err(emit_fail(
+                        return Err(crash_system(
                             ctx,
                             ActorError::FunctionalCritical {
                                 description: format!(
@@ -456,7 +459,7 @@ impl Handler<Self> for Evaluation {
                                         error = %e,
                                         "Failed to abort request"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 };
 
                                 debug!(
@@ -487,7 +490,7 @@ impl Handler<Self> for Evaluation {
                                         error = %e,
                                         "Failed to send reboot to request actor"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
 
                                 self.reboot = true;
@@ -519,7 +522,7 @@ impl Handler<Self> for Evaluation {
                                     error = %e,
                                     "Failed to send reboot to request actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
@@ -536,7 +539,7 @@ impl Handler<Self> for Evaluation {
                                         error = %e,
                                         "Failed to create evaluation response"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             };
 
@@ -549,7 +552,7 @@ impl Handler<Self> for Evaluation {
                                     error = %e,
                                     "Failed to send evaluation to request actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             };
 
                             if !matches!(summary, ResponseSummary::Reboot) {
@@ -616,7 +619,7 @@ impl Handler<Self> for Evaluation {
                                 error = %e,
                                 "Failed to send reboot to request actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         } else if self.current_evaluators.is_empty() {
                             Self::observe_event("reboot");
                         }
@@ -632,22 +635,6 @@ impl Handler<Self> for Evaluation {
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        Self::observe_event("error");
-        error!(
-            request_id = %self.request_id,
-            version = self.version,
-            error = %error,
-            "Child fault in evaluation actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
@@ -1080,7 +1067,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1201,7 +1188,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1237,7 +1224,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request.clone(),
             &node_actor,
             &request_actor,
@@ -1380,7 +1367,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1416,7 +1403,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request,
             &node_actor,
             &request_actor,
@@ -1929,7 +1916,7 @@ pub mod tests {
             viewpoints: Default::default(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             fact_request,
             &node_actor,
             &request_actor,
@@ -1980,7 +1967,7 @@ pub mod tests {
                     Some(gov_id.to_string().as_str())
                 );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
-                assert_eq!(replay_payload.as_ref(), Some(&payload));
+                assert_eq!(replay_payload, &payload);
                 assert!(*success);
                 assert_eq!(*sn, 1);
                 assert_eq!(*gov_version, 1);
@@ -2049,7 +2036,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request,
             &node_actor,
             &request_actor,
@@ -2329,7 +2316,7 @@ pub mod tests {
         };
 
         assert_eq!(
-            "runner error: contract failed: contract returned failure: Contract execution in running was not successful: Can not convert Event from value",
+            "runner error: contract failed: contract returned failure: Contract execution in running was not successful: Cannot parse Event from JSON bytes: missing field `data` at line 1 column 31",
             e
         );
         assert_eq!(metadata.name, subject_data.name);
@@ -2404,7 +2391,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request.clone(),
             &node_actor,
             &request_actor,
@@ -2531,7 +2518,7 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(
+        let _ = emit_request(
             transfer_request.clone(),
             &node_actor,
             &request_actor,

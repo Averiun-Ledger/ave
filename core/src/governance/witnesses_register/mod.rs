@@ -1,15 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::governance::sn_register::{
     SnLimit, SnRegister, SnRegisterMessage, SnRegisterResponse,
 };
-use crate::governance::subject_register::{
-    SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
-};
+
 use crate::model::common::{
-    Interval, IntervalSet, TrackerEventVisibility, TrackerStoredVisibility,
-    TrackerVisibilityMode, TrackerVisibilityState, emit_fail, purge_storage,
+    Interval, IntervalSet, OwnerContext, TrackerEventVisibility,
+    TrackerIdentity, TrackerParams, TrackerStoredVisibility,
+    TrackerVisibilityMode, TrackerVisibilityState, crash_system, purge_storage,
 };
+use crate::model::event::Ledger;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
@@ -17,12 +18,18 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::db::Storable;
+
+mod access_engine;
+pub(crate) mod subject_ownership;
+mod sync_support;
+mod witness_policy;
 
 #[derive(
     Debug,
@@ -34,23 +41,23 @@ use crate::db::Storable;
     BorshSerialize,
 )]
 pub struct WitnessesRegister {
-    gov_sn: u64,
-    subjects: HashMap<DigestIdentifier, TransferData>,
-    witnesses:
+    pub(crate) gov_sn: u64,
+    pub(crate) subjects: HashMap<DigestIdentifier, TransferData>,
+    pub(crate) witnesses:
         HashMap<(PublicKey, SchemaType), HashMap<Namespace, IntervalData>>,
-    witnesses_creator: HashMap<
-        (PublicKey, String, SchemaType),
-        HashMap<WitnessesType, IntervalData>,
-    >,
-    witnesses_creator_grants: HashMap<
-        (PublicKey, String, SchemaType),
-        HashMap<WitnessesType, CreatorWitnessGrantHistory>,
-    >,
+    pub(crate) creator_witnesses:
+        HashMap<(PublicKey, String, SchemaType), CreatorWitnessEntry>,
+    /// Índice invertido: nodo → creators donde es witness explícito.
+    /// No incluye witnesses de schema (WitnessesType::Witnesses) porque
+    /// dependen del nodo que pregunta y se evalúan dinámicamente.
     #[serde(skip)]
-    ledger_batch_size: usize,
+    pub(crate) node_creator_index:
+        HashMap<PublicKey, HashSet<(PublicKey, String, SchemaType)>>,
+    #[serde(skip)]
+    pub(crate) ledger_batch_size: usize,
 }
 
-type IntervalData = (IntervalSet, Option<u64>);
+pub type IntervalData = (IntervalSet, Option<u64>);
 
 pub enum ActualSearch {
     End(SnLimit),
@@ -154,12 +161,12 @@ pub struct TrackerDeliveryRange {
     BorshSerialize,
 )]
 pub struct TransferData {
-    actual_owner: PublicKey,
-    actual_new_owner_data: Option<(PublicKey, u64)>,
-    sn: u64,
-    gov_version: u64,
-    old_owners: HashMap<PublicKey, OldOwnerData>,
-    visibility_state: TrackerVisibilityState,
+    pub(crate) actual_owner: PublicKey,
+    pub(crate) actual_new_owner_data: Option<(PublicKey, u64)>,
+    pub(crate) sn: u64,
+    pub(crate) gov_version: u64,
+    pub(crate) old_owners: HashMap<PublicKey, OldOwnerData>,
+    pub(crate) visibility_state: TrackerVisibilityState,
 }
 
 #[derive(
@@ -172,8 +179,22 @@ pub struct TransferData {
     BorshSerialize,
 )]
 pub struct OldOwnerData {
-    sn: u64,
-    interval_gov_version: IntervalSet,
+    pub(crate) sn: u64,
+    pub(crate) interval_gov_version: IntervalSet,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct CreatorWitnessEntry {
+    pub intervals: HashMap<WitnessesType, IntervalData>,
+    pub grants: HashMap<WitnessesType, CreatorWitnessGrantHistory>,
 }
 
 #[derive(Debug, Clone)]
@@ -246,21 +267,51 @@ pub enum WitnessesRegisterMessage {
         sn: u64,
         gov_version: u64,
     },
-    Access {
-        subject_id: DigestIdentifier,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-    },
     GetTrackerVisibilityState {
         subject_id: DigestIdentifier,
     },
     GetTrackerWindow {
         subject_id: DigestIdentifier,
         node: PublicKey,
+        sender: PublicKey,
         namespace: String,
         schema_id: SchemaType,
         actual_sn: Option<u64>,
+    },
+    GetTrackerWindowFromLedger {
+        subject_id: DigestIdentifier,
+        ledger: Vec<Ledger>,
+        node: PublicKey,
+        sender: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
+    },
+    SimulateTransferHiSnLimit {
+        subject_id: DigestIdentifier,
+        transfer_event: Box<Ledger>,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+    },
+    QueryWitnessStatusAndWindow {
+        subject_id: DigestIdentifier,
+        transfer_data: Option<TransferData>,
+        node: PublicKey,
+        sender: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
+        owner: Option<PublicKey>,
+        owner_gov_version: Option<u64>,
+    },
+    QueryWitnessStatus {
+        subject_id: Option<DigestIdentifier>,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        owner: Option<PublicKey>,
+        owner_gov_version: Option<u64>,
     },
 }
 
@@ -349,9 +400,6 @@ pub enum WitnessesRegisterEvent {
 impl Event for WitnessesRegisterEvent {}
 
 pub enum WitnessesRegisterResponse {
-    Access {
-        sn: Option<u64>,
-    },
     GovSn {
         sn: u64,
     },
@@ -368,14 +416,47 @@ pub enum WitnessesRegisterResponse {
     },
     TrackerWindow {
         sn: Option<u64>,
+        transfer_sn: Option<u64>,
         clear_sn: Option<u64>,
         is_all: bool,
         ranges: Vec<TrackerDeliveryRange>,
     },
+    WitnessStatusAndWindow {
+        status: WitnessStatus,
+        sn: Option<u64>,
+        transfer_sn: Option<u64>,
+        clear_sn: Option<u64>,
+        is_all: bool,
+        ranges: Vec<TrackerDeliveryRange>,
+    },
+    WitnessStatus(WitnessStatus),
     Ok,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WitnessStatus {
+    pub access_sn: Option<u64>,
+    pub hi_sn_limit: HiSnLimit,
+    pub gov_version_limit: GovVersionLimit,
+    pub create_access: bool,
+    pub create_gov_version_limit: GovVersionLimit,
+}
+
 impl Response for WitnessesRegisterResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HiSnLimit {
+    None,
+    Sn(u64),
+    Infinity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GovVersionLimit {
+    None,
+    Version(u64),
+    Infinity,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrentWitnessSubject {
@@ -384,7 +465,7 @@ pub struct CurrentWitnessSubject {
 }
 
 impl CreatorWitnessGrantHistory {
-    fn apply_version(
+    pub(crate) fn apply_version(
         &mut self,
         version: u64,
         grant: Option<CreatorWitnessGrant>,
@@ -466,24 +547,40 @@ impl WitnessesRegister {
     ) -> IntervalSet {
         let mut covered = IntervalSet::new();
 
-        for owner_range in old_owner.interval_gov_version.iter() {
-            if let Some(from) = current_from {
-                let lo = from.max(owner_range.lo);
-                if lo <= owner_range.hi {
-                    covered.insert(Interval {
-                        lo,
-                        hi: owner_range.hi,
-                    });
-                }
-            }
+        let owners: Vec<&Interval> =
+            old_owner.interval_gov_version.iter().collect();
+        let witnesses: Vec<&Interval> = intervals.iter().collect();
 
-            for witness_range in intervals.iter() {
-                let lo = witness_range.lo.max(owner_range.lo);
-                let hi = witness_range.hi.min(owner_range.hi);
+        let mut i = 0;
+        let mut j = 0;
+        while i < owners.len() && j < witnesses.len() {
+            let owner = owners[i];
+            let witness = witnesses[j];
 
+            if witness.hi < owner.lo {
+                j += 1;
+            } else if owner.hi < witness.lo {
+                i += 1;
+            } else {
+                let lo = witness.lo.max(owner.lo);
+                let hi = witness.hi.min(owner.hi);
                 if lo <= hi {
                     covered.insert(Interval { lo, hi });
                 }
+
+                if witness.hi < owner.hi {
+                    j += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        if let Some(from) = current_from {
+            let start = owners.partition_point(|owner| owner.hi < from);
+            for owner in &owners[start..] {
+                let lo = from.max(owner.lo);
+                covered.insert(Interval { lo, hi: owner.hi });
             }
         }
 
@@ -513,14 +610,19 @@ impl WitnessesRegister {
             return Some(current_grant);
         }
 
-        history
+        // `closed` intervals are disjoint and sorted by `lo` because they are
+        // pushed in ascending governance-version order. We can locate the
+        // candidate with a binary search instead of a linear scan.
+        let idx = history
             .closed
-            .iter()
-            .rev()
-            .find(|range| {
-                range.interval.lo <= owner_hi && range.interval.hi >= owner_lo
-            })
-            .map(|range| &range.grant)
+            .partition_point(|range| range.interval.lo <= owner_hi);
+        if idx > 0 {
+            let range = &history.closed[idx - 1];
+            if range.interval.hi >= owner_lo {
+                return Some(&range.grant);
+            }
+        }
+        None
     }
 
     fn schema_witness_covers_owner_interval(
@@ -563,16 +665,13 @@ impl WitnessesRegister {
         owner_lo: u64,
         owner_hi: u64,
     ) -> Option<CreatorWitnessGrant> {
-        let grants = self.witnesses_creator_grants.get(&(
+        let entry = self.creator_witnesses.get(&(
             creator.clone(),
             namespace.to_string(),
             schema_id.clone(),
         ))?;
-        let intervals = self.witnesses_creator.get(&(
-            creator.clone(),
-            namespace.to_string(),
-            schema_id.clone(),
-        ))?;
+        let grants = &entry.grants;
+        let intervals = &entry.intervals;
 
         let mut out = None;
 
@@ -658,10 +757,9 @@ impl WitnessesRegister {
         from_sn: u64,
         to_sn: u64,
     ) -> Result<Vec<(Interval, u64)>, ActorError> {
-        let governance_id = ctx.path().parent().key();
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/sn_register",
-            governance_id
+            ctx.path().parent().key()
         ));
         let sn_register = ctx.system().get_actor::<SnRegister>(&path).await?;
         let response = sn_register
@@ -689,428 +787,32 @@ impl WitnessesRegister {
         }
     }
 
-    fn gov_version_for_sn(
-        gov_versions: &[(Interval, u64)],
-        sn: u64,
-    ) -> Option<u64> {
-        gov_versions
-            .iter()
-            .find(|(interval, _)| interval.contains(sn))
-            .map(|(_, gov_version)| *gov_version)
-    }
-
-    fn event_delivery_mode(
-        &self,
-        data: &TransferData,
-        node: &PublicKey,
-        namespace: &Namespace,
-        schema_id: &SchemaType,
-        sn: u64,
-        gov_version: u64,
-    ) -> TrackerDeliveryMode {
-        let stored_span = data.visibility_state.iter_stored(sn, sn).next();
-        let event_span = data.visibility_state.iter_events(sn, sn).next();
-
-        let Some(stored_span) = stored_span else {
-            return TrackerDeliveryMode::Opaque;
-        };
-        let Some(event_span) = event_span else {
-            return TrackerDeliveryMode::Opaque;
-        };
-
-        match event_span.visibility {
-            TrackerEventVisibility::NonFact => TrackerDeliveryMode::Clear,
-            TrackerEventVisibility::Fact(viewpoints) => {
-                if viewpoints.is_empty() {
-                    return TrackerDeliveryMode::Clear;
-                }
-
-                if data.actual_owner == *node
-                    || data
-                        .actual_new_owner_data
-                        .as_ref()
-                        .is_some_and(|(new_owner, _)| new_owner == node)
-                {
-                    return TrackerDeliveryMode::Clear;
-                }
-
-                if let Some(old_owner) = data.old_owners.get(node)
-                    && sn <= old_owner.sn
-                {
-                    return TrackerDeliveryMode::Clear;
-                }
-
-                if matches!(
-                    stored_span.visibility,
-                    TrackerStoredVisibility::None
-                ) {
-                    return TrackerDeliveryMode::Opaque;
-                }
-
-                let mut grant = None;
-
-                if gov_version >= data.gov_version {
-                    grant = Some(Self::merge_grant(
-                        grant,
-                        &self
-                            .creator_grant_for_event_or_current_owner(
-                                node,
-                                &data.actual_owner,
-                                schema_id,
-                                namespace,
-                                gov_version,
-                                data.gov_version,
-                            )
-                            .unwrap_or(CreatorWitnessGrant::Hash),
-                    ));
-                }
-
-                if let Some((new_owner, new_owner_gov_version)) =
-                    &data.actual_new_owner_data
-                    && gov_version >= *new_owner_gov_version
-                {
-                    grant = Some(Self::merge_grant(
-                        grant,
-                        &self
-                            .creator_grant_for_event_or_current_owner(
-                                node,
-                                new_owner,
-                                schema_id,
-                                namespace,
-                                gov_version,
-                                *new_owner_gov_version,
-                            )
-                            .unwrap_or(CreatorWitnessGrant::Hash),
-                    ));
-                }
-
-                for (creator, old_owner) in &data.old_owners {
-                    if sn > old_owner.sn {
-                        continue;
-                    }
-
-                    for range in old_owner.interval_gov_version.iter().rev() {
-                        if !range.contains(gov_version) {
-                            continue;
-                        }
-
-                        grant = Some(Self::merge_grant(
-                            grant,
-                            &self
-                                .creator_grant_for_owner_interval(
-                                    node,
-                                    creator,
-                                    schema_id,
-                                    namespace,
-                                    gov_version,
-                                    gov_version,
-                                )
-                                .unwrap_or(CreatorWitnessGrant::Hash),
-                        ));
-                        break;
-                    }
-                }
-
-                if Self::grant_allows_clear(grant, viewpoints) {
-                    TrackerDeliveryMode::Clear
-                } else {
-                    TrackerDeliveryMode::Opaque
-                }
-            }
-        }
-    }
-
-    async fn build_tracker_window(
-        &self,
-        ctx: &ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-        node: &PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        actual_sn: Option<u64>,
-    ) -> Result<
-        (Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
-        ActorError,
-    > {
-        let Some(data) = self.subjects.get(subject_id) else {
-            return Ok((None, None, true, Vec::new()));
-        };
-
-        let access_limit = match self
-            .search_witnesses(
-                ctx,
-                node,
-                data,
-                namespace.clone(),
-                schema_id.clone(),
-                subject_id.clone(),
-            )
-            .await?
-        {
-            SnLimit::Sn(sn) => Some(sn),
-            SnLimit::LastSn => Some(data.sn),
-            SnLimit::NotSn => {
-                if data.actual_owner == *node
-                    || data
-                        .actual_new_owner_data
-                        .as_ref()
-                        .is_some_and(|(new_owner, _)| new_owner == node)
-                {
-                    Some(data.sn)
-                } else {
-                    data.old_owners.get(node).map(|old_owner| old_owner.sn)
-                }
-            }
-        };
-
-        let Some(access_limit) = access_limit else {
-            return Ok((None, None, true, Vec::new()));
-        };
-
-        let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
-        if from_sn > access_limit {
-            return Ok((None, None, true, Vec::new()));
-        }
-
-        let namespace = Namespace::from(namespace);
-        let gov_versions = self
-            .get_gov_version_window(ctx, subject_id, from_sn, access_limit)
-            .await?;
-
-        let mut ranges: Vec<TrackerDeliveryRange> = Vec::new();
-        let mut clear_sn = None;
-
-        for sn in from_sn..=access_limit {
-            let Some(gov_version) = Self::gov_version_for_sn(&gov_versions, sn)
-                .or_else(|| (sn == 0).then_some(data.gov_version))
-            else {
-                continue;
-            };
-
-            let mode = self.event_delivery_mode(
-                data,
-                node,
-                &namespace,
-                &schema_id,
-                sn,
-                gov_version,
-            );
-
-            match ranges.last_mut() {
-                Some(last)
-                    if std::mem::discriminant(&last.mode)
-                        == std::mem::discriminant(&mode)
-                        && last.to_sn + 1 == sn =>
-                {
-                    last.to_sn = sn;
-                }
-                _ => ranges.push(TrackerDeliveryRange {
-                    from_sn: sn,
-                    to_sn: sn,
-                    mode: mode.clone(),
-                }),
-            }
-
-            if matches!(mode, TrackerDeliveryMode::Clear)
-                && ((clear_sn.is_none()
-                    && matches!(
-                        ranges.first().map(|x| &x.mode),
-                        Some(TrackerDeliveryMode::Clear)
-                    ))
-                    || clear_sn == Some(sn.saturating_sub(1)))
-            {
-                clear_sn = Some(sn);
-            }
-        }
-
-        Ok((Some(access_limit), clear_sn, true, ranges))
-    }
-
-    async fn access_limit_for_node(
-        &self,
-        ctx: &ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-        node: &PublicKey,
-        namespace: &str,
-        schema_id: &SchemaType,
-    ) -> Result<Option<u64>, ActorError> {
-        let Some(data) = self.subjects.get(subject_id) else {
-            return Ok(None);
-        };
-
-        let sn = if data.actual_owner == *node {
-            Some(data.sn)
-        } else if let Some((new_owner, ..)) = &data.actual_new_owner_data
-            && new_owner == node
-        {
-            Some(data.sn)
-        } else if let Some(old_data) = data.old_owners.get(node) {
-            let sn_limit = self
-                .search_witnesses(
-                    ctx,
-                    node,
-                    data,
-                    namespace.to_owned(),
-                    schema_id.clone(),
-                    subject_id.clone(),
-                )
-                .await?;
-
-            let sn = match sn_limit {
-                SnLimit::Sn(sn) => sn.max(old_data.sn),
-                SnLimit::LastSn => unreachable!(
-                    "search_witnesses can not return SnLimit::LastSn"
-                ),
-                SnLimit::NotSn => old_data.sn,
-            };
-
-            Some(sn)
-        } else {
-            let sn_limit = self
-                .search_witnesses(
-                    ctx,
-                    node,
-                    data,
-                    namespace.to_owned(),
-                    schema_id.clone(),
-                    subject_id.clone(),
-                )
-                .await?;
-
-            match sn_limit {
-                SnLimit::Sn(sn) => Some(sn),
-                SnLimit::LastSn => unreachable!(
-                    "search_witnesses can not return SnLimit::LastSn"
-                ),
-                SnLimit::NotSn => None,
-            }
-        };
-
-        Ok(sn)
-    }
-
-    fn close_creator_registration(
-        &mut self,
-        schema_id: &SchemaType,
-        namespace: &str,
-        creator: &PublicKey,
-        version: u64,
-    ) {
-        if let Some(witnesses) = self.witnesses_creator.get_mut(&(
-            creator.clone(),
-            namespace.to_owned(),
-            schema_id.clone(),
-        )) {
-            for (.., (interval, last)) in witnesses.iter_mut() {
-                if let Some(last) = last.take() {
-                    interval.insert(Interval {
-                        lo: last,
-                        hi: version - 1,
-                    });
-                }
-            }
-        }
-
-        if let Some(grants) = self.witnesses_creator_grants.get_mut(&(
-            creator.clone(),
-            namespace.to_owned(),
-            schema_id.clone(),
-        )) {
-            for history in grants.values_mut() {
-                history.apply_version(version, None);
-            }
-        }
-    }
-
-    fn apply_creator_registration(
-        &mut self,
-        schema_id: &SchemaType,
-        namespace: &str,
-        creator: &PublicKey,
-        registration: &CreatorWitnessRegistration,
-        version: u64,
-    ) {
-        let creator_entry = self
-            .witnesses_creator
-            .entry((creator.clone(), namespace.to_owned(), schema_id.clone()))
-            .or_default();
-
-        let witnesses: HashSet<_> =
-            registration.witnesses.iter().cloned().collect();
-        for (witness_type, (interval, last)) in creator_entry.iter_mut() {
-            if !witnesses.contains(witness_type)
-                && let Some(lo) = last.take()
-            {
-                interval.insert(Interval {
-                    lo,
-                    hi: version - 1,
-                });
-            }
-        }
-
-        for witness in &registration.witnesses {
-            if let Some((.., last)) = creator_entry.get_mut(witness) {
-                if last.is_none() {
-                    *last = Some(version);
-                }
-            } else {
-                creator_entry.insert(
-                    witness.clone(),
-                    (IntervalSet::new(), Some(version)),
-                );
-            }
-        }
-
-        let creator_grants = self
-            .witnesses_creator_grants
-            .entry((creator.clone(), namespace.to_owned(), schema_id.clone()))
-            .or_default();
-
-        let grant_map: HashMap<_, _> =
-            registration.grants.iter().cloned().collect();
-
-        for (witness_type, history) in creator_grants.iter_mut() {
-            history
-                .apply_version(version, grant_map.get(witness_type).cloned());
-        }
-
-        for (witness_type, grant) in grant_map {
-            creator_grants
-                .entry(witness_type)
-                .or_default()
-                .apply_version(version, Some(grant));
-        }
-    }
-
-    async fn get_sn(
+    async fn get_sns(
         &self,
         ctx: &ActorContext<Self>,
         subject_id: DigestIdentifier,
-        gov_version: u64,
-    ) -> Result<SnLimit, ActorError> {
-        let governance_id = ctx.path().parent().key();
-
+        gov_versions: Vec<u64>,
+    ) -> Result<Vec<SnLimit>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/sn_register",
-            governance_id
+            ctx.path().parent().key()
         ));
         let sn_register = ctx.system().get_actor::<SnRegister>(&path).await?;
         let response = sn_register
-            .ask(SnRegisterMessage::GetSn {
+            .ask(SnRegisterMessage::GetSns {
                 subject_id,
-                gov_version,
+                gov_versions,
             })
             .await?;
 
         match response {
-            SnRegisterResponse::Sn(sn_limit) => Ok(sn_limit),
+            SnRegisterResponse::Sns(results) => Ok(results),
             _ => Err(ActorError::UnexpectedResponse {
                 path,
-                expected: "SnRegisterResponse::Sn".to_owned(),
+                expected: "SnRegisterResponse::Sns".to_owned(),
             }),
         }
     }
-
     fn search_in_schema(
         witness_data: &HashMap<Namespace, (IntervalSet, Option<u64>)>,
         parse_namespace: &Namespace,
@@ -1136,14 +838,13 @@ impl WitnessesRegister {
         witness_data: &HashMap<Namespace, (IntervalSet, Option<u64>)>,
         parse_namespace: &Namespace,
         gov_version: u64,
-        sn: u64,
         mut better_gov_version: Option<u64>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
             if namespace.is_ancestor_or_equal_of(parse_namespace) {
                 // Actualmente soy testigo del owner
                 if actual_lo.is_some() {
-                    return ActualSearch::End(SnLimit::Sn(sn));
+                    return ActualSearch::End(SnLimit::LastSn);
                 }
 
                 if let Some(range) = interval.iter().last()
@@ -1154,7 +855,6 @@ impl WitnessesRegister {
                 }
             }
         }
-
         ActualSearch::Continue {
             gov_version: better_gov_version,
         }
@@ -1167,7 +867,6 @@ impl WitnessesRegister {
         schema_id: &SchemaType,
         parse_namespace: &Namespace,
         gov_version: u64,
-        sn: u64,
         better_gov_version: Option<u64>,
     ) -> ActualSearch {
         // el esquema específico
@@ -1178,7 +877,6 @@ impl WitnessesRegister {
                 witness_data,
                 parse_namespace,
                 gov_version,
-                sn,
                 better_gov_version,
             )
             .await
@@ -1201,12 +899,10 @@ impl WitnessesRegister {
                 witness_data,
                 parse_namespace,
                 gov_version,
-                sn,
                 better_gov_version,
             )
             .await;
         }
-
         ActualSearch::Continue {
             gov_version: better_gov_version,
         }
@@ -1257,7 +953,6 @@ impl WitnessesRegister {
         node: &PublicKey,
         schema_id: &SchemaType,
         parse_namespace: &Namespace,
-        sn: u64,
         owner_better_gov_version: (u64, Option<u64>),
     ) -> ActualSearch {
         let (owner_gov_version, mut better_gov_version) =
@@ -1269,7 +964,7 @@ impl WitnessesRegister {
         {
             // Actualmente soy testigo del owner
             if actual_lo.is_some() {
-                return ActualSearch::End(SnLimit::Sn(sn));
+                return ActualSearch::End(SnLimit::LastSn);
             }
             // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
             // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
@@ -1281,10 +976,9 @@ impl WitnessesRegister {
             }
         }
 
-        // Solo delegar a los testigos de schema si el rol Witnesses estaba activo
-        // cuando el owner empezó a serlo (actual_lo activo, o intervalo cerrado que llega
-        // hasta owner_gov_version). Si el intervalo cerró antes de que el owner empezase,
-        // contains_key sería true pero no debe triggear search_schemas_actual.
+        // Si el rol Witnesses está activo actualmente, los testigos de schema pueden
+        // pedir el tracker actual. Para intervalos cerrados sí hay que comprobar que
+        // cubrieron el momento en que este owner pasó a ser owner.
         if let Some((interval, actual_lo)) =
             witnesses_creator.get(&WitnessesType::Witnesses)
         {
@@ -1301,7 +995,6 @@ impl WitnessesRegister {
                         schema_id,
                         parse_namespace,
                         owner_gov_version,
-                        sn,
                         better_gov_version,
                     )
                     .await;
@@ -1313,312 +1006,13 @@ impl WitnessesRegister {
         }
     }
 
-    async fn search_witnesses(
-        &self,
-        ctx: &ActorContext<Self>,
-        node: &PublicKey,
-        data: &TransferData,
-        namespace: String,
-        schema_id: SchemaType,
-        subject_id: DigestIdentifier,
-    ) -> Result<SnLimit, ActorError> {
-        let mut better_gov_version: Option<u64> = None;
-        let mut better_sn: Option<u64> = None;
-        let parse_namespace = Namespace::from(namespace.clone());
-
-        // Obtengo los testigos del owner
-        if let Some(witnesses_creator) = self.witnesses_creator.get(&(
-            data.actual_owner.to_owned(),
-            namespace.clone(),
-            schema_id.clone(),
-        )) {
-            match self
-                .check_current_owner(
-                    witnesses_creator,
-                    node,
-                    &schema_id,
-                    &parse_namespace,
-                    data.sn,
-                    (data.gov_version, better_gov_version),
-                )
-                .await
-            {
-                ActualSearch::End(sn_limit) => return Ok(sn_limit),
-                ActualSearch::Continue { gov_version } => {
-                    better_gov_version = gov_version;
-                }
-            }
-        }
-
-        if let Some((new_owner, new_owner_gov_version)) =
-            &data.actual_new_owner_data
-            && let Some(witnesses_creator) = self.witnesses_creator.get(&(
-                new_owner.to_owned(),
-                namespace.clone(),
-                schema_id.clone(),
-            ))
-        {
-            match self
-                .check_current_owner(
-                    witnesses_creator,
-                    node,
-                    &schema_id,
-                    &parse_namespace,
-                    data.sn,
-                    (*new_owner_gov_version, better_gov_version),
-                )
-                .await
-            {
-                ActualSearch::End(sn_limit) => return Ok(sn_limit),
-                ActualSearch::Continue { gov_version } => {
-                    better_gov_version = gov_version;
-                }
-            }
-        }
-
-        // Not_owners
-        for (creator, old_data) in data.old_owners.iter() {
-            if let Some(witnesses_creator) = self.witnesses_creator.get(&(
-                creator.to_owned(),
-                namespace.clone(),
-                schema_id.clone(),
-            )) {
-                if let Some((interval, actual_lo)) =
-                    witnesses_creator.get(&WitnessesType::User(node.clone()))
-                    && let Some(gov_version) =
-                        Self::max_covered_old_owner_gov_version(
-                            *actual_lo, interval, old_data,
-                        )
-                {
-                    match self
-                        .get_sn(ctx, subject_id.clone(), gov_version)
-                        .await?
-                    {
-                        SnLimit::Sn(sn) => {
-                            better_sn =
-                                better_sn.max(Some(sn.min(old_data.sn)));
-                        }
-                        SnLimit::LastSn => {
-                            better_sn = better_sn.max(Some(old_data.sn));
-                        }
-                        SnLimit::NotSn => {}
-                    }
-                }
-
-                // Witness de schema.
-                if let Some((interval, actual_lo)) =
-                    witnesses_creator.get(&WitnessesType::Witnesses)
-                {
-                    let covered_old_owner = Self::covered_old_owner_intervals(
-                        *actual_lo, interval, old_data,
-                    );
-
-                    if covered_old_owner.iter().next().is_some() {
-                        let capped_old_owner = OldOwnerData {
-                            sn: old_data.sn,
-                            interval_gov_version: covered_old_owner,
-                        };
-
-                        if let Some(gov_version) = self.search_schemas_old(
-                            node,
-                            &schema_id,
-                            &parse_namespace,
-                            &capped_old_owner,
-                            better_gov_version,
-                        ) {
-                            match self
-                                .get_sn(ctx, subject_id.clone(), gov_version)
-                                .await?
-                            {
-                                SnLimit::Sn(sn) => {
-                                    better_sn = better_sn
-                                        .max(Some(sn.min(old_data.sn)));
-                                }
-                                SnLimit::LastSn => {
-                                    better_sn =
-                                        better_sn.max(Some(old_data.sn));
-                                }
-                                SnLimit::NotSn => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let sn_limit = if let Some(gov_version) = better_gov_version {
-            match self.get_sn(ctx, subject_id.clone(), gov_version).await? {
-                SnLimit::Sn(sn) => better_sn
-                    .map_or(SnLimit::Sn(sn), |better_sn| {
-                        SnLimit::Sn(sn.max(better_sn))
-                    }),
-                SnLimit::LastSn => SnLimit::Sn(data.sn),
-                SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
-            }
-        } else if let Some(better_sn) = better_sn {
-            SnLimit::Sn(better_sn)
-        } else {
-            SnLimit::NotSn
-        };
-
-        Ok(sn_limit)
-    }
-
-    fn has_active_schema_witness(
-        &self,
-        node: &PublicKey,
-        schema_id: &SchemaType,
-        namespace: &Namespace,
+    fn interval_active_at_version(
+        current_from: Option<u64>,
+        intervals: &IntervalSet,
+        gov_version: u64,
     ) -> bool {
-        let has_match = |witness_data: &HashMap<Namespace, IntervalData>| {
-            witness_data
-                .iter()
-                .any(|(current_namespace, (_, current_lo))| {
-                    current_lo.is_some()
-                        && current_namespace.is_ancestor_or_equal_of(namespace)
-                })
-        };
-
-        self.witnesses
-            .get(&(node.clone(), schema_id.clone()))
-            .is_some_and(has_match)
-            || self
-                .witnesses
-                .get(&(node.clone(), SchemaType::TrackerSchemas))
-                .is_some_and(has_match)
-    }
-
-    fn is_current_witness_for_entry(
-        &self,
-        node: &PublicKey,
-        schema_id: &SchemaType,
-        namespace: &str,
-        creator_witnesses: &HashMap<WitnessesType, IntervalData>,
-    ) -> bool {
-        if creator_witnesses
-            .get(&WitnessesType::User(node.clone()))
-            .is_some_and(|(_, current_lo)| current_lo.is_some())
-        {
-            return true;
-        }
-
-        if !creator_witnesses
-            .get(&WitnessesType::Witnesses)
-            .is_some_and(|(_, current_lo)| current_lo.is_some())
-        {
-            return false;
-        }
-
-        self.has_active_schema_witness(
-            node,
-            schema_id,
-            &Namespace::from(namespace.to_owned()),
-        )
-    }
-
-    async fn get_subjects_for_owner_schema(
-        &self,
-        ctx: &ActorContext<Self>,
-        owner: &PublicKey,
-        schema_id: &SchemaType,
-        namespace: &str,
-    ) -> Result<Vec<DigestIdentifier>, ActorError> {
-        let governance_id = ctx.path().parent().key();
-        let path = ActorPath::from(format!(
-            "/user/node/subject_manager/{}/subject_register",
-            governance_id
-        ));
-        let actor = ctx.system().get_actor::<SubjectRegister>(&path).await?;
-        let response = actor
-            .ask(SubjectRegisterMessage::GetSubjectsByOwnerSchema {
-                owner: owner.clone(),
-                schema_id: schema_id.clone(),
-                namespace: namespace.to_owned(),
-            })
-            .await?;
-
-        match response {
-            SubjectRegisterResponse::Subjects(subjects) => Ok(subjects),
-            _ => Err(ActorError::UnexpectedResponse {
-                path,
-                expected: "SubjectRegisterResponse::Subjects".to_owned(),
-            }),
-        }
-    }
-
-    async fn list_current_witness_subjects(
-        &self,
-        ctx: &ActorContext<Self>,
-        node: &PublicKey,
-        governance_version: u64,
-        after_subject_id: Option<DigestIdentifier>,
-        limit: usize,
-    ) -> Result<
-        (Vec<CurrentWitnessSubject>, Option<DigestIdentifier>),
-        ActorError,
-    > {
-        let mut subjects = BTreeMap::new();
-
-        for ((creator, namespace, schema_id), creator_witnesses) in
-            &self.witnesses_creator
-        {
-            if !self.is_current_witness_for_entry(
-                node,
-                schema_id,
-                namespace,
-                creator_witnesses,
-            ) {
-                continue;
-            }
-
-            let current_subjects = self
-                .get_subjects_for_owner_schema(
-                    ctx, creator, schema_id, namespace,
-                )
-                .await?;
-
-            for subject_id in current_subjects {
-                if let Some(data) = self.subjects.get(&subject_id) {
-                    subjects.insert(subject_id, data.sn);
-                }
-            }
-        }
-
-        let limit = limit.max(1);
-        let mut items = Vec::with_capacity(limit + 1);
-        let effective_cursor = if governance_version == self.gov_sn {
-            after_subject_id
-        } else {
-            None
-        };
-
-        for (subject_id, target_sn) in subjects {
-            if effective_cursor
-                .as_ref()
-                .is_some_and(|cursor| &subject_id <= cursor)
-            {
-                continue;
-            }
-
-            items.push(CurrentWitnessSubject {
-                subject_id,
-                target_sn,
-            });
-
-            if items.len() > limit {
-                break;
-            }
-        }
-
-        let next_cursor = if items.len() > limit {
-            let extra = items.pop();
-            let _ = extra;
-            items.last().map(|item| item.subject_id.clone())
-        } else {
-            None
-        };
-
-        Ok((items, next_cursor))
+        current_from.is_some_and(|from| from <= gov_version)
+            || intervals.contains(gov_version)
     }
 }
 
@@ -1627,6 +1021,9 @@ impl Actor for WitnessesRegister {
     type Event = WitnessesRegisterEvent;
     type Message = WitnessesRegisterMessage;
     type Response = WitnessesRegisterResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1639,17 +1036,23 @@ impl Actor for WitnessesRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("witnesses_register", Some(prefix), false, ctx)
+            .init_store(
+                "witnesses_register",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
+                msg_type = "Init",
                 error = %e,
                 "Failed to initialize witnesses_register store"
             );
             return Err(e);
         }
+        self.rebuild_node_creator_index();
         Ok(())
     }
 }
@@ -1658,7 +1061,7 @@ impl Actor for WitnessesRegister {
 impl Handler<Self> for WitnessesRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: WitnessesRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
@@ -1936,34 +1339,6 @@ impl Handler<Self> for WitnessesRegister {
                     "Witness subject entry deleted"
                 );
             }
-            WitnessesRegisterMessage::Access {
-                subject_id,
-                node,
-                namespace,
-                schema_id,
-            } => {
-                let sn = self
-                    .access_limit_for_node(
-                        ctx,
-                        &subject_id,
-                        &node,
-                        &namespace,
-                        &schema_id,
-                    )
-                    .await?;
-
-                debug!(
-                    msg_type = "Access",
-                    subject_id = %subject_id,
-                    node = %node,
-                    namespace = %namespace,
-                    schema_id = %schema_id,
-                    sn = sn,
-                    "Checked access status"
-                );
-
-                return Ok(WitnessesRegisterResponse::Access { sn });
-            }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
                 subject_id,
             } => {
@@ -1983,24 +1358,234 @@ impl Handler<Self> for WitnessesRegister {
                 namespace,
                 schema_id,
                 actual_sn,
+                ..
             } => {
-                let (sn, clear_sn, is_all, ranges) = self
+                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
                     .build_tracker_window(
                         ctx,
                         &subject_id,
                         &node,
-                        namespace,
-                        schema_id,
-                        actual_sn,
+                        TrackerParams {
+                            namespace,
+                            schema_id,
+                            actual_sn,
+                        },
                     )
                     .await?;
 
                 return Ok(WitnessesRegisterResponse::TrackerWindow {
                     sn,
+                    transfer_sn,
                     clear_sn,
                     is_all,
                     ranges,
                 });
+            }
+            WitnessesRegisterMessage::GetTrackerWindowFromLedger {
+                subject_id,
+                ledger,
+                node,
+                namespace,
+                schema_id,
+                actual_sn,
+                ..
+            } => {
+                let data =
+                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
+                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
+                    .build_tracker_window_from_data(
+                        ctx,
+                        &subject_id,
+                        &data,
+                        &node,
+                        TrackerParams {
+                            namespace,
+                            schema_id,
+                            actual_sn,
+                        },
+                        None,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::TrackerWindow {
+                    sn,
+                    transfer_sn,
+                    clear_sn,
+                    is_all,
+                    ranges,
+                });
+            }
+            WitnessesRegisterMessage::SimulateTransferHiSnLimit {
+                subject_id,
+                transfer_event,
+                node,
+                namespace,
+                schema_id,
+            } => {
+                let (new_owner, gov_version) = match transfer_event
+                    .get_event_request()
+                {
+                    Some(EventRequest::Transfer(req)) => {
+                        (req.new_owner, transfer_event.gov_version)
+                    }
+                    _ => {
+                        return Err(ActorError::Functional {
+                                description:
+                                    "SimulateTransferHiSnLimit called with non-Transfer event"
+                                        .to_string(),
+                            });
+                    }
+                };
+
+                // Si ya tenemos TransferData para este subject (por gobernanza o
+                // batches anteriores), lo usamos como base y solo actualizamos el
+                // estado actual con el evento de transferencia. Así conservamos
+                // el historial de old_owners que la simulación necesita.
+                let mut data = if let Some(existing) =
+                    self.subjects.get(&subject_id)
+                {
+                    let mut data = existing.clone();
+                    data.actual_owner =
+                        transfer_event.ledger_seal_signature.signer.clone();
+                    data.actual_new_owner_data = Some((new_owner, gov_version));
+                    data.sn = transfer_event.sn;
+                    data.gov_version = gov_version;
+                    data
+                } else {
+                    TransferData {
+                        actual_owner: transfer_event
+                            .ledger_seal_signature
+                            .signer
+                            .clone(),
+                        actual_new_owner_data: Some((new_owner, gov_version)),
+                        sn: transfer_event.sn,
+                        gov_version,
+                        old_owners: HashMap::new(),
+                        visibility_state: TrackerVisibilityState::default(),
+                    }
+                };
+                data.visibility_state.record_event(
+                    0,
+                    TrackerStoredVisibility::Full,
+                    TrackerEventVisibility::NonFact,
+                );
+
+                let mut cached = None;
+                let limit = self
+                    .hi_sn_limit_for_transfer_data(
+                        ctx,
+                        &subject_id,
+                        &node,
+                        TrackerIdentity {
+                            namespace,
+                            schema_id,
+                        },
+                        &data,
+                        &mut cached,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::WitnessStatus(
+                    WitnessStatus {
+                        access_sn: None,
+                        hi_sn_limit: limit,
+                        gov_version_limit: GovVersionLimit::None,
+                        create_access: false,
+                        create_gov_version_limit: GovVersionLimit::None,
+                    },
+                ));
+            }
+            WitnessesRegisterMessage::QueryWitnessStatusAndWindow {
+                subject_id,
+                transfer_data,
+                node,
+                namespace,
+                schema_id,
+                actual_sn,
+                owner,
+                owner_gov_version,
+                ..
+            } => {
+                let data = match transfer_data {
+                    Some(data) => data,
+                    None => match self.subjects.get(&subject_id) {
+                        Some(data) => data.clone(),
+                        None => {
+                            return Err(ActorError::Functional {
+                                description: format!(
+                                    "Subject data not found for {}",
+                                    subject_id
+                                ),
+                            });
+                        }
+                    },
+                };
+                let (status, cached) = self
+                    .query_witness_status(
+                        ctx,
+                        Some(subject_id.clone()),
+                        node.clone(),
+                        TrackerIdentity {
+                            namespace: namespace.clone(),
+                            schema_id: schema_id.clone(),
+                        },
+                        OwnerContext {
+                            owner,
+                            gov_version: owner_gov_version,
+                        },
+                        None,
+                    )
+                    .await?;
+                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
+                    .build_tracker_window_from_data(
+                        ctx,
+                        &subject_id,
+                        &data,
+                        &node,
+                        TrackerParams {
+                            namespace,
+                            schema_id,
+                            actual_sn,
+                        },
+                        cached,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::WitnessStatusAndWindow {
+                    status,
+                    sn,
+                    transfer_sn,
+                    clear_sn,
+                    is_all,
+                    ranges,
+                });
+            }
+            WitnessesRegisterMessage::QueryWitnessStatus {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+                owner,
+                owner_gov_version,
+            } => {
+                let (status, _) = self
+                    .query_witness_status(
+                        ctx,
+                        subject_id,
+                        node,
+                        TrackerIdentity {
+                            namespace,
+                            schema_id,
+                        },
+                        OwnerContext {
+                            owner,
+                            gov_version: owner_gov_version,
+                        },
+                        None,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::WitnessStatus(status));
             }
         };
 
@@ -2012,13 +1597,13 @@ impl Handler<Self> for WitnessesRegister {
         event: WitnessesRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
+                msg_type = "Persist",
                 error = %e,
                 "Failed to persist witnesses register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }
@@ -2027,6 +1612,7 @@ impl Handler<Self> for WitnessesRegister {
 impl PersistentActor for WitnessesRegister {
     type Persistence = LightPersistence;
     type InitParams = usize;
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -2035,12 +1621,18 @@ impl PersistentActor for WitnessesRegister {
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             WitnessesRegisterEvent::UpdateSnGov { sn } => {
-                self.gov_sn = *sn;
+                inner.gov_sn = *sn;
 
                 debug!(
+                    msg_type = "UpdateSnGov",
                     event_type = "UpdateSnGov",
                     sn = sn,
                     "Governance sn updated in state"
@@ -2052,13 +1644,13 @@ impl PersistentActor for WitnessesRegister {
                 remove_witnesses,
             } => {
                 for (schema_id, ns, creator) in remove_creator.iter() {
-                    self.close_creator_registration(
+                    inner.close_creator_registration(
                         schema_id, ns, creator, *version,
                     );
                 }
 
                 for ((schema_id, witness), namespace) in remove_witnesses {
-                    if let Some(witness_namespace) = self
+                    if let Some(witness_namespace) = inner
                         .witnesses
                         .get_mut(&(witness.clone(), schema_id.clone()))
                     {
@@ -2076,7 +1668,10 @@ impl PersistentActor for WitnessesRegister {
                     }
                 }
 
+                inner.rebuild_node_creator_index();
+
                 debug!(
+                    msg_type = "UpdateCreatorsWitnessesConfirm",
                     event_type = "UpdateCreatorsWitnessesConfirm",
                     version = version,
                     remove_witnesses_count = remove_witnesses.len(),
@@ -2095,7 +1690,7 @@ impl PersistentActor for WitnessesRegister {
                 for ((schema_id, ns, creator), registration) in
                     new_creator.iter()
                 {
-                    self.apply_creator_registration(
+                    inner.apply_creator_registration(
                         schema_id,
                         ns,
                         creator,
@@ -2105,7 +1700,7 @@ impl PersistentActor for WitnessesRegister {
                 }
 
                 for (schema_id, ns, creator) in remove_creator.iter() {
-                    self.close_creator_registration(
+                    inner.close_creator_registration(
                         schema_id, ns, creator, *version,
                     );
                 }
@@ -2113,7 +1708,7 @@ impl PersistentActor for WitnessesRegister {
                 for ((schema_id, ns, creator), registration) in
                     update_creator_witnesses.iter()
                 {
-                    self.apply_creator_registration(
+                    inner.apply_creator_registration(
                         schema_id,
                         ns,
                         creator,
@@ -2124,7 +1719,8 @@ impl PersistentActor for WitnessesRegister {
 
                 for ((schema_id, witness), namespace) in new_witnesses {
                     for ns in namespace.iter() {
-                        self.witnesses
+                        inner
+                            .witnesses
                             .entry((witness.clone(), schema_id.clone()))
                             .or_default()
                             .entry(ns.clone())
@@ -2134,7 +1730,7 @@ impl PersistentActor for WitnessesRegister {
                 }
 
                 for ((schema_id, witness), namespace) in remove_witnesses {
-                    if let Some(witness_namespace) = self
+                    if let Some(witness_namespace) = inner
                         .witnesses
                         .get_mut(&(witness.clone(), schema_id.clone()))
                     {
@@ -2152,7 +1748,10 @@ impl PersistentActor for WitnessesRegister {
                     }
                 }
 
+                inner.rebuild_node_creator_index();
+
                 debug!(
+                    msg_type = "UpdateCreatorsWitnessesFact",
                     event_type = "UpdateCreatorsWitnessesFact",
                     version = version,
                     remove_creator_count = remove_creator.len(),
@@ -2165,10 +1764,11 @@ impl PersistentActor for WitnessesRegister {
                 );
             }
             WitnessesRegisterEvent::UpdateSn { subject_id, sn } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     data.sn = *sn;
 
                     debug!(
+                        msg_type = "UpdateSn",
                         event_type = "UpdateSn",
                         subject_id = %subject_id,
                         sn = sn,
@@ -2176,6 +1776,7 @@ impl PersistentActor for WitnessesRegister {
                     );
                 } else {
                     error!(
+                        msg_type = "UpdateSn",
                         event_type = "UpdateSn",
                         subject_id = %subject_id,
                         "Subject not found in register"
@@ -2189,7 +1790,7 @@ impl PersistentActor for WitnessesRegister {
                 stored_visibility,
                 event_visibility,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     data.visibility_state.set_mode(*mode);
                     data.visibility_state.record_event(
                         *sn,
@@ -2198,6 +1799,7 @@ impl PersistentActor for WitnessesRegister {
                     );
                 } else {
                     warn!(
+                        msg_type = "UpdateTrackerVisibility",
                         event_type = "UpdateTrackerVisibility",
                         subject_id = %subject_id,
                         sn = sn,
@@ -2210,7 +1812,8 @@ impl PersistentActor for WitnessesRegister {
                 owner,
                 gov_version,
             } => {
-                let data = self.subjects.entry(subject_id.clone()).or_default();
+                let data =
+                    inner.subjects.entry(subject_id.clone()).or_default();
 
                 data.actual_owner = owner.clone();
                 data.gov_version = *gov_version;
@@ -2222,6 +1825,7 @@ impl PersistentActor for WitnessesRegister {
                 );
 
                 debug!(
+                    msg_type = "Create",
                     event_type = "Create",
                     subject_id = %subject_id,
                     owner = %owner,
@@ -2234,11 +1838,12 @@ impl PersistentActor for WitnessesRegister {
                 new_owner,
                 gov_version,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     data.actual_new_owner_data =
                         Some((new_owner.clone(), *gov_version));
 
                     debug!(
+                        msg_type = "Transfer",
                         event_type = "Transfer",
                         subject_id = %subject_id,
                         new_owner = %new_owner,
@@ -2247,6 +1852,7 @@ impl PersistentActor for WitnessesRegister {
                     );
                 } else {
                     error!(
+                        msg_type = "Transfer",
                         event_type = "Transfer",
                         subject_id = %subject_id,
                         new_owner = %new_owner,
@@ -2259,7 +1865,7 @@ impl PersistentActor for WitnessesRegister {
                 sn,
                 gov_version,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
                     if let Some((new_owner, new_owner_gov_version)) = new_owner
@@ -2278,6 +1884,7 @@ impl PersistentActor for WitnessesRegister {
                         data.gov_version = new_owner_gov_version;
 
                         debug!(
+                            msg_type = "Confirm",
                             event_type = "Confirm",
                             subject_id = %subject_id,
                             sn = sn,
@@ -2286,6 +1893,7 @@ impl PersistentActor for WitnessesRegister {
                         );
                     } else {
                         error!(
+                            msg_type = "Confirm",
                             event_type = "Confirm",
                             subject_id = %subject_id,
                             sn = sn,
@@ -2294,6 +1902,7 @@ impl PersistentActor for WitnessesRegister {
                     };
                 } else {
                     error!(
+                        msg_type = "Confirm",
                         event_type = "Confirm",
                         subject_id = %subject_id,
                         sn = sn,
@@ -2302,9 +1911,10 @@ impl PersistentActor for WitnessesRegister {
                 };
             }
             WitnessesRegisterEvent::DeleteSubject { subject_id } => {
-                self.subjects.remove(subject_id);
+                inner.subjects.remove(subject_id);
 
                 debug!(
+                    msg_type = "DeleteSubject",
                     event_type = "DeleteSubject",
                     subject_id = %subject_id,
                     "Witness subject entry deleted from state"
@@ -2315,7 +1925,7 @@ impl PersistentActor for WitnessesRegister {
                 sn,
                 gov_version,
             } => {
-                if let Some(data) = self.subjects.get_mut(subject_id) {
+                if let Some(data) = inner.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
                     if let Some((new_owner, new_owner_gov_version)) = new_owner
@@ -2329,6 +1939,7 @@ impl PersistentActor for WitnessesRegister {
                         });
 
                         debug!(
+                            msg_type = "Reject",
                             event_type = "Reject",
                             subject_id = %subject_id,
                             sn = sn,
@@ -2337,6 +1948,7 @@ impl PersistentActor for WitnessesRegister {
                         );
                     } else {
                         error!(
+                            msg_type = "Reject",
                             event_type = "Reject",
                             subject_id = %subject_id,
                             sn = sn,
@@ -2345,6 +1957,7 @@ impl PersistentActor for WitnessesRegister {
                     };
                 } else {
                     error!(
+                        msg_type = "Reject",
                         event_type = "Reject",
                         subject_id = %subject_id,
                         sn = sn,
@@ -2354,7 +1967,15 @@ impl PersistentActor for WitnessesRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

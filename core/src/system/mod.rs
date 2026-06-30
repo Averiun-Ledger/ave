@@ -3,12 +3,12 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     config::{
-        Config, GovernanceSyncConfig, RebootSyncConfig, SinkAuth,
+        Config, GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry,
         TrackerSyncConfig, UpdateSyncConfig,
     },
     db::Database,
     external_db::DBManager,
-    helpers::{db::ExternalDB, sink::AveSink},
+    helpers::db::ExternalDB,
     model::common::contract::WasmRuntime,
 };
 use ave_actors::{
@@ -35,28 +35,33 @@ pub struct ConfigHelper {
     pub sync_tracker: TrackerSyncConfig,
     pub sync_update: UpdateSyncConfig,
     pub sync_reboot: RebootSyncConfig,
+    /// Sink configuration entries read from the bridge configuration. Each
+    /// entry pairs a [`SinkTarget`] with the list of servers that deliver
+    /// events for that target.
+    pub sinks: Vec<SinkConfigEntry>,
 }
 
-impl From<Config> for ConfigHelper {
-    fn from(value: Config) -> Self {
+impl ConfigHelper {
+    pub fn from_config(config: Config, sinks: Vec<SinkConfigEntry>) -> Self {
         Self {
-            contracts_path: value.contracts_path,
-            always_accept: value.always_accept,
-            safe_mode: value.safe_mode,
-            tracking_size: value.tracking_size,
-            only_clear_events: value.only_clear_events,
-            ledger_batch_size: value.sync.ledger_batch_size,
-            sync_governance: value.sync.governance,
-            sync_tracker: value.sync.tracker,
-            sync_update: value.sync.update,
-            sync_reboot: value.sync.reboot,
+            contracts_path: config.contracts_path,
+            always_accept: config.always_accept,
+            safe_mode: config.safe_mode,
+            tracking_size: config.tracking_size,
+            only_clear_events: config.only_clear_events,
+            ledger_batch_size: config.sync.ledger_batch_size,
+            sync_governance: config.sync.governance,
+            sync_tracker: config.sync.tracker,
+            sync_update: config.sync.update,
+            sync_reboot: config.sync.reboot,
+            sinks,
         }
     }
 }
 
 pub async fn system(
     config: Config,
-    sink_auth: SinkAuth,
+    sinks: Vec<SinkConfigEntry>,
     password: &str,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
@@ -65,9 +70,8 @@ pub async fn system(
     let (system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
-    system
-        .add_helper("config", ConfigHelper::from(config.clone()))
-        .await;
+    let config_helper = ConfigHelper::from_config(config.clone(), sinks);
+    system.add_helper("config", config_helper).await;
 
     // Build engine + limits together; actors fetch both via a single helper access.
     let wasm_runtime = WasmRuntime::new(config.spec.clone())
@@ -84,25 +88,11 @@ pub async fn system(
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
     // Build database manager.
-    let mut db = Database::open(&config.internal_db, actor_spec)
-        .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
-    system.add_helper("store", db.clone()).await;
-
-    // Build sink manager.
-    let api_key = if sink_auth.api_key.is_empty() {
-        None
-    } else {
-        Some(sink_auth.api_key.clone())
-    };
-    let ave_sink = AveSink::new(
-        sink_auth.sink.sinks,
-        sink_auth.token,
-        &sink_auth.sink.auth,
-        &sink_auth.sink.username,
-        &sink_auth.password,
-        api_key,
+    let db = Arc::new(
+        Database::open(&config.internal_db, actor_spec)
+            .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?,
     );
-    system.add_helper("sink", ave_sink).await;
+    system.add_helper("store", db.clone()).await;
 
     let pass_hash =
         hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string())
@@ -136,14 +126,34 @@ pub async fn system(
 
     system.add_helper("ext_db", Arc::clone(&ext_db)).await;
 
+    let system_shutdown = system.clone();
     let runner = tokio::spawn(async move {
         runner.run().await;
         if let Err(e) = ext_db.shutdown().await {
             error!(error = %e, "Failed to stop external db");
         };
-        if let Err(e) = db.stop() {
-            error!(error = %e, "Failed to stop db");
-        };
+
+        // Remove the helper so the shared Arc<Database> reference is dropped
+        // before we try to take ownership of the local one.
+        if let Some(helper) = system_shutdown
+            .remove_helper::<Arc<Database>>("store")
+            .await
+        {
+            drop(helper);
+        }
+
+        match Arc::try_unwrap(db) {
+            Ok(db) => {
+                if let Err(e) = db.stop() {
+                    error!(error = %e, "Failed to stop db");
+                }
+            }
+            Err(_) => {
+                error!(
+                    "Database still referenced at shutdown; file lock may persist"
+                );
+            }
+        }
     });
 
     Ok((system, runner))
@@ -188,7 +198,7 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_system() {
         let (system, _runner, _dirs) = create_system().await;
-        let db: Option<Database> = system.get_helper("store").await;
+        let db: Option<Arc<Database>> = system.get_helper("store").await;
         assert!(db.is_some());
         let ep: Option<EncryptedKey> = system.get_helper("encrypted_key").await;
         assert!(ep.is_some());
@@ -259,7 +269,7 @@ pub mod tests {
 
         let (sys, handlers) = system(
             config.clone(),
-            SinkAuth::default(),
+            Vec::new(),
             "password",
             CancellationToken::new(),
             CancellationToken::new(),

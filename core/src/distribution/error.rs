@@ -8,6 +8,9 @@ pub enum DistributorError {
     #[error("governance is not authorized")]
     GovernanceNotAuthorized,
 
+    #[error("tracker is banned")]
+    TrackerBanned,
+
     #[error("we are not witness for this subject")]
     NotWitness,
 
@@ -21,6 +24,9 @@ pub enum DistributorError {
 
     #[error("sender does not have access to the subject")]
     SenderNoAccess,
+
+    #[error("receiver does not have access to the subject")]
+    ReceiverNoAccess,
 
     #[error("missing governance_id for tracker subject {subject_id}")]
     MissingGovernanceId { subject_id: DigestIdentifier },
@@ -63,6 +69,9 @@ pub enum DistributorError {
 
     #[error("failed to update subject ledger: {details}")]
     UpdateLedgerFailed { details: String },
+
+    #[error("transfer event verification failed: {details}")]
+    TransferEventInvalid { details: String },
 }
 
 impl From<DistributorError> for ActorError {
@@ -73,17 +82,18 @@ impl From<DistributorError> for ActorError {
             | DistributorError::SubjectNotFound
             | DistributorError::SenderNotMember { .. }
             | DistributorError::SenderNoAccess
+            | DistributorError::ReceiverNoAccess
             | DistributorError::UpdatingSubject
             | DistributorError::ActualSnBiggerThanWitness { .. }
             | DistributorError::UnexpectedSender
             | DistributorError::EmptyEvents
             | DistributorError::MissingCreateEventInCreateLedger { .. }
             | DistributorError::GetGovernanceFailed { .. }
-            | DistributorError::GovernanceVersionMismatch { .. } => {
-                Self::Functional {
-                    description: error.to_string(),
-                }
-            }
+            | DistributorError::GovernanceVersionMismatch { .. }
+            | DistributorError::TransferEventInvalid { .. }
+            | DistributorError::TrackerBanned => Self::Functional {
+                description: error.to_string(),
+            },
             DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
             | DistributorError::UpTrackerFailed { .. }

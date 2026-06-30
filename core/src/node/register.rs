@@ -5,9 +5,7 @@ use ave_actors::{
 };
 use ave_common::SchemaType;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span};
-
-use crate::model::common::emit_fail;
+use tracing::{Span, debug, info_span};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterDataSubj {
@@ -94,6 +92,9 @@ impl Actor for Register {
     type Event = RegisterEvent;
     type Message = RegisterMessage;
     type Response = RegisterResponse;
+    type SinkEvent = RegisterEvent;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -107,7 +108,7 @@ impl Actor for Register {
 impl Handler<Self> for Register {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RegisterMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RegisterResponse, ActorError> {
@@ -186,11 +187,7 @@ impl Handler<Self> for Register {
         event: RegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = ctx.publish_event(event.clone()).await {
-            error!(error = %e, event = ?event, "Failed to publish register event");
-            emit_fail(ctx, e).await;
-        } else {
-            debug!(event = ?event, "Register event published successfully");
-        }
+        ctx.publish_all(event.clone());
+        debug!(event = ?event, "Register event published successfully");
     }
 }

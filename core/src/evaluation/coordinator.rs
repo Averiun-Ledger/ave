@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     helpers::network::{NetworkMessage, service::NetworkSender},
-    model::{common::emit_fail, network::RetryNetwork},
+    model::{common::crash_system, network::RetryNetwork},
 };
 
 use crate::helpers::network::ActorMessage;
@@ -13,9 +13,8 @@ use ave_common::identity::{HashAlgorithm, PublicKey, Signed, hash_borsh};
 use ave_network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
-    RetryMessage, Strategy,
+    Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
+    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -135,6 +134,9 @@ impl Actor for EvalCoordinator {
     type Event = ();
     type Message = EvalCoordinatorMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -150,7 +152,7 @@ impl NotPersistentActor for EvalCoordinator {}
 impl Handler<Self> for EvalCoordinator {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvalCoordinatorMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -176,7 +178,7 @@ impl Handler<Self> for EvalCoordinator {
                                 error = %e,
                                 "Failed to send timeout response to evaluation actor"
                             );
-                            emit_fail(ctx, e).await;
+                            crash_system(ctx, e).await;
                         } else {
                             debug!(
                                 request_id = %self.request_id,
@@ -191,7 +193,7 @@ impl Handler<Self> for EvalCoordinator {
                             path = %ctx.path().parent(),
                             "Evaluation actor not found"
                         );
-                        emit_fail(ctx, e).await;
+                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -231,13 +233,15 @@ impl Handler<Self> for EvalCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(any(test, feature = "test"))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(1, Duration::from_secs(20)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    1,
+                    Duration::from_secs(20),
+                ));
                 #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(3, Duration::from_secs(60)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    3,
+                    Duration::from_secs(60),
+                ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
                     target,
@@ -260,7 +264,7 @@ impl Handler<Self> for EvalCoordinator {
                             error = %e,
                             "Failed to create retry actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -270,7 +274,7 @@ impl Handler<Self> for EvalCoordinator {
                         error = %e,
                         "Failed to send retry message to retry actor"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 };
 
                 debug!(
@@ -330,7 +334,7 @@ impl Handler<Self> for EvalCoordinator {
                                     error = %e,
                                     "Failed to send response to evaluation actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
@@ -341,7 +345,7 @@ impl Handler<Self> for EvalCoordinator {
                                 "Evaluation actor not found"
                             );
 
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
 
@@ -393,21 +397,5 @@ impl Handler<Self> for EvalCoordinator {
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            request_id = %self.request_id,
-            version = self.version,
-            node_key = %self.node_key,
-            error = %error,
-            "Child fault in evaluation coordinator"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

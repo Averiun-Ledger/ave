@@ -445,6 +445,150 @@ where
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_spec_profile() {
+        let spec =
+            resolve_spec(Some(MachineSpec::Profile(MachineProfile::Medium)));
+        assert_eq!(spec.ram_mb, 4_096);
+        assert_eq!(spec.cpu_cores, 2);
+    }
+
+    #[test]
+    fn test_resolve_spec_custom() {
+        let spec = resolve_spec(Some(MachineSpec::Custom {
+            ram_mb: 8192,
+            cpu_cores: 4,
+        }));
+        assert_eq!(spec.ram_mb, 8192);
+        assert_eq!(spec.cpu_cores, 4);
+    }
+
+    #[test]
+    fn test_resolve_spec_none() {
+        let spec = resolve_spec(None);
+        assert!(spec.ram_mb > 0);
+        assert!(spec.cpu_cores > 0);
+    }
+
+    #[test]
+    fn test_memory_limits_validate_ok() {
+        assert!(MemoryLimitsConfig::Disabled.validate().is_ok());
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.5 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.0 }
+                .validate()
+                .is_ok()
+        );
+        assert!(MemoryLimitsConfig::Mb { value: 1024 }.validate().is_ok());
+    }
+
+    #[test]
+    fn test_memory_limits_validate_err() {
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.0 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: -0.5 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.5 }
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_machine_profile_ram_mb_and_cpu_cores() {
+        assert_eq!(MachineProfile::Nano.ram_mb(), 512);
+        assert_eq!(MachineProfile::Nano.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Micro.ram_mb(), 1_024);
+        assert_eq!(MachineProfile::Micro.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Small.ram_mb(), 2_048);
+        assert_eq!(MachineProfile::Small.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Medium.ram_mb(), 4_096);
+        assert_eq!(MachineProfile::Medium.cpu_cores(), 2);
+        assert_eq!(MachineProfile::Large.ram_mb(), 8_192);
+        assert_eq!(MachineProfile::Large.cpu_cores(), 2);
+        assert_eq!(MachineProfile::XLarge.ram_mb(), 16_384);
+        assert_eq!(MachineProfile::XLarge.cpu_cores(), 4);
+        assert_eq!(MachineProfile::XXLarge.ram_mb(), 32_768);
+        assert_eq!(MachineProfile::XXLarge.cpu_cores(), 8);
+    }
+
+    #[test]
+    fn test_memory_limits_validate_boundary() {
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.0 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.0001 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 0.0 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: 1.5 }
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_node_type_deserialize_variants() {
+        let bootstrap: NodeType =
+            serde_json::from_str("\"Bootstrap\"").unwrap();
+        assert_eq!(bootstrap, NodeType::Bootstrap);
+        let addressable: NodeType =
+            serde_json::from_str("\"Addressable\"").unwrap();
+        assert_eq!(addressable, NodeType::Addressable);
+        let ephemeral: NodeType =
+            serde_json::from_str("\"Ephemeral\"").unwrap();
+        assert_eq!(ephemeral, NodeType::Ephemeral);
+    }
+
+    #[test]
+    fn test_config_default() {
+        let cfg = Config::default();
+        assert_eq!(cfg.node_type, NodeType::Bootstrap);
+        assert!(cfg.listen_addresses.is_empty());
+        assert!(cfg.external_addresses.is_empty());
+        assert!(cfg.boot_nodes.is_empty());
+        assert_eq!(cfg.memory_limits, MemoryLimitsConfig::Disabled);
+    }
+
+    #[test]
+    fn test_config_new() {
+        let cfg = Config::new(
+            NodeType::Addressable,
+            vec!["/memory/1".to_owned()],
+            vec!["/memory/2".to_owned()],
+            vec![],
+        );
+        assert_eq!(cfg.node_type, NodeType::Addressable);
+        assert_eq!(cfg.listen_addresses, vec!["/memory/1"]);
+        assert_eq!(cfg.external_addresses, vec!["/memory/2"]);
+        assert!(cfg.boot_nodes.is_empty());
+    }
+}
+
 /// Event enumeration for the Helper service.
 #[derive(
     Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize,

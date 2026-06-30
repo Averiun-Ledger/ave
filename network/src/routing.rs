@@ -689,3 +689,193 @@ pub struct RoutingNode {
     /// Address.
     pub address: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{NodeType, utils::LimitsConfig};
+
+    fn build_behaviour(node_type: NodeType) -> Behaviour {
+        let peer_id = PeerId::random();
+        let config = Config::default();
+        let protocol = StreamProtocol::new("/test/routing/1.0.0");
+        let limits = LimitsConfig::build(1024, 1);
+        Behaviour::new(peer_id, config, protocol, node_type, limits)
+    }
+
+    #[test]
+    fn test_new_close_connections() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.new_close_connections(peer, None);
+        assert_eq!(behaviour.close_connections.len(), 1);
+    }
+
+    #[test]
+    fn test_new_close_connections_with_waker() {
+        use std::task::{RawWaker, RawWakerVTable, Waker};
+        fn dummy_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)
+        }
+        fn dummy_wake(_: *const ()) {}
+        fn dummy_wake_by_ref(_: *const ()) {}
+        fn dummy_drop(_: *const ()) {}
+        static DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            dummy_clone,
+            dummy_wake,
+            dummy_wake_by_ref,
+            dummy_drop,
+        );
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE))
+        };
+
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        behaviour.waker = Some(waker);
+        let peer = PeerId::random();
+        behaviour.new_close_connections(peer, None);
+        assert_eq!(behaviour.close_connections.len(), 1);
+        assert!(behaviour.waker.is_none());
+    }
+
+    #[test]
+    fn test_is_known_peer_after_add() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        behaviour.add_self_reported_address(&peer, &addr);
+        assert!(behaviour.is_known_peer(&peer));
+    }
+
+    #[test]
+    fn test_add_peer_to_remove_once() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.add_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), Some(&1));
+    }
+
+    #[test]
+    fn test_add_peer_to_remove_three_times_triggers_removal() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        // First two calls just increment the counter
+        behaviour.add_peer_to_remove(&peer);
+        behaviour.add_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), Some(&2));
+        // Third call triggers removal and cleanup
+        behaviour.add_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), None);
+    }
+
+    #[test]
+    fn test_clean_peer_to_remove() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.add_peer_to_remove(&peer);
+        behaviour.clean_peer_to_remove(&peer);
+        assert_eq!(behaviour.peer_to_remove.get(&peer), None);
+    }
+
+    #[test]
+    fn test_poll_close_connections_with_connection_id() {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn dummy_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)
+        }
+        fn dummy_wake(_: *const ()) {}
+        fn dummy_wake_by_ref(_: *const ()) {}
+        fn dummy_drop(_: *const ()) {}
+        static DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            dummy_clone,
+            dummy_wake,
+            dummy_wake_by_ref,
+            dummy_drop,
+        );
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE))
+        };
+        let mut cx = Context::from_waker(&waker);
+
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        let conn_id = ConnectionId::new_unchecked(42);
+        behaviour.new_close_connections(peer, Some(conn_id));
+
+        let result = behaviour.poll(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::One(id)
+            }) if peer_id == peer && id == conn_id
+        ));
+    }
+
+    #[test]
+    fn test_poll_close_connections_without_connection_id() {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn dummy_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &DUMMY_VTABLE)
+        }
+        fn dummy_wake(_: *const ()) {}
+        fn dummy_wake_by_ref(_: *const ()) {}
+        fn dummy_drop(_: *const ()) {}
+        static DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            dummy_clone,
+            dummy_wake,
+            dummy_wake_by_ref,
+            dummy_drop,
+        );
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(std::ptr::null(), &DUMMY_VTABLE))
+        };
+        let mut cx = Context::from_waker(&waker);
+
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        behaviour.new_close_connections(peer, None);
+
+        let result = behaviour.poll(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::All
+            }) if peer_id == peer
+        ));
+    }
+
+    #[test]
+    fn test_add_self_reported_address_accepts_valid() {
+        let mut behaviour = build_behaviour(NodeType::Addressable);
+        let peer = PeerId::random();
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(behaviour.add_self_reported_address(&peer, &addr));
+    }
+
+    #[test]
+    fn test_routing_config_builder_chain() {
+        let config = crate::routing::Config::default()
+            .with_dht_random_walk(false)
+            .with_discovery_limit(50)
+            .with_allow_private_address_in_dht(true)
+            .with_allow_dns_address_in_dht(true)
+            .with_allow_loop_back_address_in_dht(true)
+            .with_kademlia_disjoint_query_paths(false);
+
+        assert!(!config.get_dht_random_walk());
+        assert_eq!(config.get_discovery_limit(), 50);
+        assert!(config.get_allow_private_address_in_dht());
+        assert!(config.get_allow_dns_address_in_dht());
+        assert!(config.get_allow_loop_back_address_in_dht());
+        assert!(!config.get_kademlia_disjoint_query_paths());
+    }
+
+    #[test]
+    fn test_is_known_peer_false_for_unknown() {
+        let mut behaviour = build_behaviour(NodeType::Bootstrap);
+        let peer = PeerId::random();
+        assert!(!behaviour.is_known_peer(&peer));
+    }
+}

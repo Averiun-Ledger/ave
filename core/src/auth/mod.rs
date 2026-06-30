@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
@@ -16,19 +16,19 @@ use tracing::{Span, debug, error, info, info_span, warn};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::get_subject_data;
 use crate::model::common::subject::{
-    get_gov, get_gov_sn, get_tracker_sn_owner,
+    get_gov_sn, get_tracker_sn_owner, get_witnesses,
 };
 use crate::node::SubjectData;
 use crate::update::UpdateType;
 use crate::{
     db::Storable,
     governance::model::WitnessesData,
-    model::common::emit_fail,
+    model::common::crash_system,
     update::{Update, UpdateMessage, UpdateNew, UpdateSubjectKind},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Auth {
+pub struct SubjectAccess {
     #[serde(skip)]
     network: Option<Arc<NetworkSender>>,
 
@@ -47,11 +47,13 @@ pub struct Auth {
     #[serde(skip)]
     witness_retry_interval_secs: u64,
 
-    auth: HashMap<DigestIdentifier, HashSet<PublicKey>>,
+    gov_allowlist: HashSet<DigestIdentifier>,
+    tracker_banlist: HashSet<DigestIdentifier>,
+    sync_peers: HashMap<DigestIdentifier, HashSet<PublicKey>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct AuthInitParams {
+pub struct SubjectAccessInitParams {
     pub network: Arc<NetworkSender>,
     pub our_key: Arc<PublicKey>,
     pub round_retry_interval_secs: u64,
@@ -69,30 +71,35 @@ pub enum AuthWitness {
     None,
 }
 
-impl BorshSerialize for Auth {
+impl BorshSerialize for SubjectAccess {
     fn serialize<W: std::io::Write>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
-        BorshSerialize::serialize(&self.auth, writer)?;
-
+        BorshSerialize::serialize(&self.gov_allowlist, writer)?;
+        BorshSerialize::serialize(&self.tracker_banlist, writer)?;
+        BorshSerialize::serialize(&self.sync_peers, writer)?;
         Ok(())
     }
 }
 
-impl BorshDeserialize for Auth {
+impl BorshDeserialize for SubjectAccess {
     fn deserialize_reader<R: std::io::Read>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
-        // Deserialize the persisted fields
-        let auth = HashMap::<DigestIdentifier, HashSet<PublicKey>>::deserialize_reader(reader)?;
+        let gov_allowlist =
+            HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
+        let tracker_banlist =
+            HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
+        let sync_peers = HashMap::<DigestIdentifier, HashSet<PublicKey>>::deserialize_reader(reader)?;
         let network = None;
         let our_key = Arc::new(PublicKey::default());
 
         Ok(Self {
             network,
-            auth,
+            gov_allowlist,
+            tracker_banlist,
+            sync_peers,
             our_key,
             round_retry_interval_secs: 10,
             max_round_retries: 3,
@@ -102,127 +109,68 @@ impl BorshDeserialize for Auth {
     }
 }
 
-impl Auth {
-    async fn build_update_state(
-        ctx: &mut ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-    ) -> Result<(Option<u64>, Option<UpdateSubjectKind>), ActorError> {
-        let data = get_subject_data(ctx, subject_id).await?;
-
-        match data {
-            Some(SubjectData::Tracker { governance_id, .. }) => {
-                let actual_sn =
-                    get_tracker_sn_owner(ctx, &governance_id, subject_id)
-                        .await?
-                        .map(|(_, actual_sn)| actual_sn);
-
-                Ok((actual_sn, Some(UpdateSubjectKind::Tracker)))
-            }
-            Some(SubjectData::Governance { .. }) => {
-                let sn = get_gov_sn(ctx, subject_id).await?;
-                Ok((Some(sn), Some(UpdateSubjectKind::Governance)))
-            }
-            None => Ok((None, None)),
+impl SubjectAccess {
+    fn witness_to_set(witness: &AuthWitness) -> HashSet<PublicKey> {
+        match witness {
+            AuthWitness::One(public_key) => HashSet::from([public_key.clone()]),
+            AuthWitness::Many(items) => items.iter().cloned().collect(),
+            AuthWitness::None => HashSet::default(),
         }
-    }
-
-    async fn build_update_data(
-        ctx: &mut ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-    ) -> Result<
-        (HashSet<PublicKey>, Option<u64>, Option<UpdateSubjectKind>),
-        ActorError,
-    > {
-        let data = get_subject_data(ctx, subject_id).await?;
-
-        let (witnesses, actual_sn, subject_kind_hint) = if let Some(data) =
-            &data
-        {
-            match data {
-                SubjectData::Tracker {
-                    governance_id,
-                    schema_id,
-                    namespace,
-                    ..
-                } => {
-                    if let Some((owner, actual_sn)) =
-                        get_tracker_sn_owner(ctx, governance_id, subject_id)
-                            .await?
-                    {
-                        let gov = get_gov(ctx, governance_id).await?;
-                        let witnesses = gov
-                            .get_witnesses(WitnessesData::Schema {
-                                creator: owner,
-                                schema_id: schema_id.clone(),
-                                namespace: Namespace::from(
-                                    namespace.to_owned(),
-                                ),
-                            })
-                            .map_err(|e| {
-                                error!(
-                                    subject_id = %subject_id,
-                                    governance_id = %governance_id,
-                                    error = %e,
-                                    "Failed to get witnesses for tracker schema"
-                                );
-                                ActorError::Functional {
-                                    description: e.to_string(),
-                                }
-                            })?;
-
-                        (
-                            witnesses,
-                            Some(actual_sn),
-                            Some(UpdateSubjectKind::Tracker),
-                        )
-                    } else {
-                        (
-                            HashSet::default(),
-                            None,
-                            Some(UpdateSubjectKind::Tracker),
-                        )
-                    }
-                }
-                SubjectData::Governance { .. } => {
-                    let gov = get_gov(ctx, subject_id).await?;
-                    let witnesses =
-                        gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
-                            warn!(
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to get witnesses for governance"
-                            );
-                            ActorError::Functional {
-                                description: e.to_string(),
-                            }
-                        })?;
-
-                    let sn = get_gov_sn(ctx, subject_id).await?;
-
-                    (witnesses, Some(sn), Some(UpdateSubjectKind::Governance))
-                }
-            }
-        } else {
-            (HashSet::default(), None, None)
-        };
-
-        Ok((witnesses, actual_sn, subject_kind_hint))
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum AuthMessage {
-    NewAuth {
+pub enum SubjectAccessMessage {
+    // GovAllowlist
+    AuthorizeGov {
         subject_id: DigestIdentifier,
-        witness: AuthWitness,
+        witnesses: AuthWitness,
     },
-    GetAuths,
-    GetAuth {
-        subject_id: DigestIdentifier,
-    },
-    DeleteAuth {
+    DisauthorizeGov {
         subject_id: DigestIdentifier,
     },
+    IsGovAuthorized {
+        subject_id: DigestIdentifier,
+    },
+    GetAuthorizedGovs,
+
+    // TrackerBanlist
+    BanTracker {
+        subject_id: DigestIdentifier,
+    },
+    UnbanTracker {
+        subject_id: DigestIdentifier,
+    },
+    IsTrackerBanned {
+        subject_id: DigestIdentifier,
+    },
+    GetBannedTrackers,
+
+    // SyncPeers
+    AddSyncPeers {
+        subject_id: DigestIdentifier,
+        peers: Vec<PublicKey>,
+    },
+    RemoveSyncPeers {
+        subject_id: DigestIdentifier,
+        peers: Vec<PublicKey>,
+    },
+    GetSyncPeers {
+        subject_id: DigestIdentifier,
+    },
+    GetSubjectsWithSyncPeers,
+
+    // Access info
+    GetAccessInfo {
+        subject_id: DigestIdentifier,
+    },
+
+    // Cleanup
+    ClearSubject {
+        subject_id: DigestIdentifier,
+    },
+
+    // Update
     Update {
         subject_id: DigestIdentifier,
         objective: Option<PublicKey>,
@@ -230,42 +178,67 @@ pub enum AuthMessage {
     },
 }
 
-impl Message for AuthMessage {}
+impl Message for SubjectAccessMessage {}
 
 #[derive(Debug, Clone)]
-pub enum AuthResponse {
-    Auths { subjects: Vec<DigestIdentifier> },
-    Witnesses(HashSet<PublicKey>),
+pub enum SubjectAccessResponse {
+    Bool(bool),
+    Subjects(Vec<DigestIdentifier>),
+    Peers(HashSet<PublicKey>),
+    AccessInfo {
+        is_gov_authorized: bool,
+        is_tracker_banned: bool,
+    },
     None,
 }
 
-impl Response for AuthResponse {}
+impl Response for SubjectAccessResponse {}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
-pub enum AuthEvent {
-    NewAuth {
+pub enum SubjectAccessEvent {
+    GovAuthorized {
         subject_id: DigestIdentifier,
-        witness: AuthWitness,
+        witnesses: AuthWitness,
     },
-    DeleteAuth {
+    GovDisauthorized {
+        subject_id: DigestIdentifier,
+    },
+    TrackerBanned {
+        subject_id: DigestIdentifier,
+    },
+    TrackerUnbanned {
+        subject_id: DigestIdentifier,
+    },
+    SyncPeersAdded {
+        subject_id: DigestIdentifier,
+        peers: Vec<PublicKey>,
+    },
+    SyncPeersRemoved {
+        subject_id: DigestIdentifier,
+        peers: Vec<PublicKey>,
+    },
+    SubjectCleared {
         subject_id: DigestIdentifier,
     },
 }
 
-impl Event for AuthEvent {}
+impl Event for SubjectAccessEvent {}
 
 #[async_trait]
-impl Actor for Auth {
-    type Event = AuthEvent;
-    type Message = AuthMessage;
-    type Response = AuthResponse;
+impl Actor for SubjectAccess {
+    type Event = SubjectAccessEvent;
+    type Message = SubjectAccessMessage;
+    type Response = SubjectAccessResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
-            || info_span!("Auth"),
-            |parent_span| info_span!(parent: parent_span, "Auth"),
+            || info_span!("SubjectAccess"),
+            |parent_span| info_span!(parent: parent_span, "SubjectAccess"),
         )
     }
 
@@ -276,7 +249,7 @@ impl Actor for Auth {
         if let Err(e) = self.init_store("auth", None, false, ctx).await {
             error!(
                 error = %e,
-                "Failed to initialize auth store"
+                "Failed to initialize subject_access store"
             );
             return Err(e);
         }
@@ -286,92 +259,268 @@ impl Actor for Auth {
 }
 
 #[async_trait]
-impl Handler<Self> for Auth {
+impl Handler<Self> for SubjectAccess {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
-        msg: AuthMessage,
+        _: ActorPath,
+        msg: SubjectAccessMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<AuthResponse, ActorError> {
+    ) -> Result<SubjectAccessResponse, ActorError> {
         match msg {
-            AuthMessage::GetAuth { subject_id } => {
-                if let Some(witnesses) = self.auth.get(&subject_id) {
-                    debug!(
-                        msg_type = "GetAuth",
-                        subject_id = %subject_id,
-                        "Retrieved auth witnesses"
-                    );
-
-                    return Ok(AuthResponse::Witnesses(witnesses.clone()));
-                } else {
-                    debug!(
-                        msg_type = "GetAuth",
-                        subject_id = %subject_id,
-                        "Subject is not authorized"
-                    );
+            // GovAllowlist
+            SubjectAccessMessage::AuthorizeGov {
+                subject_id,
+                witnesses,
+            } => {
+                if subject_id.is_empty() {
                     return Err(ActorError::Functional {
-                        description: "The subject has not been authorized"
-                            .to_owned(),
+                        description: "subject_id cannot be empty".to_owned(),
                     });
                 }
-            }
-            AuthMessage::DeleteAuth { subject_id } => {
                 self.on_event(
-                    AuthEvent::DeleteAuth {
+                    SubjectAccessEvent::GovAuthorized {
+                        subject_id: subject_id.clone(),
+                        witnesses,
+                    },
+                    ctx,
+                )
+                .await;
+                debug!(
+                    msg_type = "AuthorizeGov",
+                    subject_id = %subject_id,
+                    "Governance authorized"
+                );
+            }
+            SubjectAccessMessage::DisauthorizeGov { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                self.on_event(
+                    SubjectAccessEvent::GovDisauthorized {
                         subject_id: subject_id.clone(),
                     },
                     ctx,
                 )
                 .await;
-
                 debug!(
-                    msg_type = "DeleteAuth",
+                    msg_type = "DisauthorizeGov",
                     subject_id = %subject_id,
-                    "Auth deleted successfully"
+                    "Governance disauthorized"
                 );
             }
-            AuthMessage::NewAuth {
-                subject_id,
-                witness,
-            } => {
-                if !subject_id.is_empty() {
-                    self.on_event(
-                        AuthEvent::NewAuth {
-                            subject_id: subject_id.clone(),
-                            witness,
-                        },
-                        ctx,
-                    )
-                    .await;
-
-                    debug!(
-                        msg_type = "NewAuth",
-                        subject_id = %subject_id,
-                        "New auth created successfully"
-                    );
-                } else {
-                    warn!(
-                        msg_type = "NewAuth",
-                        witness = ?witness,
-                        "Ignoring auth creation with empty subject_id"
-                    );
+            SubjectAccessMessage::IsGovAuthorized { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
                 }
+                let authorized = self.gov_allowlist.contains(&subject_id);
+                return Ok(SubjectAccessResponse::Bool(authorized));
             }
-            AuthMessage::GetAuths => {
+            SubjectAccessMessage::GetAuthorizedGovs => {
                 let subjects: Vec<DigestIdentifier> =
-                    self.auth.keys().cloned().collect();
-                debug!(
-                    msg_type = "GetAuths",
-                    count = subjects.len(),
-                    "Retrieved all authorized subjects"
-                );
-                return Ok(AuthResponse::Auths { subjects });
+                    self.gov_allowlist.iter().cloned().collect();
+                return Ok(SubjectAccessResponse::Subjects(subjects));
             }
-            AuthMessage::Update {
+
+            // TrackerBanlist
+            SubjectAccessMessage::BanTracker { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                self.on_event(
+                    SubjectAccessEvent::TrackerBanned {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+                debug!(
+                    msg_type = "BanTracker",
+                    subject_id = %subject_id,
+                    "Tracker banned"
+                );
+            }
+            SubjectAccessMessage::UnbanTracker { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                self.on_event(
+                    SubjectAccessEvent::TrackerUnbanned {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+                debug!(
+                    msg_type = "UnbanTracker",
+                    subject_id = %subject_id,
+                    "Tracker unbanned"
+                );
+            }
+            SubjectAccessMessage::IsTrackerBanned { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                let banned = self.tracker_banlist.contains(&subject_id);
+                return Ok(SubjectAccessResponse::Bool(banned));
+            }
+            SubjectAccessMessage::GetBannedTrackers => {
+                let subjects: Vec<DigestIdentifier> =
+                    self.tracker_banlist.iter().cloned().collect();
+                return Ok(SubjectAccessResponse::Subjects(subjects));
+            }
+
+            // SyncPeers
+            SubjectAccessMessage::AddSyncPeers { subject_id, peers } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                if peers.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "peers cannot be empty".to_owned(),
+                    });
+                }
+                self.on_event(
+                    SubjectAccessEvent::SyncPeersAdded {
+                        subject_id: subject_id.clone(),
+                        peers: peers.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+                debug!(
+                    msg_type = "AddSyncPeers",
+                    subject_id = %subject_id,
+                    count = peers.len(),
+                    "Sync peers added"
+                );
+            }
+            SubjectAccessMessage::RemoveSyncPeers { subject_id, peers } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                if peers.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "peers cannot be empty".to_owned(),
+                    });
+                }
+                self.on_event(
+                    SubjectAccessEvent::SyncPeersRemoved {
+                        subject_id: subject_id.clone(),
+                        peers: peers.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+                debug!(
+                    msg_type = "RemoveSyncPeers",
+                    subject_id = %subject_id,
+                    count = peers.len(),
+                    "Sync peers removed"
+                );
+            }
+            SubjectAccessMessage::GetSyncPeers { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                let peers = self
+                    .sync_peers
+                    .get(&subject_id)
+                    .cloned()
+                    .unwrap_or_default();
+                return Ok(SubjectAccessResponse::Peers(peers));
+            }
+            SubjectAccessMessage::GetSubjectsWithSyncPeers => {
+                let subjects: Vec<DigestIdentifier> =
+                    self.sync_peers.keys().cloned().collect();
+                return Ok(SubjectAccessResponse::Subjects(subjects));
+            }
+
+            // Access info
+            SubjectAccessMessage::GetAccessInfo { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                let is_gov_authorized =
+                    self.gov_allowlist.contains(&subject_id);
+                let is_tracker_banned =
+                    self.tracker_banlist.contains(&subject_id);
+                return Ok(SubjectAccessResponse::AccessInfo {
+                    is_gov_authorized,
+                    is_tracker_banned,
+                });
+            }
+
+            // Cleanup
+            SubjectAccessMessage::ClearSubject { subject_id } => {
+                if subject_id.is_empty() {
+                    return Err(ActorError::Functional {
+                        description: "subject_id cannot be empty".to_owned(),
+                    });
+                }
+                self.on_event(
+                    SubjectAccessEvent::SubjectCleared {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+                debug!(
+                    msg_type = "ClearSubject",
+                    subject_id = %subject_id,
+                    "Cleared subject access state"
+                );
+            }
+
+            // Update
+            SubjectAccessMessage::Update {
                 subject_id,
                 objective,
                 strict,
             } => {
+                if self.tracker_banlist.contains(&subject_id) {
+                    warn!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "Refusing update for banned tracker"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Tracker is banned".to_owned(),
+                    });
+                }
+
+                let data = get_subject_data(ctx, &subject_id).await?;
+                let is_gov =
+                    matches!(data, Some(SubjectData::Governance { .. }));
+
+                if is_gov && !self.gov_allowlist.contains(&subject_id) {
+                    warn!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "Refusing update for unauthorized governance"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Governance is not authorized".to_owned(),
+                    });
+                }
+
                 let Some(network) = self.network.clone() else {
                     error!(
                         msg_type = "Update",
@@ -384,29 +533,114 @@ impl Handler<Self> for Auth {
                 };
 
                 let (witnesses, actual_sn, subject_kind_hint) = {
-                    let auth_witnesses =
-                        self.auth.get(&subject_id).cloned().unwrap_or_default();
+                    let sync_witnesses = self
+                        .sync_peers
+                        .get(&subject_id)
+                        .cloned()
+                        .unwrap_or_default();
                     let (mut witnesses, actual_sn, subject_kind_hint) =
                         if strict {
-                            let (actual_sn, subject_kind_hint) =
-                                Self::build_update_state(ctx, &subject_id)
-                                    .await?;
-                            (auth_witnesses, actual_sn, subject_kind_hint)
+                            let actual_sn =
+                                if let Some(SubjectData::Tracker {
+                                    governance_id,
+                                    ..
+                                }) = &data
+                                {
+                                    get_tracker_sn_owner(
+                                        ctx,
+                                        governance_id,
+                                        &subject_id,
+                                    )
+                                    .await?
+                                    .map(|(_, sn)| sn)
+                                } else if data.is_some() {
+                                    Some(get_gov_sn(ctx, &subject_id).await?)
+                                } else {
+                                    None
+                                };
+                            let kind = if is_gov {
+                                Some(UpdateSubjectKind::Governance)
+                            } else {
+                                Some(UpdateSubjectKind::Tracker)
+                            };
+                            (sync_witnesses, actual_sn, kind)
                         } else {
-                            let (
-                                mut governance_witnesses,
-                                actual_sn,
-                                subject_kind_hint,
-                            ) = Self::build_update_data(ctx, &subject_id)
-                                .await?;
+                            let (gov_witnesses, actual_sn, subject_kind_hint) =
+                                if let Some(ref d) = data {
+                                    match d {
+                                        SubjectData::Tracker {
+                                            governance_id,
+                                            schema_id,
+                                            namespace,
+                                            ..
+                                        } => {
+                                            if let Some((owner, actual_sn)) =
+                                                get_tracker_sn_owner(
+                                                    ctx,
+                                                    governance_id,
+                                                    &subject_id,
+                                                )
+                                                .await?
+                                            {
+                                                let w = get_witnesses(
+                                                    ctx,
+                                                    governance_id,
+                                                    WitnessesData::Schema {
+                                                        creator: owner,
+                                                        schema_id: schema_id.clone(),
+                                                        namespace: Namespace::from(
+                                                            namespace.to_owned(),
+                                                        ),
+                                                    },
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    error!(
+                                                        subject_id = %subject_id,
+                                                        governance_id = %governance_id,
+                                                        error = %e,
+                                                        "Failed to get witnesses for tracker schema"
+                                                    );
+                                                    ActorError::Functional {
+                                                        description: e.to_string(),
+                                                    }
+                                                })?;
+                                                (w, Some(actual_sn), Some(UpdateSubjectKind::Tracker))
+                                            } else {
+                                                (HashSet::default(), None, Some(UpdateSubjectKind::Tracker))
+                                            }
+                                        }
+                                        SubjectData::Governance { .. } => {
+                                            let w = get_witnesses(ctx, &subject_id, WitnessesData::Gov)
+                                                .await
+                                                .map_err(|e| {
+                                                    warn!(
+                                                        subject_id = %subject_id,
+                                                        error = %e,
+                                                        "Failed to get witnesses for governance"
+                                                    );
+                                                    ActorError::Functional {
+                                                        description: e.to_string(),
+                                                    }
+                                                })?;
+                                            let sn =
+                                                get_gov_sn(ctx, &subject_id)
+                                                    .await?;
+                                            (w, Some(sn), Some(UpdateSubjectKind::Governance))
+                                        }
+                                    }
+                                } else {
+                                    (HashSet::default(), None, None)
+                                };
 
+                            let mut all_witnesses = gov_witnesses;
                             if let Some(witness) = objective {
-                                governance_witnesses.insert(witness);
+                                all_witnesses.insert(witness);
                             }
 
                             (
-                                governance_witnesses
-                                    .union(&auth_witnesses)
+                                all_witnesses
+                                    .union(&sync_witnesses)
                                     .cloned()
                                     .collect::<HashSet<PublicKey>>(),
                                 actual_sn,
@@ -454,7 +688,7 @@ impl Handler<Self> for Auth {
                                 error = %e,
                                 "Failed to send Run message to update actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
 
                         debug!(
@@ -473,51 +707,36 @@ impl Handler<Self> for Auth {
             }
         };
 
-        Ok(AuthResponse::None)
+        Ok(SubjectAccessResponse::None)
     }
 
     async fn on_event(
         &mut self,
-        event: AuthEvent,
+        event: SubjectAccessEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
-                "Failed to persist auth event"
+                "Failed to persist subject_access event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child actor fault in auth"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
 #[async_trait]
-impl PersistentActor for Auth {
+impl PersistentActor for SubjectAccess {
     type Persistence = LightPersistence;
-    type InitParams = AuthInitParams;
-
-    fn update(&mut self, state: Self) {
-        self.auth = state.auth;
-    }
+    type InitParams = SubjectAccessInitParams;
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
             network: Some(params.network),
-            auth: HashMap::new(),
+            gov_allowlist: HashSet::new(),
+            tracker_banlist: HashSet::new(),
+            sync_peers: HashMap::new(),
             our_key: params.our_key,
             round_retry_interval_secs: params.round_retry_interval_secs,
             max_round_retries: params.max_round_retries,
@@ -526,41 +745,107 @@ impl PersistentActor for Auth {
         }
     }
 
-    /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
-            AuthEvent::NewAuth {
+            SubjectAccessEvent::GovAuthorized {
                 subject_id,
-                witness,
+                witnesses,
             } => {
-                let witnesses = match witness {
-                    AuthWitness::One(public_key) => {
-                        HashSet::from([public_key.clone()])
-                    }
-                    AuthWitness::Many(items) => items.iter().cloned().collect(),
-                    AuthWitness::None => HashSet::default(),
-                };
-
-                self.auth.insert(subject_id.clone(), witnesses);
+                inner.gov_allowlist.insert(subject_id.clone());
+                let peers = Self::witness_to_set(witnesses);
+                if !peers.is_empty() {
+                    inner.sync_peers.insert(subject_id.clone(), peers);
+                }
                 debug!(
-                    event_type = "NewAuth",
+                    event_type = "GovAuthorized",
                     subject_id = %subject_id,
-                    "Applied new auth"
+                    "Applied gov authorization"
                 );
             }
-            AuthEvent::DeleteAuth { subject_id } => {
-                self.auth.remove(subject_id);
+            SubjectAccessEvent::GovDisauthorized { subject_id } => {
+                inner.gov_allowlist.remove(subject_id);
+                inner.sync_peers.remove(subject_id);
                 debug!(
-                    event_type = "DeleteAuth",
+                    event_type = "GovDisauthorized",
                     subject_id = %subject_id,
-                    "Applied auth deletion"
+                    "Applied gov disauthorization"
+                );
+            }
+            SubjectAccessEvent::TrackerBanned { subject_id } => {
+                inner.tracker_banlist.insert(subject_id.clone());
+                inner.sync_peers.remove(subject_id);
+                debug!(
+                    event_type = "TrackerBanned",
+                    subject_id = %subject_id,
+                    "Applied tracker ban"
+                );
+            }
+            SubjectAccessEvent::TrackerUnbanned { subject_id } => {
+                inner.tracker_banlist.remove(subject_id);
+                debug!(
+                    event_type = "TrackerUnbanned",
+                    subject_id = %subject_id,
+                    "Applied tracker unban"
+                );
+            }
+            SubjectAccessEvent::SyncPeersAdded { subject_id, peers } => {
+                inner
+                    .sync_peers
+                    .entry(subject_id.clone())
+                    .or_default()
+                    .extend(peers.iter().cloned());
+                debug!(
+                    event_type = "SyncPeersAdded",
+                    subject_id = %subject_id,
+                    "Applied sync peers addition"
+                );
+            }
+            SubjectAccessEvent::SyncPeersRemoved { subject_id, peers } => {
+                if let Some(set) = inner.sync_peers.get_mut(subject_id) {
+                    for p in peers {
+                        set.remove(p);
+                    }
+                    if set.is_empty() {
+                        inner.sync_peers.remove(subject_id);
+                    }
+                }
+                debug!(
+                    event_type = "SyncPeersRemoved",
+                    subject_id = %subject_id,
+                    "Applied sync peers removal"
+                );
+            }
+            SubjectAccessEvent::SubjectCleared { subject_id } => {
+                inner.gov_allowlist.remove(subject_id);
+                inner.tracker_banlist.remove(subject_id);
+                inner.sync_peers.remove(subject_id);
+                debug!(
+                    event_type = "SubjectCleared",
+                    subject_id = %subject_id,
+                    "Applied subject clearance"
                 );
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.gov_allowlist.clone_from(&state.gov_allowlist);
+        self.tracker_banlist.clone_from(&state.tracker_banlist);
+        self.sync_peers.clone_from(&state.sync_peers);
     }
 }
 
 #[async_trait]
-impl Storable for Auth {}
+impl Storable for SubjectAccess {}

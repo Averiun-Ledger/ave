@@ -2,7 +2,8 @@
 
 use crate::{
     DataToSink, SchemaType,
-    bridge::request::{ApprovalState, EventRequestType},
+    bridge::request::{ApprovalState, EventRequestType, SinkReplayItem},
+    sink::{SinkServer, SinkTarget},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -310,6 +311,48 @@ pub struct SinkEventsPage {
     pub events: Vec<DataToSink>,
 }
 
+/// Identifies where a sink instance is running.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkManagerTarget {
+    Node,
+    Governance { governance_id: String },
+}
+
+/// Full information about a sink instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkInfo {
+    pub name: String,
+    pub target: Option<SinkTarget>,
+    pub manager: SinkManagerTarget,
+    pub in_config: bool,
+    pub running: bool,
+    pub blocked: Option<String>,
+    pub lagging_subjects: usize,
+    pub server: Option<SinkServer>,
+}
+
+/// Reduced sink information for the quick `/sinks/status` view.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkStatusInfo {
+    pub name: String,
+    pub target: Option<SinkTarget>,
+    pub manager: SinkManagerTarget,
+    pub in_config: bool,
+    pub running: bool,
+    pub blocked: Option<String>,
+    pub lagging_subjects: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -449,6 +492,28 @@ pub struct RequestData {
     pub subject_id: String,
 }
 
+/// Error entry for a single failed manual sink replay item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayError {
+    pub sink: String,
+    pub subject_id: String,
+    pub from_sn: u64,
+    pub reason: String,
+}
+
+/// Result of a manual sink replay request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkReplayResponse {
+    pub processed: Vec<SinkReplayItem>,
+    pub errors: Vec<SinkReplayError>,
+}
+
 /// Time range filter for querying events by timestamp.
 /// Both `from` and `to` are optional and should be ISO 8601 strings (e.g., "2024-01-15T14:30:00Z").
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -460,4 +525,71 @@ pub struct TimeRange {
     pub from: Option<String>,
     /// End of the range (inclusive). ISO 8601 format.
     pub to: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_subjs_data_deserialize_with_custom_schema() {
+        let json = r#"{
+            "subject_id": "sub1",
+            "schema_id": "custom_schema",
+            "active": false,
+            "namespace": "ns",
+            "name": null,
+            "description": null
+        }"#;
+        let decoded: SubjsData = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded.schema_id,
+            SchemaType::Type("custom_schema".to_string())
+        );
+        assert!(!decoded.active);
+        assert_eq!(decoded.name, None);
+    }
+
+    #[test]
+    fn test_approval_entry_deserialize_variants() {
+        for state in [
+            ApprovalState::Pending,
+            ApprovalState::Accepted,
+            ApprovalState::Rejected,
+        ] {
+            let entry = ApprovalEntry {
+                request: ApprovalReq {
+                    subject_id: "sub1".to_string(),
+                    sn: 1,
+                    gov_version: 1,
+                    patch: json!({}),
+                    signer: "signer".to_string(),
+                },
+                state: state.clone(),
+            };
+            let json_str = serde_json::to_string(&entry).unwrap();
+            let decoded: ApprovalEntry =
+                serde_json::from_str(&json_str).unwrap();
+            assert_eq!(decoded.state, state);
+        }
+    }
+
+    #[test]
+    fn test_time_range_deserialize_empty() {
+        let decoded: TimeRange = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded.from, None);
+        assert_eq!(decoded.to, None);
+    }
+
+    #[test]
+    fn test_tracker_stored_visibility_deserialize_full_and_none() {
+        let full: TrackerStoredVisibilityDB =
+            serde_json::from_str(r#"{"kind":"full"}"#).unwrap();
+        assert_eq!(full, TrackerStoredVisibilityDB::Full);
+
+        let none: TrackerStoredVisibilityDB =
+            serde_json::from_str(r#"{"kind":"none"}"#).unwrap();
+        assert_eq!(none, TrackerStoredVisibilityDB::None);
+    }
 }

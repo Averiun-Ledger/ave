@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -12,7 +13,7 @@ use tracing::{Span, error, info_span};
 use crate::{
     db::Storable,
     evaluation::compiler::ContractArtifactRecord,
-    model::common::{emit_fail, purge_storage},
+    model::common::{crash_system, purge_storage},
 };
 
 #[derive(
@@ -90,6 +91,9 @@ impl Actor for ContractRegister {
     type Event = ContractRegisterEvent;
     type Message = ContractRegisterMessage;
     type Response = ContractRegisterResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -102,9 +106,13 @@ impl Actor for ContractRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
-        self.init_store("contract_register", Some(prefix), false, ctx)
-            .await
+        self.init_store(
+            "contract_register",
+            Some(ctx.path().parent().key().to_owned()),
+            false,
+            ctx,
+        )
+        .await
     }
 }
 
@@ -112,7 +120,7 @@ impl Actor for ContractRegister {
 impl Handler<Self> for ContractRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ContractRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ContractRegisterResponse, ActorError> {
@@ -164,13 +172,12 @@ impl Handler<Self> for ContractRegister {
         event: ContractRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist contract register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }
@@ -179,26 +186,41 @@ impl Handler<Self> for ContractRegister {
 impl PersistentActor for ContractRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::new()
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             ContractRegisterEvent::DeleteMetadata { contract_name } => {
-                self.contracts.remove(contract_name);
+                inner.contracts.remove(contract_name);
             }
             ContractRegisterEvent::SetMetadata {
                 contract_name,
                 metadata,
             } => {
-                self.contracts
+                inner
+                    .contracts
                     .insert(contract_name.clone(), metadata.clone());
             }
         }
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

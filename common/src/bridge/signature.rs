@@ -59,3 +59,103 @@ impl TryFrom<BridgeSignature> for Signature {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::keys::Ed25519Signer;
+    use borsh::BorshSerialize;
+
+    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
+    struct TestContent {
+        data: String,
+    }
+
+    #[test]
+    fn test_bridge_signature_from_signature_roundtrip() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let content = TestContent {
+            data: "hello".to_string(),
+        };
+        let signature = Signature::new(&content, &signer).unwrap();
+
+        let bridge: BridgeSignature = signature.clone().into();
+        assert!(!bridge.signer.is_empty());
+        assert!(bridge.timestamp > 0);
+        assert!(!bridge.value.is_empty());
+        assert!(!bridge.content_hash.is_empty());
+
+        let back: Signature = bridge.try_into().unwrap();
+        assert_eq!(signature.signer, back.signer);
+        assert_eq!(signature.timestamp, back.timestamp);
+        assert_eq!(signature.value, back.value);
+        assert_eq!(signature.content_hash, back.content_hash);
+    }
+
+    #[test]
+    fn test_bridge_signature_try_from_invalid_signer() {
+        let bridge = BridgeSignature {
+            signer: "not-a-valid-key".to_string(),
+            timestamp: 0,
+            value: "Eabc".to_string(),
+            content_hash: DigestIdentifier::default().to_string(),
+        };
+        let result: Result<Signature, _> = bridge.try_into();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SignatureError::InvalidPublicKey(_)
+        ));
+    }
+
+    #[test]
+    fn test_bridge_signature_try_from_invalid_signature() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let content = TestContent {
+            data: "test".to_string(),
+        };
+        let signature = Signature::new(&content, &signer).unwrap();
+
+        let bridge = BridgeSignature {
+            signer: signature.signer.to_string(),
+            timestamp: 0,
+            value: "not-valid".to_string(),
+            content_hash: DigestIdentifier::default().to_string(),
+        };
+        let result: Result<Signature, _> = bridge.try_into();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SignatureError::InvalidSignature(_)
+        ));
+    }
+
+    #[test]
+    fn test_bridge_signature_try_from_invalid_content_hash() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let content = TestContent {
+            data: "test".to_string(),
+        };
+        let signature = Signature::new(&content, &signer).unwrap();
+
+        let bridge = BridgeSignature {
+            signer: signature.signer.to_string(),
+            timestamp: 0,
+            value: signature.value.to_string(),
+            content_hash: "bad-hash".to_string(),
+        };
+        let result: Result<Signature, _> = bridge.try_into();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SignatureError::InvalidContentHash(_)
+        ));
+    }
+
+    #[test]
+    fn test_bridge_signature_serde_rejects_missing_fields() {
+        // Missing required fields should fail deserialization.
+        let json = r#"{"signer":"Eabc","timestamp":123}"#;
+        assert!(serde_json::from_str::<BridgeSignature>(json).is_err());
+    }
+}

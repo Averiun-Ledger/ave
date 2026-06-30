@@ -1,9 +1,8 @@
 mod error;
 
 use crate::{
-    external_db::DBManager, model::event::Ledger,
+    external_db::DBManager, model::sink::SubjectSinkEvent,
     node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
-    subject::sinkdata::SinkDataEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
@@ -118,6 +117,10 @@ impl ExternalDB {
         match ext_db {
             #[cfg(feature = "ext-sqlite")]
             AveExternalDBFeatureConfig::Sqlite { path } => {
+                // Passive permission check before creating anything
+                check_dir_writable(&path)
+                    .map_err(|e| DatabaseError::PermissionDenied(e))?;
+
                 if !Path::new(&path).exists() {
                     fs::create_dir_all(&path).await.map_err(|e| {
                         error!(
@@ -145,14 +148,7 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_subject(&self) -> impl Subscriber<Ledger> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),
-        }
-    }
-
-    pub fn get_sink_data(&self) -> impl Subscriber<SinkDataEvent> {
+    pub fn get_sink_data(&self) -> impl Subscriber<SubjectSinkEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),
@@ -310,4 +306,50 @@ impl ReadStore for ExternalDB {
             }
         }
     }
+}
+
+/// Check that a directory exists and is writable.
+/// If it does not exist, check the nearest existing ancestor.
+fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
+    let target = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!(
+                "'{}' exists but is not a directory",
+                path.display()
+            ));
+        }
+        path
+    } else {
+        let mut ancestor = path;
+        while !ancestor.exists() {
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => {
+                    return Err(format!(
+                        "'{}' does not exist and has no existing parent",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if !ancestor.is_dir() {
+            return Err(format!(
+                "ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            ));
+        }
+        ancestor
+    };
+
+    let test_file = target.join(".ave_write_test");
+    match std::fs::File::create(&test_file) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(e) => {
+            return Err(format!("'{}' is not writable: {e}", target.display()));
+        }
+    }
+
+    Ok(())
 }

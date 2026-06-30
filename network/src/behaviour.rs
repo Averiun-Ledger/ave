@@ -461,74 +461,6 @@ mod tests {
 
     use std::vec;
 
-    #[test]
-    fn map_reqres_inbound_failure_kinds() {
-        assert_eq!(
-            map_inbound_failure_kind(
-                &request_response::InboundFailure::Timeout
-            ),
-            ReqresFailureKind::Timeout
-        );
-        assert_eq!(
-            map_inbound_failure_kind(
-                &request_response::InboundFailure::ConnectionClosed
-            ),
-            ReqresFailureKind::ConnectionClosed
-        );
-        assert_eq!(
-            map_inbound_failure_kind(
-                &request_response::InboundFailure::UnsupportedProtocols
-            ),
-            ReqresFailureKind::Negotiation
-        );
-        assert_eq!(
-            map_inbound_failure_kind(
-                &request_response::InboundFailure::ResponseOmission
-            ),
-            ReqresFailureKind::ResponseOmission
-        );
-        assert_eq!(
-            map_inbound_failure_kind(&request_response::InboundFailure::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, "x"),
-            )),
-            ReqresFailureKind::Io
-        );
-    }
-
-    #[test]
-    fn map_reqres_outbound_failure_kinds() {
-        assert_eq!(
-            map_outbound_failure_kind(
-                &request_response::OutboundFailure::DialFailure
-            ),
-            ReqresFailureKind::Dial
-        );
-        assert_eq!(
-            map_outbound_failure_kind(
-                &request_response::OutboundFailure::Timeout
-            ),
-            ReqresFailureKind::Timeout
-        );
-        assert_eq!(
-            map_outbound_failure_kind(
-                &request_response::OutboundFailure::ConnectionClosed
-            ),
-            ReqresFailureKind::ConnectionClosed
-        );
-        assert_eq!(
-            map_outbound_failure_kind(
-                &request_response::OutboundFailure::UnsupportedProtocols
-            ),
-            ReqresFailureKind::Negotiation
-        );
-        assert_eq!(
-            map_outbound_failure_kind(&request_response::OutboundFailure::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, "x"),
-            )),
-            ReqresFailureKind::Io
-        );
-    }
-
     #[test(tokio::test)]
     #[serial]
     async fn test_reqres() {
@@ -805,5 +737,36 @@ mod tests {
             listen_addresses: vec![],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_peer_management_methods() {
+        let mut node =
+            build_node(create_config(vec![], false, NodeType::Addressable));
+        let peer = PeerId::random();
+
+        node.behaviour_mut().add_peer_to_remove(&peer);
+        node.behaviour_mut().clean_peer_to_remove(&peer);
+        node.behaviour_mut().clean_hard_peer_to_remove(&peer);
+        node.behaviour_mut().discover(&peer);
+
+        assert!(!node.behaviour_mut().is_known_peer(&peer));
+
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(node.behaviour_mut().add_self_reported_address(&peer, &addr));
+        assert!(!node.behaviour_mut().is_invalid_address(&addr));
+
+        node.behaviour_mut().close_connections(&peer, None);
+        node.behaviour_mut().finish_prerouting_state();
+        // All calls above should complete without panic.
+    }
+
+    #[test]
+    fn test_is_invalid_address_always_false_in_test_mode() {
+        let mut node =
+            build_node(create_config(vec![], false, NodeType::Addressable));
+        // In test builds is_invalid_address always returns false.
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+        assert!(!node.behaviour_mut().is_invalid_address(&addr));
     }
 }

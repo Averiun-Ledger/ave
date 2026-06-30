@@ -6,6 +6,7 @@ use crate::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
     },
+    config::SinkTarget,
     db::Storable,
     evaluation::{
         compiler::{
@@ -19,14 +20,15 @@ use crate::{
         contract_register::{
             ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
         },
-        data::GovernanceData,
+        data::{GovernanceData, MemberName},
         events::{
             GovernanceEvent, governance_event_roles_update_fact,
             governance_event_update_creator_change,
         },
         model::{
             CreatorQuantity, CreatorWitness, HashThisRole, ProtocolTypes,
-            Quorum, RoleCreator, RoleTypes, Schema, WitnessesData,
+            Quorum, RoleCreator, RoleTypes, RolesSchema, RolesTrackerSchemas,
+            Schema, WitnessesData,
         },
         role_register::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
@@ -37,25 +39,29 @@ use crate::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
         tracker_sync::{TrackerSync, TrackerSyncConfig},
+        transfer_verification_register::{
+            TransferVerificationRegister, TransferVerificationRegisterMessage,
+            TransferVerificationRegisterResponse,
+        },
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
         },
     },
-    helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
+    helpers::network::service::NetworkSender,
+    model::sink::{SinkDataEvent, SubjectSinkEvent},
     model::{
         common::{
-            emit_fail, get_last_event, purge_storage, subject::make_obsolete,
+            crash_system, get_last_event, purge_storage, subject::make_obsolete,
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
-        SubjectMetadata,
-        error::SubjectError,
-        sinkdata::{SinkData, SinkDataMessage},
+        SubjectMetadata, error::SubjectError,
     },
     system::ConfigHelper,
     validation::{
@@ -66,11 +72,11 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
+    Response,
 };
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper,
+    DataToSink, Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
     response::SubjectDB,
@@ -101,6 +107,8 @@ pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
 pub mod tracker_sync;
+pub mod transfer_verification_register;
+
 pub mod version_sync;
 pub mod witnesses_register;
 
@@ -175,51 +183,49 @@ pub struct CreatorRoleUpdate {
     pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
-pub struct Governance {
-    #[serde(skip)]
-    pub our_key: Arc<PublicKey>,
-    #[serde(skip)]
-    pub service: bool,
-    #[serde(skip)]
-    pub hash: Option<HashAlgorithm>,
+#[derive(
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct GovernanceState {
     pub subject_metadata: SubjectMetadata,
     pub properties: GovernanceData,
 }
 
-impl BorshSerialize for Governance {
-    fn serialize<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
-        BorshSerialize::serialize(&self.subject_metadata, writer)?;
-        BorshSerialize::serialize(&self.properties, writer)?;
+#[derive(Debug)]
+pub struct Governance {
+    pub our_key: Arc<PublicKey>,
+    pub service: bool,
+    pub hash: Option<HashAlgorithm>,
+    pub state: Arc<GovernanceState>,
+}
 
-        Ok(())
+impl Clone for Governance {
+    fn clone(&self) -> Self {
+        Self {
+            our_key: self.our_key.clone(),
+            service: self.service,
+            hash: self.hash,
+            state: self.state.clone(),
+        }
     }
 }
 
-impl BorshDeserialize for Governance {
-    fn deserialize_reader<R: std::io::Read>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        // Deserialize the persisted fields
-        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
-        let properties = GovernanceData::deserialize_reader(reader)?;
+impl std::ops::Deref for Governance {
+    type Target = GovernanceState;
+    fn deref(&self) -> &GovernanceState {
+        &self.state
+    }
+}
 
-        // Create a default/placeholder KeyPair for 'owner'
-        // This will be replaced by the actual owner during actor initialization
-        let our_key = Arc::new(PublicKey::default());
-        let hash = None;
-
-        Ok(Self {
-            hash,
-            our_key,
-            service: false,
-            subject_metadata,
-            properties,
-        })
+impl std::ops::DerefMut for Governance {
+    fn deref_mut(&mut self) -> &mut GovernanceState {
+        Arc::make_mut(&mut self.state)
     }
 }
 
@@ -302,66 +308,6 @@ impl Subject for Governance {
         ctx: &mut ActorContext<Self>,
     ) -> Result<Option<Ledger>, ActorError> {
         get_last_event(ctx).await
-    }
-
-    fn apply_patch(
-        &mut self,
-        json_patch: ValueWrapper,
-    ) -> Result<(), ActorError> {
-        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
-            .map_err(|e| {
-                let error = SubjectError::PatchConversionFailed {
-                    details: e.to_string(),
-                };
-                error!(
-                    error = %e,
-                    subject_id = %self.subject_metadata.subject_id,
-                    "Failed to convert patch from JSON"
-                );
-                ActorError::Functional {
-                    description: error.to_string(),
-                }
-            })?;
-
-        let mut properties = self.properties.to_value_wrapper();
-
-        patch(&mut properties.0, &patch_json).map_err(|e| {
-            let error = SubjectError::PatchApplicationFailed {
-                details: e.to_string(),
-            };
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                "Failed to apply patch to properties"
-            );
-            ActorError::Functional {
-                description: error.to_string(),
-            }
-        })?;
-
-        self.properties = serde_json::from_value::<GovernanceData>(
-            properties.0,
-        )
-        .map_err(|e| {
-            let error = SubjectError::GovernanceDataConversionFailed {
-                details: e.to_string(),
-            };
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                "Failed to convert properties to GovernanceData"
-            );
-            ActorError::Functional {
-                description: error.to_string(),
-            }
-        })?;
-
-        debug!(
-            subject_id = %self.subject_metadata.subject_id,
-            "Patch applied successfully"
-        );
-
-        Ok(())
     }
 
     async fn manager_new_ledger_events(
@@ -515,17 +461,103 @@ impl Subject for Governance {
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
-            Self::publish_sink(
-                ctx,
-                SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
-                    self.clone(),
-                ))),
-            )
-            .await?;
+            ctx.publish_all(SubjectSinkEvent::SinkData(SinkDataEvent::State(
+                Box::new(SubjectDB::from(&*self)),
+            )));
 
             self.update_sn(ctx).await?;
             self.refresh_version_sync(ctx).await?;
         }
+
+        Ok(())
+    }
+
+    fn our_key(&self) -> std::sync::Arc<ave_common::identity::PublicKey> {
+        self.our_key.clone()
+    }
+
+    async fn notify_reliable_sinks(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        data: DataToSink,
+    ) -> Result<(), ActorError> {
+        let node_path = ctx.path().parent().parent();
+        let manager_path =
+            ActorPath::from(format!("{}/node_sink_manager", node_path));
+        match ctx.system().get_actor::<SinkManager>(&manager_path).await {
+            Ok(manager) => {
+                if let Err(e) = manager
+                    .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
+                    .await
+                {
+                    error!(error = %e, "Failed to notify NodeSinkManager");
+                }
+            }
+            Err(e) => {
+                debug!(error = %e, path = %manager_path, "NodeSinkManager not found");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl GovernanceState {
+    fn apply_patch_inner(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError> {
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
+                );
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
+
+        let mut properties = self.properties.to_value_wrapper();
+
+        patch(&mut properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        self.properties = serde_json::from_value::<GovernanceData>(
+            properties.0,
+        )
+        .map_err(|e| {
+            let error = SubjectError::GovernanceDataConversionFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to convert properties to GovernanceData"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
 
         Ok(())
     }
@@ -1715,7 +1747,7 @@ impl Governance {
             let Schema {
                 contract,
                 initial_value,
-                viewpoints: _,
+                ..
             } = schema;
 
             let response = compiler
@@ -2250,7 +2282,7 @@ impl Governance {
                 ctx,
                 &first,
                 hash,
-                Metadata::from(self.clone()),
+                Metadata::from(&*self),
             )
             .await
             {
@@ -2276,7 +2308,7 @@ impl Governance {
                 first.get_issuer_event_request_timestamp();
             let event_request = first.get_event_request();
 
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: None,
@@ -2296,6 +2328,7 @@ impl Governance {
                         &first.protocols,
                         &self.properties.to_value_wrapper().0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 event_request,
             )
@@ -2324,7 +2357,7 @@ impl Governance {
                 ctx,
                 Self::verify_new_ledger_event_args(
                     &event,
-                    Metadata::from(self.clone()),
+                    Metadata::from(&*self),
                     actual_ledger_hash,
                     last_data,
                     hash,
@@ -2466,7 +2499,7 @@ impl Governance {
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
-            Self::event_to_sink(
+            self.event_to_sink(
                 ctx,
                 DataForSink {
                     gov_id: None,
@@ -2486,6 +2519,7 @@ impl Governance {
                         &event.protocols,
                         &self.properties.to_value_wrapper().0,
                     ),
+                    public_key: self.our_key.to_string(),
                 },
                 Some(event_request.clone()),
             )
@@ -2651,6 +2685,67 @@ impl Governance {
             if let Err(error) = witnesses_register.ask_stop().await {
                 cleanup_errors
                     .push(format!("witnesses_register stop: {error}"));
+            }
+        }
+
+        let transfer_verification_register = match ctx
+            .create_child(
+                "transfer_verification_register",
+                TransferVerificationRegister::initial(()),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<TransferVerificationRegister>(
+                        "transfer_verification_register",
+                    )
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "transfer_verification_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors
+                    .push(format!("transfer_verification_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(transfer_verification_register) =
+            transfer_verification_register
+        {
+            match transfer_verification_register
+                .ask(
+                    TransferVerificationRegisterMessage::Remove {
+                        subject_id: subject_id.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(TransferVerificationRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "transfer_verification_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!(
+                        "transfer_verification_register: {error}"
+                    ))
+                }
+            }
+
+            if let Err(error) = transfer_verification_register.ask_stop().await
+            {
+                cleanup_errors.push(format!(
+                    "transfer_verification_register stop: {error}"
+                ));
             }
         }
 
@@ -2956,6 +3051,63 @@ impl Governance {
             }
         }
 
+        let transfer_verification_register = match ctx
+            .create_child(
+                "transfer_verification_register",
+                TransferVerificationRegister::initial(()),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<TransferVerificationRegister>(
+                        "transfer_verification_register",
+                    )
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "transfer_verification_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors
+                    .push(format!("transfer_verification_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(transfer_verification_register) =
+            transfer_verification_register
+        {
+            match transfer_verification_register
+                .ask(TransferVerificationRegisterMessage::PurgeStorage)
+                .await
+            {
+                Ok(TransferVerificationRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "transfer_verification_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!(
+                        "transfer_verification_register: {error}"
+                    ))
+                }
+            }
+
+            if let Err(error) = transfer_verification_register.ask_stop().await
+            {
+                cleanup_errors.push(format!(
+                    "transfer_verification_register stop: {error}"
+                ));
+            }
+        }
+
         if let Err(error) = purge_storage(ctx).await {
             cleanup_errors.push(format!("governance: {error}"));
         }
@@ -2974,13 +3126,62 @@ impl Governance {
 #[derive(Debug, Clone)]
 pub enum GovernanceMessage {
     GetMetadata,
-    GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
+    GetLedger {
+        lo_sn: Option<u64>,
+        hi_sn: u64,
+    },
     GetLastLedger,
-    DeleteTrackerReferences { subject_id: DigestIdentifier },
+    DeleteTrackerReferences {
+        subject_id: DigestIdentifier,
+    },
     DeleteGovernanceStorage,
-    UpdateLedger { events: Vec<Ledger> },
+    UpdateLedger {
+        events: Vec<Ledger>,
+    },
     GetGovernance,
     GetVersion,
+    HasRole {
+        governance_id: DigestIdentifier,
+        role_query: HashThisRole,
+    },
+    GetWitnesses {
+        governance_id: DigestIdentifier,
+        data: WitnessesData,
+    },
+    GetSchemaViewpoints {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+    GetQuorumAndSigners {
+        governance_id: DigestIdentifier,
+        protocol: ProtocolTypes,
+        schema_id: SchemaType,
+        namespace: Namespace,
+    },
+    GetInitState {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+    GetSigners {
+        governance_id: DigestIdentifier,
+        role: RoleTypes,
+        schema_id: SchemaType,
+        namespace: Namespace,
+    },
+    GetMembers {
+        governance_id: DigestIdentifier,
+    },
+    GetSchemaRoles {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+    GetTrackerRoles {
+        governance_id: DigestIdentifier,
+    },
+    GetSinkEvents {
+        from_sn: u64,
+        batch_size: usize,
+    },
 }
 
 impl Message for GovernanceMessage {}
@@ -2998,9 +3199,17 @@ pub enum GovernanceResponse {
         ledger_event: Box<Option<Ledger>>,
     },
     Governance(Box<GovernanceData>),
-    NewCompilers(Vec<SchemaType>),
-    Sn(u64),
     Version(u64),
+    Bool(bool),
+    Witnesses(HashSet<PublicKey>),
+    SchemaViewpoints(Option<BTreeSet<String>>),
+    QuorumAndSigners(HashSet<PublicKey>, Quorum),
+    InitState(Option<ValueWrapper>),
+    Signers(HashSet<PublicKey>, bool),
+    Members(BTreeMap<MemberName, PublicKey>),
+    SchemaRoles(Option<RolesSchema>),
+    TrackerRoles(RolesTrackerSchemas),
+    SinkEvents(Vec<DataToSink>),
     Ok,
 }
 impl Response for GovernanceResponse {}
@@ -3010,6 +3219,9 @@ impl Actor for Governance {
     type Event = Ledger;
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
+    type SinkEvent = SubjectSinkEvent;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -3027,6 +3239,50 @@ impl Actor for Governance {
                 error = %e,
                 "Failed to initialize governance store"
             );
+            return Err(e);
+        }
+
+        // Create SinkManager for tracker events of this governance.
+        let tracker_sinks = if let Some(config_helper) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
+        {
+            let schema_ids: Vec<String> = self
+                .properties
+                .schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect();
+            let governance_id = self.subject_metadata.subject_id.to_string();
+            config_helper
+                .sinks
+                .iter()
+                .filter(|entry| {
+                    let SinkTarget::Schema {
+                        schema_id,
+                        governance_id: target_governance_id,
+                    } = &entry.target;
+                    schema_id != "governance"
+                        && schema_ids.contains(schema_id)
+                        && target_governance_id.as_ref() == Some(&governance_id)
+                })
+                .flat_map(|entry| entry.servers.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = ctx
+            .create_child(
+                "sink_manager",
+                SinkManager::initial(SinkManagerInitParams {
+                    sinks: tracker_sinks,
+                    is_governance: false,
+                }),
+            )
+            .await
+        {
+            error!(error = %e, "Failed to create SinkManager");
             return Err(e);
         }
 
@@ -3069,26 +3325,6 @@ impl Actor for Governance {
             error!("Hash algorithm not found");
             return Err(ActorError::FunctionalCritical {
                 description: "Hash algorithm is None".to_string(),
-            });
-        };
-
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!("External database helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
-        let Some(ave_sink): Option<AveSink> =
-            ctx.system().get_helper("sink").await
-        else {
-            error!("Sink helper not found");
-            return Err(ActorError::Helper {
-                name: "sink".to_owned(),
-                reason: "Not found".to_owned(),
             });
         };
 
@@ -3152,6 +3388,20 @@ impl Actor for Governance {
         }
 
         if let Err(e) = ctx
+            .create_child(
+                "transfer_verification_register",
+                TransferVerificationRegister::initial(()),
+            )
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to create transfer_verification_register child"
+            );
+            return Err(e);
+        }
+
+        if let Err(e) = ctx
             .create_child("contract_register", ContractRegister::initial(()))
             .await
         {
@@ -3162,39 +3412,14 @@ impl Actor for Governance {
             return Err(e);
         }
 
-        if self.subject_metadata.active {
-            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
-                error!(
-                    error = %e,
-                    "Failed to build governance child actors"
-                );
-                return Err(e);
-            }
-
-            let sink_actor = match ctx
-                .create_child(
-                    "sink_data",
-                    SinkData {
-                        public_key: self.our_key.to_string(),
-                    },
-                )
-                .await
-            {
-                Ok(actor) => actor,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to create sink_data child"
-                    );
-                    return Err(e);
-                }
-            };
-            let sink =
-                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-            ctx.system().run_sink(sink).await;
-
-            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-            ctx.system().run_sink(sink).await;
+        if self.subject_metadata.active
+            && let Err(e) = self.build_childs(ctx, &hash, &network).await
+        {
+            error!(
+                error = %e,
+                "Failed to build governance child actors"
+            );
+            return Err(e);
         }
 
         if self.service {
@@ -3290,7 +3515,7 @@ impl Actor for Governance {
 impl Handler<Self> for Governance {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: GovernanceMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceResponse, ActorError> {
@@ -3310,7 +3535,7 @@ impl Handler<Self> for Governance {
                 })
             }
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
-                Box::new(Metadata::from(self.clone())),
+                Box::new(Metadata::from(&*self)),
             )),
             GovernanceMessage::DeleteTrackerReferences { subject_id } => {
                 self.delete_tracker_references(ctx, subject_id.clone())
@@ -3370,49 +3595,111 @@ impl Handler<Self> for Governance {
                     self.properties.clone(),
                 )))
             }
+            GovernanceMessage::HasRole { role_query, .. } => {
+                let result = self.properties.has_this_role(role_query);
+                Ok(GovernanceResponse::Bool(result))
+            }
+            GovernanceMessage::GetWitnesses { data, .. } => {
+                let witnesses =
+                    self.properties.get_witnesses(data).map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Failed to get witnesses from governance: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                Ok(GovernanceResponse::Witnesses(witnesses))
+            }
+            GovernanceMessage::GetSchemaViewpoints { schema_id, .. } => {
+                let viewpoints = self
+                    .properties
+                    .schemas
+                    .get(&schema_id)
+                    .map(|schema| schema.viewpoints.clone());
+                Ok(GovernanceResponse::SchemaViewpoints(viewpoints))
+            }
+            GovernanceMessage::GetQuorumAndSigners {
+                protocol,
+                schema_id,
+                namespace,
+                ..
+            } => {
+                let (signers, quorum) = self
+                    .properties
+                    .get_quorum_and_signers(protocol, &schema_id, namespace)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Failed to get quorum and signers: {}",
+                            e
+                        ),
+                    })?;
+                Ok(GovernanceResponse::QuorumAndSigners(signers, quorum))
+            }
+            GovernanceMessage::GetInitState { schema_id, .. } => {
+                let init_state = self
+                    .properties
+                    .get_init_state(&schema_id)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Failed to get init state for schema {}: {}",
+                            schema_id, e
+                        ),
+                    })?;
+                Ok(GovernanceResponse::InitState(Some(init_state)))
+            }
+            GovernanceMessage::GetSigners {
+                role,
+                schema_id,
+                namespace,
+                ..
+            } => {
+                let (signers, any) =
+                    self.properties.get_signers(role, &schema_id, namespace);
+                Ok(GovernanceResponse::Signers(signers, any))
+            }
+            GovernanceMessage::GetMembers { .. } => {
+                Ok(GovernanceResponse::Members(self.properties.members.clone()))
+            }
+            GovernanceMessage::GetSchemaRoles { schema_id, .. } => {
+                let roles =
+                    self.properties.roles_schema.get(&schema_id).cloned();
+                Ok(GovernanceResponse::SchemaRoles(roles))
+            }
+            GovernanceMessage::GetTrackerRoles { .. } => {
+                Ok(GovernanceResponse::TrackerRoles(
+                    self.properties.roles_tracker_schemas.clone(),
+                ))
+            }
+            GovernanceMessage::GetSinkEvents {
+                from_sn,
+                batch_size,
+            } => {
+                let events =
+                    self.get_sink_events(ctx, from_sn, batch_size).await?;
+                Ok(GovernanceResponse::SinkEvents(events))
+            }
         }
     }
 
     async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        let event_for_publish = event.clone();
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 error = %e,
                 subject_id = %self.subject_metadata.subject_id,
                 sn = self.subject_metadata.sn,
                 "Failed to persist event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
 
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(
-                error = %e,
-                subject_id = %self.subject_metadata.subject_id,
-                sn = self.subject_metadata.sn,
-                "Failed to publish event"
-            );
-            emit_fail(ctx, e).await;
-        } else {
-            debug!(
-                subject_id = %self.subject_metadata.subject_id,
-                sn = self.subject_metadata.sn,
-                "Event persisted and published successfully"
-            );
-        }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
+        ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
+        debug!(
             subject_id = %self.subject_metadata.subject_id,
-            "Child fault occurred"
+            sn = self.subject_metadata.sn,
+            "Event persisted and published successfully"
         );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
@@ -3425,11 +3712,7 @@ impl PersistentActor for Governance {
         HashAlgorithm,
         bool,
     );
-
-    fn update(&mut self, state: Self) {
-        self.properties = state.properties;
-        self.subject_metadata = state.subject_metadata;
-    }
+    type State = GovernanceState;
 
     fn create_initial(params: Self::InitParams) -> Self {
         let (subject_metadata, properties) =
@@ -3442,12 +3725,19 @@ impl PersistentActor for Governance {
             hash: Some(params.2),
             our_key: params.1,
             service: params.3,
-            subject_metadata,
-            properties,
+            state: Arc::new(GovernanceState {
+                subject_metadata,
+                properties,
+            }),
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match &event.protocols {
             Protocols::Create {
                 validation,
@@ -3457,7 +3747,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance create apply"
                     );
@@ -3471,14 +3761,14 @@ impl PersistentActor for Governance {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
-                    self.subject_metadata = SubjectMetadata::new(metadata);
-                    self.properties = serde_json::from_value::<GovernanceData>(
+                    inner.subject_metadata = SubjectMetadata::new(metadata);
+                    inner.properties = serde_json::from_value::<GovernanceData>(
                         metadata.properties.0.clone(),
                     )
                     .map_err(|e| {
                         error!(
                             event_type = "Create",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             error = %e,
                             "Failed to convert properties into GovernanceData"
                         );
@@ -3487,8 +3777,8 @@ impl PersistentActor for Governance {
 
                     debug!(
                         event_type = "Create",
-                        subject_id = %self.subject_metadata.subject_id,
-                        sn = self.subject_metadata.sn,
+                        subject_id = %inner.subject_metadata.subject_id,
+                        sn = inner.subject_metadata.sn,
                         "Applied create event"
                     );
                 } else {
@@ -3499,7 +3789,7 @@ impl PersistentActor for Governance {
                     return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
                 }
 
-                return Ok(());
+                return Ok(state);
             }
             Protocols::GovFact {
                 evaluation,
@@ -3511,7 +3801,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Fact",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance fact apply"
                     );
@@ -3525,17 +3815,17 @@ impl PersistentActor for Governance {
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
-                            self.apply_patch(eval_res.patch)?;
+                            inner.apply_patch_inner(eval_res.patch)?;
                             debug!(
                                 event_type = "Fact",
-                                subject_id = %self.subject_metadata.subject_id,
+                                subject_id = %inner.subject_metadata.subject_id,
                                 approved = true,
                                 "Applied fact event with patch"
                             );
                         } else {
                             debug!(
                                 event_type = "Fact",
-                                subject_id = %self.subject_metadata.subject_id,
+                                subject_id = %inner.subject_metadata.subject_id,
                                 approved = false,
                                 "Fact event not approved, patch not applied"
                             );
@@ -3543,7 +3833,7 @@ impl PersistentActor for Governance {
                     } else {
                         error!(
                             event_type = "Fact",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "Evaluation successful but no approval present"
                         );
                         return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval".to_owned() });
@@ -3561,7 +3851,7 @@ impl PersistentActor for Governance {
                 else {
                     error!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance transfer apply"
                     );
@@ -3573,11 +3863,11 @@ impl PersistentActor for Governance {
                 };
 
                 if evaluation.evaluator_response_ok().is_some() {
-                    self.subject_metadata.new_owner =
+                    inner.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
                         event_type = "Transfer",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         new_owner = %transfer_request.new_owner,
                         "Applied transfer event"
                     );
@@ -3593,7 +3883,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Confirm",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance confirm apply"
                     );
@@ -3606,20 +3896,20 @@ impl PersistentActor for Governance {
 
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(new_owner) =
-                        self.subject_metadata.new_owner.take()
+                        inner.subject_metadata.new_owner.take()
                     {
-                        self.subject_metadata.owner = new_owner.clone();
-                        self.apply_patch(eval_res.patch)?;
+                        inner.subject_metadata.owner = new_owner.clone();
+                        inner.apply_patch_inner(eval_res.patch)?;
                         debug!(
                             event_type = "Confirm",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             new_owner = %new_owner,
                             "Applied confirm event with patch"
                         );
                     } else {
                         error!(
                             event_type = "Confirm",
-                            subject_id = %self.subject_metadata.subject_id,
+                            subject_id = %inner.subject_metadata.subject_id,
                             "New owner is None in confirm event"
                         );
                         return Err(ActorError::Functional {
@@ -3634,7 +3924,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "Reject",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance reject apply"
                     );
@@ -3645,10 +3935,10 @@ impl PersistentActor for Governance {
                     });
                 };
 
-                self.subject_metadata.new_owner = None;
+                inner.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied reject event"
                 );
             }
@@ -3657,7 +3947,7 @@ impl PersistentActor for Governance {
                 } else {
                     error!(
                         event_type = "EOL",
-                        subject_id = %self.subject_metadata.subject_id,
+                        subject_id = %inner.subject_metadata.subject_id,
                         actual_request = ?event_request.content(),
                         "Unexpected event request type for governance eol apply"
                     );
@@ -3667,16 +3957,16 @@ impl PersistentActor for Governance {
                     });
                 };
 
-                self.subject_metadata.active = false;
+                inner.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Applied EOL event"
                 );
             }
             _ => {
                 error!(
-                    subject_id = %self.subject_metadata.subject_id,
+                    subject_id = %inner.subject_metadata.subject_id,
                     "Invalid protocol data for Governance"
                 );
                 return Err(ActorError::Functional {
@@ -3687,14 +3977,22 @@ impl PersistentActor for Governance {
         }
 
         if event.protocols.is_success() {
-            self.properties.version += 1;
+            inner.properties.version += 1;
         }
 
-        self.subject_metadata.sn += 1;
-        self.subject_metadata.prev_ledger_event_hash =
+        inner.subject_metadata.sn += 1;
+        inner.subject_metadata.prev_ledger_event_hash =
             event.prev_ledger_event_hash.clone();
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        self.state.clone()
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state = state;
     }
 }
 

@@ -17,8 +17,9 @@ Cargo.lock
 # Macs files
 .DS_Store
 
+.vscode
+
 **/*.profraw
-coverage
 
 /keys
 /db
@@ -36,3 +37,7 @@ todo.txt
 requisitos.md
 
 temporal
+AGENTS.md
+
+.agents/
+

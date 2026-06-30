@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use ave_core::error::Error as CoreError;
-use ave_core::helpers::sink::SinkError;
+use ave_core::sink::SinkError;
 
 /// Bridge API errors.
 ///
@@ -26,6 +26,10 @@ pub enum BridgeError {
     /// The provided request identifier is not valid.
     #[error("Invalid request identifier: {0}")]
     InvalidRequestId(String),
+
+    /// The provided governance identifier is not valid.
+    #[error("Invalid governance identifier: {0}")]
+    InvalidGovernanceId(String),
 
     /// The provided public key is not valid.
     #[error("Invalid public key: {0}")]
@@ -66,6 +70,10 @@ pub enum BridgeError {
     #[error("Failed to store private key: {0}")]
     KeyWrite(String),
 
+    /// The configured keys path is not accessible or not writable.
+    #[error("Keys path validation failed: {0}")]
+    KeyPathInvalid(String),
+
     // ========================================
     // Configuration Errors
     // ========================================
@@ -90,4 +98,18 @@ pub enum BridgeError {
     /// Sink authentication failed during initialization.
     #[error("Sink authentication failed: {0}")]
     SinkAuth(#[from] SinkError),
+
+    // ========================================
+    // Runtime Errors
+    // ========================================
+    /// Failed to register a process signal handler.
+    #[error("Failed to register shutdown signal handler: {0}")]
+    SignalRegistration(String),
+
+    // ========================================
+    // API Errors
+    // ========================================
+    /// Generic API error.
+    #[error("API error: {0}")]
+    Api(String),
 }

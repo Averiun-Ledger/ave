@@ -46,11 +46,14 @@ impl Actor for TempCompiler {
     type Event = ();
     type Message = TempCompilerMessage;
     type Response = CompilerResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
-            || info_span!("TempCompiler", id),
-            |parent_span| info_span!(parent: parent_span, "TempCompiler", id),
+            || info_span!("TempCompiler"),
+            |parent_span| info_span!(parent: parent_span, "TempCompiler"),
         )
     }
 }
@@ -59,7 +62,7 @@ impl Actor for TempCompiler {
 impl Handler<Self> for TempCompiler {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: TempCompilerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<CompilerResponse, ActorError> {

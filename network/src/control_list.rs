@@ -1088,4 +1088,131 @@ mod tests {
 
         server_stop.cancel();
     }
+
+    #[test]
+    fn behaviour_update_allow_peers() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut behaviour = Behaviour::new(
+            Config::default()
+                .with_enable(true)
+                .with_allow_list(vec![PeerId::random().to_string()]),
+            &[],
+            None,
+            Some(metrics),
+        );
+        let new_list = vec![PeerId::random().to_string()];
+        behaviour.update_allow_peers(&new_list);
+        assert_eq!(behaviour.allow_peers.len(), 1);
+    }
+
+    #[test]
+    fn behaviour_update_block_peers() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut behaviour = Behaviour::new(
+            Config::default().with_enable(true),
+            &[],
+            None,
+            Some(metrics),
+        );
+        let new_list = vec![PeerId::random().to_string()];
+        behaviour.update_block_peers(&new_list);
+        assert_eq!(behaviour.block_peers.len(), 1);
+    }
+
+    #[test]
+    fn behaviour_check_allow_and_block() {
+        let allowed_peer = PeerId::random();
+        let blocked_peer = PeerId::random();
+        let other_peer = PeerId::random();
+
+        let behaviour = Behaviour::new(
+            Config::default()
+                .with_enable(true)
+                .with_allow_list(vec![allowed_peer.to_string()])
+                .with_block_list(vec![blocked_peer.to_string()]),
+            &[],
+            None,
+            None,
+        );
+
+        assert!(behaviour.check_allow(&allowed_peer).is_ok());
+        assert!(behaviour.check_allow(&other_peer).is_err());
+        assert!(behaviour.check_block(&other_peer).is_ok());
+        assert!(behaviour.check_block(&blocked_peer).is_err());
+        assert!(behaviour.check_lists(&allowed_peer).is_ok());
+        assert!(behaviour.check_lists(&blocked_peer).is_err());
+        assert!(behaviour.check_lists(&other_peer).is_err());
+    }
+
+    #[test]
+    fn behaviour_check_lists_when_disabled() {
+        let peer = PeerId::random();
+        let behaviour = Behaviour::new(
+            Config::default().with_enable(false),
+            &[],
+            None,
+            None,
+        );
+        assert!(behaviour.check_lists(&peer).is_ok());
+    }
+
+    #[test]
+    fn behaviour_new_with_boot_nodes_in_allow_list() {
+        let boot_peer = PeerId::random();
+        let boot_node = RoutingNode {
+            peer_id: boot_peer.to_string(),
+            address: vec![],
+        };
+        let behaviour = Behaviour::new(
+            Config::default().with_enable(true),
+            &[boot_node],
+            None,
+            None,
+        );
+        assert!(behaviour.check_allow(&boot_peer).is_ok());
+    }
+
+    #[test]
+    fn deserialize_duration_secs_accepts_positive_integer() {
+        let raw: u64 = serde_json::from_str("42").unwrap();
+        assert_eq!(raw, 42);
+        // The function itself is invoked via serde attribute on Config fields;
+        // verify that Config deserialization uses it correctly.
+        let config: Config =
+            serde_json::from_str(r#"{"interval_request": 300}"#).unwrap();
+        assert_eq!(config.get_interval_request(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn deserialize_duration_secs_rejects_non_integer() {
+        let result = serde_json::from_str::<Config>(
+            r#"{"interval_request": "not-a-number"}"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_deserialize_complete() {
+        let json = r#"{
+            "enable": true,
+            "allow_list": ["a", "b"],
+            "block_list": ["c"],
+            "service_allow_list": ["d"],
+            "service_block_list": ["e"],
+            "interval_request": 120,
+            "request_timeout": 10,
+            "max_concurrent_requests": 5
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.get_enable());
+        assert_eq!(config.get_allow_list(), vec!["a", "b"]);
+        assert_eq!(config.get_block_list(), vec!["c"]);
+        assert_eq!(config.get_service_allow_list(), vec!["d"]);
+        assert_eq!(config.get_service_block_list(), vec!["e"]);
+        assert_eq!(config.get_interval_request(), Duration::from_secs(120));
+        assert_eq!(config.get_request_timeout(), Duration::from_secs(10));
+        assert_eq!(config.get_max_concurrent_requests(), 5);
+    }
 }

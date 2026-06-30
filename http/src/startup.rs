@@ -11,7 +11,7 @@ use crate::{
     server::build_routes,
 };
 use ave_bridge::{
-    Bridge,
+    Bridge, SinkConfigEntry, SinkTarget,
     clap::Parser,
     config::Config as BridgeConfig,
     settings::{
@@ -102,6 +102,9 @@ pub enum StartupError {
 
     #[error("HTTP to HTTPS redirect server failed: {0}")]
     RedirectServer(String),
+
+    #[error("directory or permission validation failed: {0}")]
+    DirectoryValidation(String),
 }
 
 struct ResolvedSecret {
@@ -665,40 +668,40 @@ fn log_effective_configuration(
     }
 
     info!(target: TARGET, "[sink]");
-    if config.sink.auth.is_empty() {
-        info!(target: TARGET, "  auth url  : none");
-    } else {
-        info!(target: TARGET, "  auth url  : {}", config.sink.auth);
-    }
-    if config.sink.username.is_empty() {
-        info!(target: TARGET, "  username  : none");
-    } else {
-        info!(target: TARGET, "  username  : {}", config.sink.username);
-    }
-    info!(target: TARGET, "  schemas   : {}", config.sink.sinks.len());
-    for (schema, servers) in &config.sink.sinks {
+    info!(target: TARGET, "  entries   : {}", config.sinks.len());
+    for SinkConfigEntry { target, servers } in &config.sinks {
+        let SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = target;
+        let target_label = if schema_id == "governance" {
+            "governance".to_string()
+        } else {
+            format!(
+                "schema '{}' (governance {})",
+                schema_id,
+                governance_id.as_deref().unwrap_or("?")
+            )
+        };
         info!(
             target: TARGET,
-            "  schema '{}': {} server(s)",
-            schema,
+            "  target {}: {} server(s)",
+            target_label,
             servers.len()
         );
         for s in servers {
             info!(
                 target: TARGET,
-                "    - {} | {} | auth: {} | events: {:?}",
+                "    - {} | {} | auth: {:?} | events: {:?}",
                 s.server,
                 s.url,
-                s.auth,
+                s.auth.is_some(),
                 s.events
             );
             info!(
                 target: TARGET,
-                "      concurrency: {} | queue: {} ({:?}) | routing: {:?}",
-                s.concurrency,
-                s.queue_capacity,
-                s.queue_policy,
-                s.routing_strategy
+                "      batch_size: {}",
+                s.batch_size
             );
             info!(
                 target: TARGET,
@@ -788,7 +791,24 @@ pub async fn run() -> Result<(), StartupError> {
     auth::request_meta::validate_proxy_config(&config.http.proxy)
         .map_err(StartupError::ProxyConfig)?;
 
+    // Validate logging directory before init_logging so we can still
+    // emit the error to stderr if the log directory is not writable.
+    if let Err(e) = crate::directory_validation::validate_logging_path(&config)
+    {
+        eprintln!(
+            "ERROR: cannot start logging — log directory is not accessible: {e}"
+        );
+        return Err(StartupError::DirectoryValidation(e));
+    }
+
     let _log_handle = logging::init_logging(&config.logging).await;
+
+    // Validate the remaining HTTP-managed paths after logging is ready
+    // so permission errors appear in the application logs.
+    if let Err(e) = crate::directory_validation::validate_http_paths(&config) {
+        error!(target: TARGET, error = %e, "directory validation failed");
+        return Err(StartupError::DirectoryValidation(e));
+    }
     let secrets = StartupSecrets {
         auth_password: resolve_secret(args.auth_password, build_auth_password),
         key_password: resolve_secret(args.key_password, build_key_password),
@@ -821,8 +841,6 @@ pub async fn run() -> Result<(), StartupError> {
     let (bridge, runners) = Bridge::build(
         &config,
         &secrets.key_password.value,
-        &secrets.sink_password.value,
-        &secrets.sink_api_key.value,
         Some(graceful_token.clone()),
         Some(crash_token.clone()),
     )

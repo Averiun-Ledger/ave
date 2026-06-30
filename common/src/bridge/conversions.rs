@@ -358,4 +358,95 @@ mod tests {
             ConversionError::InvalidViewpoints(_)
         ));
     }
+
+    #[test]
+    fn test_eol_request_invalid_subject_id() {
+        let bridge_eol = BridgeEOLRequest {
+            subject_id: "bad-id".to_string(),
+        };
+        let result: Result<EOLRequest, _> = bridge_eol.try_into();
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
+    }
+
+    #[test]
+    fn test_confirm_request_invalid_subject_id() {
+        let bridge_confirm = BridgeConfirmRequest {
+            subject_id: "bad-id".to_string(),
+            name_old_owner: None,
+        };
+        let result: Result<ConfirmRequest, _> = bridge_confirm.try_into();
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
+    }
+
+    #[test]
+    fn test_reject_request_invalid_subject_id() {
+        let bridge_reject = BridgeRejectRequest {
+            subject_id: "bad-id".to_string(),
+        };
+        let result: Result<RejectRequest, _> = bridge_reject.try_into();
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
+    }
+
+    #[test]
+    fn test_bridge_fact_request_conversion_preserves_viewpoints() {
+        let bridge_fact = BridgeFactRequest {
+            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                .to_string(),
+            payload: json!({"test": "value"}),
+            viewpoints: vec!["vp1".to_string(), "vp2".to_string()],
+        };
+        let fact: FactRequest = bridge_fact.clone().try_into().unwrap();
+        assert!(fact.viewpoints.contains("vp1"));
+        assert!(fact.viewpoints.contains("vp2"));
+        let back: BridgeFactRequest = fact.into();
+        assert_eq!(back.viewpoints, vec!["vp1".to_string(), "vp2".to_string()]);
+    }
+    #[test]
+    fn test_bridge_event_request_from_fact_with_viewpoints() {
+        let mut viewpoints = BTreeSet::new();
+        viewpoints.insert("vp1".to_string());
+        viewpoints.insert("vp2".to_string());
+        let event = EventRequest::Fact(FactRequest {
+            subject_id: DigestIdentifier::default(),
+            payload: crate::ValueWrapper::default(),
+            viewpoints,
+        });
+        let bridge: BridgeEventRequest = event.into();
+        match bridge {
+            BridgeEventRequest::Fact(req) => {
+                assert_eq!(
+                    req.viewpoints,
+                    vec!["vp1".to_string(), "vp2".to_string()]
+                );
+            }
+            other => panic!("expected Fact, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_signed_event_request_roundtrip() {
+        use ave_identity::keys::Ed25519Signer;
+        let signer = Ed25519Signer::generate().unwrap();
+        let create = CreateRequest {
+            name: Some("name".to_string()),
+            description: None,
+            governance_id: DigestIdentifier::default(),
+            schema_id: crate::SchemaType::Governance,
+            namespace: crate::Namespace::new(),
+        };
+        let event = EventRequest::Create(create);
+        let signed = ave_identity::Signed::new(event, &signer).unwrap();
+        let bridge: BridgeSignedEventRequest = signed.into();
+        assert!(bridge.signature.is_some());
+        assert!(matches!(bridge.request, BridgeEventRequest::Create(_)));
+    }
 }

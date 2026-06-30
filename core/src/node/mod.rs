@@ -13,14 +13,28 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{Auth, AuthInitParams, AuthMessage, AuthResponse},
+    auth::{
+        SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage,
+        SubjectAccessResponse,
+    },
+    config::SinkTarget,
     db::Storable,
     distribution::worker::DistriWorker,
-    governance::{Governance, GovernanceMessage, GovernanceResponse},
+    governance::{
+        Governance, GovernanceMessage, GovernanceResponse,
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
+    },
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
     model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
+    sink::{
+        SinkManager, SinkManagerInitParams, SinkManagerMessage, SinkRegistry,
+        SinkRegistryMessage, SinkRegistryResponse,
+    },
     subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
@@ -36,7 +50,7 @@ use ave_common::{
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
     Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
@@ -206,6 +220,12 @@ impl BorshDeserialize for Node {
 }
 
 impl Node {
+    fn hash(&self) -> Result<HashAlgorithm, ActorError> {
+        self.hash.ok_or_else(|| ActorError::FunctionalCritical {
+            description: "Hash is None".to_string(),
+        })
+    }
+
     fn get_subject_data(
         &self,
         subject_id: &DigestIdentifier,
@@ -241,8 +261,6 @@ impl Node {
     }
 
     pub fn confirm_transfer(&mut self, subject_id: DigestIdentifier) {
-        self.our_key.to_string();
-
         if let Some(data) = self.transfer_subjects.remove(&subject_id) {
             if data.actual_owner == *self.our_key {
                 if let Some(data) = self.owned_subjects.remove(&subject_id) {
@@ -335,6 +353,15 @@ impl Node {
 
         let dir = contracts_path.join("contracts");
 
+        // Passive permission check before creating anything
+        if let Err(e) = check_dir_writable(&dir) {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Contracts directory permission check failed: {e}"
+                ),
+            });
+        }
+
         if !Path::new(&dir).exists() {
             fs::create_dir_all(&dir).await.map_err(|e| {
                 error!(
@@ -355,6 +382,8 @@ impl Node {
         ctx: &mut ActorContext<Self>,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
+        let hash = self.hash()?;
+
         for subject in self.owned_subjects.keys() {
             let distributor_name = format!("distributor_{}", subject);
             if ctx
@@ -368,6 +397,8 @@ impl Node {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         ledger_batch_size: self.ledger_batch_size,
+                        transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
+                        hash,
                     },
                 )
                 .await?;
@@ -387,6 +418,8 @@ impl Node {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         ledger_batch_size: self.ledger_batch_size,
+                        transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
+                        hash,
                     },
                 )
                 .await?;
@@ -609,7 +642,7 @@ impl Node {
                     sink_timestamp,
                 )
             }
-            SubjectData::Tracker { .. } => {
+            SubjectData::Tracker { governance_id, .. } => {
                 let subject_manager =
                     ctx.get_child::<SubjectManager>("subject_manager").await?;
                 let requester = format!(
@@ -625,23 +658,64 @@ impl Node {
                     .await?;
 
                 let result = async {
-                    let path = ActorPath::from(format!(
-                        "/user/node/subject_manager/{}",
-                        subject_id
+                    let actor_path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/witnesses_register",
+                        governance_id
                     ));
-                    let tracker =
-                        ctx.system().get_actor::<Tracker>(&path).await?;
-                    let response =
-                        tracker.ask(TrackerMessage::GetMetadata).await?;
-                    let TrackerResponse::Metadata(metadata) = response else {
-                        return Err(ActorError::UnexpectedResponse {
-                            path,
-                            expected: "TrackerResponse::Metadata".to_owned(),
-                        });
+
+                    let sn = if let Ok(actor) = ctx
+                        .system()
+                        .get_actor::<WitnessesRegister>(&actor_path)
+                        .await
+                    {
+                        let response = actor
+                            .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
+                                subject_id: subject_id.clone(),
+                            })
+                            .await?;
+                        let WitnessesRegisterResponse::TrackerOwnerSn { data } =
+                            response
+                        else {
+                            return Err(ActorError::UnexpectedResponse {
+                                path: actor_path,
+                                expected:
+                                    "WitnessesRegisterResponse::TrackerOwnerSn"
+                                        .to_owned(),
+                            });
+                        };
+                        data.map(|(_, sn)| sn).ok_or_else(|| {
+                            ActorError::Functional {
+                                description: format!(
+                                    "local tracker sn not found for subject {}",
+                                    subject_id
+                                ),
+                            }
+                        })?
+                    } else {
+                        // Safe mode fallback: witnesses_register doesn't exist,
+                        // get SN directly from tracker
+                        let tracker_path = ActorPath::from(format!(
+                            "/user/node/subject_manager/{}",
+                            subject_id
+                        ));
+                        let tracker = ctx
+                            .system()
+                            .get_actor::<Tracker>(&tracker_path)
+                            .await?;
+                        let response =
+                            tracker.ask(TrackerMessage::GetMetadata).await?;
+                        let TrackerResponse::Metadata(metadata) = response
+                        else {
+                            return Err(ActorError::UnexpectedResponse {
+                                path: tracker_path,
+                                expected: "TrackerResponse::Metadata"
+                                    .to_owned(),
+                            });
+                        };
+                        metadata.sn
                     };
-                    let hi_sn = to_sn
-                        .map(|to_sn| to_sn.min(metadata.sn))
-                        .unwrap_or(metadata.sn);
+
+                    let hi_sn = to_sn.map(|to_sn| to_sn.min(sn)).unwrap_or(sn);
                     let ledger = self
                         .collect_tracker_ledger(ctx, &subject_id, hi_sn)
                         .await?;
@@ -691,7 +765,7 @@ pub enum NodeMessage {
     DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
-    AuthData(DigestIdentifier),
+    SubjectAccessData(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
@@ -727,8 +801,9 @@ pub enum NodeResponse {
         i_owner: bool,
         i_new_owner: Option<bool>,
     },
-    AuthData {
-        auth: bool,
+    SubjectAccessData {
+        is_gov_authorized: bool,
+        is_tracker_banned: bool,
         subject_data: Option<SubjectData>,
     },
     Ok,
@@ -763,6 +838,9 @@ impl Actor for Node {
     type Event = NodeEvent;
     type Message = NodeMessage;
     type Response = NodeResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -792,7 +870,8 @@ impl Actor for Node {
             return Err(e);
         }
 
-        let Some(config) =
+        // Create SinkRegistry and populate it from current config.
+        let Some(config_helper) =
             ctx.system().get_helper::<ConfigHelper>("config").await
         else {
             error!("Config helper not found");
@@ -801,6 +880,48 @@ impl Actor for Node {
                 reason: "Not found".to_string(),
             });
         };
+        let registry_actor = match ctx
+            .create_child("sink_registry", SinkRegistry::initial(()))
+            .await
+        {
+            Ok(actor) => actor,
+            Err(e) => {
+                error!(error = %e, "Failed to create SinkRegistry");
+                return Err(e);
+            }
+        };
+        if let Err(e) =
+            populate_sink_registry(&registry_actor, &config_helper.sinks).await
+        {
+            error!(error = %e, "Failed to populate SinkRegistry");
+            return Err(e);
+        }
+
+        // Create NodeSinkManager for governance events.
+        let gov_sinks = config_helper
+            .sinks
+            .iter()
+            .filter(|entry| matches!(
+                entry.target,
+                SinkTarget::Schema { schema_id: ref id, governance_id: None } if id == "governance"
+            ))
+            .flat_map(|entry| entry.servers.clone())
+            .collect();
+        if let Err(e) = ctx
+            .create_child(
+                "node_sink_manager",
+                SinkManager::initial(SinkManagerInitParams {
+                    sinks: gov_sinks,
+                    is_governance: true,
+                }),
+            )
+            .await
+        {
+            error!(error = %e, "Failed to create NodeSinkManager");
+            return Err(e);
+        }
+
+        let config = config_helper;
         let safe_mode = config.safe_mode;
         let Some(network): Option<Arc<NetworkSender>> =
             ctx.system().get_helper("network").await
@@ -832,9 +953,9 @@ impl Actor for Node {
                 });
             };
 
-            let sink =
-                Sink::new(register_actor.subscribe(), ext_db.get_register());
-            ctx.system().run_sink(sink).await;
+            let mut sink = Sink::new("internal", None);
+            sink.add("ext_db", ext_db.get_register());
+            register_actor.register_sink(sink);
 
             if let Err(e) = ctx
                 .create_child(
@@ -898,7 +1019,7 @@ impl Actor for Node {
         if let Err(e) = ctx
             .create_child(
                 "auth",
-                Auth::initial(AuthInitParams {
+                SubjectAccess::initial(SubjectAccessInitParams {
                     network: network.clone(),
                     our_key: self.our_key.clone(),
                     round_retry_interval_secs: config
@@ -915,10 +1036,12 @@ impl Actor for Node {
         {
             error!(
                 error = %e,
-                "Failed to create auth child"
+                "Failed to create subject_access child"
             );
             return Err(e);
         }
+
+        let hash = self.hash()?;
 
         if !safe_mode
             && let Err(e) = ctx
@@ -928,6 +1051,8 @@ impl Actor for Node {
                         our_key: self.our_key.clone(),
                         network,
                         ledger_batch_size: self.ledger_batch_size,
+                        transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
+                        hash,
                     },
                 )
                 .await
@@ -939,6 +1064,30 @@ impl Actor for Node {
             return Err(e);
         }
 
+        // All node children (including SubjectManager and its governances) are
+        // now started. Notify the governance sink manager so it can start
+        // workers and trigger catch-up safely.
+        let node_sink_manager = ctx
+            .get_child::<SinkManager>("node_sink_manager")
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "NodeSinkManager not found at end of pre_start"
+                );
+                e
+            })?;
+        node_sink_manager
+            .tell(SinkManagerMessage::StartupReady)
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "Failed to notify NodeSinkManager of startup readiness"
+                );
+                e
+            })?;
+
         Ok(())
     }
 }
@@ -947,7 +1096,7 @@ impl Actor for Node {
 impl Handler<Self> for Node {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: NodeMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<NodeResponse, ActorError> {
@@ -990,6 +1139,7 @@ impl Handler<Self> for Node {
                 )
                 .await;
 
+                let hash = self.hash()?;
                 let distributor_name = format!("distributor_{}", subject_id);
                 if ctx
                     .get_child::<DistriWorker>(&distributor_name)
@@ -1002,6 +1152,8 @@ impl Handler<Self> for Node {
                             our_key: self.our_key.clone(),
                             network,
                             ledger_batch_size: self.ledger_batch_size,
+                            transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
+                            hash,
                         },
                     )
                     .await?;
@@ -1247,53 +1399,57 @@ impl Handler<Self> for Node {
                     i_new_owner,
                 })
             }
-            NodeMessage::AuthData(subject_id) => {
-                let authorized_subjects = match ctx
-                    .get_child::<Auth>("auth")
-                    .await
+            NodeMessage::SubjectAccessData(subject_id) => {
+                let access = match ctx.get_child::<SubjectAccess>("auth").await
                 {
-                    Ok(auth) => {
-                        let res = match auth.ask(AuthMessage::GetAuths).await {
-                            Ok(res) => res,
-                            Err(e) => {
-                                error!(
-                                    msg_type = "AuthData",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to get authorizations from auth actor"
-                                );
-                                ctx.system().crash_system();
-                                return Err(e);
-                            }
-                        };
-                        let AuthResponse::Auths { subjects } = res else {
-                            error!(
-                                msg_type = "AuthData",
-                                subject_id = %subject_id,
-                                "Unexpected response from auth actor"
-                            );
-                            ctx.system().crash_system();
-                            return Err(ActorError::UnexpectedResponse {
-                                expected: "AuthResponse::Auths".to_owned(),
-                                path: ctx.path().clone() / "auth",
-                            });
-                        };
-                        subjects
-                    }
+                    Ok(access) => access,
                     Err(e) => {
                         error!(
-                            msg_type = "AuthData",
+                            msg_type = "SubjectAccessData",
                             subject_id = %subject_id,
                             error = %e,
-                            "Auth actor not found"
+                            "SubjectAccess actor not found"
                         );
                         ctx.system().crash_system();
                         return Err(e);
                     }
                 };
 
-                let auth_subj =
-                    authorized_subjects.iter().any(|x| x.clone() == subject_id);
+                let (is_gov_authorized, is_tracker_banned) = match access
+                    .ask(SubjectAccessMessage::GetAccessInfo {
+                        subject_id: subject_id.clone(),
+                    })
+                    .await
+                {
+                    Ok(SubjectAccessResponse::AccessInfo {
+                        is_gov_authorized,
+                        is_tracker_banned,
+                    }) => (is_gov_authorized, is_tracker_banned),
+                    Ok(other) => {
+                        error!(
+                            msg_type = "SubjectAccessData",
+                            subject_id = %subject_id,
+                            ?other,
+                            "Unexpected response from subject_access actor for GetAccessInfo"
+                        );
+                        ctx.system().crash_system();
+                        return Err(ActorError::UnexpectedResponse {
+                            expected: "SubjectAccessResponse::AccessInfo"
+                                .to_owned(),
+                            path: ctx.path().clone() / "auth",
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "SubjectAccessData",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to get access info from subject_access actor"
+                        );
+                        ctx.system().crash_system();
+                        return Err(e);
+                    }
+                };
 
                 let subj_data = self
                     .known_subjects
@@ -1302,32 +1458,21 @@ impl Handler<Self> for Node {
                     .cloned();
 
                 debug!(
-                    msg_type = "AuthData",
+                    msg_type = "SubjectAccessData",
                     subject_id = %subject_id,
-                    authorized = auth_subj,
+                    is_gov_authorized = is_gov_authorized,
+                    is_tracker_banned = is_tracker_banned,
                     subject_data = ?subj_data,
-                    "Checked subject authorization status"
+                    "Checked subject access status"
                 );
 
-                Ok(NodeResponse::AuthData {
-                    auth: auth_subj,
+                Ok(NodeResponse::SubjectAccessData {
+                    is_gov_authorized,
+                    is_tracker_banned,
                     subject_data: subj_data,
                 })
             }
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child actor fault, stopping system"
-        );
-        ctx.system().crash_system();
-        ChildAction::Stop
     }
 
     async fn on_event(
@@ -1335,9 +1480,8 @@ impl Handler<Self> for Node {
         event: NodeEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist node event"
             );
@@ -1359,13 +1503,7 @@ pub struct InitParamsNode {
 impl PersistentActor for Node {
     type Persistence = LightPersistence;
     type InitParams = InitParamsNode;
-
-    fn update(&mut self, state: Self) {
-        self.owned_subjects = state.owned_subjects;
-        self.known_subjects = state.known_subjects;
-        self.transfer_subjects = state.transfer_subjects;
-        self.reject_subjects = state.reject_subjects
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -1383,13 +1521,18 @@ impl PersistentActor for Node {
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             NodeEvent::EOLSubject {
                 subject_id,
                 i_owner,
             } => {
-                self.eol(subject_id.clone(), *i_owner);
+                inner.eol(subject_id.clone(), *i_owner);
                 debug!(
                     event_type = "EOLSubject",
                     subject_id = %subject_id,
@@ -1398,7 +1541,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::ConfirmTransfer(subject_id) => {
-                self.confirm_transfer(subject_id.clone());
+                inner.confirm_transfer(subject_id.clone());
                 debug!(
                     event_type = "ConfirmTransfer",
                     subject_id = %subject_id,
@@ -1410,7 +1553,7 @@ impl PersistentActor for Node {
                 data,
                 owner,
             } => {
-                self.register_subject(
+                inner.register_subject(
                     subject_id.clone(),
                     owner.clone(),
                     data.clone(),
@@ -1423,7 +1566,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::DeleteSubject(subject_id) => {
-                self.delete_subject(subject_id);
+                inner.delete_subject(subject_id);
                 debug!(
                     event_type = "DeleteSubject",
                     subject_id = %subject_id,
@@ -1431,7 +1574,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::RejectTransfer(subject_id) => {
-                self.delete_transfer(subject_id);
+                inner.delete_transfer(subject_id);
                 debug!(
                     event_type = "RejectTransfer",
                     subject_id = %subject_id,
@@ -1439,7 +1582,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::TransferSubject(transfer) => {
-                self.transfer_subject(transfer.clone());
+                inner.transfer_subject(transfer.clone());
                 debug!(
                     event_type = "TransferSubject",
                     subject_id = %transfer.subject_id,
@@ -1449,9 +1592,134 @@ impl PersistentActor for Node {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.owned_subjects.clone_from(&state.owned_subjects);
+        self.known_subjects.clone_from(&state.known_subjects);
+        self.transfer_subjects.clone_from(&state.transfer_subjects);
+        self.reject_subjects.clone_from(&state.reject_subjects);
     }
 }
 
 #[async_trait]
 impl Storable for Node {}
+
+/// Check that a directory exists and is writable.
+/// If it does not exist, check the nearest existing ancestor.
+fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
+    let target = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!(
+                "'{}' exists but is not a directory",
+                path.display()
+            ));
+        }
+        path
+    } else {
+        let mut ancestor = path;
+        while !ancestor.exists() {
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => {
+                    return Err(format!(
+                        "'{}' does not exist and has no existing parent",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if !ancestor.is_dir() {
+            return Err(format!(
+                "ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            ));
+        }
+        ancestor
+    };
+
+    let test_file = target.join(".ave_write_test");
+    match std::fs::File::create(&test_file) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(e) => {
+            return Err(format!("'{}' is not writable: {e}", target.display()));
+        }
+    }
+
+    Ok(())
+}
+
+async fn populate_sink_registry(
+    registry: &ActorRef<SinkRegistry>,
+    sinks: &[crate::config::SinkConfigEntry],
+) -> Result<(), ActorError> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut config_names = HashSet::new();
+    for entry in sinks {
+        let crate::config::SinkTarget::Schema {
+            schema_id,
+            governance_id,
+        } = &entry.target;
+        for server in &entry.servers {
+            if !seen.insert(server.server.clone()) {
+                let msg = format!(
+                    "duplicate sink name '{}' in configuration",
+                    server.server
+                );
+                error!(%msg);
+                return Err(ActorError::Functional { description: msg });
+            }
+            config_names.insert(server.server.clone());
+            registry
+                .tell(SinkRegistryMessage::RegisterSink {
+                    name: server.server.clone(),
+                    schema_id: schema_id.clone(),
+                    governance_id: governance_id.clone(),
+                    from_config: true,
+                })
+                .await?;
+        }
+    }
+
+    // Mark any previously-configured sinks that are no longer present as
+    // residuals (from_config=false) so operators can still inspect and clean
+    // them up. Sinks that have no persisted state will typically be removed by
+    // safe-mode cleanup; until then they remain visible in the registry.
+    let existing = match registry
+        .ask(SinkRegistryMessage::GetSinkRegistry)
+        .await?
+    {
+        SinkRegistryResponse::Registry(registrations) => registrations,
+        other => {
+            error!(response = ?other, "Unexpected response from SinkRegistry");
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node/sink_registry"),
+                expected: "Registry".to_owned(),
+            });
+        }
+    };
+    for reg in existing {
+        if !config_names.contains(&reg.name) && reg.from_config {
+            registry
+                .tell(SinkRegistryMessage::RegisterSink {
+                    name: reg.name,
+                    schema_id: reg.schema_id,
+                    governance_id: reg.governance_id,
+                    from_config: false,
+                })
+                .await?;
+        }
+    }
+
+    Ok(())
+}

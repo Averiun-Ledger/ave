@@ -189,7 +189,7 @@ async fn test_viewpoints_architecture_battery() {
         .unwrap();
 
     witness
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -1808,7 +1808,7 @@ async fn test_viewpoints_batch_window_battery() {
     );
 
     node_new
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::Many(vec![
                 PublicKey::from_str(&node_two.public_key()).unwrap(),
@@ -2150,7 +2150,7 @@ async fn test_viewpoints_requester_perspective_battery() {
 
     for requester in [&requester_agua, &requester_hash, &requester_vidrio] {
         requester
-            .auth_subject(
+            .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
                     PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -2744,7 +2744,7 @@ async fn test_viewpoints_transfer_override_battery() {
     .unwrap();
 
     final_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -3384,7 +3384,7 @@ async fn test_viewpoints_reject_and_old_owner_battery() {
     node_running(&old_rejected).await.unwrap();
 
     old_rejected
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -3400,7 +3400,7 @@ async fn test_viewpoints_reject_and_old_owner_battery() {
             .unwrap();
 
     old_rejected
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -3528,7 +3528,7 @@ async fn test_viewpoints_reject_and_old_owner_battery() {
     node_running(&old_owner).await.unwrap();
 
     old_owner
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -3545,7 +3545,7 @@ async fn test_viewpoints_reject_and_old_owner_battery() {
         .unwrap();
 
     old_owner
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -3657,7 +3657,7 @@ async fn test_viewpoints_reject_and_old_owner_battery() {
     .unwrap();
 
     invalid_witness
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -4133,7 +4133,7 @@ async fn test_viewpoints_projection_battery() {
             .unwrap();
 
     requester_basura
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&sender_agua.public_key()).unwrap(),
@@ -4245,7 +4245,7 @@ async fn test_viewpoints_projection_battery() {
     assert!(matches!(basura_events[8].event, RequestEventDB::EOL));
 
     requester_hash
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full.public_key()).unwrap(),
@@ -4685,7 +4685,7 @@ async fn test_viewpoints_copy_paths_battery() {
         .unwrap();
 
     requester_auth
-        .auth_subject(
+        .authorize_governance(
             subject_auth.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -4697,7 +4697,7 @@ async fn test_viewpoints_copy_paths_battery() {
         .unwrap();
 
     invalid_auth
-        .auth_subject(
+        .authorize_governance(
             subject_auth.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -6097,7 +6097,7 @@ async fn test_viewpoints_update_disjoint_ranges_battery() {
     );
 
     requester
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::Many(vec![
                 PublicKey::from_str(&clear_short.public_key()).unwrap(),
@@ -6923,7 +6923,7 @@ async fn test_viewpoints_schema_viewpoints_evolution_battery() {
 
     alice_node
         .api
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -6940,7 +6940,7 @@ async fn test_viewpoints_schema_viewpoints_evolution_battery() {
 
     alice_node
         .api
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -6970,7 +6970,7 @@ async fn test_viewpoints_schema_viewpoints_evolution_battery() {
 
     requester_node
         .api
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -6988,7 +6988,7 @@ async fn test_viewpoints_schema_viewpoints_evolution_battery() {
 
     requester_node
         .api
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -7512,7 +7512,7 @@ async fn test_viewpoints_schema_subset_survival_battery() {
 
     alice_node
         .api
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -7529,7 +7529,7 @@ async fn test_viewpoints_schema_subset_survival_battery() {
 
     alice_node
         .api
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -7921,7 +7921,7 @@ async fn test_viewpoints_schema_empty_roundtrip_battery() {
 
     alice_node
         .api
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -7938,7 +7938,7 @@ async fn test_viewpoints_schema_empty_roundtrip_battery() {
 
     alice_node
         .api
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
@@ -8757,7 +8757,7 @@ async fn test_viewpoints_clear_prefix_cut_battery() {
     }
 
     requester
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::Many(vec![
                 PublicKey::from_str(&clear_short.public_key()).unwrap(),
@@ -9146,7 +9146,7 @@ async fn test_viewpoints_multi_viewpoint_fact_battery() {
         &requester_hash_node.api,
     ] {
         requester
-            .auth_subject(
+            .authorize_governance(
                 governance_id.clone(),
                 AuthWitness::One(
                     PublicKey::from_str(&owner.public_key()).unwrap(),
@@ -9163,7 +9163,7 @@ async fn test_viewpoints_multi_viewpoint_fact_battery() {
             .unwrap();
 
         requester
-            .auth_subject(
+            .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
                     PublicKey::from_str(&owner.public_key()).unwrap(),
@@ -9887,7 +9887,7 @@ async fn test_viewpoints_transfer_restart_override_battery() {
     node_running(&target).await.unwrap();
 
     target
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner_public_key).unwrap()),
         )
@@ -9899,7 +9899,7 @@ async fn test_viewpoints_transfer_restart_override_battery() {
         .unwrap();
 
     target
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full_public_key).unwrap(),
@@ -10036,7 +10036,7 @@ async fn test_viewpoints_transfer_restart_override_battery() {
     node_running(&target_2).await.unwrap();
 
     target_2
-        .auth_subject(
+        .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&owner_public_key).unwrap()),
         )
@@ -10051,7 +10051,7 @@ async fn test_viewpoints_transfer_restart_override_battery() {
         .unwrap();
 
     target_2
-        .auth_subject(
+        .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
                 PublicKey::from_str(&witness_full_public_key).unwrap(),

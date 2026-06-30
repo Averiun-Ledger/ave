@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     governance::model::Quorum,
     model::common::{
-        CeilingMap, Interval, IntervalSet, emit_fail, purge_storage,
+        CeilingMap, Interval, IntervalSet, crash_system, purge_storage,
     },
 };
 use async_trait::async_trait;
@@ -67,36 +68,6 @@ pub struct RoleRegister {
 }
 
 type IntervalData = (IntervalSet, Option<u64>);
-
-impl RoleRegister {
-    pub fn new() -> Self {
-        Self {
-            version: 0,
-            appr_quorum: Quorum::Majority,
-            eval_quorum: HashMap::new(),
-            vali_quorum: HashMap::new(),
-            evaluators: HashMap::new(),
-            validators: HashMap::new(),
-            approvers: HashSet::new(),
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, Deserialize, Serialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct UpdateRole {
-    pub schema_id: SchemaType,
-    pub role: HashSet<RoleData>,
-}
-
-#[derive(
-    Debug, Clone, Deserialize, Serialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct UpdateQuorum {
-    pub schema_id: SchemaType,
-    pub quorum: Quorum,
-}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -238,6 +209,9 @@ impl Actor for RoleRegister {
     type Event = RoleRegisterEvent;
     type Message = RoleRegisterMessage;
     type Response = RoleRegisterResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -250,9 +224,13 @@ impl Actor for RoleRegister {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("role_register", Some(prefix), true, ctx)
+            .init_store(
+                "role_register",
+                Some(ctx.path().parent().key().to_owned()),
+                true,
+                ctx,
+            )
             .await
         {
             error!(
@@ -269,7 +247,7 @@ impl Actor for RoleRegister {
 impl Handler<Self> for RoleRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RoleRegisterMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RoleRegisterResponse, ActorError> {
@@ -704,18 +682,18 @@ impl Handler<Self> for RoleRegister {
         event: RoleRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
-            let version = match &event {
-                RoleRegisterEvent::UpdateFact { version, .. } => *version,
-                RoleRegisterEvent::UpdateVersion { version } => *version,
-                RoleRegisterEvent::UpdateConfirm { version, .. } => *version,
-            };
+        let version = match &event {
+            RoleRegisterEvent::UpdateFact { version, .. } => *version,
+            RoleRegisterEvent::UpdateVersion { version } => *version,
+            RoleRegisterEvent::UpdateConfirm { version, .. } => *version,
+        };
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 version = version,
                 error = %e,
                 "Failed to persist role register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }
@@ -724,15 +702,21 @@ impl Handler<Self> for RoleRegister {
 impl PersistentActor for RoleRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             RoleRegisterEvent::UpdateVersion { version } => {
-                self.version = *version;
+                inner.version = *version;
             }
             RoleRegisterEvent::UpdateConfirm {
                 version,
@@ -743,20 +727,22 @@ impl PersistentActor for RoleRegister {
                 new_validator,
                 remove_validators,
             } => {
-                self.version = *version;
+                inner.version = *version;
                 if let Some(approver) = new_approver {
-                    self.approvers.insert(approver.clone());
+                    inner.approvers.insert(approver.clone());
                 }
 
                 if let Some(evaluator) = new_evaluator {
-                    self.evaluators
+                    inner
+                        .evaluators
                         .entry(SchemaType::Governance)
                         .or_default()
                         .insert((evaluator.clone(), Namespace::new()));
                 }
 
                 if let Some(validator) = new_validator {
-                    self.validators
+                    inner
+                        .validators
                         .entry(SchemaType::Governance)
                         .or_default()
                         .entry((validator.clone(), Namespace::new()))
@@ -764,13 +750,14 @@ impl PersistentActor for RoleRegister {
                         .1 = Some(*version);
                 }
 
-                self.approvers.remove(remove_approver);
+                inner.approvers.remove(remove_approver);
 
                 for ((schema_id, evaluator), namespaces) in
                     remove_evaluators.iter()
                 {
                     for ns in namespaces.iter() {
-                        self.evaluators
+                        inner
+                            .evaluators
                             .entry(schema_id.clone())
                             .or_default()
                             .remove(&(evaluator.clone(), ns.clone()));
@@ -781,7 +768,7 @@ impl PersistentActor for RoleRegister {
                     remove_validators.iter()
                 {
                     for ns in namespaces.iter() {
-                        let (interval, last) = self
+                        let (interval, last) = inner
                             .validators
                             .entry(schema_id.clone())
                             .or_default()
@@ -820,36 +807,38 @@ impl PersistentActor for RoleRegister {
                 new_validators,
                 remove_validators,
             } => {
-                self.version = *version;
+                inner.version = *version;
 
                 if let Some(appr_quorum) = appr_quorum {
-                    self.appr_quorum = appr_quorum.clone();
+                    inner.appr_quorum = appr_quorum.clone();
                 }
 
                 for (schema_id, quorum) in vali_quorum.iter() {
-                    self.vali_quorum
+                    inner
+                        .vali_quorum
                         .entry(schema_id.clone())
                         .or_default()
                         .insert(*version, quorum.clone());
                 }
 
                 for (schema_id, quorum) in eval_quorum.iter() {
-                    self.eval_quorum.insert(schema_id.clone(), quorum.clone());
+                    inner.eval_quorum.insert(schema_id.clone(), quorum.clone());
                 }
 
                 for approver in new_approvers.iter() {
-                    self.approvers.insert(approver.clone());
+                    inner.approvers.insert(approver.clone());
                 }
 
                 for approver in remove_approvers.iter() {
-                    self.approvers.remove(approver);
+                    inner.approvers.remove(approver);
                 }
 
                 for ((schema_id, evaluator), namespaces) in
                     new_evaluators.iter()
                 {
                     for ns in namespaces.iter() {
-                        self.evaluators
+                        inner
+                            .evaluators
                             .entry(schema_id.clone())
                             .or_default()
                             .insert((evaluator.clone(), ns.clone()));
@@ -860,7 +849,8 @@ impl PersistentActor for RoleRegister {
                     remove_evaluators.iter()
                 {
                     for ns in namespaces.iter() {
-                        self.evaluators
+                        inner
+                            .evaluators
                             .entry(schema_id.clone())
                             .or_default()
                             .remove(&(evaluator.clone(), ns.clone()));
@@ -871,7 +861,8 @@ impl PersistentActor for RoleRegister {
                     new_validators.iter()
                 {
                     for ns in namespaces.iter() {
-                        self.validators
+                        inner
+                            .validators
                             .entry(schema_id.clone())
                             .or_default()
                             .entry((validator.clone(), ns.clone()))
@@ -884,7 +875,7 @@ impl PersistentActor for RoleRegister {
                     remove_validators.iter()
                 {
                     for ns in namespaces.iter() {
-                        let (interval, last) = self
+                        let (interval, last) = inner
                             .validators
                             .entry(schema_id.clone())
                             .or_default()
@@ -912,7 +903,15 @@ impl PersistentActor for RoleRegister {
                 );
             }
         }
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

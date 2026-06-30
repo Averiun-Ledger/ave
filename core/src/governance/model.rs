@@ -874,6 +874,7 @@ impl From<ProtocolTypes> for RoleTypes {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum WitnessesData {
     Gov,
     Schema {
@@ -901,6 +902,7 @@ impl WitnessesData {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum HashThisRole {
     Gov {
         who: PublicKey,

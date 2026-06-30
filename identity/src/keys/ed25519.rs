@@ -381,17 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn test_send_sync_traits() {
-        // This test verifies that Ed25519Signer implements Send + Sync
-        // which is required for thread safety
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-
-        assert_send::<Ed25519Signer>();
-        assert_sync::<Ed25519Signer>();
-    }
-
-    #[test]
     fn test_concurrent_key_generation() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};

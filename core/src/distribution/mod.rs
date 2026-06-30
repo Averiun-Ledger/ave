@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
@@ -12,13 +12,102 @@ use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::{common::emit_fail, event::Ledger},
+    model::{common::crash_system, event::Ledger},
     request::manager::{RequestManager, RequestManagerMessage},
     request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
 
+macro_rules! handle_distri_error {
+    ($ctx:expr, $result:expr, $msg_type:expr, $subject_id:expr, $message:expr) => {
+        match $result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(crash_system($ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+    ($ctx:expr, $result:expr, $msg_type:expr, $subject_id:expr, $message:expr, sender = $sender:expr) => {
+        match $result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(crash_system($ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+    ($ctx:expr, $result:expr, $msg_type:expr, $subject_id:expr, $message:expr, sender = $sender:expr, sn = $sn:expr) => {
+        match $result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let ActorError::FunctionalCritical { .. } = e {
+                    error!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sn = $sn,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(crash_system($ctx, e).await)
+                } else {
+                    warn!(
+                        msg_type = $msg_type,
+                        subject_id = %$subject_id,
+                        sn = $sn,
+                        sender = %$sender,
+                        error = %e,
+                        "{}",
+                        $message
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+}
+
 pub mod coordinator;
 pub mod error;
+pub mod processor;
+pub mod transfer_verifier;
 pub mod worker;
 
 #[derive(Debug, Clone)]
@@ -91,6 +180,7 @@ impl Distribution {
             Ok(child) => child,
             Err(e) => {
                 error!(
+                    msg_type = "CreateDistributor",
                     subject_id = %self.subject_id,
                     witness = %signer,
                     error = %e,
@@ -141,6 +231,9 @@ impl Actor for Distribution {
     type Event = ();
     type Message = DistributionMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -169,7 +262,7 @@ impl NotPersistentActor for Distribution {}
 impl Handler<Self> for Distribution {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DistributionMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -264,29 +357,12 @@ impl Handler<Self> for Distribution {
                             error = %e,
                             "Failed to end distribution request"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
                 }
             }
         }
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        Self::observe_event("error");
-        error!(
-            subject_id = %self.subject_id,
-            request_id = %self.request_id,
-            distribution_type = ?self.distribution_type,
-            error = %error,
-            "Child fault in distribution actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

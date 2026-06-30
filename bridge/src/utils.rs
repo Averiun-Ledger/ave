@@ -1,5 +1,5 @@
 use ave_common::identity::KeyPair;
-use pkcs8::{Document, EncryptedPrivateKeyInfo, PrivateKeyInfo, pkcs5};
+use pkcs8::{EncryptedPrivateKeyInfoRef, PrivateKeyInfoRef, pkcs5};
 
 use getrandom::fill;
 use std::fs;
@@ -8,6 +8,51 @@ use crate::config::Config;
 use crate::error::BridgeError;
 
 const PBKDF2_ITERATIONS: u32 = 200_000;
+
+/// Validate that the keys path (or its nearest existing ancestor) is writable.
+pub fn validate_keys_path(path: &std::path::Path) -> Result<(), String> {
+    let target = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!(
+                "'{}' exists but is not a directory",
+                path.display()
+            ));
+        }
+        path
+    } else {
+        let mut ancestor = path;
+        while !ancestor.exists() {
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => {
+                    return Err(format!(
+                        "'{}' does not exist and has no existing parent",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if !ancestor.is_dir() {
+            return Err(format!(
+                "ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            ));
+        }
+        ancestor
+    };
+
+    let test_file = target.join(".ave_write_test");
+    match std::fs::File::create(&test_file) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(e) => {
+            return Err(format!("'{}' is not writable: {e}", target.display()));
+        }
+    }
+
+    Ok(())
+}
 
 pub fn key_pair(
     config: &Config,
@@ -21,9 +66,9 @@ pub fn key_pair(
     let path = config.keys_path.join("node_private.der");
     match fs::metadata(&path) {
         Ok(_) => {
-            let document = Document::read_der_file(path)
+            let bytes = fs::read(&path)
                 .map_err(|e| BridgeError::KeyRead(e.to_string()))?;
-            let enc_pk = EncryptedPrivateKeyInfo::try_from(document.as_bytes())
+            let enc_pk = EncryptedPrivateKeyInfoRef::try_from(bytes.as_slice())
                 .map_err(|e| BridgeError::KeyRead(e.to_string()))?;
             let dec_pk = enc_pk
                 .decrypt(password)
@@ -43,7 +88,7 @@ pub fn key_pair(
             let der = key_pair
                 .to_secret_der()
                 .map_err(|e| BridgeError::KeyGeneration(e.to_string()))?;
-            let pk = PrivateKeyInfo::try_from(der.as_slice())
+            let pk = PrivateKeyInfoRef::try_from(der.as_slice())
                 .map_err(|e| BridgeError::KeyGeneration(e.to_string()))?;
             let mut salt = [0u8; 32];
             let mut iv = [0u8; 16];
@@ -52,20 +97,20 @@ pub fn key_pair(
             fill(&mut iv)
                 .map_err(|e| BridgeError::KeyEncrypt(e.to_string()))?;
 
-            let params = pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(
-                PBKDF2_ITERATIONS,
-                &salt,
-                &iv,
-            )
-            .map_err(|e| BridgeError::KeyEncrypt(e.to_string()))?;
+            let params =
+                pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes256cbc(
+                    PBKDF2_ITERATIONS,
+                    &salt,
+                    iv,
+                )
+                .map_err(|e| BridgeError::KeyEncrypt(e.to_string()))?;
             let enc_pk =
                 pk.encrypt_with_params(params, password).map_err(|_| {
                     BridgeError::KeyEncrypt(
                         "encryption algorithm failed".to_owned(),
                     )
                 })?;
-            enc_pk
-                .write_der_file(path)
+            fs::write(&path, enc_pk.as_bytes())
                 .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
             Ok(key_pair)
         }

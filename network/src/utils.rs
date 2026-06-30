@@ -170,7 +170,7 @@ pub enum ScheduleType {
     Dial(Vec<Multiaddr>),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Discover,
     Dial,
@@ -186,7 +186,7 @@ impl From<RetryKind> for Action {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RetryKind {
     Discover,
     Dial,
@@ -561,5 +561,118 @@ impl ReqResConfig {
     /// Get max concurrent streams
     pub const fn get_max_concurrent_streams(&self) -> usize {
         self.max_concurrent_streams
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RoutingNode;
+    use std::time::Duration;
+
+    #[test]
+    fn peer_id_to_ed25519_not_identity_multihash() {
+        // SHA-256 multihash (code 0x12) — not identity
+        let mh = Multihash::<64>::wrap(0x12, &[0u8; 32]).expect("wrap sha256");
+        let peer_id = PeerId::from_multihash(mh).expect("peer from multihash");
+        let result = peer_id_to_ed25519_pubkey_bytes(&peer_id);
+        assert!(
+            matches!(result, Err(PeerIdToEd25519Error::NotIdentityMultihash)),
+            "expected NotIdentityMultihash, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn peer_id_to_ed25519_invalid_digest() {
+        // Build a PeerId from an identity multihash with empty digest.
+        // Multihash code 0x00 with empty digest.
+        let mh = Multihash::<64>::wrap(0x00, &[]).expect("wrap empty digest");
+        let peer_id = PeerId::from_multihash(mh).expect("peer from multihash");
+        let result = peer_id_to_ed25519_pubkey_bytes(&peer_id);
+        assert!(
+            matches!(result, Err(PeerIdToEd25519Error::InvalidDigest)),
+            "expected InvalidDigest, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn peer_id_to_ed25519_success() {
+        let keypair = identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let result = peer_id_to_ed25519_pubkey_bytes(&peer_id);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn due_ordering() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let a = Due(PeerId::random(), now + Duration::from_secs(1));
+        let b = Due(PeerId::random(), now + Duration::from_secs(2));
+        // Due orders by Instant descending (earlier = greater)
+        assert!(a > b);
+        assert!(b < a);
+        assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Greater));
+    }
+
+    #[test]
+    fn due_equality() {
+        let now = Instant::now();
+        let a = Due(PeerId::random(), now);
+        let b = Due(PeerId::random(), now);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn convert_boot_nodes_skips_invalid() {
+        let nodes = vec![
+            RoutingNode {
+                peer_id: "not-valid-peer-id".to_string(),
+                address: vec!["/memory/1".to_string()],
+            },
+            RoutingNode {
+                peer_id: PeerId::random().to_base58(),
+                address: vec!["not-a-valid-address".to_string()],
+            },
+            RoutingNode {
+                peer_id: PeerId::random().to_base58(),
+                address: vec!["/memory/2".to_string()],
+            },
+        ];
+        let result = convert_boot_nodes(&nodes);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn convert_addresses_invalid() {
+        let result = convert_addresses(&["not-a-valid-address".to_string()]);
+        assert!(matches!(result, Err(Error::InvalidAddress(_))));
+    }
+
+    #[test]
+    fn convert_addresses_ok() {
+        let result = convert_addresses(&["/memory/1".to_string()]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn req_res_config_deserialize_duration_secs() {
+        let cfg: ReqResConfig =
+            serde_json::from_str(r#"{"message_timeout": 5}"#).unwrap();
+        assert_eq!(cfg.message_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn req_res_config_builder_chaining() {
+        let cfg = ReqResConfig::default()
+            .with_message_timeout(Duration::from_secs(3))
+            .with_max_concurrent_streams(50);
+        assert_eq!(cfg.get_message_timeout(), Duration::from_secs(3));
+        assert_eq!(cfg.get_max_concurrent_streams(), 50);
     }
 }

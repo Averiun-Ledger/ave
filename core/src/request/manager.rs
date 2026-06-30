@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
-    Message,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::bridge::request::EventRequestType;
@@ -35,8 +34,10 @@ use crate::metrics::try_core_metrics;
 use crate::model::common::distribution_plan::build_tracker_event_distribution_plan;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::subject::{
-    acquire_subject, create_subject, get_gov, get_gov_sn,
-    get_last_ledger_event, get_metadata, make_obsolete, update_ledger,
+    acquire_subject, create_subject, get_gov, get_gov_sn, get_init_state,
+    get_last_ledger_event, get_members, get_metadata, get_quorum_and_signers,
+    get_schema_viewpoints, get_signers, get_version, get_witnesses, has_role,
+    make_obsolete, update_ledger,
 };
 use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::event::{
@@ -54,10 +55,10 @@ use crate::validation::worker::CurrentRequestRoles;
 use crate::{
     ActorMessage, NetworkMessage, Validation, ValidationMessage,
     approval::{Approval, ApprovalMessage},
-    auth::{Auth, AuthMessage, AuthResponse},
+    auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
     db::Storable,
     evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
-    model::common::emit_fail,
+    model::common::crash_system,
     update::{Update, UpdateMessage, UpdateNew, UpdateType},
 };
 
@@ -214,62 +215,6 @@ impl RequestManager {
     }
 
     //////// EVAL
-    ////////////////////////////////////////////////
-    //Revisado
-    fn tracker_evaluation_context(
-        governance_data: &GovernanceData,
-        schema_id: &SchemaType,
-        namespace: Namespace,
-        request_type: &EventRequestType,
-    ) -> Result<EvalWorkerContext, RequestManagerError> {
-        match request_type {
-            EventRequestType::Fact => {
-                let (issuers, issuer_any) = governance_data.get_signers(
-                    RoleTypes::Issuer,
-                    schema_id,
-                    namespace,
-                );
-                let schema_viewpoints = governance_data
-                    .schemas
-                    .get(schema_id)
-                    .ok_or_else(|| {
-                        crate::governance::error::GovernanceError::SchemaDoesNotExist {
-                            schema_id: schema_id.to_string(),
-                        }
-                    })?
-                    .viewpoints
-                    .clone();
-
-                Ok(EvalWorkerContext::TrackerFact {
-                    issuers: issuers.into_iter().collect(),
-                    issuer_any,
-                    schema_viewpoints,
-                })
-            }
-            EventRequestType::Transfer => {
-                let members = governance_data
-                    .members
-                    .values()
-                    .cloned()
-                    .collect::<BTreeSet<PublicKey>>();
-                let (creator_signers, _) = governance_data.get_signers(
-                    RoleTypes::Creator,
-                    schema_id,
-                    namespace.clone(),
-                );
-                let creators = creator_signers
-                    .into_iter()
-                    .map(|creator| {
-                        (creator, BTreeSet::from([namespace.clone()]))
-                    })
-                    .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
-
-                Ok(EvalWorkerContext::TrackerTransfer { members, creators })
-            }
-            _ => Ok(EvalWorkerContext::Empty),
-        }
-    }
-
     async fn build_evaluation(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -332,8 +277,9 @@ impl RequestManager {
         self.id.to_string()
     }
 
-    fn build_distribution_plan(
+    async fn build_distribution_plan(
         &self,
+        ctx: &mut ActorContext<Self>,
         validation_req: &ValidationReq,
         governance_data: Option<&GovernanceData>,
     ) -> Result<Vec<DistributionPlanEntry>, RequestManagerError> {
@@ -352,21 +298,16 @@ impl RequestManager {
                     return Ok(Vec::new());
                 }
 
-                let Some(governance_data) = governance_data else {
-                    return Err(RequestManagerError::ActorError(
-                        ActorError::FunctionalCritical {
-                            description:
-                                "Missing governance data for distribution plan"
-                                    .to_owned(),
-                        },
-                    ));
-                };
-                let witnesses =
-                    governance_data.get_witnesses(WitnessesData::Schema {
+                let witnesses = get_witnesses(
+                    ctx,
+                    &create.governance_id,
+                    WitnessesData::Schema {
                         creator: event_request.signature().signer.clone(),
                         schema_id: create.schema_id.clone(),
                         namespace: create.namespace.clone(),
-                    })?;
+                    },
+                )
+                .await?;
 
                 for witness in witnesses {
                     plan.insert(witness, DistributionPlanMode::Clear);
@@ -475,17 +416,13 @@ impl RequestManager {
         let is_gov = metadata.schema_id.is_gov();
 
         let request_type = EventRequestType::from(request.content());
-        let (evaluate_data, governance_data, init_state, tracker_context) =
+        let (evaluate_data, init_state, tracker_context) =
             match (is_gov, request_type.clone()) {
                 (true, EventRequestType::Fact) => {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
-
                     (
-                        EvaluateData::GovFact {
-                            state: state.clone(),
-                        },
-                        state,
+                        EvaluateData::GovFact { state },
                         None,
                         EvalWorkerContext::default(),
                     )
@@ -493,12 +430,8 @@ impl RequestManager {
                 (true, EventRequestType::Transfer) => {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
-
                     (
-                        EvaluateData::GovTransfer {
-                            state: state.clone(),
-                        },
-                        state,
+                        EvaluateData::GovTransfer { state },
                         None,
                         EvalWorkerContext::default(),
                     )
@@ -506,52 +439,87 @@ impl RequestManager {
                 (true, EventRequestType::Confirm) => {
                     let state =
                         GovernanceData::try_from(metadata.properties.clone())?;
-
                     (
-                        EvaluateData::GovConfirm {
-                            state: state.clone(),
-                        },
-                        state,
+                        EvaluateData::GovConfirm { state },
                         None,
                         EvalWorkerContext::default(),
                     )
                 }
                 (false, EventRequestType::Fact) => {
-                    let governance_data =
-                        get_gov(ctx, &metadata.governance_id).await?;
-
-                    let init_state =
-                        governance_data.get_init_state(&metadata.schema_id)?;
-                    let tracker_context = Self::tracker_evaluation_context(
-                        &governance_data,
-                        &metadata.schema_id,
+                    let init_state = get_init_state(
+                        ctx,
+                        &metadata.governance_id,
+                        metadata.schema_id.clone(),
+                    )
+                    .await?;
+                    let (issuers, issuer_any) = get_signers(
+                        ctx,
+                        &metadata.governance_id,
+                        RoleTypes::Issuer,
+                        metadata.schema_id.clone(),
                         metadata.namespace.clone(),
-                        &request_type,
-                    )?;
+                    )
+                    .await?;
+                    let schema_viewpoints = get_schema_viewpoints(
+                        ctx,
+                        &metadata.governance_id,
+                        metadata.schema_id.clone(),
+                    )
+                    .await?;
+                    let Some(schema_viewpoints) = schema_viewpoints else {
+                        return Err(RequestManagerError::Governance(
+                            crate::governance::error::GovernanceError::
+                                SchemaDoesNotExist {
+                                    schema_id: metadata.schema_id.to_string(),
+                                },
+                        ));
+                    };
+                    let tracker_context = EvalWorkerContext::TrackerFact {
+                        issuers: issuers.into_iter().collect(),
+                        issuer_any,
+                        schema_viewpoints,
+                    };
 
                     (
                         EvaluateData::TrackerSchemasFact {
                             state: metadata.properties.clone(),
                         },
-                        governance_data,
-                        Some(init_state),
+                        init_state,
                         tracker_context,
                     )
                 }
                 (false, EventRequestType::Transfer) => {
-                    let governance_data =
-                        get_gov(ctx, &metadata.governance_id).await?;
-                    let tracker_context = Self::tracker_evaluation_context(
-                        &governance_data,
-                        &metadata.schema_id,
+                    let members = get_members(ctx, &metadata.governance_id)
+                        .await?
+                        .values()
+                        .cloned()
+                        .collect::<BTreeSet<PublicKey>>();
+                    let (creator_signers, _) = get_signers(
+                        ctx,
+                        &metadata.governance_id,
+                        RoleTypes::Creator,
+                        metadata.schema_id.clone(),
                         metadata.namespace.clone(),
-                        &request_type,
-                    )?;
+                    )
+                    .await?;
+                    let creators = creator_signers
+                        .into_iter()
+                        .map(|creator| {
+                            (
+                                creator,
+                                BTreeSet::from([metadata.namespace.clone()]),
+                            )
+                        })
+                        .collect::<BTreeMap<PublicKey, BTreeSet<Namespace>>>();
+                    let tracker_context = EvalWorkerContext::TrackerTransfer {
+                        members,
+                        creators,
+                    };
+
                     (
                         EvaluateData::TrackerSchemasTransfer {
                             state: metadata.properties.clone(),
                         },
-                        governance_data,
                         None,
                         tracker_context,
                     )
@@ -569,17 +537,33 @@ impl RequestManager {
                 }
             };
 
-        let (signers, quorum) = governance_data.get_quorum_and_signers(
-            ProtocolTypes::Evaluation,
-            &metadata.schema_id,
-            metadata.namespace.clone(),
-        )?;
+        let (signers, quorum, gov_version) = if is_gov {
+            let governance_data =
+                GovernanceData::try_from(metadata.properties.clone())?;
+            let (signers, quorum) = governance_data.get_quorum_and_signers(
+                ProtocolTypes::Evaluation,
+                &metadata.schema_id,
+                metadata.namespace.clone(),
+            )?;
+            (signers, quorum, governance_data.version)
+        } else {
+            let (signers, quorum) = get_quorum_and_signers(
+                ctx,
+                &metadata.governance_id,
+                ProtocolTypes::Evaluation,
+                metadata.schema_id.clone(),
+                metadata.namespace.clone(),
+            )
+            .await?;
+            let gov_version = get_version(ctx, &metadata.governance_id).await?;
+            (signers, quorum, gov_version)
+        };
 
         let eval_req = EvaluationReq {
             event_request: request.clone(),
             data: evaluate_data,
             sn: metadata.sn + 1,
-            gov_version: governance_data.version,
+            gov_version,
             namespace: metadata.namespace.clone(),
             schema_id: metadata.schema_id.clone(),
             signer: (*self.our_key).clone(),
@@ -686,14 +670,14 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         let request = self.build_request_appro(ctx, eval_req, eval_res).await?;
 
-        let governance_data =
-            get_gov(ctx, &request.content().subject_id).await?;
-
-        let (signers, quorum) = governance_data.get_quorum_and_signers(
+        let (signers, quorum) = get_quorum_and_signers(
+            ctx,
+            &request.content().subject_id,
             ProtocolTypes::Approval,
-            &SchemaType::Governance,
+            SchemaType::Governance,
             Namespace::new(),
-        )?;
+        )
+        .await?;
 
         if signers.is_empty() {
             warn!(
@@ -823,8 +807,9 @@ impl RequestManager {
         )
         .await?;
 
-        let distribution_plan =
-            self.build_distribution_plan(&vali_req, governance_data.as_ref())?;
+        let distribution_plan = self
+            .build_distribution_plan(ctx, &vali_req, governance_data.as_ref())
+            .await?;
 
         let signed_validation_req: Signed<ValidationReq> =
             Signed::from_parts(vali_req, signature);
@@ -908,28 +893,34 @@ impl RequestManager {
                     None,
                 ))
             } else {
-                let governance_data =
-                    get_gov(ctx, &create.governance_id).await?;
+                let (signers, quorum) = get_quorum_and_signers(
+                    ctx,
+                    &create.governance_id,
+                    ProtocolTypes::Validation,
+                    create.schema_id.clone(),
+                    create.namespace.clone(),
+                )
+                .await?;
 
-                let (signers, quorum) = governance_data
-                    .get_quorum_and_signers(
-                        ProtocolTypes::Validation,
-                        &create.schema_id,
-                        create.namespace.clone(),
-                    )?;
+                let init_state = get_init_state(
+                    ctx,
+                    &create.governance_id,
+                    create.schema_id.clone(),
+                )
+                .await?;
 
-                let init_state =
-                    governance_data.get_init_state(&create.schema_id)?;
+                let gov_version =
+                    get_version(ctx, &create.governance_id).await?;
 
                 Ok((
                     ValidationReq::Create {
                         event_request: request.clone(),
-                        gov_version: governance_data.version,
+                        gov_version,
                         subject_id: self.subject_id.clone(),
                     },
                     quorum,
                     signers,
-                    Some(init_state),
+                    init_state,
                     CurrentRequestRoles {
                         evaluation: RoleDataRegister {
                             workers: HashSet::new(),
@@ -941,7 +932,7 @@ impl RequestManager {
                         },
                     },
                     create.schema_id.clone(),
-                    Some(governance_data),
+                    None,
                 ))
             }
         } else {
@@ -1288,25 +1279,21 @@ impl RequestManager {
 
         if is_governance {
             let governance_id = ledger.get_subject_id();
-            let governance_data = get_gov(ctx, &governance_id).await?;
-            distribution_plan = governance_data
-                .get_witnesses(WitnessesData::Gov)?
-                .into_iter()
-                .map(|node| DistributionPlanEntry {
-                    node,
-                    mode: DistributionPlanMode::Clear,
-                })
-                .collect();
-        }
-
-        if distribution_plan.is_empty() {
-            return Ok(false);
+            distribution_plan =
+                get_witnesses(ctx, &governance_id, WitnessesData::Gov)
+                    .await?
+                    .into_iter()
+                    .map(|node| DistributionPlanEntry {
+                        node,
+                        mode: DistributionPlanMode::Clear,
+                    })
+                    .collect();
         }
 
         distribution_plan.retain(|entry| entry.node != *self.our_key);
 
         if distribution_plan.is_empty() {
-            warn!(
+            debug!(
                 request_id = %self.id,
                 "No witnesses available for distribution"
             );
@@ -1404,14 +1391,12 @@ impl RequestManager {
 
         let gov_sn = get_gov_sn(ctx, governance_id).await?;
 
-        let governance_data = get_gov(ctx, governance_id).await?;
-
         let mut witnesses = {
             let gov_witnesses =
-                governance_data.get_witnesses(WitnessesData::Gov)?;
+                get_witnesses(ctx, governance_id, WitnessesData::Gov).await?;
 
             let auth_witnesses =
-                Self::get_witnesses_auth(ctx, governance_id.clone())
+                Self::get_sync_peers(ctx, governance_id.clone())
                     .await
                     .unwrap_or_default();
 
@@ -1464,6 +1449,7 @@ impl RequestManager {
                             actual_sn: Some(gov_sn),
                             target_sn: None,
                             subject_id: governance_id.clone(),
+                            already_verified_transfer_sn: None,
                         },
                     },
                 })
@@ -1529,25 +1515,25 @@ impl RequestManager {
         Ok(())
     }
 
-    async fn get_witnesses_auth(
+    async fn get_sync_peers(
         ctx: &ActorContext<Self>,
         governance_id: DigestIdentifier,
     ) -> Result<HashSet<PublicKey>, RequestManagerError> {
         let path = ActorPath::from("/user/node/auth");
-        let actor = ctx.system().get_actor::<Auth>(&path).await?;
+        let actor = ctx.system().get_actor::<SubjectAccess>(&path).await?;
 
         let response = actor
-            .ask(AuthMessage::GetAuth {
+            .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: governance_id,
             })
             .await?;
 
         match response {
-            AuthResponse::Witnesses(witnesses) => Ok(witnesses),
+            SubjectAccessResponse::Peers(peers) => Ok(peers),
             _ => Err(RequestManagerError::ActorError(
                 ActorError::UnexpectedResponse {
                     path,
-                    expected: "AuthResponse::Witnesses".to_owned(),
+                    expected: "SubjectAccessResponse::Peers".to_owned(),
                 },
             )),
         }
@@ -1595,7 +1581,7 @@ impl RequestManager {
                 ..
             } => {
                 if let Err(e) = self.send_reboot(ctx, governance_id).await {
-                    emit_fail(ctx, e).await;
+                    crash_system(ctx, e).await;
                 }
             }
             RequestManagerError::CheckLimit
@@ -1611,7 +1597,7 @@ impl RequestManager {
                     )
                     .await
                 {
-                    emit_fail(
+                    crash_system(
                         ctx,
                         ActorError::FunctionalCritical {
                             description: e.to_string(),
@@ -1621,7 +1607,7 @@ impl RequestManager {
                 }
             }
             _ => {
-                emit_fail(
+                crash_system(
                     ctx,
                     ActorError::FunctionalCritical {
                         description: error.to_string(),
@@ -1678,12 +1664,6 @@ impl RequestManager {
         )
         .await;
 
-        let Ok(actor) = ctx.reference().await else {
-            return Ok(());
-        };
-
-        let request_id = self.id.clone();
-
         match reboot_type {
             RebootType::Normal => {
                 info!("Launching Normal reboot {}", self.id);
@@ -1696,10 +1676,11 @@ impl RequestManager {
                 )
                 .await?;
 
+                let actor = ctx.reference().await?;
                 actor
                     .tell(RequestManagerMessage::RebootUpdate {
-                        request_id,
-                        governance_id,
+                        request_id: self.id.clone(),
+                        governance_id: governance_id.clone(),
                     })
                     .await?;
             }
@@ -1729,15 +1710,13 @@ impl RequestManager {
                 )
                 .await?;
 
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(seconds)).await;
-                    let _ = actor
-                        .tell(RequestManagerMessage::RebootUpdate {
-                            request_id,
-                            governance_id,
-                        })
-                        .await;
-                });
+                ctx.schedule_once(
+                    Duration::from_secs(seconds),
+                    RequestManagerMessage::RebootUpdate {
+                        request_id: self.id.clone(),
+                        governance_id: governance_id.clone(),
+                    },
+                );
             }
             RebootType::TimeOut => {
                 self.retry_timeout += 1;
@@ -1763,15 +1742,13 @@ impl RequestManager {
                 )
                 .await?;
 
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(seconds)).await;
-                    let _ = actor
-                        .tell(RequestManagerMessage::RebootUpdate {
-                            request_id,
-                            governance_id,
-                        })
-                        .await;
-                });
+                ctx.schedule_once(
+                    Duration::from_secs(seconds),
+                    RequestManagerMessage::RebootUpdate {
+                        request_id: self.id.clone(),
+                        governance_id: governance_id.clone(),
+                    },
+                );
             }
         }
 
@@ -1814,7 +1791,8 @@ impl RequestManager {
             return Err(RequestManagerError::RequestNotSet);
         };
 
-        let gov = self.get_governance_data(ctx).await?;
+        let governance_id =
+            self.governance_id.as_ref().unwrap_or(&self.subject_id);
         let subject_data = match request.content() {
             EventRequest::Create(..) => None,
             _ => get_subject_data(ctx, &self.subject_id).await?,
@@ -1841,12 +1819,17 @@ impl RequestManager {
             };
 
         if let Some((schema_id, namespace)) = creator_scope
-            && !gov.has_this_role(HashThisRole::Schema {
-                who: (*self.our_key).clone(),
-                role: RoleTypes::Creator,
-                schema_id,
-                namespace,
-            })
+            && !has_role(
+                ctx,
+                governance_id,
+                HashThisRole::Schema {
+                    who: (*self.our_key).clone(),
+                    role: RoleTypes::Creator,
+                    schema_id,
+                    namespace,
+                },
+            )
+            .await?
         {
             return Err(RequestManagerError::NotCreator);
         }
@@ -1862,20 +1845,32 @@ impl RequestManager {
                     namespace,
                     ..
                 } => {
-                    if !gov.has_this_role(HashThisRole::Schema {
-                        who: request.signature().signer.clone(),
-                        role: RoleTypes::Issuer,
-                        schema_id,
-                        namespace: Namespace::from(namespace),
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Schema {
+                            who: request.signature().signer.clone(),
+                            role: RoleTypes::Issuer,
+                            schema_id,
+                            namespace: Namespace::from(namespace),
+                        },
+                    )
+                    .await?
+                    {
                         return Err(RequestManagerError::NotIssuer);
                     }
                 }
                 SubjectData::Governance { .. } => {
-                    if !gov.has_this_role(HashThisRole::Gov {
-                        who: request.signature().signer.clone(),
-                        role: RoleTypes::Issuer,
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Gov {
+                            who: request.signature().signer.clone(),
+                            role: RoleTypes::Issuer,
+                        },
+                    )
+                    .await?
+                    {
                         return Err(RequestManagerError::NotIssuer);
                     }
                 }
@@ -2057,6 +2052,9 @@ impl Actor for RequestManager {
     type Event = RequestManagerEvent;
     type Message = RequestManagerMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -2099,7 +2097,7 @@ impl Handler<Self> for RequestManager {
     #[allow(clippy::large_stack_frames)]
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RequestManagerMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -2240,7 +2238,7 @@ impl Handler<Self> for RequestManager {
                             error = %e,
                             "Failed to send version update to tracking"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
 
                     if let Err(e) =
@@ -2459,7 +2457,7 @@ impl Handler<Self> for RequestManager {
                         init_state,
                         current_request_roles,
                         signers,
-                        distribution_plan: _,
+                        ..
                     } => {
                         if let Err(e) = self
                             .run_validation(
@@ -2740,7 +2738,7 @@ impl Handler<Self> for RequestManager {
                         let e = ActorError::FunctionalCritical {
                             description: "Invalid request state".to_owned(),
                         };
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     };
                     let (
                         request,
@@ -2962,31 +2960,15 @@ impl Handler<Self> for RequestManager {
             RequestManagerEvent::SafeState { .. } => "SafeState",
         };
 
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 event_type = event_type,
                 request_id = %self.id,
                 error = %e,
                 "Failed to persist event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         };
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            request_id = %self.id,
-            version = self.version,
-            state = ?self.state,
-            error = %error,
-            "Child fault in request manager"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
@@ -2994,13 +2976,7 @@ impl Handler<Self> for RequestManager {
 impl PersistentActor for RequestManager {
     type Persistence = LightPersistence;
     type InitParams = InitRequestManager;
-
-    fn update(&mut self, state: Self) {
-        self.command = state.command;
-        self.request = state.request;
-        self.state = state.state;
-        self.version = state.version;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -3022,56 +2998,73 @@ impl PersistentActor for RequestManager {
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             RequestManagerEvent::Finish => {
                 debug!(
                     event_type = "Finish",
-                    request_id = %self.id,
+                    request_id = %inner.id,
                     "Applying finish event"
                 );
-                self.state = RequestManagerState::End;
-                self.request = None;
-                self.id = DigestIdentifier::default();
+                inner.state = RequestManagerState::End;
+                inner.request = None;
+                inner.id = DigestIdentifier::default();
             }
             RequestManagerEvent::UpdateState { state } => {
                 debug!(
                     event_type = "UpdateState",
-                    request_id = %self.id,
-                    old_state = ?self.state,
+                    request_id = %inner.id,
+                    old_state = ?inner.state,
                     new_state = ?state,
                     "Applying state update"
                 );
-                self.state = *state.clone()
+                inner.state = *state.clone()
             }
             RequestManagerEvent::UpdateVersion { version } => {
                 debug!(
                     event_type = "UpdateVersion",
-                    request_id = %self.id,
-                    old_version = self.version,
+                    request_id = %inner.id,
+                    old_version = inner.version,
                     new_version = version,
                     "Applying version update"
                 );
-                self.state = RequestManagerState::Starting;
-                self.version = *version
+                inner.state = RequestManagerState::Starting;
+                inner.version = *version
             }
             RequestManagerEvent::SafeState { command, request } => {
                 debug!(
                     event_type = "SafeState",
-                    request_id = %self.id,
+                    request_id = %inner.id,
                     command = ?command,
                     "Applying safe state"
                 );
-                self.version = 0;
-                self.retry_diff = 0;
-                self.retry_timeout = 0;
-                self.state = RequestManagerState::Starting;
-                self.request = Some(request.clone());
-                self.command = command.clone();
+                inner.version = 0;
+                inner.retry_diff = 0;
+                inner.retry_timeout = 0;
+                inner.state = RequestManagerState::Starting;
+                inner.request = Some(request.clone());
+                inner.command = command.clone();
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.command.clone_from(&state.command);
+        self.request.clone_from(&state.request);
+        self.state.clone_from(&state.state);
+        self.version = state.version;
     }
 }
 

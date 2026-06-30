@@ -1,16 +1,40 @@
 //! # Configuration module
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fmt::{self, Display},
     path::PathBuf,
+    time::Instant,
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
+
+pub use ave_common::sink::{SinkConfigEntry, SinkServer, SinkTarget};
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{helpers::sink::TokenResponse, subject::sinkdata::SinkTypes};
+#[derive(Deserialize, Debug, Clone)]
+pub struct TokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
+    pub refresh_token: Option<String>,
+    pub scope: Option<String>,
+    #[serde(skip, default)]
+    pub obtained_at: Option<Instant>,
+}
+
+impl TokenResponse {
+    pub fn is_expired_or_expiring_soon(&self, margin_secs: u64) -> bool {
+        match self.obtained_at {
+            Some(t) => {
+                let elapsed = t.elapsed().as_secs();
+                self.expires_in > 0
+                    && elapsed + margin_secs >= self.expires_in as u64
+            }
+            None => true,
+        }
+    }
+}
 
 /// Node configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -611,79 +635,4 @@ impl LoggingConfig {
     pub const fn logs(&self) -> bool {
         self.output.api || self.output.file || self.output.stdout
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Default, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct SinkServer {
-    pub server: String,
-    pub events: BTreeSet<SinkTypes>,
-    pub url: String,
-    pub auth: bool,
-    #[serde(default = "default_sink_concurrency")]
-    pub concurrency: usize,
-    #[serde(default = "default_sink_queue_capacity")]
-    pub queue_capacity: usize,
-    #[serde(default)]
-    pub queue_policy: SinkQueuePolicy,
-    #[serde(default)]
-    pub routing_strategy: SinkRoutingStrategy,
-    #[serde(default = "default_sink_connect_timeout_ms")]
-    pub connect_timeout_ms: u64,
-    #[serde(default = "default_sink_request_timeout_ms")]
-    pub request_timeout_ms: u64,
-    #[serde(default = "default_sink_max_retries")]
-    pub max_retries: usize,
-}
-
-#[derive(Default)]
-pub struct SinkAuth {
-    pub sink: SinkConfig,
-    pub token: Option<TokenResponse>,
-    pub password: String,
-    pub api_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Default, Serialize)]
-#[serde(default)]
-pub struct SinkConfig {
-    pub sinks: BTreeMap<String, Vec<SinkServer>>,
-    pub auth: String,
-    pub username: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SinkQueuePolicy {
-    DropOldest,
-    #[default]
-    DropNewest,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SinkRoutingStrategy {
-    #[default]
-    OrderedBySubject,
-    UnorderedRoundRobin,
-}
-
-const fn default_sink_concurrency() -> usize {
-    2
-}
-
-const fn default_sink_queue_capacity() -> usize {
-    1024
-}
-
-const fn default_sink_connect_timeout_ms() -> u64 {
-    2_000
-}
-
-const fn default_sink_request_timeout_ms() -> u64 {
-    5_000
-}
-
-const fn default_sink_max_retries() -> usize {
-    2
 }

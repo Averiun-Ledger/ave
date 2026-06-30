@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -16,27 +17,8 @@ use crate::model::common::CeilingMap;
 use crate::{
     db::Storable,
     governance::model::CreatorQuantity,
-    model::common::{emit_fail, purge_storage},
+    model::common::{crash_system, purge_storage},
 };
-
-#[derive(
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    Hash,
-    PartialEq,
-    Eq,
-    Ord,
-    PartialOrd,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-pub struct OwnerSchema {
-    pub owner: PublicKey,
-    pub schema_id: SchemaType,
-    pub namespace: String,
-}
 
 #[derive(
     Clone,
@@ -106,10 +88,8 @@ pub enum SubjectRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
-    GetSubjectsByOwnerSchema {
-        owner: PublicKey,
-        schema_id: SchemaType,
-        namespace: String,
+    GetSubjectsByOwnerSchemaBatch {
+        queries: Vec<(PublicKey, SchemaType, String)>,
     },
     RegisterData {
         gov_version: u64,
@@ -143,7 +123,9 @@ impl Message for SubjectRegisterMessage {
             | Self::CreateSubject { .. }
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
-            Self::Check { .. } | Self::GetSubjectsByOwnerSchema { .. } => false,
+            Self::Check { .. } | Self::GetSubjectsByOwnerSchemaBatch { .. } => {
+                false
+            }
         }
     }
 }
@@ -151,7 +133,7 @@ impl Message for SubjectRegisterMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterResponse {
     Ok,
-    Subjects(Vec<DigestIdentifier>),
+    SubjectsBatch(Vec<Vec<DigestIdentifier>>),
 }
 
 impl Response for SubjectRegisterResponse {}
@@ -189,6 +171,9 @@ impl Actor for SubjectRegister {
     type Message = SubjectRegisterMessage;
     type Event = SubjectRegisterEvent;
     type Response = SubjectRegisterResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -201,9 +186,13 @@ impl Actor for SubjectRegister {
         &mut self,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("subject_register", Some(prefix), false, ctx)
+            .init_store(
+                "subject_register",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
@@ -220,7 +209,7 @@ impl Actor for SubjectRegister {
 impl Handler<Self> for SubjectRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SubjectRegisterMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SubjectRegisterResponse, ActorError> {
@@ -235,23 +224,27 @@ impl Handler<Self> for SubjectRegister {
 
                 return Ok(SubjectRegisterResponse::Ok);
             }
-            SubjectRegisterMessage::GetSubjectsByOwnerSchema {
-                owner,
-                schema_id,
-                namespace,
+            SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch {
+                queries,
             } => {
-                let subjects = self
-                    .register
-                    .get(&(owner, schema_id, namespace))
-                    .map(|(_, subjects)| {
-                        let mut subjects =
-                            subjects.iter().cloned().collect::<Vec<_>>();
-                        subjects.sort();
-                        subjects
+                let results: Vec<Vec<DigestIdentifier>> = queries
+                    .into_iter()
+                    .map(|(owner, schema_id, namespace)| {
+                        self.register
+                            .get(&(owner, schema_id, namespace))
+                            .map(|(_, subjects)| {
+                                let mut subjects = subjects
+                                    .iter()
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                subjects.sort();
+                                subjects
+                            })
+                            .unwrap_or_default()
                     })
-                    .unwrap_or_default();
+                    .collect();
 
-                return Ok(SubjectRegisterResponse::Subjects(subjects));
+                return Ok(SubjectRegisterResponse::SubjectsBatch(results));
             }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
                 let data_count = data.len();
@@ -373,13 +366,12 @@ impl Handler<Self> for SubjectRegister {
         event: SubjectRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist subject register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }
@@ -388,17 +380,24 @@ impl Handler<Self> for SubjectRegister {
 impl PersistentActor for SubjectRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             SubjectRegisterEvent::RegisterData { gov_version, data } => {
                 for (creator, schema_id, namespace, quantity) in data.iter() {
-                    self.register
+                    inner
+                        .register
                         .entry((
                             creator.to_owned(),
                             schema_id.to_owned(),
@@ -422,7 +421,8 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
-                self.register
+                inner
+                    .register
                     .entry((
                         creator.to_owned(),
                         schema_id.to_owned(),
@@ -440,7 +440,7 @@ impl PersistentActor for SubjectRegister {
                 );
             }
             SubjectRegisterEvent::DeleteSubject { subject_id } => {
-                for (_, subjects) in self.register.values_mut() {
+                for (_, subjects) in inner.register.values_mut() {
                     subjects.remove(subject_id);
                 }
 
@@ -457,7 +457,8 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
-                self.register
+                inner
+                    .register
                     .entry((
                         new_owner.to_owned(),
                         schema_id.to_owned(),
@@ -467,7 +468,8 @@ impl PersistentActor for SubjectRegister {
                     .1
                     .insert(subject_id.to_owned());
 
-                self.register
+                inner
+                    .register
                     .entry((
                         old_owner.to_owned(),
                         schema_id.to_owned(),
@@ -487,7 +489,15 @@ impl PersistentActor for SubjectRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

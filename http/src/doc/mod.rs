@@ -31,9 +31,9 @@ use crate::{
         HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
         NetworkConfigHttp, ProxyConfigHttp, RateLimitConfigHttp,
         RebootSyncConfigHttp, RoutingConfigHttp, RoutingNodeHttp,
-        SelfSignedCertConfigHttp, SessionConfigHttp, SinkConfigHttp,
-        SinkServerHttp, SyncConfigHttp, TrackerSyncConfigHttp,
-        UpdateSyncConfigHttp,
+        SelfSignedCertConfigHttp, SessionConfigHttp, SinkConfigEntryHttp,
+        SinkConfigHttp, SinkServerHttp, SinkTargetHttp, SyncConfigHttp,
+        TrackerSyncConfigHttp, UpdateSyncConfigHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
@@ -125,11 +125,19 @@ impl Modify for SecurityAddon {
         // ── Transfer ────────────────────────────────────────────
         server::get_pending_transfers,
 
-        // ── Authorization ───────────────────────────────────────
-        server::put_auth_subject,
-        server::get_all_auth_subjects,
-        server::get_witnesses_subject,
-        server::delete_auth_subject,
+        // ── SubjectAccess ──────────────────────────────────────
+        server::authorize_governance,
+        server::disauthorize_governance,
+        server::authorized_governances,
+        server::is_governance_authorized,
+        server::ban_tracker,
+        server::unban_tracker,
+        server::banned_trackers,
+        server::is_tracker_banned,
+        server::get_sync_peers,
+        server::add_sync_peer,
+        server::remove_sync_peer,
+        server::subjects_with_sync_peers,
         server::post_update_subject,
 
         // ── Distribution ────────────────────────────────────────
@@ -347,7 +355,9 @@ impl Modify for SecurityAddon {
             LoggingHttp,
             LoggingOutputHttp,
             SinkConfigHttp,
+            SinkConfigEntryHttp,
             SinkServerHttp,
+            SinkTargetHttp,
             AveActorsStoreConfigHttp,
             AveStoreConfigHttp,
             MachineSpecHttp
@@ -361,7 +371,7 @@ impl Modify for SecurityAddon {
         (name = "Approval", description = "Manage approval workflows for governance events."),
         (name = "Tracking", description = "Track the lifecycle state of submitted requests."),
         (name = "Transfer", description = "Manage subject ownership transfers between parties."),
-        (name = "Authorization", description = "Configure witness authorization rules for subjects."),
+        (name = "SubjectAccess", description = "Governance allowlisting, tracker banning, and sync peer management."),
         (name = "Distribution", description = "Trigger manual event distribution to network peers."),
         (name = "Register", description = "Query governances and subjects in the ledger registry."),
         (name = "Ledger", description = "Query event history, aborts, and subject state from the ledger."),

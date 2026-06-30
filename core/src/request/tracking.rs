@@ -12,7 +12,7 @@ use ave_common::{
 use borsh::{BorshDeserialize, BorshSerialize};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span, warn};
+use tracing::{Span, debug, info_span, warn};
 
 #[derive(Clone, Debug)]
 pub struct RequestTracking {
@@ -62,6 +62,9 @@ impl Actor for RequestTracking {
     type Message = RequestTrackingMessage;
     type Event = RequestTrackingEvent;
     type Response = RequestTrackingResponse;
+    type SinkEvent = RequestTrackingEvent;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -89,7 +92,7 @@ impl Event for RequestTrackingEvent {}
 impl Handler<Self> for RequestTracking {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RequestTrackingMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RequestTrackingResponse, ActorError> {
@@ -231,12 +234,6 @@ impl Handler<Self> for RequestTracking {
         event: RequestTrackingEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(
-                error = %e,
-                "Failed to publish event"
-            );
-            ctx.system().crash_system();
-        };
+        ctx.publish_all(event);
     }
 }

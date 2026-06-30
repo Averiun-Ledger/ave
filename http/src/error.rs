@@ -51,6 +51,7 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
     match err {
         // ── Input validation → 400 ──────────────────────────────
         BridgeError::InvalidSubjectId(_)
+        | BridgeError::InvalidGovernanceId(_)
         | BridgeError::InvalidRequestId(_)
         | BridgeError::InvalidPublicKey(_)
         | BridgeError::InvalidSignature(_)
@@ -65,7 +66,8 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
         | BridgeError::KeyRestore(_)
         | BridgeError::KeyGeneration(_)
         | BridgeError::KeyEncrypt(_)
-        | BridgeError::KeyWrite(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        | BridgeError::KeyWrite(_)
+        | BridgeError::KeyPathInvalid(_) => StatusCode::INTERNAL_SERVER_ERROR,
 
         // ── Configuration → 500 ────────────────────────────────
         BridgeError::ConfigBuild(_) | BridgeError::ConfigDeserialize(_) => {
@@ -77,6 +79,12 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
 
         // ── Core errors → delegate ─────────────────────────────
         BridgeError::Core(core) => status_for_core_error(core),
+
+        // ── Runtime errors → 500 ───────────────────────────────
+        BridgeError::SignalRegistration(_) => StatusCode::INTERNAL_SERVER_ERROR,
+
+        // ── Generic API errors → 500 ───────────────────────────
+        BridgeError::Api(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -105,6 +113,7 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         | CoreError::WitnessesNotFound(_)
         | CoreError::NoEventsFound(_)
         | CoreError::EventNotFound { .. }
+        | CoreError::SinkNotFound(_)
         | CoreError::NoPendingTransfers => StatusCode::NOT_FOUND,
 
         // ── 409 Conflict ───────────────────────────────────────

@@ -5,13 +5,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    NotPersistentActor, Response, TimerKey,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
-use crate::auth::{Auth, AuthMessage, AuthResponse};
+use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
 };
@@ -58,6 +58,7 @@ pub struct GovernanceVersionSync {
     pending_peers: HashSet<PublicKey>,
     update_target: Option<UpdateTarget>,
     round_open: bool,
+    pending_timeout: Option<TimerKey>,
 }
 
 impl GovernanceVersionSync {
@@ -82,34 +83,32 @@ impl GovernanceVersionSync {
             pending_peers: HashSet::new(),
             update_target: None,
             round_open: false,
+            pending_timeout: None,
         }
     }
 
-    async fn schedule_tick(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let delay = self.tick_interval;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let _ = actor.tell(GovernanceVersionSyncMessage::Tick).await;
-        });
-        Ok(())
+    fn schedule_tick(&self, ctx: &ActorContext<Self>) {
+        ctx.schedule_once(
+            self.tick_interval,
+            GovernanceVersionSyncMessage::Tick,
+        );
     }
 
-    async fn schedule_timeout(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let delay = self.response_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let _ =
-                actor.tell(GovernanceVersionSyncMessage::RoundTimeout).await;
-        });
-        Ok(())
+    fn schedule_timeout(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(key) = self.pending_timeout.take() {
+            ctx.cancel_timer(key);
+        }
+        let key = ctx.schedule_once(
+            self.response_timeout,
+            GovernanceVersionSyncMessage::RoundTimeout,
+        );
+        self.pending_timeout = Some(key);
+    }
+
+    fn cancel_timeout(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(key) = self.pending_timeout.take() {
+            ctx.cancel_timer(key);
+        }
     }
 
     fn refresh_governance(
@@ -130,10 +129,7 @@ impl GovernanceVersionSync {
         }
     }
 
-    async fn trigger_update_if_needed(
-        &self,
-        _ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
+    async fn trigger_update_if_needed(&self) -> Result<(), ActorError> {
         let Some(UpdateTarget { peer, .. }) = self.update_target.clone() else {
             return Ok(());
         };
@@ -156,27 +152,31 @@ impl GovernanceVersionSync {
                         actual_sn: Some(self.local_version),
                         target_sn: None,
                         subject_id: self.governance_id.clone(),
+                        already_verified_transfer_sn: None,
                     },
                 },
             })
             .await
     }
 
-    async fn get_auth_peers(
+    async fn get_sync_peers(
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<HashSet<PublicKey>, ActorError> {
-        let auth_path = ActorPath::from("/user/node/auth");
-        let auth = ctx.system().get_actor::<Auth>(&auth_path).await?;
-        match auth
-            .ask(AuthMessage::GetAuth {
+        let access_path = ActorPath::from("/user/node/auth");
+        let access = ctx
+            .system()
+            .get_actor::<SubjectAccess>(&access_path)
+            .await?;
+        match access
+            .ask(SubjectAccessMessage::GetSyncPeers {
                 subject_id: self.governance_id.clone(),
             })
             .await
         {
-            Ok(AuthResponse::Witnesses(mut witnesses)) => {
-                witnesses.remove(&*self.our_key);
-                Ok(witnesses)
+            Ok(SubjectAccessResponse::Peers(mut peers)) => {
+                peers.remove(&*self.our_key);
+                Ok(peers)
             }
             Ok(_) => Ok(HashSet::new()),
             Err(ActorError::Functional { .. }) => Ok(HashSet::new()),
@@ -184,9 +184,9 @@ impl GovernanceVersionSync {
         }
     }
 
-    fn select_peers(&self, auth_peers: HashSet<PublicKey>) -> Vec<PublicKey> {
+    fn select_peers(&self, sync_peers: HashSet<PublicKey>) -> Vec<PublicKey> {
         let mut peers = self.governance_peers.clone();
-        peers.extend(auth_peers);
+        peers.extend(sync_peers);
         peers.remove(&*self.our_key);
 
         if peers.is_empty() {
@@ -225,15 +225,15 @@ impl GovernanceVersionSync {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.update_target.is_some() {
-            self.schedule_tick(ctx).await?;
+            self.schedule_tick(ctx);
             return Ok(());
         }
 
-        let auth_peers = self.get_auth_peers(ctx).await?;
-        let peers = self.select_peers(auth_peers);
+        let sync_peers = self.get_sync_peers(ctx).await?;
+        let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
-            self.schedule_tick(ctx).await?;
+            self.schedule_tick(ctx);
             return Ok(());
         }
 
@@ -282,8 +282,8 @@ impl GovernanceVersionSync {
         );
 
         // The actual network request/response path is integrated later.
-        self.schedule_timeout(ctx).await?;
-        self.schedule_tick(ctx).await?;
+        self.schedule_timeout(ctx);
+        self.schedule_tick(ctx);
 
         Ok(())
     }
@@ -294,6 +294,9 @@ impl Actor for GovernanceVersionSync {
     type Event = ();
     type Message = GovernanceVersionSyncMessage;
     type Response = GovernanceVersionSyncResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -306,7 +309,8 @@ impl Actor for GovernanceVersionSync {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.schedule_tick(ctx).await
+        self.schedule_tick(ctx);
+        Ok(())
     }
 }
 
@@ -316,7 +320,7 @@ impl NotPersistentActor for GovernanceVersionSync {}
 impl Handler<Self> for GovernanceVersionSync {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: GovernanceVersionSyncMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceVersionSyncResponse, ActorError> {
@@ -337,11 +341,11 @@ impl Handler<Self> for GovernanceVersionSync {
                 }
             }
             GovernanceVersionSyncMessage::RoundTimeout => {
+                self.cancel_timeout(ctx);
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
-                    if let Err(error) = self.trigger_update_if_needed(ctx).await
-                    {
+                    if let Err(error) = self.trigger_update_if_needed().await {
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,
@@ -352,9 +356,9 @@ impl Handler<Self> for GovernanceVersionSync {
             }
             GovernanceVersionSyncMessage::PeerVersion { peer, version } => {
                 if self.peer_version(peer, version) {
+                    self.cancel_timeout(ctx);
                     self.round_open = false;
-                    if let Err(error) = self.trigger_update_if_needed(ctx).await
-                    {
+                    if let Err(error) = self.trigger_update_if_needed().await {
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,

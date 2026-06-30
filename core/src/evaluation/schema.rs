@@ -20,7 +20,7 @@ use crate::{
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::emit_fail,
+    model::common::crash_system,
 };
 
 use super::request::{EvalWorkerContext, EvaluationReq};
@@ -101,6 +101,9 @@ impl Actor for EvaluationSchema {
     type Event = ();
     type Message = EvaluationSchemaMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -114,7 +117,7 @@ impl Actor for EvaluationSchema {
 impl Handler<Self> for EvaluationSchema {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: EvaluationSchemaMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -234,7 +237,7 @@ impl Handler<Self> for EvaluationSchema {
                                 error = %e,
                                 "Failed to create evaluator actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                 };
@@ -292,25 +295,5 @@ impl Handler<Self> for EvaluationSchema {
             }
         };
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ave_actors::ChildAction {
-        if let Some(metrics) = try_core_metrics() {
-            metrics.observe_schema_event("evaluation_schema", "child_fault");
-        }
-        error!(
-            governance_id = %self.governance_id,
-            schema_id = ?self.schema_id,
-            gov_version = self.gov_version,
-            sn = self.sn,
-            error = %error,
-            "Child fault in evaluation schema actor"
-        );
-        emit_fail(ctx, error).await;
-        ave_actors::ChildAction::Stop
     }
 }

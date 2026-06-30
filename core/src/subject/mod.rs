@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     ops::Deref,
+    sync::Arc,
 };
 
 use crate::{
@@ -18,6 +19,7 @@ use crate::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
         event::{Ledger, LedgerSeal, Protocols, ValidationMetadata},
+        sink::SubjectSinkEvent,
     },
     node::register::{Register, RegisterMessage},
     tracker::Tracker,
@@ -35,7 +37,8 @@ use ave_actors::{
 use ave_common::{
     DataToSink, DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
     identity::{
-        DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
+        hash_borsh,
     },
     request::EventRequest,
     response::{
@@ -51,11 +54,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sinkdata::{SinkData, SinkDataMessage};
 use tracing::{debug, error};
 
 pub mod error;
-pub mod sinkdata;
 
 impl Event for Ledger {}
 
@@ -167,57 +168,59 @@ impl From<Metadata> for MetadataWithoutProperties {
     }
 }
 
-impl From<Governance> for Metadata {
-    fn from(value: Governance) -> Self {
+impl From<&Governance> for Metadata {
+    fn from(value: &Governance) -> Self {
         Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
             subject_id: value.subject_metadata.subject_id.clone(),
-            governance_id: value.subject_metadata.subject_id,
+            governance_id: value.subject_metadata.subject_id.clone(),
             genesis_gov_version: 0,
             prev_ledger_event_hash: value
                 .subject_metadata
-                .prev_ledger_event_hash,
-            schema_id: value.subject_metadata.schema_id,
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
             namespace: Namespace::new(),
             sn: value.subject_metadata.sn,
-            creator: value.subject_metadata.creator,
-            owner: value.subject_metadata.owner,
-            new_owner: value.subject_metadata.new_owner,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
             active: value.subject_metadata.active,
             properties: value.properties.to_value_wrapper(),
         }
     }
 }
 
-impl From<Tracker> for Metadata {
-    fn from(value: Tracker) -> Self {
+impl From<&Tracker> for Metadata {
+    fn from(value: &Tracker) -> Self {
         Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
-            subject_id: value.subject_metadata.subject_id,
-            governance_id: value.governance_id,
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.governance_id.clone(),
             genesis_gov_version: value.genesis_gov_version,
             prev_ledger_event_hash: value
                 .subject_metadata
-                .prev_ledger_event_hash,
-            schema_id: value.subject_metadata.schema_id,
-            namespace: value.namespace,
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
+            namespace: value.namespace.clone(),
             sn: value.subject_metadata.sn,
-            creator: value.subject_metadata.creator,
-            owner: value.subject_metadata.owner,
-            new_owner: value.subject_metadata.new_owner,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
             active: value.subject_metadata.active,
-            properties: value.properties,
+            properties: value.properties.clone(),
         }
     }
 }
 
-impl From<Governance> for SubjectDB {
-    fn from(value: Governance) -> Self {
+impl From<&Governance> for SubjectDB {
+    fn from(value: &Governance) -> Self {
         Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
             subject_id: value.subject_metadata.subject_id.to_string(),
             governance_id: value.subject_metadata.subject_id.to_string(),
             genesis_gov_version: 0,
@@ -238,6 +241,7 @@ impl From<Governance> for SubjectDB {
             new_owner: value
                 .subject_metadata
                 .new_owner
+                .as_ref()
                 .map(|owner| owner.to_string()),
             active: value.subject_metadata.active,
             tracker_visibility: None,
@@ -347,6 +351,7 @@ pub struct DataForSink {
     pub event_ledger_timestamp: u64,
     pub gov_version: u64,
     pub event_data_ledger: EventLedgerDataForSink,
+    pub public_key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -379,6 +384,7 @@ impl SinkReplayState {
         &self,
         event: &Ledger,
         event_data_ledger: EventLedgerDataForSink,
+        public_key: String,
     ) -> DataForSink {
         let (issuer, event_request_timestamp) =
             event.get_issuer_event_request_timestamp();
@@ -398,6 +404,7 @@ impl SinkReplayState {
                 .as_nanos(),
             gov_version: event.gov_version,
             event_data_ledger,
+            public_key,
         }
     }
 
@@ -408,12 +415,15 @@ impl SinkReplayState {
         sink_timestamp: u64,
     ) -> Result<DataToSink, ActorError> {
         let replay_parts = SinkReplayEventParts::from_ledger(ledger)?;
-        let data = self.data_for_sink(ledger, replay_parts.event_data_ledger);
+        let data = self.data_for_sink(
+            ledger,
+            replay_parts.event_data_ledger,
+            public_key.to_owned(),
+        );
 
         Ok(build_data_to_sink(
             data,
             replay_parts.event_request,
-            public_key,
             sink_timestamp,
         ))
     }
@@ -652,7 +662,7 @@ fn data_to_sink_event(
             issuer: data.issuer.to_string(),
             viewpoints: fact_request.viewpoints.iter().cloned().collect(),
             owner: data.owner,
-            payload: success.then_some(fact_request.payload.0),
+            payload: fact_request.payload.0,
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,
@@ -737,12 +747,11 @@ fn data_to_sink_event(
 pub fn build_data_to_sink(
     data: DataForSink,
     event: Option<EventRequest>,
-    public_key: &str,
     sink_timestamp: u64,
 ) -> DataToSink {
     DataToSink {
         payload: data_to_sink_event(data.clone(), event),
-        public_key: public_key.to_owned(),
+        public_key: data.public_key,
         event_request_timestamp: data.event_request_timestamp,
         event_ledger_timestamp: data.event_ledger_timestamp,
         sink_timestamp,
@@ -868,8 +877,7 @@ impl SubjectMetadata {
 #[async_trait]
 pub trait Subject
 where
-    <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
-    Self: PersistentActor,
+    Self: Actor<Event = Ledger, SinkEvent = SubjectSinkEvent> + PersistentActor,
 {
     fn verify_new_ledger_event_args<'a>(
         new_ledger_event: &'a Ledger,
@@ -1790,33 +1798,28 @@ where
     }
 
     async fn event_to_sink(
+        &self,
         ctx: &mut ActorContext<Self>,
         data: DataForSink,
         event: Option<EventRequest>,
     ) -> Result<(), ActorError> {
-        let msg = SinkDataMessage::Event {
-            event: Box::new(data_to_sink_event(data.clone(), event)),
+        let data_to_sink = DataToSink {
+            payload: data_to_sink_event(data.clone(), event),
+            public_key: data.public_key,
             event_request_timestamp: data.event_request_timestamp,
             event_ledger_timestamp: data.event_ledger_timestamp,
+            sink_timestamp: TimeStamp::now().as_nanos(),
         };
 
-        Self::publish_sink(ctx, msg).await
+        self.notify_reliable_sinks(ctx, data_to_sink).await?;
+        Ok(())
     }
 
-    async fn publish_sink(
-        ctx: &mut ActorContext<Self>,
-        message: SinkDataMessage,
+    async fn notify_reliable_sinks(
+        &self,
+        _ctx: &mut ActorContext<Self>,
+        _data: DataToSink,
     ) -> Result<(), ActorError> {
-        let sink_data = ctx.get_child::<SinkData>("sink_data").await?;
-        let (subject_id, schema_id) = message.get_subject_schema();
-
-        sink_data.tell(message).await?;
-        debug!(
-            subject_id = %subject_id,
-            schema_id = %schema_id,
-            "Message published to sink successfully"
-        );
-
         Ok(())
     }
 
@@ -1869,11 +1872,6 @@ where
     async fn eol(&self, ctx: &mut ActorContext<Self>)
     -> Result<(), ActorError>;
 
-    fn apply_patch(
-        &mut self,
-        json_patch: ValueWrapper,
-    ) -> Result<(), ActorError>;
-
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -1884,4 +1882,30 @@ where
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<Option<Ledger>, ActorError>;
+
+    fn our_key(&self) -> Arc<PublicKey>;
+
+    async fn get_sink_events(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        from_sn: u64,
+        batch_size: usize,
+    ) -> Result<Vec<DataToSink>, ActorError> {
+        let public_key = self.our_key().to_string();
+        let hi_sn = from_sn + batch_size as u64;
+        let (ledgers, _is_all) = self.get_ledger(ctx, None, hi_sn).await?;
+        let sink_timestamp = TimeStamp::now().as_nanos();
+        let page = replay_sink_events(
+            &ledgers,
+            &public_key,
+            from_sn,
+            None,
+            batch_size as u64,
+            sink_timestamp,
+        )
+        .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+        Ok(page.events)
+    }
 }

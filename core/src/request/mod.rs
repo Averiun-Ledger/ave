@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
-    Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
@@ -37,10 +37,10 @@ use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
 use crate::model::common::subject::{
-    get_gov, get_tracker_visibility_state, get_version,
+    get_schema_viewpoints, get_tracker_visibility_state, get_version, has_role,
 };
 use crate::model::common::{
-    check_subject_creation, emit_fail, send_to_tracking,
+    check_subject_creation, crash_system, send_to_tracking,
     viewpoints::validate_fact_viewpoints,
 };
 use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
@@ -119,40 +119,27 @@ impl RequestHandler {
         event_request: &EventRequestType,
         subject_data: SubjectData,
     ) -> Result<(), ActorError> {
-        let gov = if matches!(subject_data, SubjectData::Tracker { .. })
-            || matches!(event_request, EventRequestType::Fact)
-        {
-            Some(get_gov(ctx, governance_id).await?)
-        } else {
-            None
-        };
-
         if let SubjectData::Tracker {
             schema_id,
             namespace,
             ..
         } = &subject_data
+            && !has_role(
+                ctx,
+                governance_id,
+                HashThisRole::Schema {
+                    who: our_key.clone(),
+                    role: RoleTypes::Creator,
+                    schema_id: schema_id.clone(),
+                    namespace: Namespace::from(namespace.clone()),
+                },
+            )
+            .await?
         {
-            let Some(gov) = gov.as_ref() else {
-                return Err(ActorError::FunctionalCritical {
-                    description:
-                        "Governance required for tracker signer authorization"
-                            .to_owned(),
-                });
-            };
-
-            if !gov.has_this_role(HashThisRole::Schema {
-                who: our_key.clone(),
-                role: RoleTypes::Creator,
-                schema_id: schema_id.clone(),
-                namespace: Namespace::from(namespace.clone()),
-            }) {
-                return Err(ActorError::Functional {
-                    description:
-                        "In tracker events, the node has to be a creator"
-                            .to_string(),
-                });
-            }
+            return Err(ActorError::Functional {
+                description: "In tracker events, the node has to be a creator"
+                    .to_string(),
+            });
         }
 
         match event_request {
@@ -171,20 +158,18 @@ impl RequestHandler {
                     namespace,
                     ..
                 } => {
-                    let Some(gov) = gov.as_ref() else {
-                        return Err(ActorError::FunctionalCritical {
-                            description:
-                                "Governance required for fact signer authorization"
-                                    .to_owned(),
-                        });
-                    };
-
-                    if !gov.has_this_role(HashThisRole::Schema {
-                        who: signer,
-                        role: RoleTypes::Issuer,
-                        schema_id,
-                        namespace: Namespace::from(namespace),
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Schema {
+                            who: signer,
+                            role: RoleTypes::Issuer,
+                            schema_id,
+                            namespace: Namespace::from(namespace),
+                        },
+                    )
+                    .await?
+                    {
                         return Err(ActorError::Functional {
                             description:
                                 "In fact events, the signer has to be an issuer"
@@ -193,18 +178,16 @@ impl RequestHandler {
                     }
                 }
                 SubjectData::Governance { .. } => {
-                    let Some(gov) = gov.as_ref() else {
-                        return Err(ActorError::FunctionalCritical {
-                            description:
-                                "Governance required for fact signer authorization"
-                                    .to_owned(),
-                        });
-                    };
-
-                    if !gov.has_this_role(HashThisRole::Gov {
-                        who: signer,
-                        role: RoleTypes::Issuer,
-                    }) {
+                    if !has_role(
+                        ctx,
+                        governance_id,
+                        HashThisRole::Gov {
+                            who: signer,
+                            role: RoleTypes::Issuer,
+                        },
+                    )
+                    .await?
+                    {
                         return Err(ActorError::Functional {
                             description:
                                 "In fact events, the signer has to be an issuer"
@@ -521,8 +504,13 @@ impl RequestHandler {
                 schema_id,
                 ..
             } => {
-                let governance = get_gov(ctx, governance_id).await?;
-                let Some(schema) = governance.schemas.get(schema_id) else {
+                let viewpoints = get_schema_viewpoints(
+                    ctx,
+                    governance_id,
+                    schema_id.clone(),
+                )
+                .await?;
+                let Some(viewpoints) = viewpoints else {
                     return Err(RequestHandlerError::Actor(
                         ActorError::FunctionalCritical {
                             description: format!(
@@ -536,7 +524,7 @@ impl RequestHandler {
                 validate_fact_viewpoints(
                     &fact_request.viewpoints,
                     schema_id,
-                    Some(&schema.viewpoints),
+                    Some(&viewpoints),
                 )
                 .map_err(RequestHandlerError::InvalidTrackerFactViewpoints)
             }
@@ -1023,6 +1011,9 @@ impl Actor for RequestHandler {
     type Event = RequestHandlerEvent;
     type Message = RequestHandlerMessage;
     type Response = RequestHandlerResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -1084,10 +1075,9 @@ impl Actor for RequestHandler {
                 }
             };
 
-            let sink =
-                Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
-
-            ctx.system().run_sink(sink).await;
+            let mut sink = Sink::new("internal", None);
+            sink.add("ext_db", ext_db.get_request_tracking());
+            tracking.register_sink(sink);
         }
 
         let Some((hash, network)) = self.helpers.clone() else {
@@ -1157,7 +1147,7 @@ impl Actor for RequestHandler {
 impl Handler<Self> for RequestHandler {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RequestHandlerMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RequestHandlerResponse, ActorError> {
@@ -1264,7 +1254,7 @@ impl Handler<Self> for RequestHandler {
                         error = %err,
                         "Helpers not initialized"
                     );
-                    return Err(emit_fail(ctx, ActorError::from(err)).await);
+                    return Err(crash_system(ctx, ActorError::from(err)).await);
                 };
 
                 if let Err(e) =
@@ -1542,25 +1532,12 @@ impl Handler<Self> for RequestHandler {
         }
     }
 
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            error = %error,
-            "Child fault in request handler"
-        );
-        ctx.system().crash_system();
-        ChildAction::Stop
-    }
-
     async fn on_event(
         &mut self,
         event: RequestHandlerEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
                 error = %e,
                 "Failed to persist event"
@@ -1577,11 +1554,7 @@ impl Storable for RequestHandler {}
 impl PersistentActor for RequestHandler {
     type Persistence = LightPersistence;
     type InitParams = (Arc<PublicKey>, (HashAlgorithm, Arc<NetworkSender>));
-
-    fn update(&mut self, state: Self) {
-        self.in_queue = state.in_queue;
-        self.handling = state.handling;
-    }
+    type State = Self;
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -1593,23 +1566,29 @@ impl PersistentActor for RequestHandler {
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             RequestHandlerEvent::EventToQueue {
                 subject_id,
                 event,
                 request_id,
             } => {
-                self.in_queue
+                inner
+                    .in_queue
                     .entry(subject_id.clone())
                     .or_default()
                     .push_back((event.clone(), request_id.clone()));
             }
             RequestHandlerEvent::Invalid { subject_id } => {
-                if let Some(vec) = self.in_queue.get_mut(subject_id) {
+                if let Some(vec) = inner.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                     if vec.is_empty() {
-                        self.in_queue.remove(subject_id);
+                        inner.in_queue.remove(subject_id);
                     }
                 }
             }
@@ -1617,23 +1596,35 @@ impl PersistentActor for RequestHandler {
                 subject_id,
                 request_id,
             } => {
-                self.handling.insert(subject_id.clone(), request_id.clone());
-                if let Some(vec) = self.in_queue.get_mut(subject_id) {
+                inner
+                    .handling
+                    .insert(subject_id.clone(), request_id.clone());
+                if let Some(vec) = inner.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                     if vec.is_empty() {
-                        self.in_queue.remove(subject_id);
+                        inner.in_queue.remove(subject_id);
                     }
                 }
             }
             RequestHandlerEvent::FinishHandling { subject_id } => {
-                self.handling.remove(subject_id);
+                inner.handling.remove(subject_id);
             }
             RequestHandlerEvent::PurgeSubject { subject_id } => {
-                self.handling.remove(subject_id);
-                self.in_queue.remove(subject_id);
+                inner.handling.remove(subject_id);
+                inner.in_queue.remove(subject_id);
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        let state = &*state;
+        self.in_queue.clone_from(&state.in_queue);
+        self.handling.clone_from(&state.handling);
     }
 }

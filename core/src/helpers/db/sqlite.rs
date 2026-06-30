@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ave_actors::rusqlite;
 use ave_actors::rusqlite::types::Type;
-use ave_actors::{ActorRef, Subscriber};
+use ave_actors::{ActorError, ActorRef, Subscriber};
 use ave_common::SchemaType;
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
@@ -37,9 +37,9 @@ use super::{DatabaseError, DbMetricsSnapshot, ReadStore};
 use crate::config::{MachineSpec, resolve_spec};
 use crate::external_db::{DBManager, DBManagerMessage};
 use crate::model::event::Ledger;
+use crate::model::sink::{SinkDataEvent, SubjectSinkEvent};
 use crate::node::register::RegisterEvent;
 use crate::request::tracking::RequestTrackingEvent;
-use crate::subject::sinkdata::SinkDataEvent;
 
 const WRITE_QUEUE_CAPACITY: usize = 1024;
 const WRITE_BATCH_MAX: usize = 128;
@@ -3602,78 +3602,91 @@ fn delete_by_subject_with_stmt(
 }
 
 #[async_trait]
-impl Subscriber<Ledger> for SqliteWriteStore {
-    async fn notify(&self, event: Ledger) {
-        let subject_id = event.get_subject_id().to_string();
-        let sn = event.sn;
+impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
+    async fn notify(
+        &self,
+        event: Arc<SubjectSinkEvent>,
+    ) -> Result<(), ActorError> {
+        match event.as_ref() {
+            SubjectSinkEvent::Ledger(ledger) => {
+                let event = ledger.as_ref().clone();
+                let subject_id = event.get_subject_id().to_string();
+                let sn = event.sn;
 
-        if let Err(e) = self.persist_signed_ledger(event).await {
-            error!(
-                subject_id = %subject_id,
-                sn = sn,
-                error = %e,
-                "Failed to save signed ledger to SQLite"
-            );
-            if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    subject_id = %subject_id,
-                    sn = sn,
-                    error = %e,
-                    "Failed to notify DBManager about ledger save error"
-                );
+                if let Err(e) = self.persist_signed_ledger(event).await {
+                    error!(
+                        subject_id = %subject_id,
+                        sn = sn,
+                        error = %e,
+                        "Failed to save signed ledger to SQLite"
+                    );
+                    if let Err(e) = self
+                        .inner
+                        .manager
+                        .tell(DBManagerMessage::Error(e))
+                        .await
+                    {
+                        error!(
+                            subject_id = %subject_id,
+                            sn = sn,
+                            error = %e,
+                            "Failed to notify DBManager about ledger save error"
+                        );
+                    }
+                } else {
+                    debug!(
+                        subject_id = %subject_id,
+                        sn = sn,
+                        "Signed ledger saved to SQLite successfully"
+                    );
+                }
             }
-        } else {
-            debug!(
-                subject_id = %subject_id,
-                sn = sn,
-                "Signed ledger saved to SQLite successfully"
-            );
-        }
-    }
-}
+            SubjectSinkEvent::SinkData(SinkDataEvent::State(metadata)) => {
+                let metadata = metadata.clone();
+                let subject_id = metadata.subject_id.clone();
+                let sn = metadata.sn;
 
-#[async_trait]
-impl Subscriber<SinkDataEvent> for SqliteWriteStore {
-    async fn notify(&self, event: SinkDataEvent) {
-        let SinkDataEvent::State(metadata) = event else {
-            return;
-        };
-
-        let subject_id = metadata.subject_id.clone();
-        let sn = metadata.sn;
-
-        if let Err(e) = self.persist_subject_state(*metadata).await {
-            error!(
-                subject_id = %subject_id,
-                sn = sn,
-                error = %e,
-                "Failed to save subject state to SQLite"
-            );
-            if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    subject_id = %subject_id,
-                    sn = sn,
-                    error = %e,
-                    "Failed to notify DBManager about state save error"
-                );
+                if let Err(e) = self.persist_subject_state(*metadata).await {
+                    error!(
+                        subject_id = %subject_id,
+                        sn = sn,
+                        error = %e,
+                        "Failed to save subject state to SQLite"
+                    );
+                    if let Err(e) = self
+                        .inner
+                        .manager
+                        .tell(DBManagerMessage::Error(e))
+                        .await
+                    {
+                        error!(
+                            subject_id = %subject_id,
+                            sn = sn,
+                            error = %e,
+                            "Failed to notify DBManager about state save error"
+                        );
+                    }
+                } else {
+                    debug!(
+                        subject_id = %subject_id,
+                        sn = sn,
+                        "Subject state saved to SQLite successfully"
+                    );
+                }
             }
-        } else {
-            debug!(
-                subject_id = %subject_id,
-                sn = sn,
-                "Subject state saved to SQLite successfully"
-            );
         }
+
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
-    async fn notify(&self, event: RequestTrackingEvent) {
+    async fn notify(
+        &self,
+        event: Arc<RequestTrackingEvent>,
+    ) -> Result<(), ActorError> {
+        let event = (*event).clone();
         let request_id = event.request_id.clone();
         let subject_id = event.subject_id.clone();
         let sn = event.sn;
@@ -3707,13 +3720,17 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 "Abort record saved to SQLite successfully"
             );
         }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Subscriber<RegisterEvent> for SqliteWriteStore {
-    async fn notify(&self, event: RegisterEvent) {
-        if let Err(e) = self.persist_register(event.clone()).await {
+    async fn notify(
+        &self,
+        event: Arc<RegisterEvent>,
+    ) -> Result<(), ActorError> {
+        if let Err(e) = self.persist_register((*event).clone()).await {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
             if let Err(e) =
                 self.inner.manager.tell(DBManagerMessage::Error(e)).await
@@ -3726,6 +3743,7 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         } else {
             debug!(event = ?event, "Register event saved to SQLite successfully");
         }
+        Ok(())
     }
 }
 

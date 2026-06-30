@@ -4,8 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ave_actors::ActorPath;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ChildAction, Handler, Message,
-    NotPersistentActor,
+    Actor, ActorContext, ActorError, Handler, Message, NotPersistentActor,
 };
 
 use ave_common::identity::{
@@ -23,7 +22,7 @@ use crate::approval::persist::{ApprPersist, ApprPersistMessage};
 use crate::governance::model::Quorum;
 use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
-use crate::model::common::{abort_req, emit_fail};
+use crate::model::common::{abort_req, crash_system};
 
 use crate::model::event::ApprovalData;
 use crate::model::network::TimeOut;
@@ -184,6 +183,9 @@ impl Actor for Approval {
     type Event = ();
     type Message = ApprovalMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -197,7 +199,7 @@ impl Actor for Approval {
 impl Handler<Self> for Approval {
     async fn handle_message(
         &mut self,
-        __sender: ActorPath,
+        _: ActorPath,
         msg: ApprovalMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -214,7 +216,7 @@ impl Handler<Self> for Approval {
                             error = %e,
                             "Failed to create approval request hash"
                         );
-                        return Err(emit_fail(
+                        return Err(crash_system(
                             ctx,
                             ActorError::FunctionalCritical {
                                 description: format!(
@@ -241,7 +243,7 @@ impl Handler<Self> for Approval {
                             signer = %signer,
                             "Failed to create approver actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 }
 
@@ -313,7 +315,7 @@ impl Handler<Self> for Approval {
                                     error = %e,
                                     "Failed to abort request"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             }
 
                             debug!(
@@ -347,7 +349,7 @@ impl Handler<Self> for Approval {
                                 error = %e,
                                 "Failed to send approval response to request actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         };
 
                         debug!(
@@ -366,7 +368,7 @@ impl Handler<Self> for Approval {
                             error = %e,
                             "Failed to send approval response to request actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     } else if self.approvers.is_empty() {
                         Self::observe_event("rejected");
                         debug!(
@@ -387,22 +389,6 @@ impl Handler<Self> for Approval {
             }
         }
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        Self::observe_event("error");
-        error!(
-            request_id = %self.request_id,
-            version = self.version,
-            error = %error,
-            "Child fault in approval actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 

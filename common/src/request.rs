@@ -222,8 +222,11 @@ pub struct RejectRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::FactRequest;
-    use ave_identity::DigestIdentifier;
+    use super::{
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
+        RejectRequest, TransferRequest,
+    };
+    use ave_identity::{DigestIdentifier, PublicKey};
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -250,5 +253,112 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("duplicated viewpoint"));
+    }
+
+    #[test]
+    fn test_event_request_check_request_signature() {
+        let owner = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let new_owner = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![1u8; 32],
+        )
+        .unwrap();
+        let other = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![2u8; 32],
+        )
+        .unwrap();
+
+        let create = EventRequest::Create(CreateRequest {
+            name: None,
+            description: None,
+            governance_id: DigestIdentifier::default(),
+            schema_id: crate::SchemaType::Governance,
+            namespace: crate::Namespace::new(),
+        });
+        assert!(create.check_request_signature(&owner, &owner, &None));
+        assert!(!create.check_request_signature(&other, &owner, &None));
+
+        let fact = EventRequest::Fact(FactRequest {
+            subject_id: DigestIdentifier::default(),
+            payload: crate::ValueWrapper::default(),
+            viewpoints: BTreeSet::new(),
+        });
+        assert!(fact.check_request_signature(&other, &owner, &None));
+
+        let transfer = EventRequest::Transfer(TransferRequest {
+            subject_id: DigestIdentifier::default(),
+            new_owner: new_owner.clone(),
+        });
+        assert!(transfer.check_request_signature(
+            &owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+        assert!(!transfer.check_request_signature(
+            &other,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+
+        let confirm = EventRequest::Confirm(ConfirmRequest {
+            subject_id: DigestIdentifier::default(),
+            name_old_owner: None,
+        });
+        assert!(confirm.check_request_signature(
+            &new_owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+        assert!(!confirm.check_request_signature(
+            &owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+
+        let reject = EventRequest::Reject(RejectRequest {
+            subject_id: DigestIdentifier::default(),
+        });
+        assert!(reject.check_request_signature(
+            &new_owner,
+            &owner,
+            &Some(new_owner.clone())
+        ));
+
+        let eol = EventRequest::EOL(EOLRequest {
+            subject_id: DigestIdentifier::default(),
+        });
+        assert!(eol.check_request_signature(&owner, &owner, &None));
+        assert!(!eol.check_request_signature(&other, &owner, &None));
+    }
+
+    #[test]
+    fn test_event_request_check_request_signature_rejects_unauthorised_transfer()
+     {
+        let owner = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let thief = PublicKey::new(
+            ave_identity::keys::DSAlgorithm::Ed25519,
+            vec![99u8; 32],
+        )
+        .unwrap();
+
+        // Transfer must be signed by the current owner, not a random key.
+        let transfer = EventRequest::Transfer(TransferRequest {
+            subject_id: DigestIdentifier::default(),
+            new_owner: thief.clone(),
+        });
+        assert!(!transfer.check_request_signature(
+            &thief,
+            &owner,
+            &Some(thief.clone())
+        ));
     }
 }

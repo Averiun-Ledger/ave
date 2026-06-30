@@ -24,6 +24,9 @@ impl Actor for DBManager {
     type Message = DBManagerMessage;
     type Event = ();
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -37,7 +40,7 @@ impl Actor for DBManager {
 impl Handler<Self> for DBManager {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DBManagerMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {

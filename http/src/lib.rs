@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod config_types;
+pub mod directory_validation;
 pub mod doc;
 pub mod error;
 pub mod logging;

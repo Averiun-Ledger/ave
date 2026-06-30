@@ -23,8 +23,13 @@ use crate::governance::role_register::{
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
 };
+use crate::governance::transfer_verification_register::{
+    TransferVerificationRegister, TransferVerificationRegisterMessage,
+    TransferVerificationRegisterResponse,
+};
 use crate::governance::witnesses_register::{
-    WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
+    WitnessStatus, WitnessesRegister, WitnessesRegisterMessage,
+    WitnessesRegisterResponse,
 };
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
@@ -37,6 +42,27 @@ pub mod distribution_plan;
 pub mod node;
 pub mod subject;
 pub mod viewpoints;
+
+pub struct TrackerIdentity {
+    pub namespace: String,
+    pub schema_id: SchemaType,
+}
+
+pub struct OwnerContext {
+    pub owner: Option<PublicKey>,
+    pub gov_version: Option<u64>,
+}
+
+pub struct TrackerPeers {
+    pub node: PublicKey,
+    pub sender: PublicKey,
+}
+
+pub struct TrackerParams {
+    pub namespace: String,
+    pub schema_id: SchemaType,
+    pub actual_sn: Option<u64>,
+}
 
 pub fn check_quorum_signers(
     signers: &HashSet<PublicKey>,
@@ -162,7 +188,7 @@ where
             }
         })?;
 
-    let _response = actor
+    let _ = actor
         .ask(SubjectRegisterMessage::Check {
             creator,
             gov_version,
@@ -174,14 +200,14 @@ where
     Ok(())
 }
 
-pub async fn check_witness_access<A>(
+pub async fn check_witness_status<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier,
     node: PublicKey,
-    namespace: String,
-    schema_id: SchemaType,
-) -> Result<Option<u64>, ActorError>
+    subject_id: Option<DigestIdentifier>,
+    identity: TrackerIdentity,
+    owner_ctx: OwnerContext,
+) -> Result<WitnessStatus, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -194,19 +220,124 @@ where
         ctx.system().get_actor(&actor_path).await?;
 
     let response = actor
-        .ask(WitnessesRegisterMessage::Access {
-            subject_id: subject_id.to_owned(),
+        .ask(WitnessesRegisterMessage::QueryWitnessStatus {
+            subject_id,
             node,
-            namespace,
-            schema_id,
+            namespace: identity.namespace,
+            schema_id: identity.schema_id,
+            owner: owner_ctx.owner,
+            owner_gov_version: owner_ctx.gov_version,
         })
         .await?;
 
     match response {
-        WitnessesRegisterResponse::Access { sn } => Ok(sn),
+        WitnessesRegisterResponse::WitnessStatus(status) => Ok(status),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
-            expected: "WitnessesRegisterResponse::Access { sn }".to_string(),
+            expected: "WitnessesRegisterResponse::WitnessStatus".to_string(),
+        }),
+    }
+}
+
+pub async fn get_verified_transfer_sn<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<(u64, PublicKey)>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(TransferVerificationRegisterMessage::GetVerifiedTransferSn {
+            subject_id: subject_id.to_owned(),
+        })
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::VerifiedTransferSn(result) => {
+            Ok(result)
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected:
+                "TransferVerificationRegisterResponse::VerifiedTransferSn"
+                    .to_string(),
+        }),
+    }
+}
+
+pub async fn record_verified_transfer<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    transfer_sn: u64,
+    sender: PublicKey,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(
+            TransferVerificationRegisterMessage::RecordVerifiedTransfer {
+                subject_id: subject_id.to_owned(),
+                transfer_sn,
+                sender,
+            },
+        )
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::Ok => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "TransferVerificationRegisterResponse::Ok".to_string(),
+        }),
+    }
+}
+
+pub async fn remove_verified_transfer<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(TransferVerificationRegisterMessage::Remove {
+            subject_id: subject_id.to_owned(),
+        })
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::Ok => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "TransferVerificationRegisterResponse::Ok".to_string(),
         }),
     }
 }
@@ -785,17 +916,16 @@ where
     tracking_actor.tell(message).await
 }
 
-pub async fn emit_fail<A>(
+pub async fn crash_system<A>(
     ctx: &mut ActorContext<A>,
     error: ActorError,
 ) -> ActorError
 where
     A: Actor + Handler<A>,
 {
-    error!("Falling, error: {}, actor: {}", error, ctx.path());
-    if let Err(_e) = ctx.emit_fail(error.clone()).await {
-        ctx.system().crash_system();
-    };
+    error!("Crashing system, error: {}, actor: {}", error, ctx.path());
+    ctx.system().crash_system();
+
     error
 }
 
@@ -872,7 +1002,7 @@ where
     A::Event: BorshSerialize + BorshDeserialize,
 {
     let store = ctx.get_child::<Store<A>>("store").await?;
-    let _response = store.ask(StoreCommand::Purge).await?;
+    let _ = store.ask(StoreCommand::Purge).await?;
 
     Ok(())
 }

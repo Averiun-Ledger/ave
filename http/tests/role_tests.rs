@@ -962,8 +962,12 @@ async fn test_sender_role_endpoints_access() {
         ("get", "/subjects/{governance_id}", true),
         ("get", "/approval", true),
         ("get", "/approval/{subject_id}", true),
-        ("get", "/auth", true),
-        ("get", "/auth/{subject_id}", true),
+        ("get", "/governances/authorized", true),
+        ("get", "/governances/{subject_id}/authorized", true),
+        ("get", "/subjects/{subject_id}/sync-peers", true),
+        ("get", "/trackers/banned", true),
+        ("get", "/trackers/{subject_id}/banned", true),
+        ("get", "/sync-peers", true),
         ("get", "/pending-transfers", true),
         // node_system:get
         ("get", "/public-key", true),
@@ -1128,8 +1132,14 @@ async fn test_manager_role_endpoints_access() {
     // But NOT to Node-Keys or Admin-* resources
 
     // Manager has node_request:all, node_subject:all, node_system:all, node_management:get
+    // but NOT node_sink.
     let manager_overrides: &[(&str, &str, bool)] = &[
+        ("get", "/sinks", false),
+        ("get", "/sinks/status", false),
         ("get", "/sink-events/{subject_id}", false),
+        ("post", "/sinks/{sink_name}/unblock", false),
+        ("delete", "/sinks/{sink_name}", false),
+        ("post", "/sinks/replay", false),
         ("delete", "/maintenance/subjects/{subject_id}", false),
     ];
 
@@ -1305,8 +1315,12 @@ async fn test_data_role_endpoints_access() {
         ("get", "/subjects/{governance_id}", true),
         ("get", "/approval", true),
         ("get", "/approval/{subject_id}", true),
-        ("get", "/auth", true),
-        ("get", "/auth/{subject_id}", true),
+        ("get", "/governances/authorized", true),
+        ("get", "/governances/{subject_id}/authorized", true),
+        ("get", "/subjects/{subject_id}/sync-peers", true),
+        ("get", "/trackers/banned", true),
+        ("get", "/trackers/{subject_id}/banned", true),
+        ("get", "/sync-peers", true),
         ("get", "/pending-transfers", true),
         // node_request:get
         ("get", "/request", true),

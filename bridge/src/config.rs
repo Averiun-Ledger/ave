@@ -1,4 +1,4 @@
-use ave_core::config::{Config as AveConfig, LoggingConfig, SinkConfig};
+use ave_core::config::{Config as AveConfig, LoggingConfig, SinkConfigEntry};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -13,8 +13,10 @@ pub struct Config {
     pub keys_path: PathBuf,
     /// Logging parameters.
     pub logging: LoggingConfig,
-    /// Sink parameters.
-    pub sink: SinkConfig,
+    /// Sink configuration entries: each entry pairs a target (governance or a
+    /// schema, optionally scoped to a governance) with the servers that
+    /// deliver events for that target.
+    pub sinks: Vec<SinkConfigEntry>,
     /// Authentication configuration.
     pub auth: AuthConfig,
     /// HTTP server configuration.
@@ -27,7 +29,7 @@ impl Default for Config {
             node: Default::default(),
             keys_path: PathBuf::from("keys"),
             logging: Default::default(),
-            sink: Default::default(),
+            sinks: Vec::new(),
             auth: Default::default(),
             http: Default::default(),
         }

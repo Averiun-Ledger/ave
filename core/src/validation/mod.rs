@@ -6,7 +6,7 @@ use crate::{
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
+            abort_req, crash_system, send_reboot_to_req, take_random_signers,
         },
         event::{ValidationData, ValidationMetadata},
     },
@@ -21,7 +21,7 @@ use crate::{
     },
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 
@@ -249,6 +249,9 @@ impl Actor for Validation {
     type Event = ();
     type Message = ValidationMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -262,7 +265,7 @@ impl Actor for Validation {
 impl Handler<Self> for Validation {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: ValidationMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -280,7 +283,7 @@ impl Handler<Self> for Validation {
                             error = %e,
                             "Failed to create validation request hash"
                         );
-                        return Err(emit_fail(
+                        return Err(crash_system(
                             ctx,
                             ActorError::FunctionalCritical {
                                 description: format!(
@@ -433,7 +436,7 @@ impl Handler<Self> for Validation {
                                         sender = %sender,
                                         "Failed to abort request"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             }
                             ValidationRes::Reboot => {
@@ -452,7 +455,7 @@ impl Handler<Self> for Validation {
                                         error = %e,
                                         "Failed to send reboot to request actor"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
 
                                 self.reboot = true;
@@ -481,7 +484,7 @@ impl Handler<Self> for Validation {
                                         error = %e,
                                         "Failed to send reboot to request actor"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
@@ -499,7 +502,7 @@ impl Handler<Self> for Validation {
                                     error = %e,
                                     "Failed to send validation to request actor"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             };
 
                             if !matches!(summary, ResponseSummary::Reboot) {
@@ -562,7 +565,7 @@ impl Handler<Self> for Validation {
                                         error = %e,
                                         "Failed to send reboot to request actor"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 } else if self.current_validators.is_empty() {
                                     Self::observe_event("reboot");
                                 }
@@ -577,22 +580,6 @@ impl Handler<Self> for Validation {
             }
         };
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        Self::observe_event("error");
-        error!(
-            request_id = %self.request_id,
-            version = self.version,
-            error = %error,
-            "Child fault in validation actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }
 
@@ -615,7 +602,7 @@ pub mod tests {
     use tokio::sync::mpsc;
 
     use crate::{
-        EventRequest, Node, NodeMessage, NodeResponse, Signed,
+        EventRequest, NetworkMessage, Node, NodeMessage, NodeResponse, Signed,
         evaluation::tests::wait_request,
         governance::{
             Governance, GovernanceMessage, GovernanceResponse,
@@ -633,6 +620,7 @@ pub mod tests {
         },
         system::tests::create_system,
     };
+    use ave_network::CommandHelper as NetworkCommandHelper;
 
     async fn get_subject_state(
         db: &Arc<ExternalDB>,
@@ -686,6 +674,12 @@ pub mod tests {
         }
     }
 
+    fn spawn_dummy_network(
+        mut receiver: mpsc::Receiver<NetworkCommandHelper<NetworkMessage>>,
+    ) {
+        tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+    }
+
     pub async fn create_gov() -> (
         SystemRef,
         ActorRef<Node>,
@@ -699,7 +693,8 @@ pub mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
 
-        let (command_sender, _command_receiver) = mpsc::channel(10);
+        let (command_sender, command_receiver) = mpsc::channel(10);
+        spawn_dummy_network(command_receiver);
         let network = Arc::new(NetworkSender::new(command_sender));
 
         system.add_helper("network", network.clone()).await;

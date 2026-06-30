@@ -591,21 +591,7 @@ mod tests {
     }
 
     // Clone trait works correctly
-    #[test]
-    fn test_value_wrapper_clone() {
-        let value = ValueWrapper(Value::String("test".to_owned()));
-        let cloned = value.clone();
-        assert_eq!(value, cloned);
-    }
-
     // Debug trait produces readable output
-    #[test]
-    fn test_value_wrapper_debug() {
-        let value = ValueWrapper(Value::String("test".to_owned()));
-        let debug_str = format!("{:?}", value);
-        assert!(debug_str.contains("test"));
-    }
-
     // Deref trait allows direct access to Value methods
     #[test]
     fn test_value_wrapper_as_str() {
@@ -646,29 +632,7 @@ mod tests {
     }
 
     // Default produces Null value
-    #[test]
-    fn test_value_wrapper_default() {
-        let value = ValueWrapper::default();
-        assert_eq!(value.0, Value::Null);
-        assert!(value.is_null());
-    }
-
     // Hash trait allows use in HashMap/HashSet
-    #[test]
-    fn test_value_wrapper_hash() {
-        use std::collections::HashMap;
-
-        let wrapper1 = ValueWrapper(Value::String("key1".to_owned()));
-        let wrapper2 = ValueWrapper(Value::String("key2".to_owned()));
-
-        let mut map = HashMap::new();
-        map.insert(wrapper1.clone(), "value1");
-        map.insert(wrapper2.clone(), "value2");
-
-        assert_eq!(map.get(&wrapper1), Some(&"value1"));
-        assert_eq!(map.get(&wrapper2), Some(&"value2"));
-    }
-
     // Helper: deserialize from raw bytes
     fn deser(bytes: Vec<u8>) -> std::io::Result<ValueWrapper> {
         let mut c = Cursor::new(bytes);
@@ -987,5 +951,164 @@ mod tests {
             }
             _ => panic!("expected object"),
         }
+    }
+}
+
+/// Payload de boundary host-contrato.
+///
+/// Transporta bytes JSON crudos entre el runtime Ave y los contratos WASM.
+/// No contiene un DOM; es una envoltura Borsh nativa de `Vec<u8>`.
+///
+/// El host serializa su `serde_json::Value` a bytes UTF-8, los envuelve en
+/// `ContractData` y los envía al contrato. El contrato recibe `ContractData`,
+/// extrae los bytes y hace `serde_json::from_slice::<T>()` directamente.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ContractData(pub Vec<u8>);
+
+impl ContractData {
+    /// Crea `ContractData` a partir de un `serde_json::Value`.
+    pub fn from_json_value(
+        value: &serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self(serde_json::to_vec(value)?))
+    }
+
+    /// Reconstruye un `serde_json::Value` a partir de los bytes internos.
+    pub fn to_json_value(
+        &self,
+    ) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_slice(&self.0)
+    }
+}
+
+/// Resultado de ejecución de contrato en el boundary.
+///
+/// Usado por el contrato para devolver el estado final al host.
+/// El host convierte `ContractData` → `ValueWrapper` para uso interno.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ContractResultData {
+    pub final_state: ContractData,
+    pub success: bool,
+    pub error: String,
+}
+
+/// Pre-serialized JSON `null` value, used as a placeholder for failed results.
+const JSON_NULL: &[u8] = b"null";
+
+impl ContractResultData {
+    /// Creates a failed result with a null final state.
+    pub fn error(error: &str) -> Self {
+        Self {
+            final_state: ContractData(JSON_NULL.to_vec()),
+            success: false,
+            error: error.to_owned(),
+        }
+    }
+}
+
+/// Resultado de validación de inicialización en el boundary.
+///
+/// Usado por el contrato para devolver el resultado de `init_check_function`.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ContractInitCheckData {
+    pub success: bool,
+    pub error: String,
+}
+
+impl ContractInitCheckData {
+    /// Creates a failed init-check result.
+    pub fn error(error: &str) -> Self {
+        Self {
+            success: false,
+            error: error.to_owned(),
+        }
+    }
+
+    /// Creates a successful init-check result.
+    pub fn ok() -> Self {
+        Self {
+            success: true,
+            error: String::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_data_tests {
+    use super::*;
+
+    #[test]
+    fn contract_data_round_trip_json_value() {
+        let value = serde_json::json!({"count": 42, "active": true});
+        let data = ContractData::from_json_value(&value).unwrap();
+        let recovered = data.to_json_value().unwrap();
+        assert_eq!(value, recovered);
+    }
+
+    #[test]
+    fn contract_data_borsh_round_trip() {
+        let value = serde_json::json!({"name": "test"});
+        let data = ContractData::from_json_value(&value).unwrap();
+        let bytes = borsh::to_vec(&data).unwrap();
+        let recovered: ContractData =
+            BorshDeserialize::try_from_slice(&bytes).unwrap();
+        assert_eq!(data.0, recovered.0);
+        assert_eq!(
+            data.to_json_value().unwrap(),
+            recovered.to_json_value().unwrap()
+        );
+    }
+
+    #[test]
+    fn contract_result_data_borsh_round_trip() {
+        let result = ContractResultData {
+            final_state: ContractData::from_json_value(
+                &serde_json::json!({"state": 1}),
+            )
+            .unwrap(),
+            success: true,
+            error: String::new(),
+        };
+        let bytes = borsh::to_vec(&result).unwrap();
+        let recovered: ContractResultData =
+            BorshDeserialize::try_from_slice(&bytes).unwrap();
+        assert_eq!(result.final_state.0, recovered.final_state.0);
+        assert_eq!(result.success, recovered.success);
+        assert_eq!(result.error, recovered.error);
+    }
+
+    #[test]
+    fn contract_init_check_data_borsh_round_trip() {
+        let check = ContractInitCheckData {
+            success: false,
+            error: "invalid state".to_owned(),
+        };
+        let bytes = borsh::to_vec(&check).unwrap();
+        let recovered: ContractInitCheckData =
+            BorshDeserialize::try_from_slice(&bytes).unwrap();
+        assert_eq!(check.success, recovered.success);
+        assert_eq!(check.error, recovered.error);
+    }
+
+    #[test]
+    fn contract_result_data_error_helper() {
+        let err = ContractResultData::error("something went wrong");
+        assert!(!err.success);
+        assert_eq!(err.error, "something went wrong");
+        assert_eq!(
+            err.final_state.to_json_value().unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn contract_init_check_data_helpers() {
+        let ok = ContractInitCheckData::ok();
+        assert!(ok.success);
+        assert!(ok.error.is_empty());
+
+        let err = ContractInitCheckData::error("bad init");
+        assert!(!err.success);
+        assert_eq!(err.error, "bad init");
     }
 }

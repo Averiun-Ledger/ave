@@ -4,8 +4,8 @@ use std::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
-    NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    NotPersistentActor, TimerKey,
 };
 
 use async_trait::async_trait;
@@ -21,7 +21,11 @@ use crate::{
         TrackerDeliveryMode, TrackerDeliveryRange,
     },
     helpers::network::{ActorMessage, service::NetworkSender},
-    model::common::{emit_fail, subject::get_local_subject_sn},
+    model::common::{
+        crash_system, get_verified_transfer_sn, node::get_subject_data,
+        subject::get_local_subject_sn,
+    },
+    node::SubjectData,
     request::manager::{RequestManager, RequestManagerMessage},
 };
 
@@ -82,6 +86,7 @@ pub struct Update {
     retry_round: u64,
     retry_token: u64,
     retry_attempt: usize,
+    pending_retry: Option<TimerKey>,
     subject_kind_hint: Option<UpdateSubjectKind>,
     round_retry_interval_secs: u64,
     max_round_retries: usize,
@@ -102,6 +107,7 @@ impl Update {
             retry_round: 0,
             retry_token: 0,
             retry_attempt: 0,
+            pending_retry: None,
             subject_kind_hint: data.subject_kind_hint,
             round_retry_interval_secs: data.round_retry_interval_secs,
             max_round_retries: data.max_round_retries,
@@ -235,10 +241,30 @@ impl Update {
         Ok(())
     }
 
+    async fn already_verified_transfer_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Option<u64> {
+        let data = get_subject_data(ctx, &self.subject_id)
+            .await
+            .ok()
+            .flatten()?;
+        let governance_id = match data {
+            SubjectData::Tracker { governance_id, .. } => governance_id,
+            SubjectData::Governance { .. } => self.subject_id.clone(),
+        };
+        get_verified_transfer_sn(ctx, &governance_id, &self.subject_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(sn, _)| sn)
+    }
+
     async fn request_distribution(
         &self,
         witness: PublicKey,
         target_sn: Option<u64>,
+        already_verified_transfer_sn: Option<u64>,
     ) -> Result<(), ActorError> {
         let info = ComunicateInfo {
             receiver: witness,
@@ -258,6 +284,7 @@ impl Update {
                         actual_sn: self.our_sn,
                         target_sn,
                         subject_id: self.subject_id.clone(),
+                        already_verified_transfer_sn,
                     },
                 },
             })
@@ -273,7 +300,9 @@ impl Update {
                 return Ok(UpdateStartMode::Direct);
             };
 
-            self.request_distribution(witness.clone(), None).await?;
+            let verified_sn = self.already_verified_transfer_sn(ctx).await;
+            self.request_distribution(witness.clone(), None, verified_sn)
+                .await?;
             return Ok(UpdateStartMode::Direct);
         }
 
@@ -312,33 +341,29 @@ impl Update {
         }
     }
 
-    async fn schedule_retry(
+    fn schedule_retry(
         &mut self,
         ctx: &ActorContext<Self>,
         expected_target_sn: u64,
         attempt: usize,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
+    ) {
+        if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
+        }
         let round = self.retry_round;
         let token = self.retry_token.saturating_add(1);
         self.retry_token = token;
         let retry_interval_secs = self.round_retry_interval_secs.max(1);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(
-                retry_interval_secs,
-            ))
-            .await;
-            let _ = actor
-                .tell(UpdateMessage::RetryRound {
-                    expected_target_sn,
-                    round,
-                    attempt,
-                    token,
-                })
-                .await;
-        });
-
-        Ok(())
+        let key = ctx.schedule_once(
+            std::time::Duration::from_secs(retry_interval_secs),
+            UpdateMessage::RetryRound {
+                expected_target_sn,
+                round,
+                attempt,
+                token,
+            },
+        );
+        self.pending_retry = Some(key);
     }
 }
 
@@ -366,6 +391,9 @@ impl Actor for Update {
     type Event = ();
     type Message = UpdateMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -381,7 +409,7 @@ impl NotPersistentActor for Update {}
 impl Handler<Self> for Update {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: UpdateMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -397,7 +425,7 @@ impl Handler<Self> for Update {
                             error = %e,
                             "Failed to create updates"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -433,7 +461,7 @@ impl Handler<Self> for Update {
                             error = %e,
                             "Failed to continue update round"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -498,7 +526,7 @@ impl Handler<Self> for Update {
                             error = %e,
                             "Failed to restart update round"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -539,10 +567,13 @@ impl Handler<Self> for Update {
                                 .max()
                                 .unwrap_or(target_sn);
 
+                            let verified_sn =
+                                self.already_verified_transfer_sn(ctx).await;
                             if let Err(e) = self
                                 .request_distribution(
                                     better_node.clone(),
                                     Some(target_sn),
+                                    verified_sn,
                                 )
                                 .await
                             {
@@ -552,7 +583,7 @@ impl Handler<Self> for Update {
                                     node = %better_node,
                                     "Failed to send request to network"
                                 );
-                                return Err(emit_fail(ctx, e).await);
+                                return Err(crash_system(ctx, e).await);
                             } else {
                                 debug!(
                                     msg_type = "Response",
@@ -570,23 +601,11 @@ impl Handler<Self> for Update {
                                 && self.should_retry_auth_rounds()
                             {
                                 keep_running = true;
-                                if let Err(e) = self
-                                    .schedule_retry(
-                                        ctx,
-                                        expected_target_sn,
-                                        self.retry_attempt,
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        subject_id = %self.subject_id,
-                                        expected_target_sn = expected_target_sn,
-                                        error = %e,
-                                        "Failed to schedule update retry"
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                }
+                                self.schedule_retry(
+                                    ctx,
+                                    expected_target_sn,
+                                    self.retry_attempt,
+                                );
                             }
                         }
 
@@ -625,7 +644,7 @@ impl Handler<Self> for Update {
                                             subject_id = %self.subject_id,
                                             "Failed to send response to request actor"
                                         );
-                                        return Err(emit_fail(ctx, e).await);
+                                        return Err(crash_system(ctx, e).await);
                                     }
                                 }
                                 Err(e) => {
@@ -636,7 +655,7 @@ impl Handler<Self> for Update {
                                         subject_id = %self.subject_id,
                                         "Request actor not found"
                                     );
-                                    return Err(emit_fail(ctx, e).await);
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             };
                         };
@@ -665,20 +684,5 @@ impl Handler<Self> for Update {
         };
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            subject_id = %self.subject_id,
-            update_type = ?self.update_type,
-            error = %error,
-            "Child fault in update actor"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -6,8 +7,7 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::SchemaType;
-use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::identity::DigestIdentifier;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -15,27 +15,8 @@ use tracing::{Span, debug, error, info_span};
 use crate::model::common::CeilingMap;
 use crate::{
     db::Storable,
-    model::common::{emit_fail, purge_storage},
+    model::common::{crash_system, purge_storage},
 };
-
-#[derive(
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    Hash,
-    PartialEq,
-    Eq,
-    Ord,
-    PartialOrd,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-pub struct OwnerSchema {
-    pub owner: PublicKey,
-    pub schema_id: SchemaType,
-    pub namespace: String,
-}
 
 #[derive(
     Clone,
@@ -50,6 +31,30 @@ pub struct SnRegister {
     register: HashMap<DigestIdentifier, CeilingMap<u64>>,
 }
 
+impl SnRegister {
+    fn lookup_sn(
+        &self,
+        subject_id: &DigestIdentifier,
+        gov_version: u64,
+    ) -> SnLimit {
+        if let Some(gov_version_register) = self.register.get(subject_id)
+            && let Some(last) = gov_version_register.last()
+        {
+            if gov_version > *last.0 {
+                SnLimit::LastSn
+            } else if let Some(sn) =
+                gov_version_register.get_prev_or_equal(gov_version)
+            {
+                SnLimit::Sn(sn)
+            } else {
+                SnLimit::NotSn
+            }
+        } else {
+            SnLimit::NotSn
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterMessage {
     PurgeStorage,
@@ -61,9 +66,9 @@ pub enum SnRegisterMessage {
         gov_version: u64,
         sn: u64,
     },
-    GetSn {
+    GetSns {
         subject_id: DigestIdentifier,
-        gov_version: u64,
+        gov_versions: Vec<u64>,
     },
     GetGovVersionWindow {
         subject_id: DigestIdentifier,
@@ -83,7 +88,7 @@ impl Message for SnRegisterMessage {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum SnLimit {
     Sn(u64),
     LastSn,
@@ -93,7 +98,7 @@ pub enum SnLimit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterResponse {
     Ok,
-    Sn(SnLimit),
+    Sns(Vec<SnLimit>),
     GovVersionWindow(Vec<SnGovVersionRange>),
 }
 
@@ -127,6 +132,9 @@ impl Actor for SnRegister {
     type Message = SnRegisterMessage;
     type Event = SnRegisterEvent;
     type Response = SnRegisterResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -139,9 +147,13 @@ impl Actor for SnRegister {
         &mut self,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
         if let Err(e) = self
-            .init_store("sn_register", Some(prefix), false, ctx)
+            .init_store(
+                "sn_register",
+                Some(ctx.path().parent().key().to_owned()),
+                false,
+                ctx,
+            )
             .await
         {
             error!(
@@ -158,7 +170,7 @@ impl Actor for SnRegister {
 impl Handler<Self> for SnRegister {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SnRegisterMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SnRegisterResponse, ActorError> {
@@ -187,35 +199,23 @@ impl Handler<Self> for SnRegister {
 
                 Ok(SnRegisterResponse::Ok)
             }
-            SnRegisterMessage::GetSn {
+            SnRegisterMessage::GetSns {
                 subject_id,
-                gov_version,
+                gov_versions,
             } => {
-                let response = if let Some(gov_version_register) =
-                    self.register.get(&subject_id)
-                    && let Some(last) = gov_version_register.last()
-                {
-                    if gov_version > *last.0 {
-                        SnRegisterResponse::Sn(SnLimit::LastSn)
-                    } else if let Some(sn) =
-                        gov_version_register.get_prev_or_equal(gov_version)
-                    {
-                        SnRegisterResponse::Sn(SnLimit::Sn(sn))
-                    } else {
-                        SnRegisterResponse::Sn(SnLimit::NotSn)
-                    }
-                } else {
-                    SnRegisterResponse::Sn(SnLimit::NotSn)
-                };
+                let results: Vec<SnLimit> = gov_versions
+                    .into_iter()
+                    .map(|gov_version| self.lookup_sn(&subject_id, gov_version))
+                    .collect();
 
                 debug!(
-                    msg_type = "GetSn",
+                    msg_type = "GetSns",
                     subject_id = %subject_id,
-                    gov_version = gov_version,
-                    "Sn lookup completed"
+                    count = results.len(),
+                    "Batch Sn lookup completed"
                 );
 
-                Ok(response)
+                Ok(SnRegisterResponse::Sns(results))
             }
             SnRegisterMessage::RegisterSn {
                 subject_id,
@@ -284,13 +284,12 @@ impl Handler<Self> for SnRegister {
         event: SnRegisterEvent,
         ctx: &mut ActorContext<Self>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
+        if let Err(e) = self.persist(event, ctx).await {
             error!(
-                event = ?event,
                 error = %e,
                 "Failed to persist sn register event"
             );
-            emit_fail(ctx, e).await;
+            crash_system(ctx, e).await;
         }
     }
 }
@@ -299,16 +298,22 @@ impl Handler<Self> for SnRegister {
 impl PersistentActor for SnRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = Self;
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
     }
 
     /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = Arc::clone(&state);
+        let inner = Arc::make_mut(&mut state);
         match event {
             SnRegisterEvent::DeleteSubject { subject_id } => {
-                self.register.remove(subject_id);
+                inner.register.remove(subject_id);
 
                 debug!(
                     event_type = "DeleteSubject",
@@ -321,7 +326,8 @@ impl PersistentActor for SnRegister {
                 gov_version,
                 sn,
             } => {
-                self.register
+                inner
+                    .register
                     .entry(subject_id.to_owned())
                     .or_default()
                     .insert(*gov_version, *sn);
@@ -336,7 +342,15 @@ impl PersistentActor for SnRegister {
             }
         };
 
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::new(self.clone())
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        *self = (*state).clone();
     }
 }
 

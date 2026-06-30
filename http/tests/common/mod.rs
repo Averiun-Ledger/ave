@@ -2,6 +2,8 @@
 //
 // Shared utilities and helpers for all auth tests
 
+pub mod test_sink;
+
 use std::collections::BTreeSet;
 use std::env;
 use std::io::ErrorKind;
@@ -334,6 +336,7 @@ pub fn materialize_role_test_path(method: &str, path: &str) -> String {
             .replace("{key_id}", "999")
             .replace("{plan_id}", "test_plan")
             .replace("{name}", "test_key")
+            .replace("{sink_name}", "test_sink")
             .replace("{key}", "test_key"),
     }
 }
@@ -341,7 +344,7 @@ pub fn materialize_role_test_path(method: &str, path: &str) -> String {
 pub fn role_test_request_body(method: &str, path: &str) -> Option<Value> {
     match (method, path) {
         ("patch", "/approval/{subject_id}") => Some(json!("Accepted")),
-        ("put", "/auth/{subject_id}") => {
+        ("put", "/governances/{subject_id}/authorize") => {
             Some(json!(["ExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI"]))
         }
         ("post", "/request") => Some(json!({"request": {}, "signature": null})),
@@ -731,6 +734,10 @@ pub struct TestServerOptions {
     pub safe_mode: bool,
     pub node_type: String,
     pub persistence: Option<TestPersistencePaths>,
+    /// Optional JSON array of sink configuration entries, inserted verbatim into
+    /// the bridge config under the top-level `sinks` key. Each entry must be a
+    /// valid `SinkConfigEntry` serialized as JSON.
+    pub sinks_config: Option<String>,
 }
 
 impl Default for TestServerOptions {
@@ -742,6 +749,7 @@ impl Default for TestServerOptions {
             safe_mode: false,
             node_type: "Bootstrap".to_string(),
             persistence: None,
+            sinks_config: None,
         }
     }
 }
@@ -798,7 +806,10 @@ async fn build_test_router_with_options(
         safe_mode,
         node_type,
         persistence,
+        sinks_config,
     } = options;
+
+    let sinks_json = sinks_config.unwrap_or_default();
 
     let (
         ave_db_path,
@@ -917,6 +928,7 @@ async fn build_test_router_with_options(
                 "audit_max_entries": 1000000
             }}
         }},
+        "sinks": [{sinks_json}],
         "http": {{
             "enable_doc": false
         }}
@@ -928,10 +940,9 @@ async fn build_test_router_with_options(
         serde_json::from_str(&bridge_config_json)
             .expect("Failed to parse bridge config");
 
-    let (bridge, runners) =
-        Bridge::build(&bridge_config, "test", "", "", None, None)
-            .await
-            .expect("Failed to create bridge");
+    let (bridge, runners) = Bridge::build(&bridge_config, "test", None, None)
+        .await
+        .expect("Failed to create bridge");
     let graceful_token = bridge.graceful_token().clone();
 
     let auth_db: Option<Arc<AuthDatabase>> =
@@ -1059,6 +1070,7 @@ impl TestServer {
             safe_mode,
             node_type: node_type.into(),
             persistence: Some(persistence),
+            sinks_config: None,
         })
         .await?;
 

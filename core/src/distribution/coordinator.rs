@@ -2,9 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
-    RetryMessage, Strategy,
+    Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
+    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
 };
 use ave_common::identity::PublicKey;
 use ave_network::ComunicateInfo;
@@ -13,7 +12,7 @@ use crate::{
     ActorMessage, NetworkMessage,
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::{common::emit_fail, event::Ledger, network::RetryNetwork},
+    model::{common::crash_system, event::Ledger, network::RetryNetwork},
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -30,6 +29,9 @@ impl Actor for DistriCoordinator {
     type Event = ();
     type Message = DistriCoordinatorMessage;
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -61,7 +63,7 @@ impl NotPersistentActor for DistriCoordinator {}
 impl Handler<Self> for DistriCoordinator {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: DistriCoordinatorMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -74,6 +76,7 @@ impl Handler<Self> for DistriCoordinator {
                     );
                 }
                 warn!(
+                    msg_type = "Coordinator",
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -87,13 +90,15 @@ impl Handler<Self> for DistriCoordinator {
                             .await
                         {
                             error!(
+                                msg_type = "Coordinator",
                                 node_key = %self.node_key,
                                 error = %e,
                                 "Failed to notify parent distribution actor after retry exhausted"
                             );
-                            emit_fail(ctx, e).await;
+                            crash_system(ctx, e).await;
                         } else {
                             debug!(
+                                msg_type = "Coordinator",
                                 node_key = %self.node_key,
                                 "Parent distribution actor notified of retry exhaustion"
                             );
@@ -101,11 +106,12 @@ impl Handler<Self> for DistriCoordinator {
                     }
                     Err(e) => {
                         error!(
+                            msg_type = "Coordinator",
                             node_key = %self.node_key,
                             error = %e,
                             "Failed to get parent distribution actor after retry exhausted"
                         );
-                        emit_fail(ctx, e).await;
+                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -134,13 +140,15 @@ impl Handler<Self> for DistriCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(any(test, feature = "test"))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(2, Duration::from_secs(2)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    2,
+                    Duration::from_secs(2),
+                ));
                 #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(3, Duration::from_secs(30)),
-                );
+                let strategy = Strategy::Interval(IntervalStrategy::new(
+                    3,
+                    Duration::from_secs(30),
+                ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
                     target,
@@ -166,7 +174,7 @@ impl Handler<Self> for DistriCoordinator {
                             error = %e,
                             "Failed to create retry actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -179,7 +187,7 @@ impl Handler<Self> for DistriCoordinator {
                         error = %e,
                         "Failed to send retry message to retry actor"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Err(crash_system(ctx, e).await);
                 };
 
                 debug!(
@@ -216,7 +224,7 @@ impl Handler<Self> for DistriCoordinator {
                                 error = %e,
                                 "Failed to notify parent distribution actor"
                             );
-                            return Err(emit_fail(ctx, e).await);
+                            return Err(crash_system(ctx, e).await);
                         }
                     }
                     Err(e) => {
@@ -225,7 +233,7 @@ impl Handler<Self> for DistriCoordinator {
                             error = %e,
                             "Failed to get parent distribution actor"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 }
 
@@ -263,19 +271,5 @@ impl Handler<Self> for DistriCoordinator {
         };
 
         Ok(())
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ChildAction {
-        error!(
-            node_key = %self.node_key,
-            error = %error,
-            "Child actor fault in distributor coordinator"
-        );
-        emit_fail(ctx, error).await;
-        ChildAction::Stop
     }
 }

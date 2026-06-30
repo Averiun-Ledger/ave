@@ -8,7 +8,7 @@ use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
-use crate::model::common::{emit_fail, subject::get_gov_sn};
+use crate::model::common::{crash_system, subject::get_gov_sn};
 
 use super::manager::{RequestManager, RequestManagerMessage};
 
@@ -39,28 +39,12 @@ impl Reboot {
         }
     }
 
-    async fn sleep(
-        &self,
-        ctx: &ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await?;
-        let request = RebootMessage::Update;
-        let request_id = self.request_id.clone();
-        let governance_id = self.governance_id.clone();
+    fn schedule_next_check(&self, ctx: &ave_actors::ActorContext<Self>) {
         let interval_secs = self.stability_check_interval_secs.max(1);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-            if let Err(e) = actor.tell(request).await {
-                error!(
-                    request_id = %request_id,
-                    governance_id = %governance_id,
-                    error = %e,
-                    "Failed to send Update message to Reboot actor"
-                );
-            }
-        });
-
-        Ok(())
+        ctx.schedule_once(
+            Duration::from_secs(interval_secs),
+            RebootMessage::Update,
+        );
     }
 
     async fn finish(
@@ -122,6 +106,9 @@ impl Actor for Reboot {
     type Message = RebootMessage;
     type Event = ();
     type Response = ();
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -135,7 +122,7 @@ impl Actor for Reboot {
 impl Handler<Self> for Reboot {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: RebootMessage,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -160,20 +147,11 @@ impl Handler<Self> for Reboot {
                             error = %e,
                             "Failed to get governance sn"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
-                if let Err(e) = self.sleep(ctx).await {
-                    error!(
-                        msg_type = "Init",
-                        request_id = %self.request_id,
-                        governance_id = %self.governance_id,
-                        error = %e,
-                        "Failed to schedule sleep"
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
+                self.schedule_next_check(ctx);
             }
             RebootMessage::Update => {
                 let actual_sn = self.actual_sn;
@@ -197,7 +175,7 @@ impl Handler<Self> for Reboot {
                             error = %e,
                             "Failed to get governance sn"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
                 };
 
@@ -239,18 +217,10 @@ impl Handler<Self> for Reboot {
                             error = %e,
                             "Failed to finish reboot"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(crash_system(ctx, e).await);
                     }
-                } else if let Err(e) = self.sleep(ctx).await {
-                    error!(
-                        msg_type = "Update",
-                        request_id = %self.request_id,
-                        governance_id = %self.governance_id,
-                        count = self.count,
-                        error = %e,
-                        "Failed to schedule sleep"
-                    );
-                    return Err(emit_fail(ctx, e).await);
+                } else {
+                    self.schedule_next_check(ctx);
                 };
             }
         };

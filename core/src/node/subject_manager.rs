@@ -10,7 +10,7 @@ use ave_actors::{
 };
 use ave_common::identity::{DigestIdentifier, HashAlgorithm, PublicKey};
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, debug, info_span};
 
 use crate::{
     governance::{
@@ -129,9 +129,9 @@ impl SubjectManager {
                         reason: "Not found".to_owned(),
                     });
                 };
-
-                let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-                ctx.system().run_sink(sink).await;
+                let mut sink = Sink::new("internal", None);
+                sink.add("ext_db", ext_db.get_sink_data());
+                actor.register_sink(sink);
             }
         }
 
@@ -307,6 +307,28 @@ impl SubjectManager {
                             cleanup_errors.push(format!("governance: {error}"))
                         }
                     }
+
+                    // Notify the governance's SinkManager to remove all tracking
+                    // state for this tracker.
+                    let sink_manager_path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/sink_manager",
+                        governance_id
+                    ));
+                    match ctx.system().get_actor::<crate::sink::SinkManager>(&sink_manager_path).await {
+                        Ok(sink_manager) => {
+                            if let Err(error) = sink_manager
+                                .tell(crate::sink::SinkManagerMessage::RemoveSubject {
+                                    subject_id: subject_id.to_string(),
+                                })
+                                .await
+                            {
+                                cleanup_errors.push(format!("sink_manager: {error}"));
+                            }
+                        }
+                        Err(error) => {
+                            cleanup_errors.push(format!("sink_manager lookup: {error}"));
+                        }
+                    }
                 }
                 Err(error) => {
                     cleanup_errors.push(format!("governance lookup: {error}"));
@@ -375,6 +397,30 @@ impl SubjectManager {
 
             if let Err(error) = governance.ask_stop().await {
                 cleanup_errors.push(format!("governance stop: {error}"));
+            }
+        }
+
+        // Notify NodeSinkManager to remove all tracking state for this governance.
+        let node_sink_manager_path =
+            ActorPath::from("/user/node/node_sink_manager");
+        match ctx
+            .system()
+            .get_actor::<crate::sink::SinkManager>(&node_sink_manager_path)
+            .await
+        {
+            Ok(node_sink_manager) => {
+                if let Err(error) = node_sink_manager
+                    .tell(crate::sink::SinkManagerMessage::RemoveSubject {
+                        subject_id: subject_id.to_string(),
+                    })
+                    .await
+                {
+                    cleanup_errors.push(format!("node_sink_manager: {error}"));
+                }
+            }
+            Err(error) => {
+                cleanup_errors
+                    .push(format!("node_sink_manager lookup: {error}"));
             }
         }
 
@@ -574,8 +620,9 @@ impl SubjectManager {
             });
         };
 
-        let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-        ctx.system().run_sink(sink).await;
+        let mut sink = Sink::new("internal", None);
+        sink.add("ext_db", ext_db.get_sink_data());
+        actor.register_sink(sink);
         Ok(())
     }
 
@@ -610,8 +657,9 @@ impl SubjectManager {
             });
         };
 
-        let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-        ctx.system().run_sink(sink).await;
+        let mut sink = Sink::new("internal", None);
+        sink.add("ext_db", ext_db.get_sink_data());
+        actor.register_sink(sink);
         Ok(())
     }
 
@@ -646,6 +694,9 @@ impl Actor for SubjectManager {
     type Event = ();
     type Message = SubjectManagerMessage;
     type Response = SubjectManagerResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
@@ -661,7 +712,7 @@ impl NotPersistentActor for SubjectManager {}
 impl Handler<Self> for SubjectManager {
     async fn handle_message(
         &mut self,
-        _sender: ActorPath,
+        _: ActorPath,
         msg: SubjectManagerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<SubjectManagerResponse, ActorError> {
@@ -716,15 +767,5 @@ impl Handler<Self> for SubjectManager {
                 Ok(SubjectManagerResponse::DeleteGovernance)
             }
         }
-    }
-
-    async fn on_child_fault(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) -> ave_actors::ChildAction {
-        error!(error = %error, "Child fault in subject manager");
-        ctx.system().crash_system();
-        ave_actors::ChildAction::Stop
     }
 }

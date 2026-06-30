@@ -13,7 +13,7 @@ use std::{
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
-    ValueWrapper,
+    ContractData, ContractInitCheckData, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
@@ -45,14 +45,6 @@ pub use contract_compiler::{ContractCompiler, ContractCompilerMessage};
 pub use temp_compiler::{TempCompiler, TempCompilerMessage};
 
 use error::*;
-
-#[derive(
-    Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
-)]
-pub struct ContractResult {
-    pub success: bool,
-    pub error: String,
-}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
@@ -179,7 +171,11 @@ impl CompilerSupport {
     }
 
     fn vendor_dir_for_contract() -> PathBuf {
-        PathBuf::from(".").join("..").join("..").join(Self::VENDOR_DIR)
+
+        PathBuf::from(".")
+            .join("..")
+            .join("..")
+            .join(Self::VENDOR_DIR)
     }
 
     fn build_output_wasm_path(contracts_root: &Path) -> PathBuf {
@@ -194,10 +190,9 @@ impl CompilerSupport {
         shared_target_dir: &Path,
         vendor_dir: Option<&Path>,
     ) -> String {
-        let mut config = format!(
-            "[build]\ntarget-dir = \"{}\"\n",
-            shared_target_dir.to_string_lossy()
-        );
+        let mut config = include_str!("contract_cargo_config.toml").to_owned();
+        config = config
+            .replace("{target_dir}", &shared_target_dir.to_string_lossy());
 
         if let Some(vendor_dir) = vendor_dir {
             config.push_str(&format!(
@@ -301,7 +296,7 @@ impl CompilerSupport {
             &Self::shared_target_dir_for_contract(),
             vendor_dir
                 .exists()
-                .then(|| Self::vendor_dir_for_contract())
+                .then(Self::vendor_dir_for_contract)
                 .as_deref(),
         );
         let cargo_config_path = Self::cargo_config_path(contract_path);
@@ -639,7 +634,7 @@ impl CompilerSupport {
             }
         })?;
 
-        let _main_contract_entrypoint = instance
+        let _ = instance
             .get_typed_func::<(u32, u32, u32, u32), u32>(
                 &mut store,
                 "main_function",
@@ -1396,7 +1391,7 @@ impl CompilerSupport {
         pointer: u32,
     ) -> Result<(), CompilerError> {
         let bytes = store.data().read_data(pointer as usize)?;
-        let contract_result: ContractResult =
+        let contract_result: ContractInitCheckData =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
                 CompilerError::InvalidContractOutput {
                     details: e.to_string(),
@@ -1417,17 +1412,25 @@ impl CompilerSupport {
         limits: &WasmLimits,
     ) -> Result<(MemoryManager, u32), CompilerError> {
         let mut context = MemoryManager::from_limits(limits);
-        let state_bytes =
-            to_vec(&state).map_err(|e| CompilerError::SerializationError {
+        let state_data =
+            ContractData::from_json_value(&state.0).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "state serialization to JSON bytes",
+                    details: e.to_string(),
+                }
+            })?;
+        let state_bytes = to_vec(&state_data).map_err(|e| {
+            CompilerError::SerializationError {
                 context: "state serialization",
                 details: e.to_string(),
-            })?;
+            }
+        })?;
         let state_ptr = context.add_data_raw(&state_bytes)?;
         Ok((context, state_ptr as u32))
     }
 
     fn get_sdk_functions_identifier() -> HashSet<&'static str> {
-        ["alloc", "write_byte", "pointer_len", "read_byte"]
+        ["alloc", "write_bytes", "pointer_len", "read_bytes"]
             .into_iter()
             .collect()
     }

@@ -2,18 +2,24 @@ use std::{collections::HashSet, str::FromStr};
 
 pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
+pub use ave_common::{
+    bridge::request::SinksQuery,
+    bridge::response::{SinkInfo, SinkStatusInfo},
+    sink::{SinkConfigEntry, SinkServer, SinkTarget},
+};
 use ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery, SinkEventsQuery, UpdateSubjectQuery,
+        EventRequestType, EventsQuery, SinkEventsQuery, SinkReplayRequest,
+        UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
     response::{
         ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
         RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
-        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SubjectDB,
-        SubjsData, TransferSubject,
+        RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
+        SinkReplayResponse, SubjectDB, SubjsData, TransferSubject,
     },
 };
 pub use ave_core::config::{MachineSpec, resolve_spec};
@@ -23,12 +29,10 @@ pub use ave_core::{
     config::Config as AveConfig,
     config::{
         AveExternalDBConfig, AveInternalDBConfig, LoggingConfig, LoggingOutput,
-        LoggingRotation, SinkConfig, SinkQueuePolicy, SinkRoutingStrategy,
-        SinkServer,
+        LoggingRotation,
     },
     error::Error,
 };
-use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 pub use ave_network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
     RoutingConfig, RoutingNode,
@@ -88,27 +92,13 @@ impl Bridge {
     pub async fn build(
         settings: &Config,
         password: &str,
-        password_sink: &str,
-        sink_api_key: &str,
         graceful_token: Option<CancellationToken>,
         crash_token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
-        let keys = key_pair(settings, password)?;
+        utils::validate_keys_path(&settings.keys_path)
+            .map_err(BridgeError::KeyPathInvalid)?;
 
-        // Skip bearer token acquisition when using api_key mode
-        let auth_token =
-            if sink_api_key.is_empty() && !settings.sink.auth.is_empty() {
-                Some(
-                    obtain_token(
-                        &settings.sink.auth,
-                        &settings.sink.username,
-                        password_sink,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
+        let keys = key_pair(settings, password)?;
 
         let mut registry = <Registry>::default();
 
@@ -118,12 +108,7 @@ impl Bridge {
         let (api, runners) = AveApi::build(
             keys,
             settings.node.clone(),
-            SinkAuth {
-                sink: settings.sink.clone(),
-                token: auth_token,
-                password: password_sink.to_owned(),
-                api_key: sink_api_key.to_owned(),
-            },
+            settings.sinks.clone(),
             &mut registry,
             password,
             graceful_token.clone(),
@@ -131,7 +116,7 @@ impl Bridge {
         )
         .await?;
 
-        Self::bind_with_shutdown(graceful_token.clone());
+        Self::bind_with_shutdown(graceful_token.clone())?;
 
         #[cfg(feature = "prometheus")]
         let registry = std::sync::Arc::new(tokio::sync::Mutex::new(registry));
@@ -165,10 +150,12 @@ impl Bridge {
         self.registry.clone()
     }
 
-    fn bind_with_shutdown(token: CancellationToken) {
+    fn bind_with_shutdown(token: CancellationToken) -> Result<(), BridgeError> {
         let cancellation_token = token;
-        let mut sigterm = signal(SignalKind::terminate())
-            .expect("It could not be registered SIGTERM");
+        let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
+            tracing::error!(error = %e, "Failed to register SIGTERM handler");
+            BridgeError::SignalRegistration(e.to_string())
+        })?;
 
         tokio::spawn(async move {
             tokio::select! {
@@ -178,6 +165,8 @@ impl Bridge {
 
             cancellation_token.cancel();
         });
+
+        Ok(())
     }
 
     ///////// General
@@ -325,18 +314,71 @@ impl Bridge {
             .collect())
     }
 
-    ///////// Auth
+    ///////// Sink
     ////////////////////////////
-    pub async fn put_auth_subject(
+    pub async fn get_sinks(
+        &self,
+        query: SinksQuery,
+    ) -> Result<Vec<SinkInfo>, BridgeError> {
+        self.api
+            .get_sinks(query)
+            .await
+            .map_err(|e| BridgeError::Api(e.to_string()))
+    }
+
+    pub async fn get_sinks_status(
+        &self,
+    ) -> Result<Vec<SinkStatusInfo>, BridgeError> {
+        self.api
+            .get_sinks_status()
+            .await
+            .map_err(|e| BridgeError::Api(e.to_string()))
+    }
+
+    pub async fn unblock_sink(
+        &self,
+        sink_name: String,
+    ) -> Result<(), BridgeError> {
+        self.api
+            .unblock_sink(sink_name)
+            .await
+            .map_err(BridgeError::Core)
+    }
+
+    pub async fn delete_sink_cursors(
+        &self,
+        sink_name: String,
+    ) -> Result<(), BridgeError> {
+        self.api
+            .delete_sink_cursors(sink_name)
+            .await
+            .map_err(BridgeError::Core)
+    }
+
+    pub async fn replay_sink_events(
+        &self,
+        request: SinkReplayRequest,
+    ) -> Result<SinkReplayResponse, BridgeError> {
+        self.api
+            .replay_sink_events(request)
+            .await
+            .map_err(BridgeError::Core)
+    }
+
+    ///////// SubjectAccess
+    ////////////////////////////
+    pub async fn authorize_governance(
         &self,
         subject_id: String,
         witnesses: Vec<String>,
     ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
         let mut witnesses_key = vec![];
-
         for witness in witnesses {
             witnesses_key.push(
                 PublicKey::from_str(&witness).map_err(|e| {
@@ -353,37 +395,168 @@ impl Bridge {
             AuthWitness::Many(witnesses_key)
         };
 
-        Ok(self.api.auth_subject(subject_id, auh_witness).await?)
+        Ok(self
+            .api
+            .authorize_governance(subject_id, auh_witness)
+            .await?)
     }
 
-    pub async fn get_all_auth_subjects(
-        &self,
-    ) -> Result<Vec<String>, BridgeError> {
-        let res = self.api.all_auth_subjects().await?;
-
-        Ok(res.iter().map(|x| x.to_string()).collect())
-    }
-
-    pub async fn get_witnesses_subject(
-        &self,
-        subject_id: String,
-    ) -> Result<HashSet<String>, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
-
-        let res = self.api.witnesses_subject(subject_id).await?;
-
-        Ok(res.iter().map(|x| x.to_string()).collect())
-    }
-
-    pub async fn delete_auth_subject(
+    pub async fn disauthorize_governance(
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(self.api.delete_auth_subject(subject_id).await?)
+        Ok(self.api.disauthorize_governance(subject_id).await?)
+    }
+
+    pub async fn authorized_governances(
+        &self,
+    ) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.authorized_governances().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
+    }
+
+    pub async fn is_governance_authorized(
+        &self,
+        subject_id: String,
+    ) -> Result<bool, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.is_governance_authorized(subject_id).await?)
+    }
+
+    pub async fn ban_tracker(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.ban_tracker(subject_id).await?)
+    }
+
+    pub async fn unban_tracker(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.unban_tracker(subject_id).await?)
+    }
+
+    pub async fn is_tracker_banned(
+        &self,
+        subject_id: String,
+    ) -> Result<bool, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.is_tracker_banned(subject_id).await?)
+    }
+
+    pub async fn banned_trackers(&self) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.banned_trackers().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
+    }
+
+    pub async fn add_sync_peer(
+        &self,
+        subject_id: String,
+        peers: Vec<String>,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        if peers.is_empty() {
+            return Err(BridgeError::InvalidPublicKey(
+                "empty peers list".to_owned(),
+            ));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let mut peers_key = vec![];
+        for peer in peers {
+            peers_key.push(
+                PublicKey::from_str(&peer).map_err(|e| {
+                    BridgeError::InvalidPublicKey(e.to_string())
+                })?,
+            );
+        }
+
+        Ok(self.api.add_sync_peer(subject_id, peers_key).await?)
+    }
+
+    pub async fn remove_sync_peer(
+        &self,
+        subject_id: String,
+        peers: Vec<String>,
+    ) -> Result<String, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        if peers.is_empty() {
+            return Err(BridgeError::InvalidPublicKey(
+                "empty peers list".to_owned(),
+            ));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let mut peers_key = vec![];
+        for peer in peers {
+            peers_key.push(
+                PublicKey::from_str(&peer).map_err(|e| {
+                    BridgeError::InvalidPublicKey(e.to_string())
+                })?,
+            );
+        }
+
+        Ok(self.api.remove_sync_peer(subject_id, peers_key).await?)
+    }
+
+    pub async fn get_sync_peers(
+        &self,
+        subject_id: String,
+    ) -> Result<HashSet<String>, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
+        }
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let res = self.api.sync_peers(subject_id).await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
+    }
+
+    pub async fn subjects_with_sync_peers(
+        &self,
+    ) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.subjects_with_sync_peers().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
     }
 
     pub async fn post_update_subject(
