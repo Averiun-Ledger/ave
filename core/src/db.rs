@@ -12,8 +12,8 @@ use ave_actors::{RocksDbManager, RocksDbStore};
 
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
+use std::sync::Arc;
 
-#[derive(Clone)]
 pub enum Database {
     #[cfg(feature = "rocksdb")]
     RocksDb(RocksDbManager),
@@ -142,13 +142,40 @@ impl DbManager<DbCollection, DbCollection> for Database {
         }
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         match self {
             #[cfg(feature = "rocksdb")]
             Database::RocksDb(manager) => manager.stop(),
             #[cfg(feature = "sqlite")]
             Self::SQLite(manager) => manager.stop(),
         }
+    }
+}
+
+impl DbManager<DbCollection, DbCollection> for Arc<Database> {
+    fn create_collection(
+        &self,
+        name: &str,
+        prefix: &str,
+    ) -> Result<DbCollection, StoreError> {
+        self.as_ref().create_collection(name, prefix)
+    }
+
+    fn create_state(
+        &self,
+        name: &str,
+        prefix: &str,
+    ) -> Result<DbCollection, StoreError> {
+        self.as_ref().create_state(name, prefix)
+    }
+
+    fn stop(self) -> Result<(), StoreError>
+    where
+        Self: Sized,
+    {
+        // The real shutdown is performed on the owned `Database` after removing
+        // this helper from the actor system.
+        Ok(())
     }
 }
 
@@ -290,7 +317,7 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Gets database
-        let db = match ctx.system().get_helper::<Database>("store").await {
+        let db = match ctx.system().get_helper::<Arc<Database>>("store").await {
             Some(db) => db,
             None => {
                 return Err(ActorError::Helper {
@@ -318,7 +345,7 @@ where
         };
 
         // Start store
-        self.start_store(name, prefix.as_deref(), ctx, db, encrypt_key)
+        self.start_store(name, prefix.as_deref(), ctx, db.clone(), encrypt_key)
             .await?;
         Ok(())
     }

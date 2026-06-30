@@ -88,8 +88,10 @@ pub async fn system(
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
     // Build database manager.
-    let mut db = Database::open(&config.internal_db, actor_spec)
-        .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
+    let db = Arc::new(
+        Database::open(&config.internal_db, actor_spec)
+            .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?,
+    );
     system.add_helper("store", db.clone()).await;
 
     let pass_hash =
@@ -124,14 +126,34 @@ pub async fn system(
 
     system.add_helper("ext_db", Arc::clone(&ext_db)).await;
 
+    let system_shutdown = system.clone();
     let runner = tokio::spawn(async move {
         runner.run().await;
         if let Err(e) = ext_db.shutdown().await {
             error!(error = %e, "Failed to stop external db");
         };
-        if let Err(e) = db.stop() {
-            error!(error = %e, "Failed to stop db");
-        };
+
+        // Remove the helper so the shared Arc<Database> reference is dropped
+        // before we try to take ownership of the local one.
+        if let Some(helper) = system_shutdown
+            .remove_helper::<Arc<Database>>("store")
+            .await
+        {
+            drop(helper);
+        }
+
+        match Arc::try_unwrap(db) {
+            Ok(db) => {
+                if let Err(e) = db.stop() {
+                    error!(error = %e, "Failed to stop db");
+                }
+            }
+            Err(_) => {
+                error!(
+                    "Database still referenced at shutdown; file lock may persist"
+                );
+            }
+        }
     });
 
     Ok((system, runner))
@@ -176,7 +198,7 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_system() {
         let (system, _runner, _dirs) = create_system().await;
-        let db: Option<Database> = system.get_helper("store").await;
+        let db: Option<Arc<Database>> = system.get_helper("store").await;
         assert!(db.is_some());
         let ep: Option<EncryptedKey> = system.get_helper("encrypted_key").await;
         assert!(ep.is_some());

@@ -677,9 +677,7 @@ pub mod tests {
     fn spawn_dummy_network(
         mut receiver: mpsc::Receiver<NetworkCommandHelper<NetworkMessage>>,
     ) {
-        tokio::spawn(async move {
-            while receiver.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while receiver.recv().await.is_some() {} });
     }
 
     pub async fn create_gov() -> (
