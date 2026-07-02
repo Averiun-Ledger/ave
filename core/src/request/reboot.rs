@@ -39,12 +39,16 @@ impl Reboot {
         }
     }
 
-    fn schedule_next_check(&self, ctx: &ave_actors::ActorContext<Self>) {
+    fn schedule_next_check(
+        &self,
+        ctx: &ave_actors::ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         let interval_secs = self.stability_check_interval_secs.max(1);
         ctx.schedule_once(
             Duration::from_secs(interval_secs),
             RebootMessage::Update,
-        );
+        )?;
+        Ok(())
     }
 
     async fn finish(
@@ -151,7 +155,16 @@ impl Handler<Self> for Reboot {
                     }
                 };
 
-                self.schedule_next_check(ctx);
+                if let Err(e) = self.schedule_next_check(ctx) {
+                    error!(
+                        msg_type = "Init",
+                        request_id = %self.request_id,
+                        governance_id = %self.governance_id,
+                        error = %e,
+                        "Failed to schedule next reboot check"
+                    );
+                    return Err(e);
+                }
             }
             RebootMessage::Update => {
                 let actual_sn = self.actual_sn;
@@ -220,7 +233,16 @@ impl Handler<Self> for Reboot {
                         return Err(crash_system(ctx, e).await);
                     }
                 } else {
-                    self.schedule_next_check(ctx);
+                    if let Err(e) = self.schedule_next_check(ctx) {
+                        error!(
+                            msg_type = "Update",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            error = %e,
+                            "Failed to schedule next reboot check"
+                        );
+                        return Err(e);
+                    }
                 };
             }
         };

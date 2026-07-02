@@ -1716,7 +1716,7 @@ impl RequestManager {
                         request_id: self.id.clone(),
                         governance_id: governance_id.clone(),
                     },
-                );
+                )?;
             }
             RebootType::TimeOut => {
                 self.retry_timeout += 1;
@@ -1748,7 +1748,7 @@ impl RequestManager {
                         request_id: self.id.clone(),
                         governance_id: governance_id.clone(),
                     },
-                );
+                )?;
             }
         }
 

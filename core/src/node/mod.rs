@@ -953,7 +953,7 @@ impl Actor for Node {
                 });
             };
 
-            let mut sink = Sink::new("internal", None);
+            let mut sink = Sink::new("internal", None)?;
             sink.add("ext_db", ext_db.get_register());
             register_actor.register_sink(sink);
 

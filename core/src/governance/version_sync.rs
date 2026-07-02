@@ -87,22 +87,30 @@ impl GovernanceVersionSync {
         }
     }
 
-    fn schedule_tick(&self, ctx: &ActorContext<Self>) {
+    fn schedule_tick(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         ctx.schedule_once(
             self.tick_interval,
             GovernanceVersionSyncMessage::Tick,
-        );
+        )?;
+        Ok(())
     }
 
-    fn schedule_timeout(&mut self, ctx: &ActorContext<Self>) {
+    fn schedule_timeout(
+        &mut self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         if let Some(key) = self.pending_timeout.take() {
             ctx.cancel_timer(key);
         }
         let key = ctx.schedule_once(
             self.response_timeout,
             GovernanceVersionSyncMessage::RoundTimeout,
-        );
+        )?;
         self.pending_timeout = Some(key);
+        Ok(())
     }
 
     fn cancel_timeout(&mut self, ctx: &ActorContext<Self>) {
@@ -225,7 +233,7 @@ impl GovernanceVersionSync {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.update_target.is_some() {
-            self.schedule_tick(ctx);
+            self.schedule_tick(ctx)?;
             return Ok(());
         }
 
@@ -233,7 +241,7 @@ impl GovernanceVersionSync {
         let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
-            self.schedule_tick(ctx);
+            self.schedule_tick(ctx)?;
             return Ok(());
         }
 
@@ -282,8 +290,8 @@ impl GovernanceVersionSync {
         );
 
         // The actual network request/response path is integrated later.
-        self.schedule_timeout(ctx);
-        self.schedule_tick(ctx);
+        self.schedule_timeout(ctx)?;
+        self.schedule_tick(ctx)?;
 
         Ok(())
     }
@@ -309,7 +317,7 @@ impl Actor for GovernanceVersionSync {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.schedule_tick(ctx);
+        self.schedule_tick(ctx)?;
         Ok(())
     }
 }

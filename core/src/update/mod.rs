@@ -346,7 +346,7 @@ impl Update {
         ctx: &ActorContext<Self>,
         expected_target_sn: u64,
         attempt: usize,
-    ) {
+    ) -> Result<(), ActorError> {
         if let Some(key) = self.pending_retry.take() {
             ctx.cancel_timer(key);
         }
@@ -362,8 +362,9 @@ impl Update {
                 attempt,
                 token,
             },
-        );
+        )?;
         self.pending_retry = Some(key);
+        Ok(())
     }
 }
 
@@ -601,11 +602,18 @@ impl Handler<Self> for Update {
                                 && self.should_retry_auth_rounds()
                             {
                                 keep_running = true;
-                                self.schedule_retry(
+                                if let Err(e) = self.schedule_retry(
                                     ctx,
                                     expected_target_sn,
                                     self.retry_attempt,
-                                );
+                                ) {
+                                    error!(
+                                        msg_type = "ScheduleRetry",
+                                        subject_id = %self.subject_id,
+                                        error = %e,
+                                        "Failed to schedule update retry"
+                                    );
+                                }
                             }
                         }
 

@@ -171,41 +171,47 @@ impl TrackerSync {
         self.next_nonce
     }
 
-    fn schedule_tick(&self, ctx: &ActorContext<Self>) {
+    fn schedule_tick(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         if !self.service {
-            return;
+            return Ok(());
         }
-        ctx.schedule_once(self.tick_interval, TrackerSyncMessage::Tick);
+        ctx.schedule_once(self.tick_interval, TrackerSyncMessage::Tick)?;
+        Ok(())
     }
 
     fn schedule_fetch_timeout(
         &mut self,
         ctx: &ActorContext<Self>,
         request_nonce: u64,
-    ) {
+    ) -> Result<(), ActorError> {
         if let Some(key) = self.pending_fetch_timeout.take() {
             ctx.cancel_timer(key);
         }
         let key = ctx.schedule_once(
             self.response_timeout,
             TrackerSyncMessage::FetchTimeout { request_nonce },
-        );
+        )?;
         self.pending_fetch_timeout = Some(key);
+        Ok(())
     }
 
     fn schedule_update_timeout(
         &mut self,
         ctx: &ActorContext<Self>,
         batch_nonce: u64,
-    ) {
+    ) -> Result<(), ActorError> {
         if let Some(key) = self.pending_update_timeout.take() {
             ctx.cancel_timer(key);
         }
         let key = ctx.schedule_once(
             self.update_timeout,
             TrackerSyncMessage::UpdateTimeout { batch_nonce },
-        );
+        )?;
         self.pending_update_timeout = Some(key);
+        Ok(())
     }
 
     fn cancel_fetch_timeout(&mut self, ctx: &ActorContext<Self>) {
@@ -345,7 +351,7 @@ impl TrackerSync {
             governance_version,
             request_nonce,
         });
-        self.schedule_fetch_timeout(ctx, request_nonce);
+        self.schedule_fetch_timeout(ctx, request_nonce)?;
         Ok(())
     }
 
@@ -524,7 +530,7 @@ impl TrackerSync {
                 let batch_nonce = self.allocate_nonce();
                 state.batch_nonce = batch_nonce;
                 self.state = SyncState::Updating(state);
-                self.schedule_update_timeout(ctx, batch_nonce);
+                self.schedule_update_timeout(ctx, batch_nonce)?;
                 return Ok(());
             }
         }
@@ -573,7 +579,7 @@ impl TrackerSync {
         state.batch_nonce = batch_nonce;
         self.state = SyncState::Updating(state);
 
-        self.schedule_update_timeout(ctx, batch_nonce);
+        self.schedule_update_timeout(ctx, batch_nonce)?;
         Ok(())
     }
 
@@ -587,7 +593,7 @@ impl TrackerSync {
 
         let Some(peer) = self.select_peer(ctx).await? else {
             Self::observe_round("no_peer");
-            self.schedule_tick(ctx);
+            self.schedule_tick(ctx)?;
             return Ok(());
         };
 
@@ -655,7 +661,7 @@ impl TrackerSync {
         self.state = SyncState::Idle;
         self.cancel_fetch_timeout(ctx);
         self.cancel_update_timeout(ctx);
-        self.schedule_tick(ctx);
+        self.schedule_tick(ctx)?;
         Ok(())
     }
 }
@@ -680,7 +686,7 @@ impl Actor for TrackerSync {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.schedule_tick(ctx);
+        self.schedule_tick(ctx)?;
         Ok(())
     }
 }

@@ -239,7 +239,7 @@ impl Actor for SinkWorker {
         ctx.schedule_once(
             Duration::from_secs(startup_delay),
             SinkWorkerMessage::HealthCheck,
-        );
+        )?;
         Ok(())
     }
 }
@@ -810,11 +810,22 @@ impl SinkWorker {
         if let Some(key) = self.pending_healthcheck.take() {
             ctx.cancel_timer(key);
         }
-        let key = ctx.schedule_once(
+        match ctx.schedule_once(
             Duration::from_secs(delay_secs),
             SinkWorkerMessage::HealthCheck,
-        );
-        self.pending_healthcheck = Some(key);
+        ) {
+            Ok(key) => {
+                self.pending_healthcheck = Some(key);
+            }
+            Err(e) => {
+                error!(
+                    msg_type = "ScheduleHealthcheck",
+                    sink = %self.sink_name,
+                    error = %e,
+                    "Failed to schedule healthcheck"
+                );
+            }
+        }
     }
 
     fn schedule_child_shutdown(
@@ -826,13 +837,25 @@ impl SinkWorker {
         if let Some(key) = self.pending_child_shutdowns.remove(&subject_id) {
             ctx.cancel_timer(key);
         }
-        let key = ctx.schedule_once(
+        match ctx.schedule_once(
             Duration::from_millis(timeout_ms),
             SinkWorkerMessage::ChildShutdown {
                 subject_id: subject_id.clone(),
             },
-        );
-        self.pending_child_shutdowns.insert(subject_id, key);
+        ) {
+            Ok(key) => {
+                self.pending_child_shutdowns.insert(subject_id, key);
+            }
+            Err(e) => {
+                error!(
+                    msg_type = "ScheduleChildShutdown",
+                    sink = %self.sink_name,
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Failed to schedule child shutdown"
+                );
+            }
+        }
     }
 
     fn cancel_child_shutdown(
