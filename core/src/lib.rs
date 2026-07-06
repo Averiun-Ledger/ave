@@ -370,7 +370,7 @@ impl Api {
 
         worker.add_helper_sender(service.sender());
 
-        system.add_helper("network", service.clone()).await;
+        system.add_helper("network", service.clone());
 
         let public_key = Arc::new(keys.public_key());
         let node_actor = system
@@ -460,7 +460,7 @@ impl Api {
             )
         };
 
-        let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db").await
+        let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db")
         else {
             error!("External database helper not found");
             return Err(Error::MissingResource {
@@ -1276,7 +1276,6 @@ impl Api {
         let config_helper = self
             .system
             .get_helper::<system::ConfigHelper>("config")
-            .await
             .ok_or_else(|| {
                 Error::Internal("ConfigHelper not available".to_string())
             })?;

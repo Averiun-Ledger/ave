@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
-    NotPersistentActor, PersistentActor, Response, Sink,
+    NotPersistentActor, PersistentActor, Response,
 };
 use ave_common::identity::{DigestIdentifier, HashAlgorithm, PublicKey};
 use serde::{Deserialize, Serialize};
@@ -97,7 +97,6 @@ impl SubjectManager {
         let safe_mode = if let Some(config) = ctx
             .system()
             .get_helper::<crate::system::ConfigHelper>("config")
-            .await
         {
             config.safe_mode
         } else {
@@ -122,16 +121,15 @@ impl SubjectManager {
 
             if !safe_mode {
                 let Some(ext_db): Option<Arc<ExternalDB>> =
-                    ctx.system().get_helper("ext_db").await
+                    ctx.system().get_helper("ext_db")
                 else {
                     return Err(ActorError::Helper {
                         name: "ext_db".to_owned(),
                         reason: "Not found".to_owned(),
                     });
                 };
-                let mut sink = Sink::new("internal", None)?;
+                let mut sink = actor.register_sink("internal", None)?;
                 sink.add("ext_db", ext_db.get_sink_data());
-                actor.register_sink(sink);
             }
         }
 
@@ -597,7 +595,6 @@ impl SubjectManager {
         let safe_mode = if let Some(config) = ctx
             .system()
             .get_helper::<crate::system::ConfigHelper>("config")
-            .await
         {
             config.safe_mode
         } else {
@@ -612,7 +609,7 @@ impl SubjectManager {
         }
 
         let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
+            ctx.system().get_helper("ext_db")
         else {
             return Err(ActorError::Helper {
                 name: "ext_db".to_owned(),
@@ -620,9 +617,8 @@ impl SubjectManager {
             });
         };
 
-        let mut sink = Sink::new("internal", None)?;
+        let mut sink = actor.register_sink("internal", None)?;
         sink.add("ext_db", ext_db.get_sink_data());
-        actor.register_sink(sink);
         Ok(())
     }
 
@@ -634,7 +630,6 @@ impl SubjectManager {
         let safe_mode = if let Some(config) = ctx
             .system()
             .get_helper::<crate::system::ConfigHelper>("config")
-            .await
         {
             config.safe_mode
         } else {
@@ -649,7 +644,7 @@ impl SubjectManager {
         }
 
         let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
+            ctx.system().get_helper("ext_db")
         else {
             return Err(ActorError::Helper {
                 name: "ext_db".to_owned(),
@@ -657,9 +652,8 @@ impl SubjectManager {
             });
         };
 
-        let mut sink = Sink::new("internal", None)?;
+        let mut sink = actor.register_sink("internal", None)?;
         sink.add("ext_db", ext_db.get_sink_data());
-        actor.register_sink(sink);
         Ok(())
     }
 

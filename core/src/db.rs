@@ -317,7 +317,7 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Gets database
-        let db = match ctx.system().get_helper::<Arc<Database>>("store").await {
+        let db = match ctx.system().get_helper::<Arc<Database>>("store") {
             Some(db) => db,
             None => {
                 return Err(ActorError::Helper {
@@ -331,7 +331,6 @@ where
             if let Some(encrypt_key) = ctx
                 .system()
                 .get_helper::<EncryptedKey>("encrypted_key")
-                .await
             {
                 Some(encrypt_key)
             } else {

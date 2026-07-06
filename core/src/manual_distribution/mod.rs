@@ -397,7 +397,6 @@ impl Handler<Self> for ManualDistribution {
                 let Some(network) = ctx
                     .system()
                     .get_helper::<Arc<NetworkSender>>("network")
-                    .await
                 else {
                     error!(
                         msg_type = "Update",

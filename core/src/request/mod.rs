@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response, Sink,
+    Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
@@ -1035,7 +1035,7 @@ impl Actor for RequestHandler {
         }
 
         let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         else {
             error!(
                 helper = "config",
@@ -1049,7 +1049,7 @@ impl Actor for RequestHandler {
 
         if !config.safe_mode {
             let Some(ext_db): Option<Arc<ExternalDB>> =
-                ctx.system().get_helper("ext_db").await
+                ctx.system().get_helper("ext_db")
             else {
                 error!("External database helper not found");
                 return Err(ActorError::Helper {
@@ -1075,9 +1075,8 @@ impl Actor for RequestHandler {
                 }
             };
 
-            let mut sink = Sink::new("internal", None)?;
+            let mut sink = tracking.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_request_tracking());
-            tracking.register_sink(sink);
         }
 
         let Some((hash, network)) = self.helpers.clone() else {

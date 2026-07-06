@@ -318,7 +318,6 @@ impl Subject for Governance {
         let Some(network) = ctx
             .system()
             .get_helper::<Arc<NetworkSender>>("network")
-            .await
         else {
             return Err(ActorError::Helper {
                 name: "network".to_owned(),
@@ -568,7 +567,7 @@ impl Governance {
         ctx: &ActorContext<Self>,
     ) -> Result<usize, ActorError> {
         let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -593,7 +592,7 @@ impl Governance {
         }
 
         let always_accept = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.always_accept
         } else {
@@ -886,7 +885,6 @@ impl Governance {
         let Some(network) = ctx
             .system()
             .get_helper::<Arc<NetworkSender>>("network")
-            .await
         else {
             return Err(ActorError::Helper {
                 name: "network".to_owned(),
@@ -1106,7 +1104,7 @@ impl Governance {
         schemas: &BTreeMap<SchemaType, Schema>,
     ) -> Result<(), ActorError> {
         let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1119,7 +1117,6 @@ impl Governance {
             .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
                 "contracts",
             )
-            .await
         else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
@@ -1215,7 +1212,7 @@ impl Governance {
         contract_register: &ActorRef<ContractRegister>,
     ) -> Result<(), ActorError> {
         let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1228,7 +1225,6 @@ impl Governance {
             .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
                 "contracts",
             )
-            .await
         else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
@@ -1458,7 +1454,7 @@ impl Governance {
             role: RoleTypes::Approver,
         }) {
             let always_accept = if let Some(config) =
-                ctx.system().get_helper::<ConfigHelper>("config").await
+                ctx.system().get_helper::<ConfigHelper>("config")
             {
                 config.always_accept
             } else {
@@ -1606,7 +1602,7 @@ impl Governance {
             }
             (false, true) => {
                 let always_accept = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await
+                    ctx.system().get_helper::<ConfigHelper>("config")
                 {
                     config.always_accept
                 } else {
@@ -1684,7 +1680,7 @@ impl Governance {
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
         let always_accept = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.always_accept
         } else {
@@ -1727,7 +1723,7 @@ impl Governance {
         hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.contracts_path
         } else {
@@ -1780,7 +1776,7 @@ impl Governance {
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1793,7 +1789,6 @@ impl Governance {
             .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
                 "contracts",
             )
-            .await
         else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
@@ -1840,7 +1835,7 @@ impl Governance {
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.contracts_path
         } else {
@@ -2780,7 +2775,6 @@ impl Governance {
             let network = ctx
                 .system()
                 .get_helper::<Arc<NetworkSender>>("network")
-                .await
                 .map_or_else(
                     || {
                         cleanup_errors.push(
@@ -3246,7 +3240,6 @@ impl Actor for Governance {
         let tracker_sinks = if let Some(config_helper) = ctx
             .system()
             .get_helper::<crate::system::ConfigHelper>("config")
-            .await
         {
             let schema_ids: Vec<String> = self
                 .properties
@@ -3287,7 +3280,7 @@ impl Actor for Governance {
         }
 
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -3308,7 +3301,6 @@ impl Actor for Governance {
             let Some(network) = ctx
                 .system()
                 .get_helper::<Arc<NetworkSender>>("network")
-                .await
             else {
                 error!("Network helper not found");
                 return Err(ActorError::Helper {
@@ -3331,7 +3323,6 @@ impl Actor for Governance {
         let Some(network) = ctx
             .system()
             .get_helper::<Arc<NetworkSender>>("network")
-            .await
         else {
             error!("Network helper not found");
             return Err(ActorError::Helper {
@@ -3424,7 +3415,7 @@ impl Actor for Governance {
 
         if self.service {
             let Some(config): Option<ConfigHelper> =
-                ctx.system().get_helper("config").await
+                ctx.system().get_helper("config")
             else {
                 error!("Config helper not found");
                 return Err(ActorError::Helper {

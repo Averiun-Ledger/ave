@@ -1356,7 +1356,7 @@ impl RequestManager {
         governance_id: &DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
         let Some(config): Option<ConfigHelper> =
-            ctx.system().get_helper("config").await
+            ctx.system().get_helper("config")
         else {
             return Err(RequestManagerError::ActorError(ActorError::Helper {
                 name: "config".to_owned(),
@@ -1467,7 +1467,7 @@ impl RequestManager {
                 .await?;
         } else {
             let Some(config): Option<ConfigHelper> =
-                ctx.system().get_helper("config").await
+                ctx.system().get_helper("config")
             else {
                 return Ok(());
             };
@@ -1647,7 +1647,7 @@ impl RequestManager {
         governance_id: DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
         let Some(config): Option<ConfigHelper> =
-            ctx.system().get_helper("config").await
+            ctx.system().get_helper("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_owned(),

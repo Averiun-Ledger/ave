@@ -398,7 +398,6 @@ impl Runner {
         let Some(wasm_runtime) = ctx
             .system()
             .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
-            .await
         else {
             return Err(RunnerError::MissingHelper {
                 name: "wasm_runtime",
@@ -410,7 +409,6 @@ impl Runner {
             .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
                 "contracts",
             )
-            .await
         else {
             return Err(RunnerError::MissingHelper { name: "contracts" });
         };

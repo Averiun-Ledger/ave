@@ -665,7 +665,6 @@ impl CompilerSupport {
     ) -> Result<Arc<WasmRuntime>, CompilerError> {
         ctx.system()
             .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
-            .await
             .ok_or(CompilerError::MissingHelper {
                 name: "wasm_runtime",
             })
@@ -678,7 +677,6 @@ impl CompilerSupport {
             .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
                 "contracts",
             )
-            .await
             .ok_or_else(|| ActorError::Helper {
                 name: "contracts".to_owned(),
                 reason: "Not found".to_owned(),

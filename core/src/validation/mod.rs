@@ -697,7 +697,7 @@ pub mod tests {
         spawn_dummy_network(command_receiver);
         let network = Arc::new(NetworkSender::new(command_sender));
 
-        system.add_helper("network", network.clone()).await;
+        system.add_helper("network", network.clone());
 
         let public_key = Arc::new(node_keys.public_key());
         let node_actor = system
@@ -728,7 +728,6 @@ pub mod tests {
 
         let ext_db = system
             .get_helper::<Arc<ExternalDB>>("ext_db")
-            .await
             .unwrap();
 
         let create_req = EventRequest::Create(CreateRequest {

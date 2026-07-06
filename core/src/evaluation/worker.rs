@@ -95,7 +95,7 @@ impl EvalWorker {
         schemas: BTreeMap<SchemaType, Schema>,
     ) -> Result<Option<CompilerError>, ActorError> {
         let contracts_path = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.contracts_path
         } else {

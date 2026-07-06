@@ -51,7 +51,7 @@ use ave_common::{
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
-    Message, Response, Sink,
+    Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
@@ -340,7 +340,7 @@ impl Node {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.contracts_path
         } else {
@@ -872,7 +872,7 @@ impl Actor for Node {
 
         // Create SinkRegistry and populate it from current config.
         let Some(config_helper) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         else {
             error!("Config helper not found");
             return Err(ActorError::Helper {
@@ -924,7 +924,7 @@ impl Actor for Node {
         let config = config_helper;
         let safe_mode = config.safe_mode;
         let Some(network): Option<Arc<NetworkSender>> =
-            ctx.system().get_helper("network").await
+            ctx.system().get_helper("network")
         else {
             error!("Network helper not found");
             return Err(ActorError::Helper {
@@ -944,7 +944,7 @@ impl Actor for Node {
                 };
 
             let Some(ext_db): Option<Arc<ExternalDB>> =
-                ctx.system().get_helper("ext_db").await
+                ctx.system().get_helper("ext_db")
             else {
                 error!("External DB helper not found");
                 return Err(ActorError::Helper {
@@ -953,9 +953,8 @@ impl Actor for Node {
                 });
             };
 
-            let mut sink = Sink::new("internal", None)?;
+            let mut sink = register_actor.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_register());
-            register_actor.register_sink(sink);
 
             if let Err(e) = ctx
                 .create_child(
@@ -1116,7 +1115,7 @@ impl Handler<Self> for Node {
                 data,
             } => {
                 let Some(network): Option<Arc<NetworkSender>> =
-                    ctx.system().get_helper("network").await
+                    ctx.system().get_helper("network")
                 else {
                     error!(
                         msg_type = "RegisterSubject",

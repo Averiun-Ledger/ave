@@ -556,7 +556,7 @@ impl Actor for SinkManager {
         // Workers are ephemeral and would be idle anyway because no new events
         // are processed, so we skip creating them.
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -954,7 +954,7 @@ impl SinkManager {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -1367,7 +1367,7 @@ impl SinkManager {
     ) -> Result<SinkReplayResponse, ActorError> {
         // Defensive check: replay is a manual mutation and must not run in safe mode.
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -1714,7 +1714,7 @@ impl SinkManager {
         // while the node is running in safe mode. In safe mode there are no
         // workers running, so we only need to clean persisted/transient state.
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {

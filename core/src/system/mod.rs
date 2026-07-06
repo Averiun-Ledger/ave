@@ -71,19 +71,17 @@ pub async fn system(
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
-    system.add_helper("config", config_helper).await;
+    system.add_helper("config", config_helper);
 
     // Build engine + limits together; actors fetch both via a single helper access.
     let wasm_runtime = WasmRuntime::new(config.spec.clone())
         .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
     system
-        .add_helper("wasm_runtime", Arc::new(wasm_runtime))
-        .await;
+        .add_helper("wasm_runtime", Arc::new(wasm_runtime));
 
     let contracts: HashMap<String, Arc<Module>> = HashMap::new();
     system
-        .add_helper("contracts", Arc::new(RwLock::new(contracts)))
-        .await;
+        .add_helper("contracts", Arc::new(RwLock::new(contracts)));
 
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
@@ -92,7 +90,7 @@ pub async fn system(
         Database::open(&config.internal_db, actor_spec)
             .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?,
     );
-    system.add_helper("store", db.clone()).await;
+    system.add_helper("store", db.clone());
 
     let pass_hash =
         hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string())
@@ -106,7 +104,7 @@ pub async fn system(
     let encrypted_key = EncryptedKey::new(&array_hash)
         .map_err(|e| SystemError::EncryptedKeyCreation(e.to_string()))?;
 
-    system.add_helper("encrypted_key", encrypted_key).await;
+    system.add_helper("encrypted_key", encrypted_key);
 
     let db_manager_actor = system
         .create_root_actor("db_manager", DBManager)
@@ -124,7 +122,7 @@ pub async fn system(
         .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
     );
 
-    system.add_helper("ext_db", Arc::clone(&ext_db)).await;
+    system.add_helper("ext_db", Arc::clone(&ext_db));
 
     let system_shutdown = system.clone();
     let runner = tokio::spawn(async move {
@@ -137,7 +135,6 @@ pub async fn system(
         // before we try to take ownership of the local one.
         if let Some(helper) = system_shutdown
             .remove_helper::<Arc<Database>>("store")
-            .await
         {
             drop(helper);
         }
@@ -198,11 +195,11 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_system() {
         let (system, _runner, _dirs) = create_system().await;
-        let db: Option<Arc<Database>> = system.get_helper("store").await;
+        let db: Option<Arc<Database>> = system.get_helper("store");
         assert!(db.is_some());
-        let ep: Option<EncryptedKey> = system.get_helper("encrypted_key").await;
+        let ep: Option<EncryptedKey> = system.get_helper("encrypted_key");
         assert!(ep.is_some());
-        let any: Option<Dummy> = system.get_helper("dummy").await;
+        let any: Option<Dummy> = system.get_helper("dummy");
         assert!(any.is_none());
     }
 

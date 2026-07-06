@@ -220,7 +220,7 @@ impl Update {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let children = ctx.system().children(ctx.path()).await;
+        let children = ctx.system().children(ctx.path());
         for child_path in children {
             let Ok(child) =
                 ctx.system().get_actor::<Updater>(&child_path).await
