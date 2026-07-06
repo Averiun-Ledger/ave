@@ -315,9 +315,8 @@ impl Subject for Governance {
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
     ) -> Result<(), ActorError> {
-        let Some(network) = ctx
-            .system()
-            .get_helper::<Arc<NetworkSender>>("network")
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
         else {
             return Err(ActorError::Helper {
                 name: "network".to_owned(),
@@ -566,8 +565,7 @@ impl Governance {
     async fn ledger_batch_size(
         ctx: &ActorContext<Self>,
     ) -> Result<usize, ActorError> {
-        let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -882,9 +880,8 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
         old_gov: &GovernanceData,
     ) -> Result<(), ActorError> {
-        let Some(network) = ctx
-            .system()
-            .get_helper::<Arc<NetworkSender>>("network")
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
         else {
             return Err(ActorError::Helper {
                 name: "network".to_owned(),
@@ -1103,8 +1100,7 @@ impl Governance {
         ctx: &ActorContext<Self>,
         schemas: &BTreeMap<SchemaType, Schema>,
     ) -> Result<(), ActorError> {
-        let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1112,12 +1108,9 @@ impl Governance {
             });
         };
 
-        let Some(contracts) = ctx
-            .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
-                "contracts",
-            )
-        else {
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<Module>>>,
+        >>("contracts") else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
                 reason: "Not Found".to_string(),
@@ -1211,8 +1204,7 @@ impl Governance {
         ctx: &ActorContext<Self>,
         contract_register: &ActorRef<ContractRegister>,
     ) -> Result<(), ActorError> {
-        let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1220,12 +1212,9 @@ impl Governance {
             });
         };
 
-        let Some(contracts) = ctx
-            .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
-                "contracts",
-            )
-        else {
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<Module>>>,
+        >>("contracts") else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
                 reason: "Not Found".to_string(),
@@ -1775,8 +1764,7 @@ impl Governance {
         schemas: &BTreeSet<SchemaType>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1784,12 +1772,9 @@ impl Governance {
             });
         };
 
-        let Some(contracts) = ctx
-            .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
-                "contracts",
-            )
-        else {
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<Module>>>,
+        >>("contracts") else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
                 reason: "Not Found".to_string(),
@@ -3237,9 +3222,9 @@ impl Actor for Governance {
         }
 
         // Create SinkManager for tracker events of this governance.
-        let tracker_sinks = if let Some(config_helper) = ctx
-            .system()
-            .get_helper::<crate::system::ConfigHelper>("config")
+        let tracker_sinks = if let Some(config_helper) =
+            ctx.system()
+                .get_helper::<crate::system::ConfigHelper>("config")
         {
             let schema_ids: Vec<String> = self
                 .properties
@@ -3298,9 +3283,8 @@ impl Actor for Governance {
                 });
             };
 
-            let Some(network) = ctx
-                .system()
-                .get_helper::<Arc<NetworkSender>>("network")
+            let Some(network) =
+                ctx.system().get_helper::<Arc<NetworkSender>>("network")
             else {
                 error!("Network helper not found");
                 return Err(ActorError::Helper {
@@ -3320,9 +3304,8 @@ impl Actor for Governance {
             });
         };
 
-        let Some(network) = ctx
-            .system()
-            .get_helper::<Arc<NetworkSender>>("network")
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
         else {
             error!("Network helper not found");
             return Err(ActorError::Helper {

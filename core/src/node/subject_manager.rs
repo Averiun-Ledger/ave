@@ -94,9 +94,9 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         governance_ids: Vec<DigestIdentifier>,
     ) -> Result<(), ActorError> {
-        let safe_mode = if let Some(config) = ctx
-            .system()
-            .get_helper::<crate::system::ConfigHelper>("config")
+        let safe_mode = if let Some(config) =
+            ctx.system()
+                .get_helper::<crate::system::ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -592,9 +592,9 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Tracker>,
     ) -> Result<(), ActorError> {
-        let safe_mode = if let Some(config) = ctx
-            .system()
-            .get_helper::<crate::system::ConfigHelper>("config")
+        let safe_mode = if let Some(config) =
+            ctx.system()
+                .get_helper::<crate::system::ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -627,9 +627,9 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Governance>,
     ) -> Result<(), ActorError> {
-        let safe_mode = if let Some(config) = ctx
-            .system()
-            .get_helper::<crate::system::ConfigHelper>("config")
+        let safe_mode = if let Some(config) =
+            ctx.system()
+                .get_helper::<crate::system::ConfigHelper>("config")
         {
             config.safe_mode
         } else {

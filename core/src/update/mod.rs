@@ -499,6 +499,9 @@ impl Handler<Self> for Update {
                 }
 
                 if attempt >= self.max_round_retries {
+                    if let Some(metrics) = crate::metrics::try_core_metrics() {
+                        metrics.observe_update_retries_exceeded();
+                    }
                     warn!(
                         msg_type = "RetryRound",
                         subject_id = %self.subject_id,

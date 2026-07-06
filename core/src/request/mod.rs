@@ -1034,8 +1034,7 @@ impl Actor for RequestHandler {
             return Err(e);
         }
 
-        let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             error!(
                 helper = "config",

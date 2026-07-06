@@ -328,9 +328,8 @@ where
         };
         // Encrypted store?
         let encrypt_key = if encrypt {
-            if let Some(encrypt_key) = ctx
-                .system()
-                .get_helper::<EncryptedKey>("encrypted_key")
+            if let Some(encrypt_key) =
+                ctx.system().get_helper::<EncryptedKey>("encrypted_key")
             {
                 Some(encrypt_key)
             } else {

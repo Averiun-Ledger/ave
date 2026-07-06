@@ -394,9 +394,8 @@ impl Handler<Self> for ManualDistribution {
 
                 let witnesses_count = recipients.len();
 
-                let Some(network) = ctx
-                    .system()
-                    .get_helper::<Arc<NetworkSender>>("network")
+                let Some(network) =
+                    ctx.system().get_helper::<Arc<NetworkSender>>("network")
                 else {
                     error!(
                         msg_type = "Update",

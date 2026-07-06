@@ -21,6 +21,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 use wasmtime::Module;
 
+#[cfg(feature = "prometheus")]
+use prometheus_client::registry::Registry;
+
 pub mod error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,10 +68,16 @@ pub async fn system(
     password: &str,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
+    #[cfg(feature = "prometheus")] registry: Option<&mut Registry>,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
-    let (system, mut runner) =
+    let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
+
+    #[cfg(feature = "prometheus")]
+    if let Some(registry) = registry {
+        ave_actors::prometheus::register(registry, &mut system);
+    }
 
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
     system.add_helper("config", config_helper);
@@ -76,12 +85,10 @@ pub async fn system(
     // Build engine + limits together; actors fetch both via a single helper access.
     let wasm_runtime = WasmRuntime::new(config.spec.clone())
         .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
-    system
-        .add_helper("wasm_runtime", Arc::new(wasm_runtime));
+    system.add_helper("wasm_runtime", Arc::new(wasm_runtime));
 
     let contracts: HashMap<String, Arc<Module>> = HashMap::new();
-    system
-        .add_helper("contracts", Arc::new(RwLock::new(contracts)));
+    system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
 
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
@@ -133,8 +140,8 @@ pub async fn system(
 
         // Remove the helper so the shared Arc<Database> reference is dropped
         // before we try to take ownership of the local one.
-        if let Some(helper) = system_shutdown
-            .remove_helper::<Arc<Database>>("store")
+        if let Some(helper) =
+            system_shutdown.remove_helper::<Arc<Database>>("store")
         {
             drop(helper);
         }
@@ -264,12 +271,17 @@ pub mod tests {
             spec: None,
         };
 
+        #[cfg(feature = "prometheus")]
+        let mut registry = Registry::default();
+
         let (sys, handlers) = system(
             config.clone(),
             Vec::new(),
             "password",
             CancellationToken::new(),
             CancellationToken::new(),
+            #[cfg(feature = "prometheus")]
+            Some(&mut registry),
         )
         .await
         .unwrap();

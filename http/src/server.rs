@@ -33,6 +33,7 @@ use ave_bridge::{
     },
     http::ProxyConfig,
 };
+use ave_core::metrics::try_core_metrics;
 use axum::{
     Extension, Json, Router,
     body::Body,
@@ -96,6 +97,19 @@ async fn public_auth_safe_mode_layer(
     }
 
     next.run(req).await
+}
+
+async fn server_error_metrics_layer(
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    let response = next.run(req).await;
+    if response.status().is_server_error() {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_http_server_error();
+        }
+    }
+    response
 }
 
 ///////// General
@@ -1668,7 +1682,7 @@ pub fn build_routes(
             app = app.merge(doc_routes);
         }
 
-        app
+        app.layer(middleware::from_fn(server_error_metrics_layer))
     } else {
         let app = main_routes;
         #[cfg(feature = "prometheus")]
@@ -1677,7 +1691,7 @@ pub fn build_routes(
         if let Some(doc_routes) = doc_routes {
             app = app.merge(doc_routes);
         }
-        app
+        app.layer(middleware::from_fn(server_error_metrics_layer))
     }
 }
 

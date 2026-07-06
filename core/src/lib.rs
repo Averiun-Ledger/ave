@@ -318,6 +318,8 @@ impl Api {
             password,
             graceful_token.clone(),
             crash_token.clone(),
+            #[cfg(feature = "prometheus")]
+            Some(registry),
         )
         .await
         .map_err(|e| {

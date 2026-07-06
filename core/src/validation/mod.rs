@@ -726,9 +726,7 @@ pub mod tests {
             .await
             .unwrap();
 
-        let ext_db = system
-            .get_helper::<Arc<ExternalDB>>("ext_db")
-            .unwrap();
+        let ext_db = system.get_helper::<Arc<ExternalDB>>("ext_db").unwrap();
 
         let create_req = EventRequest::Create(CreateRequest {
             name: Some("Name".to_string()),

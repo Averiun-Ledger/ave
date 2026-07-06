@@ -63,6 +63,21 @@ struct SinkResultLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct DistributionFailureLabels {
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct DistributionDurationLabels {
+    kind: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct GovernanceVersionSyncFailureLabels {
+    reason: &'static str,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
@@ -91,6 +106,15 @@ pub struct CoreMetrics {
         Family<SinkResultLabels, Histogram, fn() -> Histogram>,
     sink_blocked: Family<SinkNameLabels, Gauge>,
     sink_lagging_subjects: Family<SinkNameLabels, Gauge>,
+    distribution_failures: Family<DistributionFailureLabels, Counter>,
+    distribution_duration_seconds:
+        Family<DistributionDurationLabels, Histogram, fn() -> Histogram>,
+    update_retries_exceeded: Counter,
+    reboot_max_retries_reached: Counter,
+    external_db_critical_errors: Counter,
+    governance_version_sync_failures:
+        Family<GovernanceVersionSyncFailureLabels, Counter>,
+    http_server_errors: Counter,
 }
 
 static CORE_METRICS: OnceLock<Arc<CoreMetrics>> = OnceLock::new();
@@ -166,6 +190,18 @@ impl CoreMetrics {
             }),
             sink_blocked: Family::default(),
             sink_lagging_subjects: Family::default(),
+            distribution_failures: Family::default(),
+            distribution_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
+                    60.0, 120.0, 300.0,
+                ])
+            }),
+            update_retries_exceeded: Counter::default(),
+            reboot_max_retries_reached: Counter::default(),
+            external_db_critical_errors: Counter::default(),
+            governance_version_sync_failures: Family::default(),
+            http_server_errors: Counter::default(),
         }
     }
 
@@ -264,6 +300,41 @@ impl CoreMetrics {
             "core_sink_lagging_subjects",
             "Number of subjects currently lagging behind for a sink.",
             self.sink_lagging_subjects.clone(),
+        );
+        registry.register(
+            "core_distribution_failures_total",
+            "Total distribution failures by reason.",
+            self.distribution_failures.clone(),
+        );
+        registry.register(
+            "core_distribution_duration_seconds",
+            "Distribution duration in seconds.",
+            self.distribution_duration_seconds.clone(),
+        );
+        registry.register(
+            "core_update_retries_exceeded_total",
+            "Total update processes that exceeded the retry threshold.",
+            self.update_retries_exceeded.clone(),
+        );
+        registry.register(
+            "core_reboot_max_retries_reached_total",
+            "Total reboot processes that reached the maximum stability checks.",
+            self.reboot_max_retries_reached.clone(),
+        );
+        registry.register(
+            "core_external_db_critical_errors_total",
+            "Total critical external database errors reported to DBManager.",
+            self.external_db_critical_errors.clone(),
+        );
+        registry.register(
+            "core_governance_version_sync_failures_total",
+            "Total governance version sync failures by reason.",
+            self.governance_version_sync_failures.clone(),
+        );
+        registry.register(
+            "core_http_server_errors_total",
+            "Total HTTP 5xx server errors.",
+            self.http_server_errors.clone(),
         );
     }
 
@@ -436,6 +507,47 @@ impl CoreMetrics {
                 sink: sink.to_owned(),
             })
             .set(count);
+    }
+
+    pub fn observe_distribution_failure(&self, reason: &'static str) {
+        self.distribution_failures
+            .get_or_create(&DistributionFailureLabels { reason })
+            .inc();
+    }
+
+    pub fn observe_distribution_duration(
+        &self,
+        kind: &'static str,
+        duration: Duration,
+    ) {
+        self.distribution_duration_seconds
+            .get_or_create(&DistributionDurationLabels { kind })
+            .observe(Self::seconds(duration));
+    }
+
+    pub fn observe_update_retries_exceeded(&self) {
+        self.update_retries_exceeded.inc();
+    }
+
+    pub fn observe_reboot_max_retries_reached(&self) {
+        self.reboot_max_retries_reached.inc();
+    }
+
+    pub fn observe_external_db_critical_error(&self) {
+        self.external_db_critical_errors.inc();
+    }
+
+    pub fn observe_governance_version_sync_failure(
+        &self,
+        reason: &'static str,
+    ) {
+        self.governance_version_sync_failures
+            .get_or_create(&GovernanceVersionSyncFailureLabels { reason })
+            .inc();
+    }
+
+    pub fn observe_http_server_error(&self) {
+        self.http_server_errors.inc();
     }
 }
 

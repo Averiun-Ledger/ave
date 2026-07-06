@@ -395,21 +395,17 @@ impl Runner {
         contract_name: &str,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
-        let Some(wasm_runtime) = ctx
-            .system()
-            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
+        let Some(wasm_runtime) =
+            ctx.system().get_helper::<Arc<WasmRuntime>>("wasm_runtime")
         else {
             return Err(RunnerError::MissingHelper {
                 name: "wasm_runtime",
             });
         };
 
-        let Some(contracts) = ctx
-            .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
-                "contracts",
-            )
-        else {
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<Module>>>,
+        >>("contracts") else {
             return Err(RunnerError::MissingHelper { name: "contracts" });
         };
 

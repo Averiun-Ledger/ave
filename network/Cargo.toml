@@ -45,7 +45,7 @@ bytes = { workspace = true }
 fastrand = { workspace = true }
 
 [dev-dependencies]
-test-log = { workspace = true } 
+test-log = { workspace = true }
 libp2p = { workspace = true, default-features = false, features = [
 	"plaintext"
 ] }
@@ -54,7 +54,7 @@ serial_test = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
-test =[]
+test = []
 
 [lib]
 bench = false
