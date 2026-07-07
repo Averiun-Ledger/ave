@@ -2,6 +2,7 @@
 pub mod config;
 pub mod error;
 
+pub(crate) mod api_input_validation;
 pub mod approval;
 pub mod auth;
 pub mod db;
@@ -23,7 +24,6 @@ pub mod update;
 pub mod validation;
 
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use auth::{
@@ -70,6 +70,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use validation::{Validation, ValidationMessage};
 
+use crate::api_input_validation::{
+    parse_request_id, require_non_empty_str, require_positive_u64,
+    validate_aborts_query, validate_event_request, validate_events_query,
+    validate_governance_id, validate_request_id, validate_sink_events_query,
+    validate_sink_replay_request, validate_sinks_query, validate_subject_id,
+};
 use crate::approval::request::ApprovalReq;
 use crate::helpers::db::{
     DatabaseError as ExternalDatabaseError, ExternalDB, ReadStore,
@@ -568,6 +574,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<RequestsInManagerSubject, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .request
             .ask(RequestHandlerMessage::RequestInManagerSubjectId {
@@ -599,6 +606,7 @@ impl Api {
         request: Signed<EventRequest>,
     ) -> Result<RequestData, Error> {
         self.ensure_mutations_allowed()?;
+        validate_event_request(request.content())?;
         let response = self
             .request
             .ask(RequestHandlerMessage::NewRequest { request })
@@ -626,6 +634,7 @@ impl Api {
         request: EventRequest,
     ) -> Result<RequestData, Error> {
         self.ensure_mutations_allowed()?;
+        validate_event_request(&request)?;
         let response = self
             .node
             .ask(NodeMessage::SignRequest(Box::new(
@@ -682,6 +691,7 @@ impl Api {
         subject_id: DigestIdentifier,
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .request
             .ask(RequestHandlerMessage::GetApproval { state, subject_id })
@@ -736,6 +746,7 @@ impl Api {
         state: ApprovalStateRes,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         if state == ApprovalStateRes::Obsolete {
             warn!("Cannot set approval state to Obsolete");
             return Err(Error::InvalidApprovalState("Obsolete".to_string()));
@@ -773,6 +784,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.request
             .tell(RequestHandlerMessage::AbortRequest { subject_id })
             .await
@@ -790,6 +802,7 @@ impl Api {
         &self,
         request_id: DigestIdentifier,
     ) -> Result<RequestInfo, Error> {
+        validate_request_id(&request_id)?;
         let Some(tracking) = &self.tracking else {
             return Err(Error::SafeMode(
                 "request tracking is unavailable while node is running in safe mode"
@@ -885,6 +898,7 @@ impl Api {
         witnesses: AuthWitness,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::AuthorizeGov {
                 subject_id,
@@ -906,6 +920,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::DisauthorizeGov { subject_id })
             .await
@@ -948,6 +963,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<bool, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::IsGovAuthorized { subject_id })
@@ -975,6 +991,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::BanTracker { subject_id })
             .await
@@ -993,6 +1010,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::UnbanTracker { subject_id })
             .await
@@ -1035,6 +1053,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<bool, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::IsTrackerBanned { subject_id })
@@ -1063,6 +1082,12 @@ impl Api {
         peers: Vec<PublicKey>,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
+        if peers.is_empty() {
+            return Err(Error::InvalidQueryParams(
+                "peers must not be empty".to_owned(),
+            ));
+        }
         self.subject_access
             .tell(SubjectAccessMessage::AddSyncPeers { subject_id, peers })
             .await
@@ -1082,6 +1107,12 @@ impl Api {
         peers: Vec<PublicKey>,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
+        if peers.is_empty() {
+            return Err(Error::InvalidQueryParams(
+                "peers must not be empty".to_owned(),
+            ));
+        }
         self.subject_access
             .tell(SubjectAccessMessage::RemoveSyncPeers { subject_id, peers })
             .await
@@ -1099,6 +1130,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<HashSet<PublicKey>, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::GetSyncPeers { subject_id })
@@ -1159,6 +1191,7 @@ impl Api {
         strict: bool,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::Update {
@@ -1195,6 +1228,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         let Some(manual_dis) = &self.manual_dis else {
             return Err(safe_mode_error());
         };
@@ -1215,6 +1249,7 @@ impl Api {
         &self,
         query: SinksQuery,
     ) -> Result<Vec<SinkInfo>, Error> {
+        validate_sinks_query(&query)?;
         let registrations = self.get_sink_registry().await?;
 
         // Group registered sinks by their manager target so we can query only
@@ -1456,6 +1491,7 @@ impl Api {
 
     pub async fn unblock_sink(&self, sink_name: String) -> Result<(), Error> {
         self.ensure_mutations_allowed()?;
+        require_non_empty_str("sink_name", &sink_name)?;
         let registration = self.get_sink_registration(&sink_name).await?;
         let target = manager_target_from_registration(&registration)?;
         let path = manager_path(&target);
@@ -1489,6 +1525,7 @@ impl Api {
         sink_name: String,
     ) -> Result<(), Error> {
         self.ensure_safe_mode_required("sink cursor deletion")?;
+        require_non_empty_str("sink_name", &sink_name)?;
 
         let registration = self.get_sink_registration(&sink_name).await?;
         let target = manager_target_from_registration(&registration)?;
@@ -1531,6 +1568,7 @@ impl Api {
         request: SinkReplayRequest,
     ) -> Result<SinkReplayResponse, Error> {
         self.ensure_mutations_allowed()?;
+        validate_sink_replay_request(&request)?;
 
         // Resolve each distinct sink once in parallel instead of once per item.
         let unique_sinks: HashSet<String> = request
@@ -1709,6 +1747,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_safe_mode_required("subject deletion")?;
+        validate_subject_id(&subject_id)?;
         self.begin_subject_deletion(&subject_id).await?;
 
         let result = async {
@@ -1850,6 +1889,10 @@ impl Api {
         active: Option<bool>,
         schema_id: Option<String>,
     ) -> Result<Vec<SubjsData>, Error> {
+        validate_governance_id(&governance_id)?;
+        if let Some(schema_id) = schema_id.as_ref() {
+            require_non_empty_str("schema_id", schema_id)?;
+        }
         let governance_id = governance_id.to_string();
         match self
             .db
@@ -1874,6 +1917,8 @@ impl Api {
         subject_id: DigestIdentifier,
         query: EventsQuery,
     ) -> Result<PaginatorEvents, Error> {
+        validate_subject_id(&subject_id)?;
+        validate_events_query(&query)?;
         let subject_id_str = subject_id.to_string();
 
         match self.db.get_events(&subject_id_str, query).await {
@@ -1893,20 +1938,8 @@ impl Api {
         subject_id: DigestIdentifier,
         query: SinkEventsQuery,
     ) -> Result<SinkEventsPage, Error> {
-        if let Some(limit) = query.limit {
-            if limit == 0 {
-                return Err(Error::InvalidQueryParams(
-                    "Replay limit must be greater than zero".to_owned(),
-                ));
-            }
-        }
-        if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn) {
-            if from_sn > to_sn {
-                return Err(Error::InvalidQueryParams(
-                    "Replay range requires from_sn <= to_sn".to_owned(),
-                ));
-            }
-        }
+        validate_subject_id(&subject_id)?;
+        validate_sink_events_query(&query)?;
 
         let subject_id_str = subject_id.to_string();
         let response = self
@@ -1943,13 +1976,12 @@ impl Api {
         subject_id: DigestIdentifier,
         query: AbortsQuery,
     ) -> Result<PaginatorAborts, Error> {
+        validate_subject_id(&subject_id)?;
+        validate_aborts_query(&query)?;
+
         let subject_id_str = subject_id.to_string();
         let request_id = if let Some(request_id) = query.request_id.as_ref() {
-            Some(
-                DigestIdentifier::from_str(request_id)
-                    .map_err(|e| Error::InvalidQueryParams(e.to_string()))?
-                    .to_string(),
-            )
+            Some(parse_request_id(request_id)?.to_string())
         } else {
             None
         };
@@ -1975,6 +2007,7 @@ impl Api {
         subject_id: DigestIdentifier,
         sn: u64,
     ) -> Result<LedgerDB, Error> {
+        validate_subject_id(&subject_id)?;
         let subject_id_str = subject_id.to_string();
 
         match self.db.get_event_sn(&subject_id_str, sn).await {
@@ -1999,6 +2032,10 @@ impl Api {
         reverse: Option<bool>,
         event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, Error> {
+        validate_subject_id(&subject_id)?;
+        if let Some(quantity) = quantity {
+            require_positive_u64("quantity", quantity)?;
+        }
         let subject_id_str = subject_id.to_string();
 
         match self
@@ -2026,6 +2063,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<SubjectDB, Error> {
+        validate_subject_id(&subject_id)?;
         let subject_id_str = subject_id.to_string();
 
         match self.db.get_subject_state(&subject_id_str).await {
