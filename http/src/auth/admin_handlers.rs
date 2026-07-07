@@ -3,7 +3,9 @@
 // REST API endpoints for user, role, permission, and API key management
 
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{DatabaseErrorMapping, run_db as shared_run_db};
+use super::http_api::{
+    DatabaseErrorMapping, normalize_pagination, run_db as shared_run_db,
+};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use axum::{
@@ -263,8 +265,14 @@ pub async fn list_users(
 
     let default_limit = db.users_default_limit();
     let max_limit = db.users_max_limit();
-    let limit = params.limit.unwrap_or(default_limit).clamp(1, max_limit);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let (limit, offset) = normalize_pagination(
+        &PaginationQuery {
+            limit: params.limit,
+            offset: params.offset,
+        },
+        default_limit,
+        max_limit,
+    )?;
     let include_inactive = params.include_inactive.unwrap_or(false);
     let users = run_db(&db, "admin_list_users", move |db| {
         db.list_users(include_inactive, limit, offset)

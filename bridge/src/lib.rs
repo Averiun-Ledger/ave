@@ -268,9 +268,9 @@ impl Bridge {
     ) -> Result<String, BridgeError> {
         let subject_id = Self::parse_subject_id(subject_id)?;
         if state == ApprovalStateRes::Obsolete {
-            return Err(BridgeError::Api(
+            return Err(BridgeError::Core(Error::InvalidApprovalState(
                 "Obsolete is not a valid target approval state".to_owned(),
-            ));
+            )));
         }
 
         Ok(self.api.approve(subject_id, state).await?)

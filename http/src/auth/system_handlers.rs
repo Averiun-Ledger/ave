@@ -4,7 +4,7 @@
 
 use super::VALIDATION_LIMITS;
 use super::database::AuthDatabase;
-use super::http_api::{DatabaseErrorMapping, HttpErrorResponse, run_db};
+use super::http_api::{DatabaseErrorMapping, normalize_pagination, run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use axum::{
@@ -13,54 +13,6 @@ use axum::{
     http::StatusCode,
 };
 use std::sync::Arc;
-
-fn normalize_pagination(
-    query: &PaginationQuery,
-    default_limit: i64,
-    max_limit: i64,
-) -> Result<(i64, i64), HttpErrorResponse> {
-    let limit = match query.limit {
-        Some(limit) if limit > 0 && limit <= max_limit => limit,
-        Some(limit) if limit <= 0 => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Limit must be positive (got {})", limit),
-                }),
-            ));
-        }
-        Some(limit) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Limit must not exceed {} (got {})",
-                        max_limit, limit
-                    ),
-                }),
-            ));
-        }
-        None => default_limit,
-    };
-
-    let offset = match query.offset {
-        Some(offset) if offset >= 0 => offset,
-        Some(offset) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Offset must be non-negative (got {})",
-                        offset
-                    ),
-                }),
-            ));
-        }
-        None => 0,
-    };
-
-    Ok((limit, offset))
-}
 
 // =============================================================================
 // RESOURCES AND ACTIONS

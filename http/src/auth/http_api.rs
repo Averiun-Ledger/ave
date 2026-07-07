@@ -1,5 +1,5 @@
 use super::database::{AuthDatabase, DatabaseError};
-use super::models::ErrorResponse;
+use super::models::{ErrorResponse, PaginationQuery};
 use axum::{Json, http::StatusCode};
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,6 +67,56 @@ pub const fn request_result_from_status(status: StatusCode) -> &'static str {
         500..=599 => "internal_error",
         _ => "error",
     }
+}
+
+/// Normalizes pagination query parameters, returning explicit 400 errors for
+/// invalid values instead of silently clamping.
+pub fn normalize_pagination(
+    query: &PaginationQuery,
+    default_limit: i64,
+    max_limit: i64,
+) -> Result<(i64, i64), HttpErrorResponse> {
+    let limit = match query.limit {
+        Some(limit) if limit > 0 && limit <= max_limit => limit,
+        Some(limit) if limit <= 0 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Limit must be positive (got {})", limit),
+                }),
+            ));
+        }
+        Some(limit) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Limit must not exceed {} (got {})",
+                        max_limit, limit
+                    ),
+                }),
+            ));
+        }
+        None => default_limit,
+    };
+
+    let offset = match query.offset {
+        Some(offset) if offset >= 0 => offset,
+        Some(offset) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Offset must be non-negative (got {})",
+                        offset
+                    ),
+                }),
+            ));
+        }
+        None => 0,
+    };
+
+    Ok((limit, offset))
 }
 
 pub async fn run_db<T, F>(
