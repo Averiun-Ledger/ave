@@ -166,7 +166,8 @@ pub fn validate_event_request(request: &EventRequest) -> Result<(), Error> {
                     "schema_id is not valid in request".to_owned(),
                 ));
             }
-            let is_governance = matches!(create.schema_id, SchemaType::Governance);
+            let is_governance =
+                matches!(create.schema_id, SchemaType::Governance);
             if is_governance {
                 if !create.governance_id.is_empty() {
                     return Err(Error::InvalidSubjectId(

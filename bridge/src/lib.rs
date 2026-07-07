@@ -203,8 +203,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<RequestsInManagerSubject, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self
             .api
@@ -237,8 +236,7 @@ impl Bridge {
         subject_id: String,
         state: Option<ApprovalState>,
     ) -> Result<Option<ApprovalEntry>, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.get_approval(subject_id, state).await?.map(|x| {
             ApprovalEntry {
@@ -268,8 +266,12 @@ impl Bridge {
         subject_id: String,
         state: ApprovalStateRes,
     ) -> Result<String, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        if state == ApprovalStateRes::Obsolete {
+            return Err(BridgeError::Api(
+                "Obsolete is not a valid target approval state".to_owned(),
+            ));
+        }
 
         Ok(self.api.approve(subject_id, state).await?)
     }
@@ -278,8 +280,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.manual_request_abort(subject_id).await?)
     }
@@ -290,8 +291,7 @@ impl Bridge {
         &self,
         request_id: String,
     ) -> Result<RequestInfo, BridgeError> {
-        let request_id = DigestIdentifier::from_str(&request_id)
-            .map_err(|e| BridgeError::InvalidRequestId(e.to_string()))?;
+        let request_id = Self::parse_request_id(request_id)?;
 
         Ok(self.api.get_request_state(request_id).await?)
     }
@@ -320,6 +320,8 @@ impl Bridge {
         &self,
         query: SinksQuery,
     ) -> Result<Vec<SinkInfo>, BridgeError> {
+        Self::validate_sinks_query(&query)?;
+
         self.api
             .get_sinks(query)
             .await
@@ -339,6 +341,8 @@ impl Bridge {
         &self,
         sink_name: String,
     ) -> Result<(), BridgeError> {
+        Self::require_non_empty_str("sink_name", &sink_name)?;
+
         self.api
             .unblock_sink(sink_name)
             .await
@@ -349,6 +353,8 @@ impl Bridge {
         &self,
         sink_name: String,
     ) -> Result<(), BridgeError> {
+        Self::require_non_empty_str("sink_name", &sink_name)?;
+
         self.api
             .delete_sink_cursors(sink_name)
             .await
@@ -359,6 +365,8 @@ impl Bridge {
         &self,
         request: SinkReplayRequest,
     ) -> Result<SinkReplayResponse, BridgeError> {
+        Self::validate_sink_replay_request(&request)?;
+
         self.api
             .replay_sink_events(request)
             .await
@@ -372,22 +380,13 @@ impl Bridge {
         subject_id: String,
         witnesses: Vec<String>,
     ) -> Result<String, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        let witnesses_key: Vec<PublicKey> = witnesses
+            .into_iter()
+            .map(|key| Self::parse_public_key_labeled("witness", key))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let mut witnesses_key = vec![];
-        for witness in witnesses {
-            witnesses_key.push(
-                PublicKey::from_str(&witness).map_err(|e| {
-                    BridgeError::InvalidPublicKey(e.to_string())
-                })?,
-            );
-        }
-
-        let auh_witness = if witnesses_key.is_empty() {
+        let auth_witness = if witnesses_key.is_empty() {
             AuthWitness::None
         } else if witnesses_key.len() == 1 {
             AuthWitness::One(witnesses_key[0].clone())
@@ -397,7 +396,7 @@ impl Bridge {
 
         Ok(self
             .api
-            .authorize_governance(subject_id, auh_witness)
+            .authorize_governance(subject_id, auth_witness)
             .await?)
     }
 
@@ -405,11 +404,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.disauthorize_governance(subject_id).await?)
     }
@@ -426,11 +421,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<bool, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.is_governance_authorized(subject_id).await?)
     }
@@ -439,11 +430,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.ban_tracker(subject_id).await?)
     }
@@ -452,11 +439,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.unban_tracker(subject_id).await?)
     }
@@ -465,11 +448,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<bool, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.is_tracker_banned(subject_id).await?)
     }
@@ -485,25 +464,8 @@ impl Bridge {
         subject_id: String,
         peers: Vec<String>,
     ) -> Result<String, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        if peers.is_empty() {
-            return Err(BridgeError::InvalidPublicKey(
-                "empty peers list".to_owned(),
-            ));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
-
-        let mut peers_key = vec![];
-        for peer in peers {
-            peers_key.push(
-                PublicKey::from_str(&peer).map_err(|e| {
-                    BridgeError::InvalidPublicKey(e.to_string())
-                })?,
-            );
-        }
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        let peers_key = Self::parse_public_keys(peers, "peer")?;
 
         Ok(self.api.add_sync_peer(subject_id, peers_key).await?)
     }
@@ -513,25 +475,8 @@ impl Bridge {
         subject_id: String,
         peers: Vec<String>,
     ) -> Result<String, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        if peers.is_empty() {
-            return Err(BridgeError::InvalidPublicKey(
-                "empty peers list".to_owned(),
-            ));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
-
-        let mut peers_key = vec![];
-        for peer in peers {
-            peers_key.push(
-                PublicKey::from_str(&peer).map_err(|e| {
-                    BridgeError::InvalidPublicKey(e.to_string())
-                })?,
-            );
-        }
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        let peers_key = Self::parse_public_keys(peers, "peer")?;
 
         Ok(self.api.remove_sync_peer(subject_id, peers_key).await?)
     }
@@ -540,11 +485,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<HashSet<String>, BridgeError> {
-        if subject_id.is_empty() {
-            return Err(BridgeError::InvalidSubjectId("empty".to_owned()));
-        }
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         let res = self.api.sync_peers(subject_id).await?;
 
@@ -564,8 +505,7 @@ impl Bridge {
         subject_id: String,
         query: UpdateSubjectQuery,
     ) -> Result<String, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self
             .api
@@ -580,8 +520,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.delete_subject(subject_id).await?)
     }
@@ -592,8 +531,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.manual_distribution(subject_id).await?)
     }
@@ -613,8 +551,10 @@ impl Bridge {
         active: Option<bool>,
         schema_id: Option<String>,
     ) -> Result<Vec<SubjsData>, BridgeError> {
-        let governance_id = DigestIdentifier::from_str(&governance_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let governance_id = Self::parse_governance_id(governance_id)?;
+        if let Some(schema_id) = schema_id.as_deref() {
+            Self::require_non_empty_str("schema_id", schema_id)?;
+        }
 
         Ok(self.api.all_subjs(governance_id, active, schema_id).await?)
     }
@@ -626,8 +566,8 @@ impl Bridge {
         subject_id: String,
         query: EventsQuery,
     ) -> Result<PaginatorEvents, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        Self::validate_events_query(&query)?;
 
         Ok(self.api.get_events(subject_id, query).await?)
     }
@@ -637,8 +577,8 @@ impl Bridge {
         subject_id: String,
         query: SinkEventsQuery,
     ) -> Result<SinkEventsPage, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        Self::validate_sink_events_query(&query)?;
 
         Ok(self.api.get_sink_events(subject_id, query).await?)
     }
@@ -648,8 +588,8 @@ impl Bridge {
         subject_id: String,
         query: AbortsQuery,
     ) -> Result<PaginatorAborts, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        Self::validate_aborts_query(&query)?;
 
         Ok(self.api.get_aborts(subject_id, query).await?)
     }
@@ -659,8 +599,7 @@ impl Bridge {
         subject_id: String,
         sn: u64,
     ) -> Result<LedgerDB, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.get_event_sn(subject_id, sn).await?)
     }
@@ -672,8 +611,10 @@ impl Bridge {
         reverse: Option<bool>,
         event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
+        if let Some(quantity) = quantity {
+            Self::require_positive_u64("quantity", quantity)?;
+        }
 
         Ok(self
             .api
@@ -685,9 +626,177 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<SubjectDB, BridgeError> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+        let subject_id = Self::parse_subject_id(subject_id)?;
 
         Ok(self.api.get_subject_state(subject_id).await?)
+    }
+
+    ///////// Input validation helpers
+    ////////////////////////////
+
+    fn parse_subject_id(
+        subject_id: String,
+    ) -> Result<DigestIdentifier, BridgeError> {
+        if subject_id.is_empty() {
+            return Err(BridgeError::InvalidSubjectId(
+                "subject_id must not be empty".to_owned(),
+            ));
+        }
+        DigestIdentifier::from_str(&subject_id).map_err(|e| {
+            BridgeError::InvalidSubjectId(format!("subject_id is invalid: {e}"))
+        })
+    }
+
+    fn parse_governance_id(
+        governance_id: String,
+    ) -> Result<DigestIdentifier, BridgeError> {
+        if governance_id.is_empty() {
+            return Err(BridgeError::InvalidGovernanceId(
+                "governance_id must not be empty".to_owned(),
+            ));
+        }
+        DigestIdentifier::from_str(&governance_id).map_err(|e| {
+            BridgeError::InvalidGovernanceId(format!(
+                "governance_id is invalid: {e}"
+            ))
+        })
+    }
+
+    fn parse_request_id(
+        request_id: String,
+    ) -> Result<DigestIdentifier, BridgeError> {
+        if request_id.is_empty() {
+            return Err(BridgeError::InvalidRequestId(
+                "request_id must not be empty".to_owned(),
+            ));
+        }
+        DigestIdentifier::from_str(&request_id).map_err(|e| {
+            BridgeError::InvalidRequestId(format!("request_id is invalid: {e}"))
+        })
+    }
+
+    fn parse_public_key_labeled(
+        label: &'static str,
+        key: String,
+    ) -> Result<PublicKey, BridgeError> {
+        if key.is_empty() {
+            return Err(BridgeError::InvalidPublicKey(format!(
+                "{label} must not be empty"
+            )));
+        }
+        PublicKey::from_str(&key).map_err(|e| {
+            BridgeError::InvalidPublicKey(format!("{label} is invalid: {e}"))
+        })
+    }
+
+    fn parse_public_keys(
+        keys: Vec<String>,
+        label: &'static str,
+    ) -> Result<Vec<PublicKey>, BridgeError> {
+        if keys.is_empty() {
+            return Err(BridgeError::InvalidPublicKey(format!(
+                "{label} must not be empty"
+            )));
+        }
+        keys.into_iter()
+            .map(|key| Self::parse_public_key_labeled(label, key))
+            .collect()
+    }
+
+    fn validate_sinks_query(query: &SinksQuery) -> Result<(), BridgeError> {
+        if let Some(name) = query.name.as_deref() {
+            Self::require_non_empty_str("name", name)?;
+        }
+        if let Some(target) = query.target.as_deref() {
+            Self::require_non_empty_str("target", target)?;
+        }
+        if let Some(schema_id) = query.schema_id.as_deref() {
+            Self::require_non_empty_str("schema_id", schema_id)?;
+        }
+        if let Some(governance_id) = query.governance_id.as_deref() {
+            Self::require_non_empty_str("governance_id", governance_id)?;
+        }
+        Ok(())
+    }
+
+    fn validate_events_query(query: &EventsQuery) -> Result<(), BridgeError> {
+        if let Some(quantity) = query.quantity {
+            Self::require_positive_u64("quantity", quantity)?;
+        }
+        Ok(())
+    }
+
+    fn validate_sink_events_query(
+        query: &SinkEventsQuery,
+    ) -> Result<(), BridgeError> {
+        if let Some(limit) = query.limit
+            && limit == 0
+        {
+            return Err(BridgeError::Core(Error::InvalidQueryParams(
+                "Replay limit must be greater than zero".to_owned(),
+            )));
+        }
+        if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn)
+            && from_sn > to_sn
+        {
+            return Err(BridgeError::Core(Error::InvalidQueryParams(
+                "Replay range requires from_sn <= to_sn".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_aborts_query(query: &AbortsQuery) -> Result<(), BridgeError> {
+        if let Some(request_id) = query.request_id.as_deref() {
+            Self::require_non_empty_str("request_id", request_id)?;
+            DigestIdentifier::from_str(request_id).map_err(|e| {
+                BridgeError::Core(Error::InvalidQueryParams(format!(
+                    "request_id is invalid: {e}"
+                )))
+            })?;
+        }
+        if let Some(quantity) = query.quantity {
+            Self::require_positive_u64("quantity", quantity)?;
+        }
+        Ok(())
+    }
+
+    fn validate_sink_replay_request(
+        request: &SinkReplayRequest,
+    ) -> Result<(), BridgeError> {
+        if request.requests.is_empty() {
+            return Err(BridgeError::Core(Error::InvalidQueryParams(
+                "requests must not be empty".to_owned(),
+            )));
+        }
+        for item in &request.requests {
+            Self::require_non_empty_str("sink", &item.sink)?;
+            Self::require_non_empty_str("subject_id", &item.subject_id)?;
+        }
+        Ok(())
+    }
+
+    fn require_non_empty_str(
+        name: &'static str,
+        value: &str,
+    ) -> Result<(), BridgeError> {
+        if value.is_empty() {
+            return Err(BridgeError::Core(Error::InvalidQueryParams(format!(
+                "{name} must not be empty"
+            ))));
+        }
+        Ok(())
+    }
+
+    fn require_positive_u64(
+        name: &'static str,
+        value: u64,
+    ) -> Result<(), BridgeError> {
+        if value == 0 {
+            return Err(BridgeError::Core(Error::InvalidQueryParams(format!(
+                "{name} must be greater than zero, got 0"
+            ))));
+        }
+        Ok(())
     }
 }
