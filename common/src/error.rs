@@ -72,6 +72,15 @@ pub enum Error {
     #[error("signature error: {0}")]
     Signature(#[from] SignatureError),
 
+    /// Invalid configuration value detected at runtime.
+    #[error("invalid configuration for {component}: {reason}")]
+    InvalidConfiguration {
+        /// Configuration component or dotted path that failed validation.
+        component: String,
+        /// Human-readable explanation of why the value is invalid.
+        reason: String,
+    },
+
     /// Generic error
     #[error("{0}")]
     Generic(String),

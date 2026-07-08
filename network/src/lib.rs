@@ -16,12 +16,13 @@ mod worker;
 
 use std::fmt::{self, Debug, Display};
 
+use ave_common::Error as CommonError;
 use ave_common::identity::PublicKey;
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use control_list::Config as ControlListConfig;
 pub use error::Error;
 pub use libp2p::{
-    PeerId,
+    Multiaddr, PeerId,
     identity::{
         PublicKey as PublicKeyLibP2P, ed25519::PublicKey as PublicKeyEd25519,
     },
@@ -231,15 +232,28 @@ pub enum MemoryLimitsConfig {
 }
 
 impl MemoryLimitsConfig {
-    /// Returns an error string if the configuration values are out of range.
-    pub fn validate(&self) -> Result<(), String> {
-        if let Self::Percentage { value } = self
-            && (*value <= 0.0 || *value > 1.0)
-        {
-            return Err(format!(
-                "network.memory_limits percentage must be in range (0.0, 1.0], got {}",
-                value
-            ));
+    /// Validates the memory limits configuration.
+    pub fn validate(&self) -> Result<(), CommonError> {
+        match self {
+            Self::Percentage { value } => {
+                if *value <= 0.0 || *value > 1.0 {
+                    return Err(CommonError::InvalidConfiguration {
+                        component: "network.memory_limits".to_string(),
+                        reason: format!(
+                            "percentage must be in range (0.0, 1.0], got {value}"
+                        ),
+                    });
+                }
+            }
+            Self::Mb { value } => {
+                if *value == 0 {
+                    return Err(CommonError::InvalidConfiguration {
+                        component: "network.memory_limits".to_string(),
+                        reason: "mb value must be greater than zero".to_string(),
+                    });
+                }
+            }
+            Self::Disabled => {}
         }
 
         Ok(())
@@ -378,6 +392,151 @@ impl Default for Config {
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
         }
+    }
+}
+
+impl Config {
+    /// Validates the network configuration, returning an error describing the
+    /// first invalid value found.
+    pub fn validate(&self) -> Result<(), CommonError> {
+        for (i, addr) in self.listen_addresses.iter().enumerate() {
+            if addr.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.listen_addresses[{i}]"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if addr.parse::<Multiaddr>().is_err() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.listen_addresses[{i}]"),
+                    reason: format!("not a valid multiaddr: {addr}"),
+                });
+            }
+        }
+
+        for (i, addr) in self.external_addresses.iter().enumerate() {
+            if addr.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.external_addresses[{i}]"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if addr.parse::<Multiaddr>().is_err() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.external_addresses[{i}]"),
+                    reason: format!("not a valid multiaddr: {addr}"),
+                });
+            }
+        }
+
+        for (i, node) in self.boot_nodes.iter().enumerate() {
+            if node.peer_id.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.boot_nodes[{i}].peer_id"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if node.peer_id.parse::<PeerId>().is_err() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.boot_nodes[{i}].peer_id"),
+                    reason: format!(
+                        "not a valid peer id: {}",
+                        node.peer_id
+                    ),
+                });
+            }
+            if node.address.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.boot_nodes[{i}].address"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            for (j, addr) in node.address.iter().enumerate() {
+                if addr.is_empty() {
+                    return Err(CommonError::InvalidConfiguration {
+                        component: format!(
+                            "network.boot_nodes[{i}].address[{j}]"
+                        ),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+                if addr.parse::<Multiaddr>().is_err() {
+                    return Err(CommonError::InvalidConfiguration {
+                        component: format!(
+                            "network.boot_nodes[{i}].address[{j}]"
+                        ),
+                        reason: format!("not a valid multiaddr: {addr}"),
+                    });
+                }
+            }
+        }
+
+        self.routing.validate().map_err(|e| CommonError::InvalidConfiguration {
+            component: "network.routing".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.control_list.validate().map_err(|e| {
+            CommonError::InvalidConfiguration {
+                component: "network.control_list".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        self.memory_limits.validate().map_err(|e| {
+            CommonError::InvalidConfiguration {
+                component: "network.memory_limits".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        if self.max_app_message_bytes == 0 {
+            return Err(CommonError::InvalidConfiguration {
+                component: "network.max_app_message_bytes".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+
+        let check_pending_limit = |limit: usize, name: &'static str| {
+            if limit > 0 && limit < self.max_app_message_bytes {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("network.{name}"),
+                    reason: format!(
+                        "must be 0 (disabled) or >= network.max_app_message_bytes ({})",
+                        self.max_app_message_bytes
+                    ),
+                });
+            }
+            Ok(())
+        };
+        check_pending_limit(
+            self.max_pending_outbound_bytes_per_peer,
+            "max_pending_outbound_bytes_per_peer",
+        )?;
+        check_pending_limit(
+            self.max_pending_inbound_bytes_per_peer,
+            "max_pending_inbound_bytes_per_peer",
+        )?;
+        check_pending_limit(
+            self.max_pending_outbound_bytes_total,
+            "max_pending_outbound_bytes_total",
+        )?;
+        check_pending_limit(
+            self.max_pending_inbound_bytes_total,
+            "max_pending_inbound_bytes_total",
+        )?;
+
+        if self.control_list.get_enable()
+            && self.control_list.get_allow_list().is_empty()
+            && self.control_list.get_service_allow_list().is_empty()
+            && self.boot_nodes.is_empty()
+        {
+            return Err(CommonError::InvalidConfiguration {
+                component: "network.control_list".to_string(),
+                reason: "enable is true but there are no allow sources (allow_list, service_allow_list or boot_nodes)"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -586,6 +745,28 @@ mod tests {
         assert_eq!(cfg.listen_addresses, vec!["/memory/1"]);
         assert_eq!(cfg.external_addresses, vec!["/memory/2"]);
         assert!(cfg.boot_nodes.is_empty());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_max_app_message_bytes() {
+        let mut cfg = Config::default();
+        cfg.max_app_message_bytes = 0;
+        let err = cfg.validate().expect_err("should fail");
+        assert!(
+            err.to_string().contains("network.max_app_message_bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn config_validate_rejects_invalid_memory_limits() {
+        let mut cfg = Config::default();
+        cfg.memory_limits = MemoryLimitsConfig::Percentage { value: 2.0 };
+        let err = cfg.validate().expect_err("should fail");
+        assert!(
+            err.to_string().contains("network.memory_limits"),
+            "unexpected error: {err}"
+        );
     }
 }
 

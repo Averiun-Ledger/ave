@@ -95,6 +95,10 @@ impl Bridge {
         graceful_token: Option<CancellationToken>,
         crash_token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
+        settings
+            .validate()
+            .map_err(|e| BridgeError::ConfigBuild(e.to_string()))?;
+
         utils::validate_keys_path(&settings.keys_path)
             .map_err(BridgeError::KeyPathInvalid)?;
 

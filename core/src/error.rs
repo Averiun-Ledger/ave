@@ -15,6 +15,15 @@ pub enum Error {
     #[error("System initialization failed: {0}")]
     SystemInit(String),
 
+    /// Invalid node configuration.
+    #[error("Invalid configuration for {component}: {reason}")]
+    InvalidConfiguration {
+        /// Configuration component that failed validation.
+        component: String,
+        /// Reason the configuration is invalid.
+        reason: String,
+    },
+
     /// Failed to create a required actor.
     #[error("Failed to initialize {actor}: {reason}")]
     ActorCreation { actor: String, reason: String },

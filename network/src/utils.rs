@@ -1,4 +1,4 @@
-use crate::{Error, routing::RoutingNode};
+use crate::{Error as NetworkError, routing::RoutingNode};
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use libp2p::{
@@ -431,13 +431,13 @@ pub fn convert_boot_nodes(
 /// Gets the list of external (public) addresses for the node from string array.
 pub fn convert_addresses(
     addresses: &[String],
-) -> Result<HashSet<Multiaddr>, Error> {
+) -> Result<HashSet<Multiaddr>, NetworkError> {
     let mut addrs = HashSet::new();
     for address in addresses {
         if let Some(value) = multiaddr(address) {
             addrs.insert(value);
         } else {
-            return Err(Error::InvalidAddress(address.clone()));
+            return Err(NetworkError::InvalidAddress(address.clone()));
         }
     }
     Ok(addrs)
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn convert_addresses_invalid() {
         let result = convert_addresses(&["not-a-valid-address".to_string()]);
-        assert!(matches!(result, Err(Error::InvalidAddress(_))));
+        assert!(matches!(result, Err(NetworkError::InvalidAddress(_))));
     }
 
     #[test]

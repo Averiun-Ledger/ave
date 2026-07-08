@@ -140,6 +140,7 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
 
         // ── 500 Internal Server Error (everything else) ────────
         CoreError::SystemInit(_)
+        | CoreError::InvalidConfiguration { .. }
         | CoreError::ActorCreation { .. }
         | CoreError::MissingResource { .. }
         | CoreError::SigningFailed(_)

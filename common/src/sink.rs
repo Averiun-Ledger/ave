@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::SchemaType;
+use crate::{Error, SchemaType};
 
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
@@ -418,6 +418,46 @@ pub struct SinkAuthConfig {
     pub api_key: String,
 }
 
+impl SinkAuthConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_url("auth_url", &self.auth_url)?;
+        if self.username.is_empty() && self.api_key.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "SinkAuthConfig".to_string(),
+                reason: "at least one of username or api_key must be set"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_url(component: &str, value: &str) -> Result<(), Error> {
+    if value.is_empty() {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    if !value.starts_with("http://") && !value.starts_with("https://") {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_string(),
+            reason: format!("must be an http/https URL, got {value}"),
+        });
+    }
+    Ok(())
+}
+
+fn require_positive_u64(component: &str, value: u64) -> Result<(), Error> {
+    if value == 0 {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_string(),
+            reason: "must be greater than zero".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Target of a sink configuration entry.
 ///
 /// Every sink targets a schema. The special schema `"governance"` means the
@@ -440,6 +480,45 @@ pub enum SinkTarget {
         #[serde(default)]
         governance_id: Option<String>,
     },
+}
+
+impl SinkTarget {
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Schema {
+                schema_id,
+                governance_id,
+            } => {
+                if schema_id.is_empty() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "SinkTarget.Schema.schema_id".to_string(),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+                if schema_id == "governance" {
+                    if governance_id.is_some() {
+                        return Err(Error::InvalidConfiguration {
+                            component: "SinkTarget.Schema.governance_id"
+                                .to_string(),
+                            reason: "must be None when schema_id is 'governance'"
+                                .to_string(),
+                        });
+                    }
+                } else if governance_id
+                    .as_deref()
+                    .is_none_or(|id| id.is_empty())
+                {
+                    return Err(Error::InvalidConfiguration {
+                        component: "SinkTarget.Schema.governance_id"
+                            .to_string(),
+                        reason: "must be set and not empty when schema_id is not 'governance'"
+                            .to_string(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Configuration for a single sink server endpoint.
@@ -500,6 +579,110 @@ impl Default for SinkServer {
     }
 }
 
+impl SinkServer {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.server.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "SinkServer.server".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if self.events.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "SinkServer.events".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        validate_url("SinkServer.url", &self.url)?;
+        if let Some(auth) = &self.auth {
+            auth.validate().map_err(|e| Error::InvalidConfiguration {
+                component: "SinkServer.auth".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+        require_positive_u64(
+            "SinkServer.connect_timeout_ms",
+            self.connect_timeout_ms,
+        )?;
+        require_positive_u64(
+            "SinkServer.request_timeout_ms",
+            self.request_timeout_ms,
+        )?;
+        if self.request_timeout_ms < self.connect_timeout_ms {
+            return Err(Error::InvalidConfiguration {
+                component: "SinkServer.request_timeout_ms".to_string(),
+                reason: format!(
+                    "must be greater than or equal to connect_timeout_ms ({})",
+                    self.connect_timeout_ms
+                ),
+            });
+        }
+        require_positive_u64("SinkServer.max_retries", self.max_retries as u64)?;
+        require_positive_u64("SinkServer.batch_size", self.batch_size as u64)?;
+        require_positive_u64(
+            "SinkServer.sink_worker_idle_timeout_ms",
+            self.sink_worker_idle_timeout_ms,
+        )?;
+        if self.healthcheck_intervals_secs.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "SinkServer.healthcheck_intervals_secs".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        for (i, interval) in self.healthcheck_intervals_secs.iter().enumerate()
+        {
+            require_positive_u64(
+                &format!("SinkServer.healthcheck_intervals_secs[{i}]"),
+                *interval,
+            )?;
+        }
+        for i in 1..self.healthcheck_intervals_secs.len() {
+            if self.healthcheck_intervals_secs[i]
+                <= self.healthcheck_intervals_secs[i - 1]
+            {
+                return Err(Error::InvalidConfiguration {
+                    component: "SinkServer.healthcheck_intervals_secs"
+                        .to_string(),
+                    reason: format!(
+                        "must be strictly increasing: healthcheck_intervals_secs[{i}] ({}) <= healthcheck_intervals_secs[{}] ({})",
+                        self.healthcheck_intervals_secs[i],
+                        i - 1,
+                        self.healthcheck_intervals_secs[i - 1],
+                    ),
+                });
+            }
+        }
+        require_positive_u64(
+            "SinkServer.max_catch_up_concurrency",
+            self.max_catch_up_concurrency as u64,
+        )?;
+        require_positive_u64(
+            "SinkServer.retry_base_delay_ms",
+            self.retry_base_delay_ms,
+        )?;
+        if let Some(url) = &self.health_check_url {
+            validate_url("SinkServer.health_check_url", url)?;
+        }
+        require_positive_u64(
+            "SinkServer.sink_subject_worker_idle_timeout_ms",
+            self.sink_subject_worker_idle_timeout_ms,
+        )?;
+        require_positive_u64(
+            "SinkServer.token_refresh_margin_secs",
+            self.token_refresh_margin_secs,
+        )?;
+        require_positive_u64(
+            "SinkServer.max_recoveries_after_failure",
+            self.max_recoveries_after_failure as u64,
+        )?;
+        require_positive_u64(
+            "SinkServer.startup_healthcheck_delay_secs",
+            self.startup_healthcheck_delay_secs,
+        )?;
+        Ok(())
+    }
+}
+
 /// A single sink configuration entry: a target plus the list of servers that
 /// serve events for that target.
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
@@ -509,6 +692,41 @@ impl Default for SinkServer {
 pub struct SinkConfigEntry {
     pub target: SinkTarget,
     pub servers: Vec<SinkServer>,
+}
+
+impl SinkConfigEntry {
+    pub fn validate(&self) -> Result<(), Error> {
+        self.target.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "SinkConfigEntry.target".to_string(),
+            reason: e.to_string(),
+        })?;
+
+        if self.servers.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "SinkConfigEntry.servers".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for (i, server) in self.servers.iter().enumerate() {
+            server.validate().map_err(|e| Error::InvalidConfiguration {
+                component: format!("SinkConfigEntry.servers[{i}]"),
+                reason: e.to_string(),
+            })?;
+            if !seen.insert(&server.server) {
+                return Err(Error::InvalidConfiguration {
+                    component: format!("SinkConfigEntry.servers[{i}].server"),
+                    reason: format!(
+                        "duplicated value '{}' within this sink entry",
+                        server.server
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub const fn default_sink_worker_idle_timeout_ms() -> u64 {

@@ -1,3 +1,4 @@
+use ave_common::Error as CommonError;
 use libp2p::{
     Multiaddr, PeerId,
     swarm::{
@@ -91,6 +92,127 @@ impl Default for Config {
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent_requests(),
         }
+    }
+}
+
+impl Config {
+    /// Validates the control list configuration, returning an error describing
+    /// the first invalid value found.
+    pub fn validate(&self) -> Result<(), CommonError> {
+        if self.interval_request.as_secs() == 0 {
+            return Err(CommonError::InvalidConfiguration {
+                component: "control_list.interval_request".to_string(),
+                reason: "must be greater than zero seconds".to_string(),
+            });
+        }
+        if self.request_timeout.as_secs() == 0 {
+            return Err(CommonError::InvalidConfiguration {
+                component: "control_list.request_timeout".to_string(),
+                reason: "must be greater than zero seconds".to_string(),
+            });
+        }
+        if self.request_timeout > self.interval_request {
+            return Err(CommonError::InvalidConfiguration {
+                component: "control_list.request_timeout".to_string(),
+                reason: format!(
+                    "must be <= control_list.interval_request ({:?})",
+                    self.interval_request
+                ),
+            });
+        }
+
+        for (i, peer_id) in self.allow_list.iter().enumerate() {
+            if peer_id.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("control_list.allow_list[{i}]"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if peer_id.parse::<PeerId>().is_err() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("control_list.allow_list[{i}]"),
+                    reason: format!("not a valid peer id: {peer_id}"),
+                });
+            }
+        }
+
+        for (i, peer_id) in self.block_list.iter().enumerate() {
+            if peer_id.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("control_list.block_list[{i}]"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if peer_id.parse::<PeerId>().is_err() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!("control_list.block_list[{i}]"),
+                    reason: format!("not a valid peer id: {peer_id}"),
+                });
+            }
+        }
+
+        for (i, url) in self.service_allow_list.iter().enumerate() {
+            if url.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!(
+                        "control_list.service_allow_list[{i}]"
+                    ),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!(
+                        "control_list.service_allow_list[{i}]"
+                    ),
+                    reason: format!(
+                        "must be an http/https URL, got {url}"
+                    ),
+                });
+            }
+        }
+
+        for (i, url) in self.service_block_list.iter().enumerate() {
+            if url.is_empty() {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!(
+                        "control_list.service_block_list[{i}]"
+                    ),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(CommonError::InvalidConfiguration {
+                    component: format!(
+                        "control_list.service_block_list[{i}]"
+                    ),
+                    reason: format!(
+                        "must be an http/https URL, got {url}"
+                    ),
+                });
+            }
+        }
+
+        let allow: HashSet<&str> = self
+            .allow_list
+            .iter()
+            .map(|peer| peer.trim())
+            .collect();
+        let block: HashSet<&str> = self
+            .block_list
+            .iter()
+            .map(|peer| peer.trim())
+            .collect();
+        if let Some(peer) = allow.intersection(&block).next() {
+            return Err(CommonError::InvalidConfiguration {
+                component: "control_list".to_string(),
+                reason: format!(
+                    "peer present in both allow_list and block_list: {peer}"
+                ),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -1214,5 +1336,17 @@ mod tests {
         assert_eq!(config.get_interval_request(), Duration::from_secs(120));
         assert_eq!(config.get_request_timeout(), Duration::from_secs(10));
         assert_eq!(config.get_max_concurrent_requests(), 5);
+    }
+
+    #[test]
+    fn config_validate_rejects_request_timeout_greater_than_interval() {
+        let config = Config::default()
+            .with_interval_request(Duration::from_secs(30))
+            .with_request_timeout(Duration::from_secs(40));
+        let err = config.validate().expect_err("should fail");
+        assert!(
+            err.to_string().contains("control_list.request_timeout"),
+            "unexpected error: {err}"
+        );
     }
 }

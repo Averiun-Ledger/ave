@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use ave_common::Error;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -58,6 +59,70 @@ impl Default for SelfSignedCertConfig {
     }
 }
 
+impl SelfSignedCertConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.common_name.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "http.self_signed_cert.common_name".to_string(),
+                reason: "must not be empty when self-signed certificates are enabled"
+                    .to_string(),
+            });
+        }
+        if self.san.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "http.self_signed_cert.san".to_string(),
+                reason: "must not be empty when self-signed certificates are enabled"
+                    .to_string(),
+            });
+        }
+        for (i, san) in self.san.iter().enumerate() {
+            if san.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: format!(
+                        "http.self_signed_cert.san[{i}]"
+                    ),
+                    reason: "must not be empty when self-signed certificates are enabled"
+                        .to_string(),
+                });
+            }
+        }
+        if self.validity_days == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "http.self_signed_cert.validity_days".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.renew_before_days == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "http.self_signed_cert.renew_before_days"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.renew_before_days >= self.validity_days {
+            return Err(Error::InvalidConfiguration {
+                component: "http.self_signed_cert.renew_before_days"
+                    .to_string(),
+                reason: format!(
+                    "must be less than validity_days ({})",
+                    self.validity_days
+                ),
+            });
+        }
+        if self.check_interval_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "http.self_signed_cert.check_interval_secs"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CorsConfig {
@@ -91,6 +156,61 @@ impl Default for HttpConfig {
     }
 }
 
+impl HttpConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.http_address.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "http.http_address".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+
+        let https_enabled = self.https_address.is_some()
+            || self.self_signed_cert.enabled;
+
+        if let Some(addr) = &self.https_address {
+            if addr.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: "http.https_address".to_string(),
+                    reason: "must not be empty when set".to_string(),
+                });
+            }
+        }
+
+        if https_enabled {
+            if self.https_cert_path.is_none() {
+                return Err(Error::InvalidConfiguration {
+                    component: "http.https_cert_path".to_string(),
+                    reason: "must be set when HTTPS is enabled".to_string(),
+                });
+            }
+            if self.https_private_key_path.is_none() {
+                return Err(Error::InvalidConfiguration {
+                    component: "http.https_private_key_path".to_string(),
+                    reason: "must be set when HTTPS is enabled".to_string(),
+                });
+            }
+        }
+
+        self.proxy.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "http.proxy".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.cors.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "http.cors".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.self_signed_cert.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "http.self_signed_cert".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        Ok(())
+    }
+}
+
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
@@ -98,6 +218,20 @@ impl Default for ProxyConfig {
             trust_x_forwarded_for: true,
             trust_x_real_ip: true,
         }
+    }
+}
+
+impl ProxyConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        for (i, proxy) in self.trusted_proxies.iter().enumerate() {
+            if proxy.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: format!("http.proxy.trusted_proxies[{i}]"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -109,5 +243,26 @@ impl Default for CorsConfig {
             allowed_origins: vec![],
             allow_credentials: false,
         }
+    }
+}
+
+impl CorsConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !self.allow_any_origin && self.allowed_origins.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "http.cors.allowed_origins".to_string(),
+                reason: "must not be empty when allow_any_origin is false"
+                    .to_string(),
+            });
+        }
+        for (i, origin) in self.allowed_origins.iter().enumerate() {
+            if origin.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: format!("http.cors.allowed_origins[{i}]"),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }

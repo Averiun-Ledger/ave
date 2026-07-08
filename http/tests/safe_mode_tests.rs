@@ -261,7 +261,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
     let safe_options = TestServerOptions {
         enable_auth: false,
         always_accept: false,
-        node: Some(("12D3KooWNode1".to_string(), 65535)),
+        node: Some(("12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc".to_string(), 65535)),
         safe_mode: true,
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
@@ -430,7 +430,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
     let safe_options = TestServerOptions {
         enable_auth: true,
         always_accept: true,
-        node: Some(("12D3KooWNode1".to_string(), 65535)),
+        node: Some(("12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc".to_string(), 65535)),
         safe_mode: true,
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),

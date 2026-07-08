@@ -1,3 +1,4 @@
+use ave_common::Error;
 use ave_core::config::{Config as AveConfig, LoggingConfig, SinkConfigEntry};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -33,5 +34,38 @@ impl Default for Config {
             auth: Default::default(),
             http: Default::default(),
         }
+    }
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.keys_path.as_os_str().is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "keys_path".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+
+        self.logging.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "logging".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.auth.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "auth".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.http.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "http".to_string(),
+            reason: e.to_string(),
+        })?;
+
+        for (i, sink) in self.sinks.iter().enumerate() {
+            sink.validate().map_err(|e| Error::InvalidConfiguration {
+                component: format!("sinks[{i}]"),
+                reason: e.to_string(),
+            })?;
+        }
+
+        Ok(())
     }
 }

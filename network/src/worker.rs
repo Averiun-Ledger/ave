@@ -26,6 +26,7 @@ use std::{
 };
 
 use ave_actors::ActorRef;
+use ave_common::Error as CommonError;
 use ave_common::identity::KeyPair;
 
 use libp2p::{
@@ -203,6 +204,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         safe_mode: bool,
         runtime: NetworkWorkerRuntime,
     ) -> Result<Self, Error> {
+        config.validate().map_err(|e| match e {
+            CommonError::InvalidConfiguration { component, reason } => {
+                Error::InvalidConfiguration { component, reason }
+            }
+            other => Error::InvalidConfiguration {
+                component: "network".to_string(),
+                reason: other.to_string(),
+            },
+        })?;
+
         // Create channels to communicate commands
         info!(target: TARGET, "network initialising");
         let (command_sender, command_receiver) = mpsc::channel(512);
@@ -2076,6 +2087,7 @@ mod tests {
             vec!["/memory/3100".to_owned()],
         );
         config.max_pending_outbound_bytes_per_peer = 16;
+        config.max_app_message_bytes = 12;
 
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let mut registry = Registry::default();
@@ -2234,6 +2246,7 @@ mod tests {
         );
         config.max_pending_outbound_bytes_per_peer = 0;
         config.max_pending_outbound_bytes_total = 20;
+        config.max_app_message_bytes = 12;
 
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let mut registry = Registry::default();

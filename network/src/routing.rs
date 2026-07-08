@@ -1,3 +1,4 @@
+use ave_common::Error as CommonError;
 use futures_timer::Delay;
 
 use libp2p::{
@@ -601,6 +602,20 @@ impl Default for Config {
             allow_loop_back_address_in_dht: Default::default(),
             kademlia_disjoint_query_paths: true,
         }
+    }
+}
+
+impl Config {
+    /// Validates the routing configuration, returning an error describing the
+    /// first invalid value found.
+    pub fn validate(&self) -> Result<(), CommonError> {
+        if self.discovery_only_if_under_num == 0 {
+            return Err(CommonError::InvalidConfiguration {
+                component: "routing.discovery_only_if_under_num".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 

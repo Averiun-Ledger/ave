@@ -2,6 +2,7 @@
 //
 // This module defines the configuration structure for the authentication system
 
+use ave_common::Error;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -51,6 +52,44 @@ impl Default for AuthConfig {
     }
 }
 
+impl AuthConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.database_path.as_os_str().is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.database_path".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if self.enable && self.superadmin.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.superadmin".to_string(),
+                reason: "must not be empty when auth is enabled".to_string(),
+            });
+        }
+
+        self.api_key.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "auth.api_key".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.lockout.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "auth.lockout".to_string(),
+            reason: e.to_string(),
+        })?;
+        self.rate_limit.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "auth.rate_limit".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        self.session.validate().map_err(|e| Error::InvalidConfiguration {
+            component: "auth.session".to_string(),
+            reason: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+}
+
 /// API key configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -77,6 +116,24 @@ impl Default for ApiKeyConfig {
     }
 }
 
+impl ApiKeyConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.default_ttl_seconds < 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.api_key.default_ttl_seconds".to_string(),
+                reason: "must not be negative".to_string(),
+            });
+        }
+        if self.prefix.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.api_key.prefix".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Account lockout configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -95,6 +152,19 @@ impl Default for LockoutConfig {
             max_attempts: 10,
             duration_seconds: 300,
         }
+    }
+}
+
+impl LockoutConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.max_attempts > 0 && self.duration_seconds <= 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.lockout.duration_seconds".to_string(),
+                reason: "must be greater than zero when lockout is enabled (max_attempts > 0)"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -170,6 +240,96 @@ impl Default for RateLimitConfig {
     }
 }
 
+impl RateLimitConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !self.enable {
+            return Ok(());
+        }
+        if self.window_seconds <= 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.rate_limit.window_seconds".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.max_requests == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.rate_limit.max_requests".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if !self.limit_by_key && !self.limit_by_ip {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.rate_limit".to_string(),
+                reason: "at least one of limit_by_key or limit_by_ip must be true when rate limiting is enabled"
+                    .to_string(),
+            });
+        }
+        if self.cleanup_interval_seconds <= 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.rate_limit.cleanup_interval_seconds"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for (i, endpoint) in self.sensitive_endpoints.iter().enumerate() {
+            endpoint.validate().map_err(|e| {
+                Error::InvalidConfiguration {
+                    component: format!(
+                        "auth.rate_limit.sensitive_endpoints[{i}]"
+                    ),
+                    reason: e.to_string(),
+                }
+            })?;
+            if !seen.insert(&endpoint.endpoint) {
+                return Err(Error::InvalidConfiguration {
+                    component: format!(
+                        "auth.rate_limit.sensitive_endpoints[{i}].endpoint"
+                    ),
+                    reason: format!(
+                        "duplicated value '{}'",
+                        endpoint.endpoint
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl EndpointRateLimit {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.endpoint.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "EndpointRateLimit.endpoint".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if !self.endpoint.starts_with('/') {
+            return Err(Error::InvalidConfiguration {
+                component: "EndpointRateLimit.endpoint".to_string(),
+                reason: format!("must start with '/', got {}", self.endpoint),
+            });
+        }
+        if self.max_requests == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "EndpointRateLimit.max_requests".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if let Some(window) = self.window_seconds {
+            if window <= 0 {
+                return Err(Error::InvalidConfiguration {
+                    component: "EndpointRateLimit.window_seconds".to_string(),
+                    reason: "must be greater than zero when set".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Session configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -194,5 +354,13 @@ impl Default for SessionConfig {
             // Approximately 11.5 days at 1 req/sec, or 1 day at 11.5 req/sec
             audit_max_entries: 1_000_000,
         }
+    }
+}
+
+impl SessionConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        // audit_retention_days == 0 means keep forever; audit_max_entries == 0 means unlimited.
+        // Both are valid defensive values, so no further validation is needed.
+        Ok(())
     }
 }

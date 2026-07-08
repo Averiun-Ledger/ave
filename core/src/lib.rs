@@ -55,6 +55,7 @@ use ave_network::{
 use config::Config as AveBaseConfig;
 use error::Error;
 use helpers::network::*;
+use ave_common::Error as CommonError;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 
@@ -317,6 +318,16 @@ impl Api {
         crash_token: CancellationToken,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
         debug!("Creating Api");
+
+        config.validate().map_err(|e| match e {
+            CommonError::InvalidConfiguration { component, reason } => {
+                Error::InvalidConfiguration { component, reason }
+            }
+            other => Error::InvalidConfiguration {
+                component: "node".to_string(),
+                reason: other.to_string(),
+            },
+        })?;
 
         let (system, runner) = system(
             config.clone(),
