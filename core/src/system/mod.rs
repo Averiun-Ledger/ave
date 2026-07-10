@@ -9,17 +9,18 @@ use crate::{
     db::Database,
     external_db::DBManager,
     helpers::db::ExternalDB,
-    model::common::contract::WasmRuntime,
 };
 use ave_actors::{
     ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef,
 };
 use ave_common::identity::hash_borsh;
+#[cfg(feature = "prometheus")]
+use ave_contract_sdk::runtime::ContractMetrics;
+use ave_contract_sdk::runtime::{CompiledModule, ContractRuntime};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use wasmtime::Module;
 
 #[cfg(feature = "prometheus")]
 use prometheus_client::registry::Registry;
@@ -68,26 +69,43 @@ pub async fn system(
     password: &str,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
-    #[cfg(feature = "prometheus")] registry: Option<&mut Registry>,
+    #[cfg(feature = "prometheus")] mut registry: Option<&mut Registry>,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
     let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
     #[cfg(feature = "prometheus")]
-    if let Some(registry) = registry {
+    if let Some(registry) = registry.as_mut() {
         ave_actors::prometheus::register(registry, &mut system);
     }
 
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
     system.add_helper("config", config_helper);
 
-    // Build engine + limits together; actors fetch both via a single helper access.
-    let wasm_runtime = WasmRuntime::new(config.spec.clone())
-        .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
-    system.add_helper("wasm_runtime", Arc::new(wasm_runtime));
+    #[cfg(feature = "prometheus")]
+    let contract_metrics = registry.map(|registry| {
+        let metrics = Arc::new(ContractMetrics::new());
+        metrics.register_into(registry);
+        metrics
+    });
 
-    let contracts: HashMap<String, Arc<Module>> = HashMap::new();
+    // Build engine + limits together via the SDK runtime.
+    let resolved = crate::config::resolve_spec(config.spec.as_ref());
+    let contract_runtime = ContractRuntime::with_metrics(
+        Some(ave_contract_sdk::runtime::ResolvedMachineSpec {
+            ram_mb: resolved.ram_mb,
+            cpu_cores: resolved.cpu_cores,
+        }),
+        #[cfg(feature = "prometheus")]
+        contract_metrics,
+        #[cfg(not(feature = "prometheus"))]
+        None,
+    )
+    .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
+    system.add_helper("contract_runtime", Arc::new(contract_runtime));
+
+    let contracts: HashMap<String, Arc<CompiledModule>> = HashMap::new();
     system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
 
     let actor_spec = config.spec.clone().map(MachineSpec::from);

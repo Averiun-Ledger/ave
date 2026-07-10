@@ -46,18 +46,24 @@ impl Config {
             });
         }
 
-        self.logging.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "logging".to_string(),
-            reason: e.to_string(),
-        })?;
-        self.auth.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "auth".to_string(),
-            reason: e.to_string(),
-        })?;
-        self.http.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "http".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.logging
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "logging".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.auth
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "auth".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.http
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "http".to_string(),
+                reason: e.to_string(),
+            })?;
 
         for (i, sink) in self.sinks.iter().enumerate() {
             sink.validate().map_err(|e| Error::InvalidConfiguration {

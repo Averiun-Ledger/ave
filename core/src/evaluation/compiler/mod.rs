@@ -3,39 +3,38 @@ use std::env;
 #[cfg(feature = "test")]
 use std::io::ErrorKind;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     hash::{DefaultHasher, Hash as StdHash, Hasher},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::Instant,
 };
+use std::time::Instant;
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
-    ContractData, ContractInitCheckData, ValueWrapper,
+    ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
+use ave_contract_sdk::runtime::{
+    CompiledModule, ContractRuntime, InvalidModuleKind as SdkInvalidModuleKind,
+    RuntimeError,
+};
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
-use borsh::{BorshDeserialize, BorshSerialize, to_vec};
+#[cfg(feature = "test")]
+use borsh::to_vec;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(feature = "test")]
 use tokio::time::{Duration, sleep};
 use tokio::{fs, process::Command, sync::RwLock};
 use tracing::debug;
-use wasmtime::{ExternType, Module, Store};
 
-use crate::model::common::contract::{
-    MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime,
-    generate_linker,
+use crate::governance::contract_register::{
+    ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
 };
-use crate::{
-    governance::contract_register::{
-        ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
-    },
-    metrics::try_core_metrics,
-};
+use crate::metrics::try_core_metrics;
 
 pub mod contract_compiler;
 pub mod error;
@@ -486,7 +485,7 @@ impl CompilerSupport {
         toolchain_fingerprint: &DigestIdentifier,
     ) -> Result<
         Option<(
-            Arc<Module>,
+            Arc<CompiledModule>,
             ContractArtifactRecord,
             &'static str,
             Vec<u8>,
@@ -545,136 +544,47 @@ impl CompilerSupport {
         })
     }
 
-    fn deserialize_precompiled(
-        wasm_runtime: &WasmRuntime,
-        precompiled_bytes: &[u8],
-    ) -> Result<Module, CompilerError> {
-        unsafe {
-            Module::deserialize(&wasm_runtime.engine, precompiled_bytes)
-                .map_err(|e| CompilerError::WasmDeserializationFailed {
-                    details: e.to_string(),
-                })
-        }
-    }
-
-    fn precompile_module(
-        wasm_runtime: &WasmRuntime,
+    async fn precompile_module(
+        contract_runtime: &ContractRuntime,
         wasm_bytes: &[u8],
-    ) -> Result<(Vec<u8>, Module), CompilerError> {
-        let precompiled_bytes = wasm_runtime
-            .engine
-            .precompile_module(wasm_bytes)
-            .map_err(|e| CompilerError::WasmPrecompileFailed {
-                details: e.to_string(),
-            })?;
+    ) -> Result<(Vec<u8>, Arc<CompiledModule>), CompilerError> {
+        let module = contract_runtime
+            .compile(wasm_bytes)
+            .map_err(map_runtime_error_to_compiler_error)?;
 
-        let module =
-            Self::deserialize_precompiled(wasm_runtime, &precompiled_bytes)?;
+        let precompiled_bytes = module.precompiled_bytes().to_vec();
+        let module = Arc::new(module);
 
         Ok((precompiled_bytes, module))
     }
 
     async fn validate_module<A: Actor>(
         ctx: &ActorContext<A>,
-        module: &Module,
+        module: &CompiledModule,
         state: ValueWrapper,
     ) -> Result<(), CompilerError> {
-        let wasm_runtime = Self::wasm_runtime(ctx).await?;
-
-        let imports = module.imports();
-        let mut pending_sdk = Self::get_sdk_functions_identifier();
-
-        for import in imports {
-            match import.ty() {
-                ExternType::Func(_) => {
-                    if !pending_sdk.remove(import.name()) {
-                        return Err(CompilerError::InvalidModule {
-                            kind: InvalidModuleKind::UnknownImportFunction {
-                                name: import.name().to_string(),
-                            },
-                        });
-                    }
-                }
-                extern_type => {
-                    return Err(CompilerError::InvalidModule {
-                        kind: InvalidModuleKind::NonFunctionImport {
-                            import_type: format!("{:?}", extern_type),
-                        },
-                    });
-                }
-            }
-        }
-        if !pending_sdk.is_empty() {
-            return Err(CompilerError::InvalidModule {
-                kind: InvalidModuleKind::MissingImports {
-                    missing: pending_sdk
-                        .into_iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                },
-            });
-        }
-
-        let (context, state_ptr) =
-            Self::generate_context(state, &wasm_runtime.limits)?;
-        let mut store = Store::new(&wasm_runtime.engine, context);
-
-        store.limiter(|data| &mut data.store_limits);
-        store.set_fuel(MAX_FUEL_COMPILATION).map_err(|e| {
-            CompilerError::FuelLimitError {
-                details: e.to_string(),
-            }
-        })?;
-
-        let linker = generate_linker(&wasm_runtime.engine)?;
-        let instance = linker.instantiate(&mut store, module).map_err(|e| {
-            CompilerError::InstantiationFailed {
-                details: e.to_string(),
-            }
-        })?;
-
-        let _ = instance
-            .get_typed_func::<(u32, u32, u32, u32), u32>(
-                &mut store,
-                "main_function",
-            )
-            .map_err(|_e| CompilerError::EntryPointNotFound {
-                function: "main_function",
-            })?;
-
-        let init_contract_entrypoint = instance
-            .get_typed_func::<u32, u32>(&mut store, "init_check_function")
-            .map_err(|_e| CompilerError::EntryPointNotFound {
-                function: "init_check_function",
-            })?;
-
-        let result_ptr =
-            init_contract_entrypoint
-                .call(&mut store, state_ptr)
-                .map_err(|e| CompilerError::ContractExecutionFailed {
-                    details: e.to_string(),
-                })?;
-
-        Self::check_result(&store, result_ptr)?;
-
-        Ok(())
+        let contract_runtime = Self::contract_runtime(ctx).await?;
+        contract_runtime
+            .validate(module, &state)
+            .map_err(map_runtime_error_to_compiler_error)
     }
 
-    async fn wasm_runtime<A: Actor>(
+    async fn contract_runtime<A: Actor>(
         ctx: &ActorContext<A>,
-    ) -> Result<Arc<WasmRuntime>, CompilerError> {
+    ) -> Result<Arc<ContractRuntime>, CompilerError> {
         ctx.system()
-            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
+            .get_helper::<Arc<ContractRuntime>>("contract_runtime")
             .ok_or(CompilerError::MissingHelper {
-                name: "wasm_runtime",
+                name: "contract_runtime",
             })
     }
 
     async fn contracts_helper<A: Actor>(
         ctx: &ActorContext<A>,
-    ) -> Result<Arc<RwLock<HashMap<String, Arc<Module>>>>, ActorError> {
+    ) -> Result<Arc<RwLock<HashMap<String, Arc<CompiledModule>>>>, ActorError>
+    {
         ctx.system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<CompiledModule>>>>>(
                 "contracts",
             )
             .ok_or_else(|| ActorError::Helper {
@@ -721,11 +631,11 @@ impl CompilerSupport {
 
     fn engine_fingerprint(
         hash: HashAlgorithm,
-        wasm_runtime: &WasmRuntime,
+        contract_runtime: &ContractRuntime,
     ) -> Result<DigestIdentifier, CompilerError> {
         let mut hasher = DefaultHasher::new();
-        wasm_runtime
-            .engine
+        contract_runtime
+            .engine()
             .precompile_compatibility_hash()
             .hash(&mut hasher);
         hash_borsh(&*hash.hasher(), &hasher.finish()).map_err(|e| {
@@ -766,9 +676,10 @@ impl CompilerSupport {
 
     async fn contract_environment(
         hash: HashAlgorithm,
-        wasm_runtime: &Arc<WasmRuntime>,
+        contract_runtime: &Arc<ContractRuntime>,
     ) -> Result<(DigestIdentifier, DigestIdentifier), CompilerError> {
-        let engine_fingerprint = Self::engine_fingerprint(hash, wasm_runtime)?;
+        let engine_fingerprint =
+            Self::engine_fingerprint(hash, contract_runtime)?;
         let toolchain_fingerprint = Self::toolchain_fingerprint(hash).await?;
         Ok((engine_fingerprint, toolchain_fingerprint))
     }
@@ -793,7 +704,8 @@ impl CompilerSupport {
         contract: &str,
         contract_path: &Path,
         initial_value: Value,
-    ) -> Result<(Arc<Module>, ContractArtifactRecord), CompilerError> {
+    ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
+    {
         let contract_hash =
             hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
                 CompilerError::SerializationError {
@@ -812,9 +724,9 @@ impl CompilerSupport {
 
         Self::prepare_contract_project(contract, contract_path).await?;
 
-        let wasm_runtime = Self::wasm_runtime(ctx).await?;
+        let contract_runtime = Self::contract_runtime(ctx).await?;
         let (engine_fingerprint, toolchain_fingerprint) =
-            Self::contract_environment(hash, &wasm_runtime).await?;
+            Self::contract_environment(hash, &contract_runtime).await?;
 
         let contracts_root = Self::contracts_root(contract_path)?;
         Self::build_contract(
@@ -825,7 +737,7 @@ impl CompilerSupport {
 
         let wasm_bytes = Self::load_compiled_wasm(&contracts_root).await?;
         let (precompiled_bytes, module) =
-            Self::precompile_module(&wasm_runtime, &wasm_bytes)?;
+            Self::precompile_module(&contract_runtime, &wasm_bytes).await?;
         Self::validate_module(ctx, &module, ValueWrapper(initial_value))
             .await?;
         Self::persist_artifact(contract_path, &wasm_bytes, &precompiled_bytes)
@@ -865,7 +777,7 @@ impl CompilerSupport {
             }
         }
 
-        Ok((Arc::new(module), metadata))
+        Ok((module, metadata))
     }
 
     #[cfg(feature = "test")]
@@ -879,7 +791,7 @@ impl CompilerSupport {
         toolchain_fingerprint: &DigestIdentifier,
     ) -> Result<
         Option<(
-            Arc<Module>,
+            Arc<CompiledModule>,
             ContractArtifactRecord,
             &'static str,
             Vec<u8>,
@@ -917,7 +829,7 @@ impl CompilerSupport {
             return Ok(None);
         }
 
-        let wasm_runtime = Self::wasm_runtime(ctx).await?;
+        let contract_runtime = Self::contract_runtime(ctx).await?;
         let wasm_bytes = match Self::load_artifact_wasm_from(&cache_dir).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -951,10 +863,9 @@ impl CompilerSupport {
                 "global cache cwasm artifact",
             )?;
             if precompiled_hash == persisted.cwasm_hash
-                && let Ok(module) = Self::deserialize_precompiled(
-                    &wasm_runtime,
-                    &precompiled_bytes,
-                )
+                && let Ok((_, module)) =
+                    Self::precompile_module(&contract_runtime, &wasm_bytes)
+                        .await
                 && Self::validate_module(
                     ctx,
                     &module,
@@ -964,7 +875,7 @@ impl CompilerSupport {
                 .is_ok()
             {
                 return Ok(Some((
-                    Arc::new(module),
+                    module,
                     persisted,
                     "global_cwasm_hit",
                     wasm_bytes,
@@ -974,7 +885,7 @@ impl CompilerSupport {
         }
 
         if let Ok((precompiled_bytes, module)) =
-            Self::precompile_module(&wasm_runtime, &wasm_bytes)
+            Self::precompile_module(&contract_runtime, &wasm_bytes).await
             && Self::validate_module(ctx, &module, ValueWrapper(initial_value))
                 .await
                 .is_ok()
@@ -1005,7 +916,7 @@ impl CompilerSupport {
             }
 
             return Ok(Some((
-                Arc::new(module),
+                module,
                 refreshed_record,
                 "global_wasm_hit",
                 wasm_bytes,
@@ -1023,7 +934,7 @@ impl CompilerSupport {
         contract: &str,
         contract_path: &Path,
         initial_value: Value,
-    ) -> Result<(Arc<Module>, ContractArtifactRecord), CompilerError> {
+    ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError> {
         let started_at = Instant::now();
         let result = async {
             let contract_hash =
@@ -1044,9 +955,9 @@ impl CompilerSupport {
 
             Self::prepare_contract_project(contract, contract_path).await?;
 
-            let wasm_runtime = Self::wasm_runtime(ctx).await?;
+            let contract_runtime = Self::contract_runtime(ctx).await?;
             let (engine_fingerprint, toolchain_fingerprint) =
-                Self::contract_environment(hash, &wasm_runtime).await?;
+                Self::contract_environment(hash, &contract_runtime).await?;
 
             let parent_path = ctx.path().parent();
             let register_path =
@@ -1092,10 +1003,9 @@ impl CompilerSupport {
                             "persisted cwasm artifact",
                         )?;
                         if precompiled_hash == persisted.cwasm_hash {
-                            match Self::deserialize_precompiled(
-                                &wasm_runtime,
-                                &precompiled_bytes,
-                            ) {
+                            match contract_runtime
+                                .load_precompiled(&precompiled_bytes)
+                            {
                                 Ok(module) => {
                                     match Self::validate_module(
                                         ctx,
@@ -1155,9 +1065,11 @@ impl CompilerSupport {
                         )?;
                         if wasm_hash == persisted.wasm_hash {
                             match Self::precompile_module(
-                                &wasm_runtime,
+                                &contract_runtime,
                                 &wasm_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok((precompiled_bytes, module)) => {
                                     match Self::validate_module(
                                         ctx,
@@ -1181,8 +1093,7 @@ impl CompilerSupport {
                                                     &wasm_bytes,
                                                     &precompiled_bytes,
                                                     engine_fingerprint.clone(),
-                                                    toolchain_fingerprint
-                                                        .clone(),
+                                                    toolchain_fingerprint.clone(),
                                                 )?;
 
                                             register
@@ -1202,7 +1113,7 @@ impl CompilerSupport {
                                                 })?;
 
                                             return Ok((
-                                                Arc::new(module),
+                                                module,
                                                 refreshed_record,
                                                 "wasm_hit",
                                             ));
@@ -1382,54 +1293,54 @@ impl CompilerSupport {
             }
         }
     }
+}
 
-    fn check_result(
-        store: &Store<MemoryManager>,
-        pointer: u32,
-    ) -> Result<(), CompilerError> {
-        let bytes = store.data().read_data(pointer as usize)?;
-        let contract_result: ContractInitCheckData =
-            BorshDeserialize::try_from_slice(bytes).map_err(|e| {
-                CompilerError::InvalidContractOutput {
-                    details: e.to_string(),
-                }
-            })?;
-
-        if contract_result.success {
-            Ok(())
-        } else {
-            Err(CompilerError::ContractCheckFailed {
-                error: contract_result.error,
-            })
+fn map_runtime_error_to_compiler_error(error: RuntimeError) -> CompilerError {
+    match error {
+        RuntimeError::EngineCreation(details)
+        | RuntimeError::PrecompileFailed(details) => {
+            CompilerError::WasmPrecompileFailed { details }
+        }
+        RuntimeError::DeserializationFailed(details) => {
+            CompilerError::WasmDeserializationFailed { details }
+        }
+        RuntimeError::InvalidModule(kind) => CompilerError::InvalidModule {
+            kind: map_sdk_invalid_module_kind(kind),
+        },
+        RuntimeError::EntryPointNotFound { function } => {
+            CompilerError::EntryPointNotFound { function }
+        }
+        RuntimeError::ContractExecutionFailed(details) => {
+            CompilerError::ContractExecutionFailed { details }
+        }
+        RuntimeError::FuelLimitError(details) => {
+            CompilerError::FuelLimitError { details }
+        }
+        RuntimeError::InstantiationFailed(details) => {
+            CompilerError::InstantiationFailed { details }
+        }
+        RuntimeError::MemoryAllocationFailed(details) => {
+            CompilerError::MemoryAllocationFailed { details }
+        }
+        RuntimeError::SerializationError { context, details } => {
+            CompilerError::SerializationError { context, details }
         }
     }
+}
 
-    fn generate_context(
-        state: ValueWrapper,
-        limits: &WasmLimits,
-    ) -> Result<(MemoryManager, u32), CompilerError> {
-        let mut context = MemoryManager::from_limits(limits);
-        let state_data =
-            ContractData::from_json_value(&state.0).map_err(|e| {
-                CompilerError::SerializationError {
-                    context: "state serialization to JSON bytes",
-                    details: e.to_string(),
-                }
-            })?;
-        let state_bytes = to_vec(&state_data).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "state serialization",
-                details: e.to_string(),
-            }
-        })?;
-        let state_ptr = context.add_data_raw(&state_bytes)?;
-        Ok((context, state_ptr as u32))
-    }
-
-    fn get_sdk_functions_identifier() -> HashSet<&'static str> {
-        ["alloc", "write_bytes", "pointer_len", "read_bytes"]
-            .into_iter()
-            .collect()
+fn map_sdk_invalid_module_kind(
+    kind: SdkInvalidModuleKind,
+) -> InvalidModuleKind {
+    match kind {
+        SdkInvalidModuleKind::UnknownImportFunction { name } => {
+            InvalidModuleKind::UnknownImportFunction { name }
+        }
+        SdkInvalidModuleKind::NonFunctionImport { import_type } => {
+            InvalidModuleKind::NonFunctionImport { import_type }
+        }
+        SdkInvalidModuleKind::MissingImports { missing } => {
+            InvalidModuleKind::MissingImports { missing }
+        }
     }
 }
 

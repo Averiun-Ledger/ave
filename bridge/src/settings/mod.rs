@@ -691,11 +691,13 @@ http:
         );
         let expected_boot_nodes = vec![
             RoutingNode {
-                peer_id: "12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc".to_owned(),
+                peer_id: "12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc"
+                    .to_owned(),
                 address: vec!["/ip4/1.1.1.1/tcp/1000".to_owned()],
             },
             RoutingNode {
-                peer_id: "12D3KooWKx2XmB57yFf5f6Bm95EmNynceBkfQ2SVJPTtpETiyEF1".to_owned(),
+                peer_id: "12D3KooWKx2XmB57yFf5f6Bm95EmNynceBkfQ2SVJPTtpETiyEF1"
+                    .to_owned(),
                 address: vec!["/ip4/2.2.2.2/tcp/2000".to_owned()],
             },
         ];
@@ -989,7 +991,7 @@ http:
         assert_eq!(config.http.self_signed_cert.check_interval_secs, 3600);
     }
 
-#[test]
+    #[test]
     fn build_config_allows_zero_control_list_max_concurrency() {
         const ZERO_TOML: &str = r#"
         [node.network.control_list]

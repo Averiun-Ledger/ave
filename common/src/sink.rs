@@ -500,8 +500,9 @@ impl SinkTarget {
                         return Err(Error::InvalidConfiguration {
                             component: "SinkTarget.Schema.governance_id"
                                 .to_string(),
-                            reason: "must be None when schema_id is 'governance'"
-                                .to_string(),
+                            reason:
+                                "must be None when schema_id is 'governance'"
+                                    .to_string(),
                         });
                     }
                 } else if governance_id
@@ -617,7 +618,10 @@ impl SinkServer {
                 ),
             });
         }
-        require_positive_u64("SinkServer.max_retries", self.max_retries as u64)?;
+        require_positive_u64(
+            "SinkServer.max_retries",
+            self.max_retries as u64,
+        )?;
         require_positive_u64("SinkServer.batch_size", self.batch_size as u64)?;
         require_positive_u64(
             "SinkServer.sink_worker_idle_timeout_ms",
@@ -696,10 +700,12 @@ pub struct SinkConfigEntry {
 
 impl SinkConfigEntry {
     pub fn validate(&self) -> Result<(), Error> {
-        self.target.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "SinkConfigEntry.target".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.target
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "SinkConfigEntry.target".to_string(),
+                reason: e.to_string(),
+            })?;
 
         if self.servers.is_empty() {
             return Err(Error::InvalidConfiguration {

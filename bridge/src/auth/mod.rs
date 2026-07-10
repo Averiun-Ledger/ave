@@ -67,24 +67,30 @@ impl AuthConfig {
             });
         }
 
-        self.api_key.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "auth.api_key".to_string(),
-            reason: e.to_string(),
-        })?;
-        self.lockout.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "auth.lockout".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.api_key
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "auth.api_key".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.lockout
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "auth.lockout".to_string(),
+                reason: e.to_string(),
+            })?;
         self.rate_limit.validate().map_err(|e| {
             Error::InvalidConfiguration {
                 component: "auth.rate_limit".to_string(),
                 reason: e.to_string(),
             }
         })?;
-        self.session.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "auth.session".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.session
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "auth.session".to_string(),
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -274,23 +280,20 @@ impl RateLimitConfig {
 
         let mut seen = std::collections::HashSet::new();
         for (i, endpoint) in self.sensitive_endpoints.iter().enumerate() {
-            endpoint.validate().map_err(|e| {
-                Error::InvalidConfiguration {
+            endpoint
+                .validate()
+                .map_err(|e| Error::InvalidConfiguration {
                     component: format!(
                         "auth.rate_limit.sensitive_endpoints[{i}]"
                     ),
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
             if !seen.insert(&endpoint.endpoint) {
                 return Err(Error::InvalidConfiguration {
                     component: format!(
                         "auth.rate_limit.sensitive_endpoints[{i}].endpoint"
                     ),
-                    reason: format!(
-                        "duplicated value '{}'",
-                        endpoint.endpoint
-                    ),
+                    reason: format!("duplicated value '{}'", endpoint.endpoint),
                 });
             }
         }

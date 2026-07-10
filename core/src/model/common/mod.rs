@@ -37,7 +37,6 @@ use crate::request::manager::{
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use std::ops::Bound::{Included, Unbounded};
 
-pub mod contract;
 pub mod distribution_plan;
 pub mod node;
 pub mod subject;

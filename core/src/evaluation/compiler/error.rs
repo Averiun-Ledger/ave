@@ -1,4 +1,3 @@
-use crate::model::common::contract::ContractError;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
@@ -100,56 +99,6 @@ impl std::fmt::Display for InvalidModuleKind {
                     "module is missing SDK imports: {}",
                     missing.join(", ")
                 )
-            }
-        }
-    }
-}
-
-impl From<ContractError> for CompilerError {
-    fn from(error: ContractError) -> Self {
-        match error {
-            ContractError::MemoryAllocationFailed { details } => {
-                Self::MemoryAllocationFailed { details }
-            }
-            ContractError::InvalidPointer { pointer } => {
-                Self::MemoryAllocationFailed {
-                    details: format!("invalid pointer: {}", pointer),
-                }
-            }
-            ContractError::WriteOutOfBounds { offset, size } => {
-                Self::MemoryAllocationFailed {
-                    details: format!(
-                        "write out of bounds: offset {} >= size {}",
-                        offset, size
-                    ),
-                }
-            }
-            ContractError::AllocationTooLarge { size, max } => {
-                Self::MemoryAllocationFailed {
-                    details: format!(
-                        "allocation size {} exceeds maximum of {} bytes",
-                        size, max
-                    ),
-                }
-            }
-            ContractError::TotalMemoryExceeded { total, max } => {
-                Self::MemoryAllocationFailed {
-                    details: format!(
-                        "total memory {} exceeds maximum of {} bytes",
-                        total, max
-                    ),
-                }
-            }
-            ContractError::AllocationOverflow => Self::MemoryAllocationFailed {
-                details: "memory allocation would overflow".to_string(),
-            },
-            ContractError::LinkerError { function, details } => {
-                Self::InstantiationFailed {
-                    details: format!(
-                        "linker error [{}]: {}",
-                        function, details
-                    ),
-                }
             }
         }
     }

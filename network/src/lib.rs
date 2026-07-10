@@ -249,7 +249,8 @@ impl MemoryLimitsConfig {
                 if *value == 0 {
                     return Err(CommonError::InvalidConfiguration {
                         component: "network.memory_limits".to_string(),
-                        reason: "mb value must be greater than zero".to_string(),
+                        reason: "mb value must be greater than zero"
+                            .to_string(),
                     });
                 }
             }
@@ -439,10 +440,7 @@ impl Config {
             if node.peer_id.parse::<PeerId>().is_err() {
                 return Err(CommonError::InvalidConfiguration {
                     component: format!("network.boot_nodes[{i}].peer_id"),
-                    reason: format!(
-                        "not a valid peer id: {}",
-                        node.peer_id
-                    ),
+                    reason: format!("not a valid peer id: {}", node.peer_id),
                 });
             }
             if node.address.is_empty() {
@@ -471,9 +469,11 @@ impl Config {
             }
         }
 
-        self.routing.validate().map_err(|e| CommonError::InvalidConfiguration {
-            component: "network.routing".to_string(),
-            reason: e.to_string(),
+        self.routing.validate().map_err(|e| {
+            CommonError::InvalidConfiguration {
+                component: "network.routing".to_string(),
+                reason: e.to_string(),
+            }
         })?;
         self.control_list.validate().map_err(|e| {
             CommonError::InvalidConfiguration {

@@ -30,6 +30,7 @@ use auth::{
     AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse,
 };
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
+use ave_common::Error as CommonError;
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
     EventsQuery, SinkEventsQuery, SinkReplayItem, SinkReplayRequest,
@@ -55,7 +56,6 @@ use ave_network::{
 use config::Config as AveBaseConfig;
 use error::Error;
 use helpers::network::*;
-use ave_common::Error as CommonError;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 

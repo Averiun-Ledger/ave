@@ -154,20 +154,14 @@ impl Config {
         for (i, url) in self.service_allow_list.iter().enumerate() {
             if url.is_empty() {
                 return Err(CommonError::InvalidConfiguration {
-                    component: format!(
-                        "control_list.service_allow_list[{i}]"
-                    ),
+                    component: format!("control_list.service_allow_list[{i}]"),
                     reason: "must not be empty".to_string(),
                 });
             }
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(CommonError::InvalidConfiguration {
-                    component: format!(
-                        "control_list.service_allow_list[{i}]"
-                    ),
-                    reason: format!(
-                        "must be an http/https URL, got {url}"
-                    ),
+                    component: format!("control_list.service_allow_list[{i}]"),
+                    reason: format!("must be an http/https URL, got {url}"),
                 });
             }
         }
@@ -175,34 +169,22 @@ impl Config {
         for (i, url) in self.service_block_list.iter().enumerate() {
             if url.is_empty() {
                 return Err(CommonError::InvalidConfiguration {
-                    component: format!(
-                        "control_list.service_block_list[{i}]"
-                    ),
+                    component: format!("control_list.service_block_list[{i}]"),
                     reason: "must not be empty".to_string(),
                 });
             }
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(CommonError::InvalidConfiguration {
-                    component: format!(
-                        "control_list.service_block_list[{i}]"
-                    ),
-                    reason: format!(
-                        "must be an http/https URL, got {url}"
-                    ),
+                    component: format!("control_list.service_block_list[{i}]"),
+                    reason: format!("must be an http/https URL, got {url}"),
                 });
             }
         }
 
-        let allow: HashSet<&str> = self
-            .allow_list
-            .iter()
-            .map(|peer| peer.trim())
-            .collect();
-        let block: HashSet<&str> = self
-            .block_list
-            .iter()
-            .map(|peer| peer.trim())
-            .collect();
+        let allow: HashSet<&str> =
+            self.allow_list.iter().map(|peer| peer.trim()).collect();
+        let block: HashSet<&str> =
+            self.block_list.iter().map(|peer| peer.trim()).collect();
         if let Some(peer) = allow.intersection(&block).next() {
             return Err(CommonError::InvalidConfiguration {
                 component: "control_list".to_string(),

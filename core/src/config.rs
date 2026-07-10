@@ -108,9 +108,11 @@ impl Config {
             });
         }
 
-        self.internal_db.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "node.internal_db".to_string(),
-            reason: e.to_string(),
+        self.internal_db.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "node.internal_db".to_string(),
+                reason: e.to_string(),
+            }
         })?;
         self.external_db.validate().map_err(|e| {
             Error::InvalidConfiguration {
@@ -118,10 +120,12 @@ impl Config {
                 reason: e.to_string(),
             }
         })?;
-        self.sync.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "node.sync".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.sync
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "node.sync".to_string(),
+                reason: e.to_string(),
+            })?;
 
         if let Some(spec) = &self.spec {
             spec.validate().map_err(|e| Error::InvalidConfiguration {
@@ -172,18 +176,24 @@ impl SyncConfig {
                 reason: e.to_string(),
             }
         })?;
-        self.tracker.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "sync.tracker".to_string(),
-            reason: e.to_string(),
-        })?;
-        self.update.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "sync.update".to_string(),
-            reason: e.to_string(),
-        })?;
-        self.reboot.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "sync.reboot".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.tracker
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "sync.tracker".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.update
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "sync.update".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.reboot
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "sync.reboot".to_string(),
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -230,7 +240,8 @@ impl UpdateSyncConfig {
         }
         if self.witness_retry_interval_secs == 0 {
             return Err(Error::InvalidConfiguration {
-                component: "sync.update.witness_retry_interval_secs".to_string(),
+                component: "sync.update.witness_retry_interval_secs"
+                    .to_string(),
                 reason: "must be greater than zero".to_string(),
             });
         }
@@ -902,9 +913,7 @@ impl LoggingConfig {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(Error::InvalidConfiguration {
                     component: "logging.api_url".to_string(),
-                    reason: format!(
-                        "must be an http/https URL, got {url}"
-                    ),
+                    reason: format!("must be an http/https URL, got {url}"),
                 });
             }
         }
@@ -913,15 +922,15 @@ impl LoggingConfig {
             if self.file_path.as_os_str().is_empty() {
                 return Err(Error::InvalidConfiguration {
                     component: "logging.file_path".to_string(),
-                    reason: "must be set when output.file is true"
-                        .to_string(),
+                    reason: "must be set when output.file is true".to_string(),
                 });
             }
             if self.max_files == 0 {
                 return Err(Error::InvalidConfiguration {
                     component: "logging.max_files".to_string(),
-                    reason: "must be greater than zero when output.file is true"
-                        .to_string(),
+                    reason:
+                        "must be greater than zero when output.file is true"
+                            .to_string(),
                 });
             }
         }
@@ -945,10 +954,7 @@ impl LoggingConfig {
     }
 }
 
-fn validate_positive_vec(
-    component: &str,
-    values: &[u64],
-) -> Result<(), Error> {
+fn validate_positive_vec(component: &str, values: &[u64]) -> Result<(), Error> {
     if values.is_empty() {
         return Err(Error::InvalidConfiguration {
             component: component.to_string(),

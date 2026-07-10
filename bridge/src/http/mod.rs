@@ -165,8 +165,8 @@ impl HttpConfig {
             });
         }
 
-        let https_enabled = self.https_address.is_some()
-            || self.self_signed_cert.enabled;
+        let https_enabled =
+            self.https_address.is_some() || self.self_signed_cert.enabled;
 
         if let Some(addr) = &self.https_address {
             if addr.is_empty() {
@@ -192,14 +192,18 @@ impl HttpConfig {
             }
         }
 
-        self.proxy.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "http.proxy".to_string(),
-            reason: e.to_string(),
-        })?;
-        self.cors.validate().map_err(|e| Error::InvalidConfiguration {
-            component: "http.cors".to_string(),
-            reason: e.to_string(),
-        })?;
+        self.proxy
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "http.proxy".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.cors
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "http.cors".to_string(),
+                reason: e.to_string(),
+            })?;
         self.self_signed_cert.validate().map_err(|e| {
             Error::InvalidConfiguration {
                 component: "http.self_signed_cert".to_string(),

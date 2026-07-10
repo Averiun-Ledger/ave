@@ -90,13 +90,13 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
+use ave_contract_sdk::runtime::CompiledModule;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
 use tokio::{fs, sync::RwLock};
-use wasmtime::Module;
 
 pub mod contract_register;
 pub mod data;
@@ -1109,7 +1109,7 @@ impl Governance {
         };
 
         let Some(contracts) = ctx.system().get_helper::<Arc<
-            RwLock<HashMap<String, Arc<Module>>>,
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
         >>("contracts") else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
@@ -1213,7 +1213,7 @@ impl Governance {
         };
 
         let Some(contracts) = ctx.system().get_helper::<Arc<
-            RwLock<HashMap<String, Arc<Module>>>,
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
         >>("contracts") else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
@@ -1773,7 +1773,7 @@ impl Governance {
         };
 
         let Some(contracts) = ctx.system().get_helper::<Arc<
-            RwLock<HashMap<String, Arc<Module>>>,
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
         >>("contracts") else {
             return Err(ActorError::Helper {
                 name: "contracts".to_string(),
