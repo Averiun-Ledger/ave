@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+pub use ave_contract_sdk::runtime::InvalidModuleKind;
+
 #[derive(Debug, Error, Clone)]
 pub enum CompilerError {
     #[error("invalid contract path [{path}]: {details}")]
@@ -69,37 +71,3 @@ pub enum CompilerError {
     ContractCheckFailed { error: String },
 }
 
-#[derive(Debug, Clone)]
-pub enum InvalidModuleKind {
-    UnknownImportFunction { name: String },
-    NonFunctionImport { import_type: String },
-    MissingImports { missing: Vec<String> },
-}
-
-impl std::fmt::Display for InvalidModuleKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownImportFunction { name } => {
-                write!(
-                    f,
-                    "module has function '{}' that is not contemplated in the SDK",
-                    name
-                )
-            }
-            Self::NonFunctionImport { import_type } => {
-                write!(
-                    f,
-                    "module has a '{}' import that is not a function",
-                    import_type
-                )
-            }
-            Self::MissingImports { missing } => {
-                write!(
-                    f,
-                    "module is missing SDK imports: {}",
-                    missing.join(", ")
-                )
-            }
-        }
-    }
-}

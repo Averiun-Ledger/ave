@@ -4,7 +4,6 @@ use std::env;
 use std::io::ErrorKind;
 use std::{
     collections::HashMap,
-    hash::{DefaultHasher, Hash as StdHash, Hasher},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -17,8 +16,7 @@ use ave_common::{
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
 use ave_contract_sdk::runtime::{
-    CompiledModule, ContractRuntime, InvalidModuleKind as SdkInvalidModuleKind,
-    RuntimeError,
+    CompiledModule, ContractRuntime, RuntimeError,
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 #[cfg(feature = "test")]
@@ -93,7 +91,7 @@ impl CompilerSupport {
     }
 
     fn compilation_toml() -> String {
-        include_str!("contract_Cargo.toml").to_owned()
+        ave_contract_sdk::runtime::CONTRACT_CARGO_TOML.to_owned()
     }
 
     fn contracts_root(contract_path: &Path) -> Result<PathBuf, CompilerError> {
@@ -188,7 +186,7 @@ impl CompilerSupport {
         shared_target_dir: &Path,
         vendor_dir: Option<&Path>,
     ) -> String {
-        let mut config = include_str!("contract_cargo_config.toml").to_owned();
+        let mut config = ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
         config = config
             .replace("{target_dir}", &shared_target_dir.to_string_lossy());
 
@@ -544,7 +542,7 @@ impl CompilerSupport {
         })
     }
 
-    async fn precompile_module(
+    fn precompile_module(
         contract_runtime: &ContractRuntime,
         wasm_bytes: &[u8],
     ) -> Result<(Vec<u8>, Arc<CompiledModule>), CompilerError> {
@@ -629,23 +627,6 @@ impl CompilerSupport {
         })
     }
 
-    fn engine_fingerprint(
-        hash: HashAlgorithm,
-        contract_runtime: &ContractRuntime,
-    ) -> Result<DigestIdentifier, CompilerError> {
-        let mut hasher = DefaultHasher::new();
-        contract_runtime
-            .engine()
-            .precompile_compatibility_hash()
-            .hash(&mut hasher);
-        hash_borsh(&*hash.hasher(), &hasher.finish()).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "engine fingerprint",
-                details: e.to_string(),
-            }
-        })
-    }
-
     async fn toolchain_fingerprint(
         hash: HashAlgorithm,
     ) -> Result<DigestIdentifier, CompilerError> {
@@ -678,8 +659,9 @@ impl CompilerSupport {
         hash: HashAlgorithm,
         contract_runtime: &Arc<ContractRuntime>,
     ) -> Result<(DigestIdentifier, DigestIdentifier), CompilerError> {
-        let engine_fingerprint =
-            Self::engine_fingerprint(hash, contract_runtime)?;
+        let engine_fingerprint = contract_runtime
+            .engine_fingerprint(hash)
+            .map_err(map_runtime_error_to_compiler_error)?;
         let toolchain_fingerprint = Self::toolchain_fingerprint(hash).await?;
         Ok((engine_fingerprint, toolchain_fingerprint))
     }
@@ -737,7 +719,7 @@ impl CompilerSupport {
 
         let wasm_bytes = Self::load_compiled_wasm(&contracts_root).await?;
         let (precompiled_bytes, module) =
-            Self::precompile_module(&contract_runtime, &wasm_bytes).await?;
+            Self::precompile_module(&contract_runtime, &wasm_bytes)?;
         Self::validate_module(ctx, &module, ValueWrapper(initial_value))
             .await?;
         Self::persist_artifact(contract_path, &wasm_bytes, &precompiled_bytes)
@@ -865,7 +847,6 @@ impl CompilerSupport {
             if precompiled_hash == persisted.cwasm_hash
                 && let Ok((_, module)) =
                     Self::precompile_module(&contract_runtime, &wasm_bytes)
-                        .await
                 && Self::validate_module(
                     ctx,
                     &module,
@@ -885,7 +866,7 @@ impl CompilerSupport {
         }
 
         if let Ok((precompiled_bytes, module)) =
-            Self::precompile_module(&contract_runtime, &wasm_bytes).await
+            Self::precompile_module(&contract_runtime, &wasm_bytes)
             && Self::validate_module(ctx, &module, ValueWrapper(initial_value))
                 .await
                 .is_ok()
@@ -1067,9 +1048,7 @@ impl CompilerSupport {
                             match Self::precompile_module(
                                 &contract_runtime,
                                 &wasm_bytes,
-                            )
-                            .await
-                            {
+                            ) {
                                 Ok((precompiled_bytes, module)) => {
                                     match Self::validate_module(
                                         ctx,
@@ -1304,9 +1283,7 @@ fn map_runtime_error_to_compiler_error(error: RuntimeError) -> CompilerError {
         RuntimeError::DeserializationFailed(details) => {
             CompilerError::WasmDeserializationFailed { details }
         }
-        RuntimeError::InvalidModule(kind) => CompilerError::InvalidModule {
-            kind: map_sdk_invalid_module_kind(kind),
-        },
+        RuntimeError::InvalidModule(kind) => CompilerError::InvalidModule { kind },
         RuntimeError::EntryPointNotFound { function } => {
             CompilerError::EntryPointNotFound { function }
         }
@@ -1324,22 +1301,6 @@ fn map_runtime_error_to_compiler_error(error: RuntimeError) -> CompilerError {
         }
         RuntimeError::SerializationError { context, details } => {
             CompilerError::SerializationError { context, details }
-        }
-    }
-}
-
-fn map_sdk_invalid_module_kind(
-    kind: SdkInvalidModuleKind,
-) -> InvalidModuleKind {
-    match kind {
-        SdkInvalidModuleKind::UnknownImportFunction { name } => {
-            InvalidModuleKind::UnknownImportFunction { name }
-        }
-        SdkInvalidModuleKind::NonFunctionImport { import_type } => {
-            InvalidModuleKind::NonFunctionImport { import_type }
-        }
-        SdkInvalidModuleKind::MissingImports { missing } => {
-            InvalidModuleKind::MissingImports { missing }
         }
     }
 }
