@@ -285,6 +285,25 @@ pub async fn wait_for_sink_lagging_subjects(
     }
 }
 
+/// Poll `get_sinks_status` until `sink_name` reports zero lagging subjects.
+/// Panics on timeout.
+pub async fn wait_for_sink_caught_up(api: &Api, sink_name: &str) {
+    let mut attempts = 0;
+    loop {
+        let statuses = api.get_sinks_status().await.unwrap();
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
+            if status.lagging_subjects == 0 {
+                return;
+            }
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for sink {} to catch up", sink_name);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
 /// Assert through `get_sinks_status` that `sink_name` is currently blocked.
 /// Returns the block reason. Panics if the sink is missing or not blocked.
 pub async fn assert_sink_blocked(api: &Api, sink_name: &str) -> String {

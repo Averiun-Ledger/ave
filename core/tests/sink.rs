@@ -50,8 +50,8 @@ use crate::common::{
         make_sink_entry_with_concurrency, restart_config,
         restart_config_safe_mode, restart_config_with_peers, sample_sinks,
         short_idle_sink_config, transient_error_sink_config,
-        wait_for_sink_blocked, wait_for_sink_lagging_subjects,
-        wait_for_sink_unblocked,
+        wait_for_sink_blocked, wait_for_sink_caught_up,
+        wait_for_sink_lagging_subjects, wait_for_sink_unblocked,
     },
     test_sink::{AuthResponseMode, ResponseMode, TestSink},
 };
@@ -5673,10 +5673,13 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 ///   password from `AVE_SINK_PASSWORD_AUTH_SINK`.
 ///
 /// **Part A — API key:**
-/// 1. Configure a sink with `auth.api_key: "secret-key"`.
-/// 2. Emit a fact.
-/// 3. Verify that `TestSink` receives the header `Authorization: Api-Key
-///    secret-key` and the fact.
+/// 1. Restart with a sink configured with `auth.api_key: "secret-key"` while
+///    `TestSink` returns 500, and emit a fact. The failing deliveries
+///    guarantee no cursor is persisted, and a status query guarantees
+///    `last_seen` is persisted before the next shutdown.
+/// 2. Restart again with the sink healthy: startup catch-up must deliver
+///    Create + 3 facts.
+/// 3. Verify that every delivery carries `Authorization: Api-Key secret-key`.
 ///
 /// **Part B — OAuth2 + refresh on 401:**
 /// 1. Configure a sink with OAuth2.
@@ -5746,7 +5749,17 @@ async fn sink_auth_token_refresh() {
     let s1_str = s1.to_string();
 
     // Part A — API key authentication.
+    //
+    // The sink starts in ServerError mode so that no delivery can succeed
+    // (and therefore no cursor can be persisted) while the node is up. After
+    // emitting the last fact, a `get_sinks_status` call acts as a
+    // mailbox-order barrier: the status ask is queued after the
+    // `NotifyNewEvent` for SN 3, so its response guarantees the manager has
+    // processed it and `last_seen` is persisted. This removes the race
+    // between the fire-and-forget sink notification and the graceful
+    // shutdown, which discards non-critical mailbox messages.
     let api_key_sink = TestSink::start().await;
+    api_key_sink.set_mode(ResponseMode::ServerError).await;
     let api_key = "secret-key".to_owned();
     let initial_keys = node.keys.clone();
     let initial_local_db = dirs[0].path().to_path_buf();
@@ -5780,6 +5793,46 @@ async fn sink_auth_token_refresh() {
         .await
         .unwrap();
 
+    // Mailbox-order barrier: guarantees last_seen=3 is persisted.
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    assert!(
+        statuses.iter().any(|s| s.name == "auth-sink"),
+        "auth-sink must be registered after the restart"
+    );
+
+    // Restart with the sink healthy: startup catch-up must deliver SN 0-3.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    // Baseline taken with the node stopped: failed delivery attempts also
+    // record Authorization headers, and only later deliveries are asserted.
+    let headers_baseline = api_key_sink.authorization_headers().await.len();
+    api_key_sink.set_mode(ResponseMode::Accept).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "auth-sink",
+            api_key_sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthConfig {
+                auth_url: String::new(),
+                username: String::new(),
+                api_key: api_key.clone(),
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
     api_key_sink.wait_for_count(4, true).await;
     let api_key_events = api_key_sink.full_snapshot().await;
     assert_eq!(
@@ -5799,7 +5852,7 @@ async fn sink_auth_token_refresh() {
     let headers = api_key_sink.authorization_headers().await;
     let expected_api_key = format!("Api-Key {}", api_key);
     assert_eq!(
-        headers.len(),
+        headers.len() - headers_baseline,
         api_key_events.len(),
         "every delivered event should have a recorded Authorization header"
     );
@@ -5860,6 +5913,13 @@ async fn sink_auth_token_refresh() {
     .await
     .expect("worker should fetch a token eagerly on startup");
 
+    // Wait for any startup catch-up (triggered when the cursor was not
+    // persisted before the previous shutdown) to finish, then reset the sink
+    // so the refresh assertions only observe the new fact.
+    wait_for_sink_caught_up(&node.api, "auth-sink").await;
+    oauth_sink.clear().await;
+    let oauth_headers_baseline = oauth_sink.authorization_headers().await.len();
+
     oauth_sink.set_mode(ResponseMode::UnauthorizedOnce).await;
 
     emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 4}}), true)
@@ -5898,7 +5958,7 @@ async fn sink_auth_token_refresh() {
 
     let headers = oauth_sink.authorization_headers().await;
     assert_eq!(
-        headers.len(),
+        headers.len() - oauth_headers_baseline,
         2,
         "expected failed 401 request + successful retry with refreshed token"
     );
