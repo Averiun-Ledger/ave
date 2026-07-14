@@ -2760,6 +2760,13 @@ fn fetch_aborts_with_offset(
     } else {
         "COALESCE(sn, -1) ASC, request_id ASC"
     };
+    // The outer query joins `aborts a` with `page_keys k`, and both expose
+    // `request_id`: every column there must be qualified with its alias.
+    let outer_order_clause = if query.reverse {
+        "COALESCE(a.sn, -1) DESC, a.request_id DESC"
+    } else {
+        "COALESCE(a.sn, -1) ASC, a.request_id ASC"
+    };
 
     let sql = format!(
         r#"
@@ -2779,7 +2786,7 @@ fn fetch_aborts_with_offset(
         order_clause,
         limit_idx,
         offset_idx,
-        order_clause
+        outer_order_clause
     );
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
@@ -3135,6 +3142,10 @@ fn fetch_events_with_offset(
     params_values.push(offset_i64.into());
     let offset_idx = params_values.len();
     let order_clause = if query.reverse { "sn DESC" } else { "sn ASC" };
+    // The outer query joins `events e` with `page_keys k`, and both expose
+    // `sn`: the column must be qualified with its alias there.
+    let outer_order_clause =
+        if query.reverse { "e.sn DESC" } else { "e.sn ASC" };
 
     let sql = format!(
         r#"
@@ -3155,7 +3166,7 @@ fn fetch_events_with_offset(
         order_clause,
         limit_idx,
         offset_idx,
-        order_clause
+        outer_order_clause
     );
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
