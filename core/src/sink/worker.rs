@@ -19,7 +19,7 @@ use tracing::{error, info_span, warn};
 use crate::config::SinkServer;
 use crate::sink::SinkError;
 use crate::sink::extract_sn;
-use crate::sink::http::SinkHttpClient;
+use crate::sink::transport::SinkTransport;
 use crate::sink::manager::{
     SendResult, SinkManager, SinkManagerMessage, SinkWorkerError,
 };
@@ -141,7 +141,7 @@ impl std::fmt::Debug for HealthcheckState {
 pub struct SinkWorker {
     pub sink_name: String,
     pub server: SinkServer,
-    client: Arc<SinkHttpClient>,
+    client: Arc<dyn SinkTransport>,
     last_activity: Instant,
     /// `true` when the worker has already reported idle to the manager since the
     /// last real activity. Prevents redundant `WorkerIdle` messages while the
@@ -205,32 +205,10 @@ impl Actor for SinkWorker {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        // If the sink has auth config, try to obtain a token eagerly on startup.
-        if let Some(ref auth) = self.server.auth
-            && !auth.auth_url.is_empty()
-            && !auth.username.is_empty()
-        {
-            let password = std::env::var(
-                crate::sink::http::sink_password_env_var(&self.sink_name),
-            )
-            .unwrap_or_default();
-            if !password.is_empty() {
-                match crate::sink::obtain_token(
-                    &auth.auth_url,
-                    &auth.username,
-                    &password,
-                )
-                .await
-                {
-                    Ok(token) => {
-                        let mut guard = self.client.cached_token.write().await;
-                        *guard = Some(token);
-                    }
-                    Err(e) => {
-                        error!(msg_type = "TokenRefresh", sink = %self.sink_name, error = %e, "Failed to refresh token on startup");
-                    }
-                }
-            }
+        // Transport startup logic (HTTP: eager OAuth2 token fetch).
+        // A failure is logged but does not prevent the worker from starting.
+        if let Err(e) = self.client.warm_up().await {
+            error!(msg_type = "TokenRefresh", sink = %self.sink_name, error = %e, "Failed to refresh token on startup");
         }
 
         // Schedule first healthcheck after configurable startup delay + jitter.
@@ -981,7 +959,7 @@ impl SinkWorker {
         server: SinkServer,
         is_governance: bool,
     ) -> Result<Self, SinkError> {
-        let client = Arc::new(SinkHttpClient::new(server.clone())?);
+        let client = crate::sink::build_transport(&server)?;
         Ok(Self {
             sink_name,
             server,

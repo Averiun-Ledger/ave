@@ -432,6 +432,112 @@ impl SinkAuthConfig {
     }
 }
 
+/// HTTP-specific sink configuration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct HttpSinkConfig {
+    pub url: String,
+    /// Per-sink authentication. When `Some`, the worker will load the
+    /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
+    /// (where `{{SERVER}}` is the sink name upper-cased with non-alphanumeric
+    /// characters replaced by `_`).
+    pub auth: Option<SinkAuthConfig>,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub max_retries: usize,
+    pub retry_base_delay_ms: u64,
+    /// Optional dedicated health-check URL.
+    pub health_check_url: Option<String>,
+    pub token_refresh_margin_secs: u64,
+}
+
+impl Default for HttpSinkConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            auth: None,
+            connect_timeout_ms: 2_000,
+            request_timeout_ms: 5_000,
+            max_retries: 2,
+            retry_base_delay_ms: 500,
+            health_check_url: None,
+            token_refresh_margin_secs: 30,
+        }
+    }
+}
+
+impl HttpSinkConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_url("HttpSinkConfig.url", &self.url)?;
+        if let Some(auth) = &self.auth {
+            auth.validate().map_err(|e| Error::InvalidConfiguration {
+                component: "HttpSinkConfig.auth".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+        require_positive_u64(
+            "HttpSinkConfig.connect_timeout_ms",
+            self.connect_timeout_ms,
+        )?;
+        require_positive_u64(
+            "HttpSinkConfig.request_timeout_ms",
+            self.request_timeout_ms,
+        )?;
+        if self.request_timeout_ms < self.connect_timeout_ms {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpSinkConfig.request_timeout_ms".to_string(),
+                reason: format!(
+                    "must be greater than or equal to connect_timeout_ms ({})",
+                    self.connect_timeout_ms
+                ),
+            });
+        }
+        require_positive_u64(
+            "HttpSinkConfig.max_retries",
+            self.max_retries as u64,
+        )?;
+        require_positive_u64(
+            "HttpSinkConfig.retry_base_delay_ms",
+            self.retry_base_delay_ms,
+        )?;
+        if let Some(url) = &self.health_check_url {
+            validate_url("HttpSinkConfig.health_check_url", url)?;
+        }
+        require_positive_u64(
+            "HttpSinkConfig.token_refresh_margin_secs",
+            self.token_refresh_margin_secs,
+        )?;
+        Ok(())
+    }
+}
+
+/// Transport selected for a sink server. Today only HTTP exists.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTransportConfig {
+    Http(HttpSinkConfig),
+}
+
+impl Default for SinkTransportConfig {
+    fn default() -> Self {
+        Self::Http(HttpSinkConfig::default())
+    }
+}
+
+impl SinkTransportConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Http(http) => http.validate(),
+        }
+    }
+}
+
 fn validate_url(component: &str, value: &str) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::InvalidConfiguration {
@@ -531,24 +637,13 @@ impl SinkTarget {
 pub struct SinkServer {
     pub server: String,
     pub events: BTreeSet<SinkTypes>,
-    pub url: String,
-    /// Per-sink authentication. When `Some`, the worker will load the
-    /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
-    /// (where `{{SERVER}}` is the sink name upper-cased with non-alphanumeric
-    /// characters replaced by `_`).
-    pub auth: Option<SinkAuthConfig>,
-    pub connect_timeout_ms: u64,
-    pub request_timeout_ms: u64,
-    pub max_retries: usize,
+    /// Delivery transport and its specific configuration.
+    pub transport: SinkTransportConfig,
     pub batch_size: usize,
     pub sink_worker_idle_timeout_ms: u64,
     pub healthcheck_intervals_secs: Vec<u64>,
     pub max_catch_up_concurrency: usize,
-    pub retry_base_delay_ms: u64,
-    /// Optional dedicated health-check URL.
-    pub health_check_url: Option<String>,
     pub sink_subject_worker_idle_timeout_ms: u64,
-    pub token_refresh_margin_secs: u64,
     /// Maximum number of recoveries after failure before a sink is considered
     /// "flapping".
     pub max_recoveries_after_failure: u32,
@@ -561,19 +656,12 @@ impl Default for SinkServer {
         Self {
             server: String::new(),
             events: BTreeSet::new(),
-            url: String::new(),
-            auth: None,
-            connect_timeout_ms: 2_000,
-            request_timeout_ms: 5_000,
-            max_retries: 2,
+            transport: SinkTransportConfig::default(),
             batch_size: 100,
             sink_worker_idle_timeout_ms: 10_000,
             healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
             max_catch_up_concurrency: 2,
-            retry_base_delay_ms: 500,
-            health_check_url: None,
             sink_subject_worker_idle_timeout_ms: 2_000,
-            token_refresh_margin_secs: 30,
             max_recoveries_after_failure: 5,
             startup_healthcheck_delay_secs: 1,
         }
@@ -594,34 +682,7 @@ impl SinkServer {
                 reason: "must not be empty".to_string(),
             });
         }
-        validate_url("SinkServer.url", &self.url)?;
-        if let Some(auth) = &self.auth {
-            auth.validate().map_err(|e| Error::InvalidConfiguration {
-                component: "SinkServer.auth".to_string(),
-                reason: e.to_string(),
-            })?;
-        }
-        require_positive_u64(
-            "SinkServer.connect_timeout_ms",
-            self.connect_timeout_ms,
-        )?;
-        require_positive_u64(
-            "SinkServer.request_timeout_ms",
-            self.request_timeout_ms,
-        )?;
-        if self.request_timeout_ms < self.connect_timeout_ms {
-            return Err(Error::InvalidConfiguration {
-                component: "SinkServer.request_timeout_ms".to_string(),
-                reason: format!(
-                    "must be greater than or equal to connect_timeout_ms ({})",
-                    self.connect_timeout_ms
-                ),
-            });
-        }
-        require_positive_u64(
-            "SinkServer.max_retries",
-            self.max_retries as u64,
-        )?;
+        self.transport.validate()?;
         require_positive_u64("SinkServer.batch_size", self.batch_size as u64)?;
         require_positive_u64(
             "SinkServer.sink_worker_idle_timeout_ms",
@@ -661,19 +722,8 @@ impl SinkServer {
             self.max_catch_up_concurrency as u64,
         )?;
         require_positive_u64(
-            "SinkServer.retry_base_delay_ms",
-            self.retry_base_delay_ms,
-        )?;
-        if let Some(url) = &self.health_check_url {
-            validate_url("SinkServer.health_check_url", url)?;
-        }
-        require_positive_u64(
             "SinkServer.sink_subject_worker_idle_timeout_ms",
             self.sink_subject_worker_idle_timeout_ms,
-        )?;
-        require_positive_u64(
-            "SinkServer.token_refresh_margin_secs",
-            self.token_refresh_margin_secs,
         )?;
         require_positive_u64(
             "SinkServer.max_recoveries_after_failure",

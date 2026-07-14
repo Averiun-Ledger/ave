@@ -13,7 +13,7 @@ use tracing::{error, info_span};
 use crate::config::SinkServer;
 use crate::sink::SinkError;
 use crate::sink::extract_sn;
-use crate::sink::http::SinkHttpClient;
+use crate::sink::transport::SinkTransport;
 use crate::sink::worker::{
     SinkSubjectWorkerError, SinkWorker, SinkWorkerMessage,
 };
@@ -53,7 +53,7 @@ impl Response for SinkSubjectWorkerResponse {}
 pub struct SinkSubjectWorker {
     sink_name: String,
     server: SinkServer,
-    client: Arc<SinkHttpClient>,
+    client: Arc<dyn SinkTransport>,
     paused: bool,
     /// `true` when this worker handles governance events (parent SinkManager
     /// is under Node). `false` when it handles tracker events (parent is under
@@ -112,10 +112,10 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 let send_full = self.server.events.contains(&event_type)
                     || self.server.events.contains(&SinkTypes::All);
                 let send_result = if send_full {
-                    self.client.send_data_to_sink(Arc::clone(&data)).await
+                    self.client.send(Arc::clone(&data)).await
                 } else {
                     let light = LightEvent::from(data.as_ref());
-                    self.client.send_light_event(light).await
+                    self.client.send_light(light).await
                 };
 
                 match send_result {
@@ -136,7 +136,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                             error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
                         }
                     },
-                    Err(e) if e.is_auth_recoverable() => {
+                    Err(e @ SinkError::Auth { .. }) => {
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
@@ -158,19 +158,19 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                             }
                         }
                     }
-                    Err(SinkError::TokenParse(ref msg)) => {
+                    Err(e @ SinkError::Delivery { retryable: true, .. }) => {
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
-                                    .emit_error(SinkSubjectWorkerError::AuthFailed {
+                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
                                         subject_id,
                                         sn,
-                                        error: format!("failed to parse token response: {}", msg),
+                                        reason: e.to_string(),
                                         from_catch_up: false,
                                     })
                                     .await
                                 {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report auth failed");
+                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery failed");
                                 }
                             }
                             Err(e) => {
@@ -178,7 +178,8 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                             }
                         }
                     }
-                    Err(e) if !e.is_transient() => {
+                    Err(e) => {
+                        // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
@@ -192,26 +193,6 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                                     .await
                                 {
                                     error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report blocked");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
-                                        subject_id,
-                                        sn,
-                                        reason: e.to_string(),
-                                        from_catch_up: false,
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery failed");
                                 }
                             }
                             Err(e) => {
@@ -298,10 +279,10 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 let send_full = self.server.events.contains(&event_type)
                     || self.server.events.contains(&SinkTypes::All);
                 let send_result = if send_full {
-                    self.client.send_data_to_sink(Arc::clone(&data)).await
+                    self.client.send(Arc::clone(&data)).await
                 } else {
                     let light = LightEvent::from(data.as_ref());
-                    self.client.send_light_event(light).await
+                    self.client.send_light(light).await
                 };
 
                 match send_result {
@@ -322,7 +303,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                             error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
                         }
                     },
-                    Err(e) if e.is_auth_recoverable() => {
+                    Err(e @ SinkError::Auth { .. }) => {
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
@@ -345,38 +326,16 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                         }
                         return Ok(SinkSubjectWorkerResponse::Ok);
                     }
-                    Err(SinkError::TokenParse(ref msg)) => {
+                    Err(e @ SinkError::Delivery { retryable: true, .. }) => {
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
-                                    .emit_error(SinkSubjectWorkerError::AuthFailed {
+                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
                                         subject_id: subject_id.clone(),
                                         sn,
-                                        error: format!("failed to parse token response: {}", msg),
+                                        reason: e.to_string(),
                                         from_catch_up: true,
                                     })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
-                        return Ok(SinkSubjectWorkerResponse::Ok);
-                    }
-                    Err(e) if !e.is_transient() => {
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(
-                                        SinkSubjectWorkerError::Blocked {
-                                            subject_id: subject_id.clone(),
-                                            sn,
-                                            reason: e.to_string(),
-                                        },
-                                    )
                                     .await
                                 {
                                     error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
@@ -389,15 +348,17 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                         return Ok(SinkSubjectWorkerResponse::Ok);
                     }
                     Err(e) => {
+                        // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
                         match ctx.get_parent::<SinkWorker>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
-                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        reason: e.to_string(),
-                                        from_catch_up: true,
-                                    })
+                                    .emit_error(
+                                        SinkSubjectWorkerError::Blocked {
+                                            subject_id: subject_id.clone(),
+                                            sn,
+                                            reason: e.to_string(),
+                                        },
+                                    )
                                     .await
                                 {
                                     error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
@@ -459,7 +420,7 @@ impl SinkSubjectWorker {
     pub fn new(
         sink_name: String,
         server: SinkServer,
-        client: Arc<SinkHttpClient>,
+        client: Arc<dyn SinkTransport>,
         is_governance: bool,
     ) -> Self {
         Self {

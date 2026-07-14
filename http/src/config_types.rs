@@ -440,14 +440,6 @@ pub struct AveStoreConfigHttp {
     pub durability: bool,
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
-pub struct AveActorsStoreConfigHttp {
-    pub ram_mb: Option<u64>,
-    pub cpu_cores: Option<usize>,
-    pub profile: Option<String>,
-    pub durability: bool,
-}
-
 impl From<AveInternalDBConfig> for AveStoreConfigHttp {
     fn from(value: AveInternalDBConfig) -> Self {
         Self {
@@ -723,11 +715,7 @@ pub struct SinkAuthConfigHttp {
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
-pub struct SinkServerHttp {
-    /// Server identifier
-    pub server: String,
-    /// Event types to send to this sink (Create, Fact, Transfer, Confirm, Reject, EOL, All)
-    pub events: Vec<String>,
+pub struct HttpSinkConfigHttp {
     /// URL endpoint for the sink
     pub url: String,
     /// Per-sink authentication configuration
@@ -740,20 +728,39 @@ pub struct SinkServerHttp {
     pub max_retries: usize,
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTransportConfigHttp {
+    Http(HttpSinkConfigHttp),
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SinkServerHttp {
+    /// Server identifier
+    pub server: String,
+    /// Event types to send to this sink (Create, Fact, Transfer, Confirm, Reject, EOL, All)
+    pub events: Vec<String>,
+    /// Delivery transport and its specific configuration
+    pub transport: SinkTransportConfigHttp,
+}
+
 impl From<ave_bridge::SinkServer> for SinkServerHttp {
     fn from(value: ave_bridge::SinkServer) -> Self {
+        let ave_bridge::SinkTransportConfig::Http(http) = value.transport;
         Self {
             server: value.server,
             events: value.events.into_iter().map(|e| e.to_string()).collect(),
-            url: value.url,
-            auth: value.auth.map(|a| SinkAuthConfigHttp {
-                auth_url: a.auth_url,
-                username: a.username,
-                api_key: a.api_key,
+            transport: SinkTransportConfigHttp::Http(HttpSinkConfigHttp {
+                url: http.url,
+                auth: http.auth.map(|a| SinkAuthConfigHttp {
+                    auth_url: a.auth_url,
+                    username: a.username,
+                    api_key: a.api_key,
+                }),
+                connect_timeout_ms: http.connect_timeout_ms,
+                request_timeout_ms: http.request_timeout_ms,
+                max_retries: http.max_retries,
             }),
-            connect_timeout_ms: value.connect_timeout_ms,
-            request_timeout_ms: value.request_timeout_ms,
-            max_retries: value.max_retries,
         }
     }
 }

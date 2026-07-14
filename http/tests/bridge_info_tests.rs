@@ -2183,41 +2183,49 @@ async fn test_system_info_deserialization() {
 
 #[test]
 fn test_sink_server_http_fields() {
-    use ave_http::config_types::SinkServerHttp;
+    use ave_http::config_types::{SinkServerHttp, SinkTransportConfigHttp};
 
     // Verify SinkServerHttp has all expected fields by deserializing from JSON
     let json = serde_json::json!({
         "server": "TestSink",
         "events": ["Create", "Transfer"],
-        "url": "https://test.sink",
-        "auth": { "auth_url": "https://auth", "username": "u", "api_key": "k" },
-        "connect_timeout_ms": 5000,
-        "request_timeout_ms": 30000,
-        "max_retries": 5
+        "transport": {
+            "type": "http",
+            "url": "https://test.sink",
+            "auth": { "auth_url": "https://auth", "username": "u", "api_key": "k" },
+            "connect_timeout_ms": 5000,
+            "request_timeout_ms": 30000,
+            "max_retries": 5
+        }
     });
 
     let http: SinkServerHttp = serde_json::from_value(json).unwrap();
 
     assert_eq!(http.server, "TestSink");
-    assert_eq!(http.url, "https://test.sink");
-    assert!(http.auth.is_some());
-    assert_eq!(http.connect_timeout_ms, 5000);
-    assert_eq!(http.request_timeout_ms, 30000);
-    assert_eq!(http.max_retries, 5);
+    let SinkTransportConfigHttp::Http(transport) = &http.transport;
+    assert_eq!(transport.url, "https://test.sink");
+    assert!(transport.auth.is_some());
+    assert_eq!(transport.connect_timeout_ms, 5000);
+    assert_eq!(transport.request_timeout_ms, 30000);
+    assert_eq!(transport.max_retries, 5);
 
     // Verify minimal deserialization
     let json2 = serde_json::json!({
         "server": "S2",
         "events": [],
-        "url": "https://s2",
-        "connect_timeout_ms": 2000,
-        "request_timeout_ms": 10000,
-        "max_retries": 3
+        "transport": {
+            "type": "http",
+            "url": "https://s2",
+            "connect_timeout_ms": 2000,
+            "request_timeout_ms": 10000,
+            "max_retries": 3
+        }
     });
 
     let http2: SinkServerHttp = serde_json::from_value(json2).unwrap();
     assert_eq!(http2.server, "S2");
-    assert!(http2.auth.is_none());
+    let SinkTransportConfigHttp::Http(transport2) = &http2.transport;
+    assert!(transport2.auth.is_none());
 }
 
 #[test]

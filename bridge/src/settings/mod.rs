@@ -36,8 +36,9 @@ mod tests {
     use ave_common::SinkTypes;
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::config::{
-        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, LoggingOutput,
-        LoggingRotation, MachineSpec, SinkConfigEntry, SinkServer, SinkTarget,
+        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
+        HttpSinkConfig, LoggingOutput, LoggingRotation, MachineSpec,
+        SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
@@ -133,6 +134,9 @@ target = { type = "schema", schema_id = "primary", governance_id = "primary_gov"
 [[sinks.servers]]
 server = "SinkOne"
 events = ["create", "all"]
+
+[sinks.servers.transport]
+type = "http"
 url = "https://sink.one"
 auth = { auth_url = "https://auth.service", username = "sink-user" }
 connect_timeout_ms = 5000
@@ -142,6 +146,9 @@ max_retries = 5
 [[sinks.servers]]
 server = "SinkTwo"
 events = ["transfer"]
+
+[sinks.servers.transport]
+type = "http"
 url = "https://sink.two"
 connect_timeout_ms = 3000
 request_timeout_ms = 15000
@@ -296,17 +303,21 @@ sinks:
     servers:
       - server: SinkOne
         events: [create, all]
-        url: https://sink.one
-        auth: { auth_url: https://auth.service, username: sink-user }
-        connect_timeout_ms: 5000
-        request_timeout_ms: 30000
-        max_retries: 5
+        transport:
+          type: http
+          url: https://sink.one
+          auth: { auth_url: https://auth.service, username: sink-user }
+          connect_timeout_ms: 5000
+          request_timeout_ms: 30000
+          max_retries: 5
       - server: SinkTwo
         events: [transfer]
-        url: https://sink.two
-        connect_timeout_ms: 3000
-        request_timeout_ms: 15000
-        max_retries: 1
+        transport:
+          type: http
+          url: https://sink.two
+          connect_timeout_ms: 3000
+          request_timeout_ms: 15000
+          max_retries: 1
 auth:
   enable: true
   database_path: /var/db/auth.db
@@ -474,19 +485,25 @@ http:
         {
           "server": "SinkOne",
           "events": ["create", "all"],
-          "url": "https://sink.one",
-          "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
-          "connect_timeout_ms": 5000,
-          "request_timeout_ms": 30000,
-          "max_retries": 5
+          "transport": {
+            "type": "http",
+            "url": "https://sink.one",
+            "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
+            "connect_timeout_ms": 5000,
+            "request_timeout_ms": 30000,
+            "max_retries": 5
+          }
         },
         {
           "server": "SinkTwo",
           "events": ["transfer"],
-          "url": "https://sink.two",
-          "connect_timeout_ms": 3000,
-          "request_timeout_ms": 15000,
-          "max_retries": 1
+          "transport": {
+            "type": "http",
+            "url": "https://sink.two",
+            "connect_timeout_ms": 3000,
+            "request_timeout_ms": 15000,
+            "max_retries": 1
+          }
         }
       ]
     }
@@ -783,44 +800,46 @@ http:
                 SinkServer {
                     server: "SinkOne".to_owned(),
                     events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
-                    url: "https://sink.one".to_owned(),
-                    auth: Some(SinkAuthConfig {
-                        auth_url: "https://auth.service".to_owned(),
-                        username: "sink-user".to_owned(),
-                        api_key: String::new(),
+                    transport: SinkTransportConfig::Http(HttpSinkConfig {
+                        url: "https://sink.one".to_owned(),
+                        auth: Some(SinkAuthConfig {
+                            auth_url: "https://auth.service".to_owned(),
+                            username: "sink-user".to_owned(),
+                            api_key: String::new(),
+                        }),
+                        connect_timeout_ms: 5_000,
+                        request_timeout_ms: 30_000,
+                        max_retries: 5,
+                        retry_base_delay_ms: 500,
+                        health_check_url: None,
+                        token_refresh_margin_secs: 30,
                     }),
-                    connect_timeout_ms: 5_000,
-                    request_timeout_ms: 30_000,
-                    max_retries: 5,
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
                     max_catch_up_concurrency: 2,
-                    retry_base_delay_ms: 500,
-                    health_check_url: None,
                     sink_subject_worker_idle_timeout_ms: 2_000,
-                    token_refresh_margin_secs: 30,
-
                     max_recoveries_after_failure: 5,
                     startup_healthcheck_delay_secs: 1,
                 },
                 SinkServer {
                     server: "SinkTwo".to_owned(),
                     events: BTreeSet::from([SinkTypes::Transfer]),
-                    url: "https://sink.two".to_owned(),
-                    auth: None,
-                    connect_timeout_ms: 3_000,
-                    request_timeout_ms: 15_000,
-                    max_retries: 1,
+                    transport: SinkTransportConfig::Http(HttpSinkConfig {
+                        url: "https://sink.two".to_owned(),
+                        auth: None,
+                        connect_timeout_ms: 3_000,
+                        request_timeout_ms: 15_000,
+                        max_retries: 1,
+                        retry_base_delay_ms: 500,
+                        health_check_url: None,
+                        token_refresh_margin_secs: 30,
+                    }),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
                     max_catch_up_concurrency: 2,
-                    retry_base_delay_ms: 500,
-                    health_check_url: None,
                     sink_subject_worker_idle_timeout_ms: 2_000,
-                    token_refresh_margin_secs: 30,
-
                     max_recoveries_after_failure: 5,
                     startup_healthcheck_delay_secs: 1,
                 },

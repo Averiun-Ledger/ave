@@ -5,7 +5,10 @@ pub use ave_common::response::MonitorNetworkState;
 pub use ave_common::{
     bridge::request::SinksQuery,
     bridge::response::{SinkInfo, SinkStatusInfo},
-    sink::{SinkConfigEntry, SinkServer, SinkTarget},
+    sink::{
+        HttpSinkConfig, SinkConfigEntry, SinkServer, SinkTarget,
+        SinkTransportConfig,
+    },
 };
 use ave_common::{
     bridge::request::{

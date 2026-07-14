@@ -78,6 +78,13 @@ pub enum SinkManagerMessage {
     WorkerIdle {
         sink: String,
     },
+    /// Death-watch notification: a sink worker has stopped.  Any event
+    /// notified to the worker but not yet delivered is lost silently
+    /// (non-critical messages are discarded during graceful shutdown), so
+    /// the manager re-evaluates cursors against last_seen for the sink.
+    WorkerStopped {
+        sink: String,
+    },
     /// Remove all tracking state for a subject that has been deleted.
     RemoveSubject {
         subject_id: String,
@@ -648,6 +655,9 @@ impl Handler<SinkManager> for SinkManager {
                 self.catch_up_in_flight.retain(|(s, _)| s != &sink);
                 self.schedule_worker_shutdown(sink, ctx).await;
             }
+            SinkManagerMessage::WorkerStopped { sink } => {
+                self.handle_worker_stopped(sink, ctx).await?;
+            }
             SinkManagerMessage::RemoveSubject { subject_id } => {
                 self.handle_remove_subject(&subject_id, ctx).await?;
             }
@@ -884,7 +894,7 @@ impl SinkManager {
                 }
             }
             for subject_id in outdated {
-                self.try_insert_lagging(&sink_name, subject_id);
+                self.try_insert_lagging(sink_name, subject_id);
             }
         }
 
@@ -1000,7 +1010,23 @@ impl SinkManager {
                         sink_name, e
                     ),
                 })?;
-                ctx.create_child(&child_name, worker).await
+                let worker_ref = ctx.create_child(&child_name, worker).await?;
+                // Death-watch: if the worker stops while a notification is in
+                // flight (e.g. racing its own idle shutdown), the manager
+                // re-evaluates cursors and recovers any lost event via
+                // catch-up.
+                let sink_for_watch = sink_name.to_owned();
+                if let Err(e) = ctx
+                    .watch(&worker_ref, move |_| {
+                        SinkManagerMessage::WorkerStopped {
+                            sink: sink_for_watch.clone(),
+                        }
+                    })
+                    .await
+                {
+                    error!(msg_type = "WatchWorker", sink = %sink_name, error = %e, "Failed to watch sink worker");
+                }
+                Ok(worker_ref)
             }
         }
     }
@@ -1060,6 +1086,62 @@ impl SinkManager {
         if let Some(token) = self.pending_worker_shutdowns.remove(sink_name) {
             token.cancel();
         }
+    }
+
+    /// A sink worker has stopped (death-watch).  An event notified to the
+    /// worker while it was already stopping is lost silently — non-critical
+    /// messages are discarded during graceful shutdown and `tell` reports
+    /// success as long as the mailbox accepts the message — so re-evaluate
+    /// every subject cursor against last_seen for this sink and recover
+    /// whatever is pending via catch-up (which recreates the worker).
+    /// On a normal idle shutdown with everything delivered this is a no-op.
+    async fn handle_worker_stopped(
+        &mut self,
+        sink: String,
+        ctx: &mut ActorContext<SinkManager>,
+    ) -> Result<(), ActorError> {
+        // Drop the shutdown timer for the dead worker: cancel it if it was
+        // still pending (abnormal stop), no-op if it already fired.
+        if let Some(token) = self.pending_worker_shutdowns.remove(&sink) {
+            token.cancel();
+        }
+        // Any catch-up running in the dead worker is no longer running.
+        self.catch_up_in_flight.retain(|(s, _)| s != &sink);
+
+        let mut outdated = Vec::new();
+        for (subject_id, &last_sn) in &self.last_seen {
+            let cursor_sn = self
+                .cursors
+                .get(&(sink.clone(), subject_id.clone()))
+                .copied();
+            // Same rule as rebuild_lagging (CR-4): no cursor means outdated
+            // even when last_sn == 0.
+            let is_outdated = match cursor_sn {
+                Some(sn) => sn < last_sn,
+                None => true,
+            };
+            if is_outdated {
+                outdated.push(subject_id.clone());
+            }
+        }
+        if outdated.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            msg_type = "WorkerStoppedPending",
+            sink = %sink,
+            subjects = %outdated.len(),
+            "Worker stopped with undelivered events; recovering via catch-up"
+        );
+        for subject_id in &outdated {
+            self.try_insert_lagging(&sink, subject_id.clone());
+        }
+        if self.blocked_sinks.contains_key(&sink) {
+            // Keep the subjects lagging until the operator unblocks the sink.
+            return Ok(());
+        }
+        self.handle_request_catch_up(sink, outdated, ctx).await
     }
 
     /// Schedule a periodic healthcheck for a sink that has lagging subjects.

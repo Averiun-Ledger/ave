@@ -690,12 +690,13 @@ fn log_effective_configuration(
             servers.len()
         );
         for s in servers {
+            let ave_bridge::SinkTransportConfig::Http(http) = &s.transport;
             info!(
                 target: TARGET,
                 "    - {} | {} | auth: {:?} | events: {:?}",
                 s.server,
-                s.url,
-                s.auth.is_some(),
+                http.url,
+                http.auth.is_some(),
                 s.events
             );
             info!(
@@ -706,9 +707,9 @@ fn log_effective_configuration(
             info!(
                 target: TARGET,
                 "      connect: {}ms | request: {}ms | retries: {}",
-                s.connect_timeout_ms,
-                s.request_timeout_ms,
-                s.max_retries
+                http.connect_timeout_ms,
+                http.request_timeout_ms,
+                http.max_retries
             );
         }
     }

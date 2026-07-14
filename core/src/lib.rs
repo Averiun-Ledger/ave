@@ -2224,6 +2224,7 @@ fn manager_sort_key(manager: &SinkManagerTarget) -> String {
 mod tests {
     use super::*;
     use ave_actors::{ActorError, ActorPath};
+    use ave_common::sink::{HttpSinkConfig, SinkTransportConfig};
 
     #[test]
     fn preserves_functional_actor_errors() {
@@ -2262,7 +2263,10 @@ mod tests {
     fn finds_sink_config_for_node_manager() {
         let server = SinkServer {
             server: "gov_sink".to_string(),
-            url: "http://example.com".to_string(),
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url: "http://example.com".to_string(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let entry = SinkConfigEntry {
@@ -2284,7 +2288,10 @@ mod tests {
     fn finds_sink_config_for_governance_manager() {
         let server = SinkServer {
             server: "schema_sink".to_string(),
-            url: "http://example.com".to_string(),
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url: "http://example.com".to_string(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let entry = SinkConfigEntry {

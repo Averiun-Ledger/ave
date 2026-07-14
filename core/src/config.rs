@@ -9,7 +9,10 @@ use std::{
 use ave_common::Error;
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 
-pub use ave_common::sink::{SinkConfigEntry, SinkServer, SinkTarget};
+pub use ave_common::sink::{
+    HttpSinkConfig, SinkConfigEntry, SinkServer, SinkTarget,
+    SinkTransportConfig,
+};
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 

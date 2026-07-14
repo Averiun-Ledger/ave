@@ -5,6 +5,7 @@ pub mod http;
 pub mod manager;
 pub mod registry;
 pub mod subject_worker;
+pub mod transport;
 pub mod worker;
 
 pub use error::SinkError;
@@ -19,6 +20,7 @@ pub use registry::{
 pub use subject_worker::{
     SinkSubjectWorker, SinkSubjectWorkerMessage, SinkSubjectWorkerResponse,
 };
+pub use transport::{SinkTransport, build_transport};
 pub use worker::{SinkWorker, SinkWorkerMessage, SinkWorkerResponse};
 
 use std::time::Duration;
@@ -65,16 +67,18 @@ pub async fn obtain_token(
         )
         .send()
         .await
-        .map_err(|e| SinkError::AuthRequest(e.to_string()))?;
+        .map_err(|e| SinkError::Auth {
+            message: format!("failed to send auth request: {e}"),
+        })?;
 
-    let res = res
-        .error_for_status()
-        .map_err(|e| SinkError::AuthEndpoint(e.to_string()))?;
+    let res = res.error_for_status().map_err(|e| SinkError::Auth {
+        message: format!("auth endpoint error: {e}"),
+    })?;
 
-    let mut token: TokenResponse = res
-        .json::<TokenResponse>()
-        .await
-        .map_err(|e| SinkError::TokenParse(e.to_string()))?;
+    let mut token: TokenResponse =
+        res.json::<TokenResponse>().await.map_err(|e| SinkError::Auth {
+            message: format!("failed to parse token response: {e}"),
+        })?;
 
     token.obtained_at = Some(std::time::Instant::now());
 

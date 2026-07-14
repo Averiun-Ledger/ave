@@ -25,15 +25,16 @@ use crate::{
         },
     },
     config_types::{
-        ApiKeyConfigHttp, AuthConfigHttp, AveActorsStoreConfigHttp,
-        AveConfigHttp, AveStoreConfigHttp, ConfigHttp, ControlListConfigHttp,
-        CorsConfigHttp, EndpointRateLimitHttp, GovernanceSyncConfigHttp,
-        HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
-        NetworkConfigHttp, ProxyConfigHttp, RateLimitConfigHttp,
-        RebootSyncConfigHttp, RoutingConfigHttp, RoutingNodeHttp,
-        SelfSignedCertConfigHttp, SessionConfigHttp, SinkConfigEntryHttp,
-        SinkConfigHttp, SinkServerHttp, SinkTargetHttp, SyncConfigHttp,
-        TrackerSyncConfigHttp, UpdateSyncConfigHttp,
+        ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, AveStoreConfigHttp,
+        ConfigHttp, ControlListConfigHttp, CorsConfigHttp,
+        EndpointRateLimitHttp, GovernanceSyncConfigHttp, HttpConfigHttp,
+        HttpSinkConfigHttp, LockoutConfigHttp, LoggingHttp,
+        LoggingOutputHttp, NetworkConfigHttp, ProxyConfigHttp,
+        RateLimitConfigHttp, RebootSyncConfigHttp, RoutingConfigHttp,
+        RoutingNodeHttp, SelfSignedCertConfigHttp, SessionConfigHttp,
+        SinkAuthConfigHttp, SinkConfigEntryHttp, SinkConfigHttp,
+        SinkServerHttp, SinkTargetHttp, SinkTransportConfigHttp,
+        SyncConfigHttp, TrackerSyncConfigHttp, UpdateSyncConfigHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
@@ -85,7 +86,7 @@ impl Modify for SecurityAddon {
     info(
         title = "Ave HTTP API",
         description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.",
-        version = "0.9.0",
+        version = "0.12.0",
         contact(
             name = "Averiun",
             url = "https://www.averiun.com/",
@@ -358,7 +359,9 @@ impl Modify for SecurityAddon {
             SinkConfigEntryHttp,
             SinkServerHttp,
             SinkTargetHttp,
-            AveActorsStoreConfigHttp,
+            SinkTransportConfigHttp,
+            HttpSinkConfigHttp,
+            SinkAuthConfigHttp,
             AveStoreConfigHttp,
             MachineSpecHttp
         )

@@ -35,11 +35,11 @@ fn sinks_config(
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "gov-sink", "events": ["all"], "url": "{gov_sink_url}" }}]
+            "servers": [{{ "server": "gov-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{gov_sink_url}" }} }}]
         }},
         {{
             "target": {{ "type": "schema", "schema_id": "Example1", "governance_id": "{governance_id}" }},
-            "servers": [{{ "server": "schema-sink", "events": ["all"], "url": "{schema_sink_url}" }}]
+            "servers": [{{ "server": "schema-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{schema_sink_url}" }} }}]
         }}
         "#
     )
@@ -276,7 +276,7 @@ async fn test_http_unblock_sink() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "example-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "example-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         sink.url()
@@ -361,7 +361,7 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "example-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "example-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         sink.url()
@@ -451,7 +451,7 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
             r#"
             {{
                 "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-                "servers": [{{ "server": "example-sink", "events": ["all"], "url": "{}" }}]
+                "servers": [{{ "server": "example-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
             }}
             "#,
             sink.url()
@@ -502,11 +502,11 @@ async fn test_http_delete_sink_cursors() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "in-config-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "in-config-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }},
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "residual-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "residual-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         in_config_sink.url(),
@@ -530,7 +530,7 @@ async fn test_http_delete_sink_cursors() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "in-config-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "in-config-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         in_config_sink.url()
@@ -623,7 +623,7 @@ async fn test_http_delete_sink_cursors_permissions_and_safe_mode() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "example-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "example-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         sink.url()
@@ -717,11 +717,11 @@ async fn test_http_replay_sink_events() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "good-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "good-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }},
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "bad-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "bad-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         good_sink.url(),
@@ -845,7 +845,7 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "gov-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "gov-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         sink.url()
@@ -1088,7 +1088,7 @@ async fn test_http_sink_role_endpoints() {
         r#"
         {{
             "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
-            "servers": [{{ "server": "example-sink", "events": ["all"], "url": "{}" }}]
+            "servers": [{{ "server": "example-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
         }}
         "#,
         sink.url()
