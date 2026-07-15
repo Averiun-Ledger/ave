@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use ave_common::{DataToSink, LightEvent};
 
 use crate::config::{SinkServer, SinkTransportConfig};
-use crate::sink::{error::SinkError, http::HttpTransport};
+use crate::sink::{error::SinkError, http::HttpTransport, kafka::KafkaTransport};
 
 /// Transport contract implemented by each sink delivery mechanism.
 #[async_trait]
@@ -33,5 +33,8 @@ pub fn build_transport(
             server.server.clone(),
             http.clone(),
         )?)),
+        SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(
+            KafkaTransport::new(server.server.clone(), kafka.clone())?,
+        )),
     }
 }

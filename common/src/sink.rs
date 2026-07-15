@@ -234,7 +234,7 @@ pub struct LightEvent {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(untagged)]
 pub enum IncomingSinkEvent {
-    Full(DataToSink),
+    Full(Box<DataToSink>),
     Light(LightEvent),
 }
 
@@ -274,7 +274,7 @@ impl IncomingSinkEvent {
     /// Returns the sink event type category.
     pub fn event_type(&self) -> SinkTypes {
         match self {
-            Self::Full(d) => SinkTypes::from(d),
+            Self::Full(d) => SinkTypes::from(d.as_ref()),
             Self::Light(l) => l.event_type.clone(),
         }
     }
@@ -400,6 +400,124 @@ mod tests {
         }"#;
         assert!(serde_json::from_str::<DataToSink>(json).is_err());
     }
+
+    fn valid_kafka_config() -> KafkaSinkConfig {
+        KafkaSinkConfig {
+            bootstrap_servers: "broker1:9092,broker2:9092".to_string(),
+            topic: "ave-{{schema-id}}".to_string(),
+            ..KafkaSinkConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_ok() {
+        assert!(valid_kafka_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_requires_bootstrap_servers() {
+        let mut cfg = valid_kafka_config();
+        cfg.bootstrap_servers.clear();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_requires_topic() {
+        let mut cfg = valid_kafka_config();
+        cfg.topic.clear();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_invalid_acks() {
+        let mut cfg = valid_kafka_config();
+        cfg.acks = "2".to_string();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_invalid_compression() {
+        let mut cfg = valid_kafka_config();
+        cfg.compression = "brotli".to_string();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_zero_timeout() {
+        let mut cfg = valid_kafka_config();
+        cfg.request_timeout_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_security_validate_rejects_invalid_mechanism() {
+        let mut cfg = valid_kafka_config();
+        cfg.security = KafkaSecurityConfig::SaslSsl {
+            mechanism: "GSSAPI".to_string(),
+            username: "ave".to_string(),
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_security_validate_requires_username() {
+        let mut cfg = valid_kafka_config();
+        cfg.security = KafkaSecurityConfig::SaslPlaintext {
+            mechanism: "PLAIN".to_string(),
+            username: String::new(),
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_serde_defaults() {
+        let cfg: KafkaSinkConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg, KafkaSinkConfig::default());
+        assert_eq!(cfg.client_id, "ave-sink");
+        assert_eq!(cfg.acks, "all");
+        assert_eq!(cfg.compression, "none");
+        assert_eq!(cfg.request_timeout_ms, 5_000);
+        // The default is incomplete: servers and topic are mandatory.
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_serde_full() {
+        let json = r#"{
+            "bootstrap_servers": "broker:9092",
+            "topic": "ave-{{schema-id}}",
+            "client_id": "node-1",
+            "security": {
+                "protocol": "sasl_ssl",
+                "mechanism": "SCRAM-SHA-256",
+                "username": "ave"
+            },
+            "acks": "all",
+            "compression": "zstd",
+            "request_timeout_ms": 3000
+        }"#;
+        let cfg: KafkaSinkConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.validate().is_ok());
+        match cfg.security {
+            KafkaSecurityConfig::SaslSsl { mechanism, username } => {
+                assert_eq!(mechanism, "SCRAM-SHA-256");
+                assert_eq!(username, "ave");
+            }
+            other => panic!("expected SaslSsl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sink_transport_config_serde_kafka_variant() {
+        let json = r#"{
+            "type": "kafka",
+            "bootstrap_servers": "broker:9092",
+            "topic": "ave-{{schema-id}}"
+        }"#;
+        let cfg: SinkTransportConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(cfg, SinkTransportConfig::Kafka(_)));
+        assert!(cfg.validate().is_ok());
+    }
 }
 
 /// Per-sink authentication configuration.
@@ -514,7 +632,159 @@ impl HttpSinkConfig {
     }
 }
 
-/// Transport selected for a sink server. Today only HTTP exists.
+/// Security protocol for the Kafka transport.
+///
+/// SASL passwords are never stored in the configuration: they are read from
+/// the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`, following the
+/// same convention as the HTTP transport.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "protocol", rename_all = "snake_case")]
+pub enum KafkaSecurityConfig {
+    /// No encryption, no authentication.
+    #[default]
+    Plaintext,
+    /// TLS encryption without authentication.
+    Ssl,
+    /// SASL authentication over a plaintext connection.
+    SaslPlaintext {
+        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
+        mechanism: String,
+        /// SASL username.
+        username: String,
+    },
+    /// SASL authentication over a TLS connection.
+    SaslSsl {
+        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
+        mechanism: String,
+        /// SASL username.
+        username: String,
+    },
+}
+
+impl KafkaSecurityConfig {
+    /// SASL mechanisms supported by the builtin librdkafka implementation.
+    const MECHANISMS: [&str; 3] = ["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"];
+
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Plaintext | Self::Ssl => Ok(()),
+            Self::SaslPlaintext { mechanism, username }
+            | Self::SaslSsl { mechanism, username } => {
+                if !Self::MECHANISMS.contains(&mechanism.as_str()) {
+                    return Err(Error::InvalidConfiguration {
+                        component: "KafkaSecurityConfig.mechanism".to_string(),
+                        reason: format!(
+                            "must be one of {}, got {mechanism}",
+                            Self::MECHANISMS.join(", ")
+                        ),
+                    });
+                }
+                if username.is_empty() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "KafkaSecurityConfig.username".to_string(),
+                        reason: "must not be empty when using SASL".to_string(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Kafka-specific sink configuration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct KafkaSinkConfig {
+    /// Comma-separated list of `host:port` bootstrap brokers.
+    pub bootstrap_servers: String,
+    /// Topic template; supports the `{{schema-id}}` and `{{subject-id}}`
+    /// placeholders. The subject id is always used as the message key, so
+    /// per-subject ordering is preserved regardless of the topic layout.
+    pub topic: String,
+    /// Producer client id (informational).
+    pub client_id: String,
+    /// Security configuration for the brokers.
+    pub security: KafkaSecurityConfig,
+    /// Required acknowledgements: "0", "1" or "all".
+    pub acks: String,
+    /// Compression codec: none, gzip, snappy, lz4 or zstd.
+    pub compression: String,
+    /// Per-message produce timeout in milliseconds.
+    pub request_timeout_ms: u64,
+}
+
+impl Default for KafkaSinkConfig {
+    fn default() -> Self {
+        Self {
+            bootstrap_servers: String::new(),
+            topic: String::new(),
+            client_id: "ave-sink".to_string(),
+            security: KafkaSecurityConfig::default(),
+            acks: "all".to_string(),
+            compression: "none".to_string(),
+            request_timeout_ms: 5_000,
+        }
+    }
+}
+
+impl KafkaSinkConfig {
+    const ACKS: [&str; 3] = ["0", "1", "all"];
+    const COMPRESSION: [&str; 5] = ["none", "gzip", "snappy", "lz4", "zstd"];
+
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.bootstrap_servers.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.bootstrap_servers".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if self.topic.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.topic".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if !Self::ACKS.contains(&self.acks.as_str()) {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.acks".to_string(),
+                reason: format!(
+                    "must be one of {}, got {}",
+                    Self::ACKS.join(", "),
+                    self.acks
+                ),
+            });
+        }
+        if !Self::COMPRESSION.contains(&self.compression.as_str()) {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.compression".to_string(),
+                reason: format!(
+                    "must be one of {}, got {}",
+                    Self::COMPRESSION.join(", "),
+                    self.compression
+                ),
+            });
+        }
+        self.security.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.security".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        require_positive_u64(
+            "KafkaSinkConfig.request_timeout_ms",
+            self.request_timeout_ms,
+        )?;
+        Ok(())
+    }
+}
+
+/// Transport selected for a sink server. HTTP and Kafka are supported.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -522,6 +792,7 @@ impl HttpSinkConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfig {
     Http(HttpSinkConfig),
+    Kafka(KafkaSinkConfig),
 }
 
 impl Default for SinkTransportConfig {
@@ -534,6 +805,7 @@ impl SinkTransportConfig {
     pub fn validate(&self) -> Result<(), Error> {
         match self {
             Self::Http(http) => http.validate(),
+            Self::Kafka(kafka) => kafka.validate(),
         }
     }
 }

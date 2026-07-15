@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::Client;
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -12,49 +11,9 @@ use tracing::debug;
 use crate::config::{HttpSinkConfig, TokenResponse};
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
+use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::SinkTransport;
 use ave_common::{DataToSink, LightEvent};
-
-/// Compiled URL template that replaces `{{subject-id}}` and `{{schema-id}}`.
-#[derive(Debug, Clone)]
-pub struct CompiledUrlTemplate {
-    template: String,
-}
-
-/// RFC 3986 path segment encode set: unreserved + sub-delimiters allowed,
-/// everything else percent-encoded.
-const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'?')
-    .add(b'[')
-    .add(b']')
-    .add(b'{')
-    .add(b'}')
-    .add(b'/')
-    .add(b'%');
-
-impl CompiledUrlTemplate {
-    pub fn new(template: &str) -> Self {
-        Self {
-            template: template.to_owned(),
-        }
-    }
-
-    pub fn render(&self, subject_id: &str, schema_id: &str) -> String {
-        let encoded_subject =
-            utf8_percent_encode(subject_id, PATH_SEGMENT_ENCODE_SET);
-        let encoded_schema =
-            utf8_percent_encode(schema_id, PATH_SEGMENT_ENCODE_SET);
-        self.template
-            .replace("{{subject-id}}", &encoded_subject.to_string())
-            .replace("{{schema-id}}", &encoded_schema.to_string())
-    }
-}
 
 /// Build the environment variable name for a sink's password.
 /// Format: `AVE_SINK_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
@@ -79,7 +38,7 @@ pub struct HttpTransport {
     client: Client,
     sink_name: String,
     config: HttpSinkConfig,
-    url_template: CompiledUrlTemplate,
+    url_template: CompiledTemplate,
     /// Password loaded from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`.
     password: String,
     cached_token: RwLock<Option<TokenResponse>>,
@@ -115,7 +74,7 @@ impl HttpTransport {
 
         Ok(Self {
             client,
-            url_template: CompiledUrlTemplate::new(&config.url),
+            url_template: CompiledTemplate::new(&config.url),
             password,
             cached_token: RwLock::new(None),
             sink_name,
@@ -343,7 +302,9 @@ impl HttpTransport {
 impl SinkTransport for HttpTransport {
     async fn send(&self, data: Arc<DataToSink>) -> Result<(), SinkError> {
         let (subject_id, schema_id) = data.payload.get_subject_schema();
-        let url = self.url_template.render(&subject_id, &schema_id);
+        let url = self
+            .url_template
+            .render_url_encoded(&subject_id, &schema_id);
         let payload = serde_json::to_vec(data.as_ref()).map_err(|e| {
             SinkError::Delivery {
                 message: format!("JSON serialization failed: {}", e),
@@ -357,7 +318,7 @@ impl SinkTransport for HttpTransport {
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
         let url = self
             .url_template
-            .render(&light.subject_id, &light.schema_id);
+            .render_url_encoded(&light.subject_id, &light.schema_id);
         let payload =
             serde_json::to_vec(&light).map_err(|e| SinkError::Delivery {
                 message: format!("JSON serialization failed: {}", e),
@@ -377,7 +338,7 @@ impl SinkTransport for HttpTransport {
             .health_check_url
             .clone()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.url_template.render("-", "-"));
+            .unwrap_or_else(|| self.url_template.render_url_encoded("-", "-"));
 
         let mut request = self.client.get(&url);
 

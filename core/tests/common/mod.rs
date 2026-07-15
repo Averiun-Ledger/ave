@@ -44,6 +44,7 @@ pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[allow(dead_code)]
+pub mod kafka_setup;
 pub mod sink_setup;
 
 #[allow(dead_code)]

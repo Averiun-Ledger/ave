@@ -36,6 +36,7 @@ bytes = { workspace = true }
 lru = { workspace = true }
 prometheus-client = { workspace = true }
 futures = { workspace = true }
+rdkafka = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true }
@@ -45,6 +46,7 @@ ave-network = { workspace = true, features = ["test"] }
 futures = { workspace = true }
 axum = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
+testcontainers = { workspace = true }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]

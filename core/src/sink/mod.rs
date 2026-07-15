@@ -2,9 +2,11 @@
 
 pub mod error;
 pub mod http;
+pub mod kafka;
 pub mod manager;
 pub mod registry;
 pub mod subject_worker;
+pub mod template;
 pub mod transport;
 pub mod worker;
 

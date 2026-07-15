@@ -92,6 +92,8 @@ config = { version = "0.15.25", features = ["json", "toml", "yaml"] }
 zeroize = "1.9"
 subtle = "2.6"
 lru = "0.18.0"
+rdkafka = { version = "0.39.0", features = ["tokio", "ssl", "zstd"] }
+testcontainers = { version = "0.27.3", default-features = false, features = ["blocking"] }
 
 [dependencies]
 ave-identity = { path = "identity", version = "0.3.0" }

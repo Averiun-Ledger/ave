@@ -1,0 +1,702 @@
+mod common;
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use ave_common::{
+    LightEvent, SinkTarget, SinkTypes,
+    identity::{PublicKey, keys::KeyPair},
+    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent},
+    SchemaType,
+};
+use ave_core::config::{
+    KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry, SinkServer, SinkTransportConfig,
+};
+use ave_core::sink::SinkError;
+use ave_core::sink::SinkTransport;
+use ave_core::sink::kafka::KafkaTransport;
+use ave_network::NodeType;
+use futures::future::join_all;
+use serde_json::json;
+use std::str::FromStr;
+use tracing_test::traced_test;
+
+use common::{
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
+    create_and_authorize_governance, create_node, create_nodes_and_connections,
+    create_subject, emit_confirm, emit_eol, emit_fact, emit_reject, emit_transfer,
+    get_subject, node_running,
+    sink_setup::{
+        assert_sink_contains_confirm, assert_sink_contains_create,
+        assert_sink_contains_eol, assert_sink_contains_fact_full,
+        assert_sink_contains_reject, assert_sink_contains_transfer,
+        assert_sink_not_lagging, example_schema_governance_fact,
+        governance_with_transfer_roles_fact, restart_config,
+        restart_config_with_peers, wait_for_sink_lagging_subjects,
+    },
+};
+use common::kafka_setup::{RedpandaEnv, RedpandaSaslEnv};
+
+/// Helper to set an environment variable for the duration of a test and clean
+/// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
+/// because concurrent mutation of the process environment is UB; tests that
+/// use distinct variable names and short-lived scopes are safe in practice.
+struct TempEnvVar {
+    name: &'static str,
+}
+
+impl TempEnvVar {
+    fn set(name: &'static str, value: &str) -> Self {
+        unsafe { std::env::set_var(name, value) };
+        Self { name }
+    }
+}
+
+impl Drop for TempEnvVar {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(self.name) };
+    }
+}
+
+const SUBJECT_ID: &str = "KAFKA-SUBJECT-ID";
+const SCHEMA_ID: &str = "Example";
+const TIMEOUT: Duration = Duration::from_secs(20);
+
+fn kafka_sink_config(bootstrap_servers: &str, topic: &str) -> KafkaSinkConfig {
+    KafkaSinkConfig {
+        bootstrap_servers: bootstrap_servers.to_string(),
+        topic: topic.to_string(),
+        ..KafkaSinkConfig::default()
+    }
+}
+
+fn kafka_sink_config_with(
+    bootstrap_servers: &str,
+    topic: &str,
+    f: impl FnOnce(&mut KafkaSinkConfig),
+) -> KafkaSinkConfig {
+    let mut cfg = kafka_sink_config(bootstrap_servers, topic);
+    f(&mut cfg);
+    cfg
+}
+
+fn kafka_sink_config_sasl(
+    bootstrap_servers: &str,
+    topic: &str,
+    username: &str,
+) -> KafkaSinkConfig {
+    KafkaSinkConfig {
+        bootstrap_servers: bootstrap_servers.to_string(),
+        topic: topic.to_string(),
+        security: KafkaSecurityConfig::SaslPlaintext {
+            mechanism: "SCRAM-SHA-256".to_string(),
+            username: username.to_string(),
+        },
+        ..KafkaSinkConfig::default()
+    }
+}
+
+fn example_data_to_sink(subject_id: &str, schema_id: &str) -> DataToSink {
+    DataToSink {
+        payload: DataToSinkEvent::Create {
+            governance_id: None,
+            subject_id: subject_id.to_string(),
+            owner: "owner".to_string(),
+            schema_id: SchemaType::Type(schema_id.to_string()),
+            namespace: "".to_string(),
+            sn: 0,
+            gov_version: 1,
+            state: serde_json::json!({ "one": 1 }),
+        },
+        public_key: "pk".to_string(),
+        event_request_timestamp: 1,
+        event_ledger_timestamp: 2,
+        sink_timestamp: 3,
+    }
+}
+
+fn example_light_event(subject_id: &str, schema_id: &str) -> LightEvent {
+    LightEvent {
+        subject_id: subject_id.to_string(),
+        schema_id: schema_id.to_string(),
+        governance_id: None,
+        sn: 1,
+        event_type: SinkTypes::Fact,
+        success: true,
+    }
+}
+
+/// Happy path: full events, light events and `{{subject-id}}` topic templates
+/// are all delivered with the subject id as the message key.
+#[tokio::test]
+async fn kafka_transport_happy_path() {
+    let env = RedpandaEnv::start().await;
+    let transport = KafkaTransport::new(
+        "test".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "ave-{{schema-id}}"),
+    )
+    .unwrap();
+
+    // Full event.
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    // Light event.
+    transport
+        .send_light(example_light_event(SUBJECT_ID, SCHEMA_ID))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("ave-Example", 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2, "expected full + light events");
+    assert_eq!(messages[0].0, SUBJECT_ID);
+    assert_eq!(messages[1].0, SUBJECT_ID);
+
+    let full: serde_json::Value = serde_json::from_str(&messages[0].1).unwrap();
+    assert_eq!(full["public_key"], "pk");
+    assert_eq!(full["event_request_timestamp"], 1);
+
+    let light: serde_json::Value = serde_json::from_str(&messages[1].1).unwrap();
+    assert_eq!(light["subject_id"], SUBJECT_ID);
+    assert_eq!(light["event_type"], "fact");
+
+    // Topic template that resolves to the subject id.
+    let template_subject = "TEMPLATE-SUBJECT-ID";
+    let transport = KafkaTransport::new(
+        "test".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "{{subject-id}}"),
+    )
+    .unwrap();
+    transport
+        .send(Arc::new(example_data_to_sink(template_subject, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string(template_subject, 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, template_subject);
+}
+
+/// Configuration variants: all supported compression codecs and acks levels
+/// deliver successfully.
+#[tokio::test]
+async fn kafka_transport_config_variants() {
+    let env = RedpandaEnv::start().await;
+
+    for compression in ["none", "gzip", "snappy", "lz4", "zstd"] {
+        let config = kafka_sink_config_with(
+            &env.bootstrap_servers,
+            &format!("comp-{compression}"),
+            |cfg| cfg.compression = compression.to_string(),
+        );
+        let transport = KafkaTransport::new("test".to_string(), config).unwrap();
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .unwrap();
+
+        let messages = env
+            .consume_string(&format!("comp-{compression}"), 1, TIMEOUT)
+            .await;
+        assert_eq!(messages.len(), 1, "compression={compression}");
+        assert_eq!(messages[0].0, SUBJECT_ID);
+    }
+
+    for acks in ["0", "1", "all"] {
+        let config = kafka_sink_config_with(
+            &env.bootstrap_servers,
+            &format!("acks-{acks}"),
+            |cfg| cfg.acks = acks.to_string(),
+        );
+        let transport = KafkaTransport::new("test".to_string(), config).unwrap();
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .unwrap();
+
+        let messages = env
+            .consume_string(&format!("acks-{acks}"), 1, TIMEOUT)
+            .await;
+        assert_eq!(messages.len(), 1, "acks={acks}");
+        assert_eq!(messages[0].0, SUBJECT_ID);
+    }
+}
+
+/// Error taxonomy: invalid configuration is rejected at build time, unreachable
+/// brokers are retryable and oversized messages are rejected.
+#[tokio::test]
+async fn kafka_transport_error_handling() {
+    // SASL without a password environment variable.
+    let config = KafkaSinkConfig {
+        bootstrap_servers: "broker:9092".to_string(),
+        topic: "t".to_string(),
+        security: KafkaSecurityConfig::SaslPlaintext {
+            mechanism: "PLAIN".to_string(),
+            username: "u".to_string(),
+        },
+        ..KafkaSinkConfig::default()
+    };
+    let err = KafkaTransport::new("test".to_string(), config).unwrap_err();
+    assert!(matches!(err, SinkError::ClientBuild(_)));
+
+    // Invalid acks value.
+    let config = KafkaSinkConfig {
+        bootstrap_servers: "broker:9092".to_string(),
+        topic: "t".to_string(),
+        acks: "2".to_string(),
+        ..KafkaSinkConfig::default()
+    };
+    let err = KafkaTransport::new("test".to_string(), config).unwrap_err();
+    assert!(matches!(err, SinkError::ClientBuild(_)));
+
+    // Unreachable broker is reported as a retryable delivery error.
+    let config = KafkaSinkConfig {
+        bootstrap_servers: "127.0.0.1:1".to_string(),
+        topic: "t".to_string(),
+        request_timeout_ms: 500,
+        ..KafkaSinkConfig::default()
+    };
+    let transport = KafkaTransport::new("test".to_string(), config).unwrap();
+    let err = transport.health_check().await.unwrap_err();
+    assert!(
+        matches!(err, SinkError::Delivery { retryable: true, .. }),
+        "expected retryable delivery error, got {err:?}"
+    );
+
+    // Message larger than librdkafka's default local limit is rejected.
+    let env = RedpandaEnv::start().await;
+    let transport = KafkaTransport::new(
+        "test".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "ave-{{schema-id}}"),
+    )
+    .unwrap();
+
+    let mut data = example_data_to_sink("BIG-SUBJECT", SCHEMA_ID);
+    data.payload = DataToSinkEvent::Create {
+        governance_id: None,
+        subject_id: "BIG-SUBJECT".to_string(),
+        owner: "owner".to_string(),
+        schema_id: SchemaType::Type(SCHEMA_ID.to_string()),
+        namespace: "".to_string(),
+        sn: 0,
+        gov_version: 1,
+        state: serde_json::json!({ "big": "a".repeat(2_000_000) }),
+    };
+
+    let err = transport.send(Arc::new(data)).await.unwrap_err();
+    assert!(
+        matches!(err, SinkError::Rejected { .. }),
+        "expected rejected error, got {err:?}"
+    );
+}
+
+/// SASL/SCRAM authentication: a valid password delivers the event and an
+/// invalid password prevents the connection from being established.
+#[tokio::test]
+async fn kafka_transport_sasl() {
+    let username = "ave";
+    let password = "test-password";
+    let env = RedpandaSaslEnv::start(username, password).await;
+
+    let _ok_env = TempEnvVar::set("AVE_SINK_PASSWORD_SASL_OK", password);
+    let transport = KafkaTransport::new(
+        "sasl-ok".to_string(),
+        kafka_sink_config_sasl(&env.bootstrap_servers, "ave-sasl-ok", username),
+    )
+    .unwrap();
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("ave-sasl-ok", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, SUBJECT_ID);
+
+    let _bad_env = TempEnvVar::set("AVE_SINK_PASSWORD_SASL_BAD", "wrong-password");
+    let bad_config = KafkaSinkConfig {
+        bootstrap_servers: env.bootstrap_servers.clone(),
+        topic: "ave-sasl-bad".to_string(),
+        security: KafkaSecurityConfig::SaslPlaintext {
+            mechanism: "SCRAM-SHA-256".to_string(),
+            username: username.to_string(),
+        },
+        request_timeout_ms: 30_000,
+        ..KafkaSinkConfig::default()
+    };
+    let transport = KafkaTransport::new("sasl-bad".to_string(), bad_config).unwrap();
+    // Force an immediate connection attempt; librdkafka may report the bad
+    // credentials as an auth error or, with some broker timings, as a
+    // retryable connection timeout.
+    let err = transport.health_check().await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            SinkError::Auth { .. } | SinkError::Delivery { retryable: true, .. }
+        ),
+        "expected auth or retryable connection error, got {err:?}"
+    );
+}
+
+/// Builds a sink configuration entry that delivers governance `Example` tracker
+/// events to a Kafka topic.
+fn make_kafka_sink_entry(
+    server_name: &str,
+    bootstrap_servers: String,
+    topic: &str,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                bootstrap_servers,
+                topic: topic.to_owned(),
+                ..KafkaSinkConfig::default()
+            }),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            max_catch_up_concurrency: 2,
+            ..Default::default()
+        }],
+    }
+}
+
+/// End-to-end test: every ledger event type produced by the node (Create, Fact,
+/// Transfer, Confirm, Reject and EOL) is delivered to Kafka with the subject id
+/// as the message key.
+#[traced_test]
+#[tokio::test]
+async fn kafka_node_emits_all_event_types() {
+    let env = RedpandaEnv::start().await;
+    let topic = "ave-node-events";
+
+    let (mut nodes, mut dirs) = create_nodes_and_connections(
+        CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut owner = nodes.remove(0);
+    let mut new_owner = nodes.remove(0);
+
+    let mut owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+    let mut new_owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&new_owner.api]).await;
+
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) = create_subject(
+        &owner.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart owner with a Kafka sink configured for all event types.
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = owner_dirs[0].path().to_path_buf();
+    let owner_ext_db = owner_dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", owner_port),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![make_kafka_sink_entry(
+            "kafka-node-sink",
+            env.bootstrap_servers.clone(),
+            topic,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+        ..Default::default()
+    })
+    .await;
+    owner_dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    // Restart new_owner connected to owner so it can witness the events.
+    let owner_peer_id = owner.api.peer_id().to_string();
+    let owner_address = owner.listen_address.clone();
+
+    let new_owner_keys: KeyPair = new_owner.keys.clone();
+    let new_owner_local_db = new_owner_dirs[0].path().to_path_buf();
+    let new_owner_ext_db = new_owner_dirs[1].path().to_path_buf();
+    new_owner.token.cancel();
+    join_all(new_owner.handler.iter_mut()).await;
+
+    let new_owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_owner, mut new_owner_dirs2) = create_node(restart_config_with_peers(
+        new_owner_keys,
+        new_owner_local_db,
+        new_owner_ext_db,
+        format!("/memory/{}", new_owner_port),
+        vec![ave_network::RoutingNode {
+            peer_id: owner_peer_id,
+            address: vec![owner_address],
+        }],
+        vec![],
+    ))
+    .await;
+    new_owner_dirs.append(&mut new_owner_dirs2);
+    node_running(&new_owner.api).await.unwrap();
+
+    get_subject(&new_owner.api, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    // Emit a representative set of ledger events.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModThree": {"data": 50}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let new_owner_pk = PublicKey::from_str(new_owner.api.public_key()).unwrap();
+    emit_transfer(&owner.api, subject_id.clone(), new_owner_pk, true)
+        .await
+        .unwrap();
+
+    get_subject(&new_owner.api, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&new_owner.api, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let owner_pk = PublicKey::from_str(owner.api.public_key()).unwrap();
+    emit_transfer(&new_owner.api, subject_id.clone(), owner_pk, true)
+        .await
+        .unwrap();
+
+    get_subject(&owner.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    emit_reject(&owner.api, subject_id.clone(), true)
+        .await
+        .unwrap();
+
+    emit_eol(&new_owner.api, subject_id.clone(), true)
+        .await
+        .unwrap();
+
+    // Consume all events from Kafka and verify each event type and SN.
+    let messages = env.consume_string(topic, 8, Duration::from_secs(30)).await;
+    assert_eq!(messages.len(), 8, "expected 8 ledger events in Kafka");
+
+    let events: Vec<IncomingSinkEvent> = messages
+        .iter()
+        .map(|(_, payload)| serde_json::from_str(payload).unwrap())
+        .collect();
+
+    let subject_id_str = subject_id.to_string();
+    assert!(
+        messages.iter().all(|(key, _)| key == &subject_id_str),
+        "all Kafka message keys must be the subject id"
+    );
+    assert_sink_contains_create(&events, &subject_id_str, 0);
+    assert_sink_contains_fact_full(
+        &events,
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
+    );
+    assert_sink_contains_fact_full(
+        &events,
+        &subject_id_str,
+        2,
+        false,
+        Some(json!({"ModThree": {"data": 50}})),
+    );
+    assert_sink_contains_transfer(&events, &subject_id_str, 3);
+    assert_sink_contains_confirm(&events, &subject_id_str, 4);
+    assert_sink_contains_transfer(&events, &subject_id_str, 5);
+    assert_sink_contains_reject(&events, &subject_id_str, 6);
+    assert_sink_contains_eol(&events, &subject_id_str, 7);
+}
+
+/// Broker-down recovery: with the broker unreachable the startup catch-up
+/// cannot deliver and the subject stays in `lagging`; after a restart with
+/// the broker available, automatic catch-up delivers the backlog.
+#[traced_test]
+#[tokio::test]
+async fn kafka_broker_down_and_catch_up() {
+    let env = RedpandaEnv::start().await;
+    let topic = "ave-broker-down";
+
+    // Boot without sinks: create the governance, the Example schema, a
+    // subject and three facts.
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) = create_subject(
+        &node.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Restart with the sink pointing to a broker that does not exist: the
+    // startup catch-up cannot deliver and the subject stays lagging.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        vec![make_kafka_sink_entry(
+            "kafka-down-sink",
+            "127.0.0.1:1".to_string(),
+            topic,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "kafka-down-sink", 1).await;
+
+    // Restart with the sink pointing to the real Redpanda broker.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        vec![make_kafka_sink_entry(
+            "kafka-down-sink",
+            env.bootstrap_servers.clone(),
+            topic,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up must deliver Create + 3 facts to Kafka.
+    let messages = env.consume_string(topic, 4, Duration::from_secs(30)).await;
+    assert_eq!(messages.len(), 4, "expected Create + 3 facts in Kafka");
+
+    let events: Vec<IncomingSinkEvent> = messages
+        .iter()
+        .map(|(_, payload)| serde_json::from_str(payload).unwrap())
+        .collect();
+
+    assert_sink_contains_create(&events, &subject_id_str, 0);
+    for i in 1..=3 {
+        assert_sink_contains_fact_full(
+            &events,
+            &subject_id_str,
+            i,
+            true,
+            Some(json!({"ModOne": {"data": i}})),
+        );
+    }
+
+    // After catch-up the sink is healthy and no longer lagging.
+    assert_sink_not_lagging(&node.api, "kafka-down-sink").await;
+}

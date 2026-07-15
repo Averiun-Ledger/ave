@@ -2202,7 +2202,10 @@ fn test_sink_server_http_fields() {
     let http: SinkServerHttp = serde_json::from_value(json).unwrap();
 
     assert_eq!(http.server, "TestSink");
-    let SinkTransportConfigHttp::Http(transport) = &http.transport;
+    let transport = match &http.transport {
+        SinkTransportConfigHttp::Http(t) => t,
+        SinkTransportConfigHttp::Kafka(_) => panic!("expected http transport"),
+    };
     assert_eq!(transport.url, "https://test.sink");
     assert!(transport.auth.is_some());
     assert_eq!(transport.connect_timeout_ms, 5000);
@@ -2224,7 +2227,10 @@ fn test_sink_server_http_fields() {
 
     let http2: SinkServerHttp = serde_json::from_value(json2).unwrap();
     assert_eq!(http2.server, "S2");
-    let SinkTransportConfigHttp::Http(transport2) = &http2.transport;
+    let transport2 = match &http2.transport {
+        SinkTransportConfigHttp::Http(t) => t,
+        SinkTransportConfigHttp::Kafka(_) => panic!("expected http transport"),
+    };
     assert!(transport2.auth.is_none());
 }
 

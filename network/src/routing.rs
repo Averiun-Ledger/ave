@@ -202,7 +202,7 @@ impl Behaviour {
 
     #[cfg(any(test, feature = "test"))]
     pub fn is_invalid_address(&self, _addr: &Multiaddr) -> bool {
-        return false;
+        false
     }
 
     #[cfg(not(any(test, feature = "test")))]

@@ -690,27 +690,59 @@ fn log_effective_configuration(
             servers.len()
         );
         for s in servers {
-            let ave_bridge::SinkTransportConfig::Http(http) = &s.transport;
-            info!(
-                target: TARGET,
-                "    - {} | {} | auth: {:?} | events: {:?}",
-                s.server,
-                http.url,
-                http.auth.is_some(),
-                s.events
-            );
-            info!(
-                target: TARGET,
-                "      batch_size: {}",
-                s.batch_size
-            );
-            info!(
-                target: TARGET,
-                "      connect: {}ms | request: {}ms | retries: {}",
-                http.connect_timeout_ms,
-                http.request_timeout_ms,
-                http.max_retries
-            );
+            match &s.transport {
+                ave_bridge::SinkTransportConfig::Http(http) => {
+                    info!(
+                        target: TARGET,
+                        "    - {} | http | {} | auth: {:?} | events: {:?}",
+                        s.server,
+                        http.url,
+                        http.auth.is_some(),
+                        s.events
+                    );
+                    info!(target: TARGET, "      batch_size: {}", s.batch_size);
+                    info!(
+                        target: TARGET,
+                        "      connect: {}ms | request: {}ms | retries: {}",
+                        http.connect_timeout_ms,
+                        http.request_timeout_ms,
+                        http.max_retries
+                    );
+                }
+                ave_bridge::SinkTransportConfig::Kafka(kafka) => {
+                    let protocol = match &kafka.security {
+                        ave_bridge::KafkaSecurityConfig::Plaintext => {
+                            "plaintext"
+                        }
+                        ave_bridge::KafkaSecurityConfig::Ssl => "ssl",
+                        ave_bridge::KafkaSecurityConfig::SaslPlaintext {
+                            mechanism,
+                            ..
+                        }
+                        | ave_bridge::KafkaSecurityConfig::SaslSsl {
+                            mechanism,
+                            ..
+                        } => mechanism.as_str(),
+                    };
+                    info!(
+                        target: TARGET,
+                        "    - {} | kafka | {} | topic: {} | security: {} | events: {:?}",
+                        s.server,
+                        kafka.bootstrap_servers,
+                        kafka.topic,
+                        protocol,
+                        s.events
+                    );
+                    info!(target: TARGET, "      batch_size: {}", s.batch_size);
+                    info!(
+                        target: TARGET,
+                        "      request: {}ms | acks: {} | compression: {}",
+                        kafka.request_timeout_ms,
+                        kafka.acks,
+                        kafka.compression
+                    );
+                }
+            }
         }
     }
 

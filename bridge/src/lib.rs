@@ -6,8 +6,8 @@ pub use ave_common::{
     bridge::request::SinksQuery,
     bridge::response::{SinkInfo, SinkStatusInfo},
     sink::{
-        HttpSinkConfig, SinkConfigEntry, SinkServer, SinkTarget,
-        SinkTransportConfig,
+        HttpSinkConfig, KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry,
+        SinkServer, SinkTarget, SinkTransportConfig,
     },
 };
 use ave_common::{

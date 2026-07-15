@@ -729,9 +729,51 @@ pub struct HttpSinkConfigHttp {
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(tag = "protocol", rename_all = "snake_case")]
+pub enum KafkaSecurityConfigHttp {
+    /// No encryption, no authentication.
+    Plaintext,
+    /// TLS encryption without authentication.
+    Ssl,
+    /// SASL authentication over a plaintext connection.
+    SaslPlaintext {
+        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
+        mechanism: String,
+        /// SASL username.
+        username: String,
+    },
+    /// SASL authentication over a TLS connection.
+    SaslSsl {
+        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
+        mechanism: String,
+        /// SASL username.
+        username: String,
+    },
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct KafkaSinkConfigHttp {
+    /// Comma-separated list of `host:port` bootstrap brokers.
+    pub bootstrap_servers: String,
+    /// Topic template; supports `{{schema-id}}` and `{{subject-id}}`.
+    pub topic: String,
+    /// Producer client id.
+    pub client_id: String,
+    /// Security configuration for the brokers.
+    pub security: KafkaSecurityConfigHttp,
+    /// Required acknowledgements: "0", "1" or "all".
+    pub acks: String,
+    /// Compression codec: none, gzip, snappy, lz4 or zstd.
+    pub compression: String,
+    /// Per-message produce timeout in milliseconds.
+    pub request_timeout_ms: u64,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfigHttp {
     Http(HttpSinkConfigHttp),
+    Kafka(KafkaSinkConfigHttp),
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -746,21 +788,61 @@ pub struct SinkServerHttp {
 
 impl From<ave_bridge::SinkServer> for SinkServerHttp {
     fn from(value: ave_bridge::SinkServer) -> Self {
-        let ave_bridge::SinkTransportConfig::Http(http) = value.transport;
+        let transport = match value.transport {
+            ave_bridge::SinkTransportConfig::Http(http) => {
+                SinkTransportConfigHttp::Http(HttpSinkConfigHttp {
+                    url: http.url,
+                    auth: http.auth.map(|a| SinkAuthConfigHttp {
+                        auth_url: a.auth_url,
+                        username: a.username,
+                        api_key: a.api_key,
+                    }),
+                    connect_timeout_ms: http.connect_timeout_ms,
+                    request_timeout_ms: http.request_timeout_ms,
+                    max_retries: http.max_retries,
+                })
+            }
+            ave_bridge::SinkTransportConfig::Kafka(kafka) => {
+                SinkTransportConfigHttp::Kafka(KafkaSinkConfigHttp {
+                    bootstrap_servers: kafka.bootstrap_servers,
+                    topic: kafka.topic,
+                    client_id: kafka.client_id,
+                    security: kafka_security_to_http(kafka.security),
+                    acks: kafka.acks,
+                    compression: kafka.compression,
+                    request_timeout_ms: kafka.request_timeout_ms,
+                })
+            }
+        };
         Self {
             server: value.server,
             events: value.events.into_iter().map(|e| e.to_string()).collect(),
-            transport: SinkTransportConfigHttp::Http(HttpSinkConfigHttp {
-                url: http.url,
-                auth: http.auth.map(|a| SinkAuthConfigHttp {
-                    auth_url: a.auth_url,
-                    username: a.username,
-                    api_key: a.api_key,
-                }),
-                connect_timeout_ms: http.connect_timeout_ms,
-                request_timeout_ms: http.request_timeout_ms,
-                max_retries: http.max_retries,
-            }),
+            transport,
         }
+    }
+}
+
+fn kafka_security_to_http(
+    value: ave_bridge::KafkaSecurityConfig,
+) -> KafkaSecurityConfigHttp {
+    match value {
+        ave_bridge::KafkaSecurityConfig::Plaintext => {
+            KafkaSecurityConfigHttp::Plaintext
+        }
+        ave_bridge::KafkaSecurityConfig::Ssl => KafkaSecurityConfigHttp::Ssl,
+        ave_bridge::KafkaSecurityConfig::SaslPlaintext {
+            mechanism,
+            username,
+        } => KafkaSecurityConfigHttp::SaslPlaintext {
+            mechanism,
+            username,
+        },
+        ave_bridge::KafkaSecurityConfig::SaslSsl {
+            mechanism,
+            username,
+        } => KafkaSecurityConfigHttp::SaslSsl {
+            mechanism,
+            username,
+        },
     }
 }
