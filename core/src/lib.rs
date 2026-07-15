@@ -1406,6 +1406,10 @@ impl Api {
                     running: info.running,
                     blocked: info.blocked,
                     lagging_subjects: info.lagging_subjects,
+                    transport: info
+                        .server
+                        .as_ref()
+                        .map(|server| server.transport.kind().to_string()),
                 })
                 .collect()
         })

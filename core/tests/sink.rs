@@ -112,6 +112,12 @@ async fn get_sinks_status_returns_configured_sinks() {
     let names: Vec<_> = statuses.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"gov-sink"));
     assert!(names.contains(&"schema-sink"));
+    assert!(
+        statuses
+            .iter()
+            .all(|s| s.transport.as_deref() == Some("http")),
+        "sample sinks should report the http transport kind"
+    );
 }
 
 #[traced_test]

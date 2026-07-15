@@ -699,4 +699,12 @@ async fn kafka_broker_down_and_catch_up() {
 
     // After catch-up the sink is healthy and no longer lagging.
     assert_sink_not_lagging(&node.api, "kafka-down-sink").await;
+
+    // The status view reports the transport kind.
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    let status = statuses
+        .iter()
+        .find(|s| s.name == "kafka-down-sink")
+        .expect("kafka-down-sink in status response");
+    assert_eq!(status.transport.as_deref(), Some("kafka"));
 }

@@ -808,6 +808,15 @@ impl SinkTransportConfig {
             Self::Kafka(kafka) => kafka.validate(),
         }
     }
+
+    /// Transport kind identifier, matching the serde `type` tag
+    /// (`"http"`, `"kafka"`).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Http(_) => "http",
+            Self::Kafka(_) => "kafka",
+        }
+    }
 }
 
 fn validate_url(component: &str, value: &str) -> Result<(), Error> {

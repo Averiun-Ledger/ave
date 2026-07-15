@@ -351,6 +351,9 @@ pub struct SinkStatusInfo {
     pub running: bool,
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
+    /// Delivery transport kind (`"http"`, `"kafka"`). `None` when the sink
+    /// is not present in the current configuration.
+    pub transport: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
