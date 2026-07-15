@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
     IncomingSinkEvent, SinkTypes,
-    sink::{DataToSink, DataToSinkEvent, SinkAuthConfig},
+    sink::{DataToSink, DataToSinkEvent, HttpTlsConfig, SinkAuthConfig},
 };
 use ave_core::{
     Api,
@@ -125,6 +125,84 @@ pub fn make_sink_entry_with_auth(
             transport: SinkTransportConfig::Http(HttpSinkConfig {
                 url,
                 auth: Some(auth),
+                max_retries: 0,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
+pub fn make_sink_entry_with_signature(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+) -> SinkConfigEntry {
+    make_sink_entry_with_signature_and_retries(
+        server_name,
+        url,
+        governance_id,
+        events,
+        0,
+    )
+}
+
+pub fn make_sink_entry_with_signature_and_retries(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    max_retries: usize,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url,
+                signature: true,
+                max_retries,
+                retry_base_delay_ms: 100,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
+/// Returns a sink entry whose HTTP transport uses the given TLS settings
+/// (custom CA, mTLS client credentials).
+pub fn make_sink_entry_with_tls(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    tls: HttpTlsConfig,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url,
+                tls: Some(tls),
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,

@@ -1327,6 +1327,7 @@ impl Handler<Self> for Node {
                     SignTypesNode::ApprovalReq(_) => "ApprovalReq",
                     SignTypesNode::ApprovalRes(_) => "ApprovalRes",
                     SignTypesNode::LedgerSeal(_) => "LedgerSeal",
+                    SignTypesNode::SinkDelivery(_) => "SinkDelivery",
                 };
 
                 let sign = match content {
@@ -1352,6 +1353,7 @@ impl Handler<Self> for Node {
                         self.sign(&*approval_res)
                     }
                     SignTypesNode::LedgerSeal(ledger) => self.sign(&ledger),
+                    SignTypesNode::SinkDelivery(payload) => self.sign(&payload),
                 }
                 .map_err(|e| {
                     error!(

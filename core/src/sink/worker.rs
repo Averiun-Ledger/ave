@@ -19,10 +19,10 @@ use tracing::{error, info_span, warn};
 use crate::config::SinkServer;
 use crate::sink::SinkError;
 use crate::sink::extract_sn;
-use crate::sink::transport::SinkTransport;
 use crate::sink::manager::{
     SendResult, SinkManager, SinkManagerMessage, SinkWorkerError,
 };
+use crate::sink::transport::{NodeSigner, SinkTransport};
 use ave_common::DataToSink;
 
 // ---------------------------------------------------------------------------
@@ -958,8 +958,9 @@ impl SinkWorker {
         sink_name: String,
         server: SinkServer,
         is_governance: bool,
+        signer: Option<NodeSigner>,
     ) -> Result<Self, SinkError> {
-        let client = crate::sink::build_transport(&server)?;
+        let client = crate::sink::build_transport(&server, signer)?;
         Ok(Self {
             sink_name,
             server,

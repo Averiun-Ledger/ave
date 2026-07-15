@@ -710,8 +710,21 @@ pub struct SinkAuthConfigHttp {
     pub auth_url: String,
     /// Username for the token endpoint
     pub username: String,
-    /// API key for Api-Key header authentication
+    /// API key for Api-Key header authentication. Always redacted (`"***"`)
+    /// in API responses; the real value never leaves the node.
     pub api_key: String,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct HttpTlsConfigHttp {
+    /// Path to an additional PEM-encoded root CA certificate to trust.
+    pub ca_certificate: String,
+    /// Path to the PEM-encoded client certificate chain used for mTLS.
+    pub client_certificate: String,
+    /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
+    pub client_key: String,
+    /// Minimum TLS version accepted: `"1.2"` or `"1.3"`.
+    pub min_tls_version: String,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -726,6 +739,10 @@ pub struct HttpSinkConfigHttp {
     pub request_timeout_ms: u64,
     /// Maximum transient retries per delivery
     pub max_retries: usize,
+    /// TLS customization: additional root CA, mTLS identity, minimum version
+    pub tls: Option<HttpTlsConfigHttp>,
+    /// Whether deliveries are signed with the node identity
+    pub signature: bool,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -795,11 +812,23 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     auth: http.auth.map(|a| SinkAuthConfigHttp {
                         auth_url: a.auth_url,
                         username: a.username,
-                        api_key: a.api_key,
+                        // Never expose the configured API key through the API.
+                        api_key: if a.api_key.is_empty() {
+                            String::new()
+                        } else {
+                            "***".to_owned()
+                        },
                     }),
                     connect_timeout_ms: http.connect_timeout_ms,
                     request_timeout_ms: http.request_timeout_ms,
                     max_retries: http.max_retries,
+                    tls: http.tls.map(|t| HttpTlsConfigHttp {
+                        ca_certificate: t.ca_certificate,
+                        client_certificate: t.client_certificate,
+                        client_key: t.client_key,
+                        min_tls_version: t.min_tls_version,
+                    }),
+                    signature: http.signature,
                 })
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
@@ -844,5 +873,67 @@ fn kafka_security_to_http(
             mechanism,
             username,
         },
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The API key configured for a sink must never appear in the HTTP
+    /// representation exposed through the API: it is redacted to `"***"`.
+    /// TLS and signature settings must survive the conversion.
+    #[test]
+    fn sink_server_http_redacts_api_key() {
+        let server: ave_bridge::SinkServer = serde_json::from_value(json!({
+            "server": "secure-sink",
+            "transport": {
+                "type": "http",
+                "url": "https://sink.example.com/events",
+                "auth": { "auth_url": "", "username": "", "api_key": "real-secret-key" },
+                "tls": { "ca_certificate": "/etc/ave/ca.pem" },
+                "signature": true
+            }
+        }))
+        .expect("sink server should deserialize");
+
+        let json = serde_json::to_string(&SinkServerHttp::from(server))
+            .expect("sink server should serialize");
+
+        assert!(
+            !json.contains("real-secret-key"),
+            "the API key must never be exposed: {json}"
+        );
+        assert!(
+            json.contains("***"),
+            "the API key must be redacted: {json}"
+        );
+        assert!(json.contains("/etc/ave/ca.pem"));
+        assert!(json.contains("\"signature\":true"));
+    }
+
+    /// An empty API key stays empty instead of being redacted, so the
+    /// response does not suggest a key is configured when it is not.
+    #[test]
+    fn sink_server_http_keeps_empty_api_key_empty() {
+        let server: ave_bridge::SinkServer = serde_json::from_value(json!({
+            "server": "plain-sink",
+            "transport": {
+                "type": "http",
+                "url": "http://sink.example.com/events",
+                "auth": { "auth_url": "", "username": "", "api_key": "" }
+            }
+        }))
+        .expect("sink server should deserialize");
+
+        let SinkTransportConfigHttp::Http(http) =
+            SinkServerHttp::from(server).transport
+        else {
+            panic!("expected HTTP transport");
+        };
+        let auth = http.auth.expect("auth config should be present");
+        assert!(auth.api_key.is_empty());
     }
 }

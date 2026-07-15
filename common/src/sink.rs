@@ -518,6 +518,103 @@ mod tests {
         assert!(matches!(cfg, SinkTransportConfig::Kafka(_)));
         assert!(cfg.validate().is_ok());
     }
+
+    #[test]
+    fn test_sink_auth_config_validate_allows_empty_for_env_api_key() {
+        // All fields empty: the API key is injected through
+        // `AVE_SINK_APIKEY_{{SERVER}}` at worker startup.
+        let auth = SinkAuthConfig {
+            auth_url: String::new(),
+            username: String::new(),
+            api_key: String::new(),
+        };
+        assert!(auth.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sink_auth_config_validate_allows_api_key_only() {
+        let auth = SinkAuthConfig {
+            auth_url: String::new(),
+            username: String::new(),
+            api_key: "secret".to_owned(),
+        };
+        assert!(auth.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sink_auth_config_validate_requires_url_and_username_together() {
+        let mut auth = SinkAuthConfig {
+            auth_url: "https://auth.example.com/token".to_owned(),
+            username: String::new(),
+            api_key: String::new(),
+        };
+        assert!(auth.validate().is_err());
+        auth.auth_url = String::new();
+        auth.username = "ave".to_owned();
+        assert!(auth.validate().is_err());
+    }
+
+    #[test]
+    fn test_sink_auth_config_api_key_serializes_redacted() {
+        let auth = SinkAuthConfig {
+            auth_url: String::new(),
+            username: String::new(),
+            api_key: "super-secret".to_owned(),
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(!json.contains("super-secret"));
+        assert!(json.contains("***"));
+        // Empty keys serialize as empty, not redacted.
+        let empty = SinkAuthConfig {
+            auth_url: String::new(),
+            username: String::new(),
+            api_key: String::new(),
+        };
+        assert!(!serde_json::to_string(&empty).unwrap().contains("***"));
+    }
+
+    #[test]
+    fn test_http_tls_config_validate_ok() {
+        let tls = HttpTlsConfig {
+            ca_certificate: "/etc/ssl/ca.pem".to_owned(),
+            client_certificate: "/etc/ssl/client.pem".to_owned(),
+            client_key: "/etc/ssl/client.key".to_owned(),
+            min_tls_version: "1.2".to_owned(),
+        };
+        assert!(tls.validate().is_ok());
+        assert!(HttpTlsConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_http_tls_config_validate_requires_cert_and_key_together() {
+        let tls = HttpTlsConfig {
+            client_certificate: "/etc/ssl/client.pem".to_owned(),
+            ..HttpTlsConfig::default()
+        };
+        assert!(tls.validate().is_err());
+        let tls = HttpTlsConfig {
+            client_key: "/etc/ssl/client.key".to_owned(),
+            ..HttpTlsConfig::default()
+        };
+        assert!(tls.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_tls_config_validate_rejects_invalid_min_version() {
+        let tls = HttpTlsConfig {
+            min_tls_version: "1.1".to_owned(),
+            ..HttpTlsConfig::default()
+        };
+        assert!(tls.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_serde_defaults_tls_and_signature() {
+        let cfg: HttpSinkConfig =
+            serde_json::from_str(r#"{"url": "https://example.com"}"#).unwrap();
+        assert!(cfg.tls.is_none());
+        assert!(!cfg.signature);
+    }
 }
 
 /// Per-sink authentication configuration.
@@ -527,23 +624,94 @@ mod tests {
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SinkAuthConfig {
-    /// OAuth2 / token endpoint URL.
+    /// OAuth2 / token endpoint URL. Must be set together with `username`.
     pub auth_url: String,
-    /// Username for the token endpoint.
+    /// Username for the token endpoint. Must be set together with `auth_url`.
     pub username: String,
     /// API key for Api-Key header authentication (alternative to OAuth2).
-    #[serde(default)]
+    /// May be empty when the key is provided through the environment variable
+    /// `AVE_SINK_APIKEY_{{SERVER}}`, which is the recommended option and
+    /// takes precedence over this field. Always serialized redacted.
+    #[serde(default, serialize_with = "serialize_redacted")]
     pub api_key: String,
+}
+
+/// Serializes a secret as `"***"` so it never leaks through API responses.
+fn serialize_redacted<S: serde::Serializer>(
+    value: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if value.is_empty() {
+        serializer.serialize_str("")
+    } else {
+        serializer.serialize_str("***")
+    }
 }
 
 impl SinkAuthConfig {
     pub fn validate(&self) -> Result<(), Error> {
-        validate_url("auth_url", &self.auth_url)?;
-        if self.username.is_empty() && self.api_key.is_empty() {
+        let url_set = !self.auth_url.is_empty();
+        let user_set = !self.username.is_empty();
+        if url_set {
+            validate_url("auth_url", &self.auth_url)?;
+        }
+        if url_set != user_set {
             return Err(Error::InvalidConfiguration {
                 component: "SinkAuthConfig".to_string(),
-                reason: "at least one of username or api_key must be set"
+                reason: "auth_url and username must be set together for OAuth2"
                     .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// TLS configuration for the HTTP transport.
+///
+/// Certificates are referenced by filesystem path; the client private key
+/// must be PEM-encoded PKCS#8.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct HttpTlsConfig {
+    /// Path to an additional PEM-encoded root CA certificate to trust
+    /// (e.g. a corporate CA doing TLS inspection).
+    pub ca_certificate: String,
+    /// Path to the PEM-encoded client certificate chain used for mTLS.
+    /// Must be set together with `client_key`.
+    pub client_certificate: String,
+    /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
+    /// Must be set together with `client_certificate`.
+    pub client_key: String,
+    /// Minimum TLS version accepted: `"1.2"` or `"1.3"`.
+    /// Empty uses the TLS library default.
+    pub min_tls_version: String,
+}
+
+impl HttpTlsConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        let cert_set = !self.client_certificate.is_empty();
+        let key_set = !self.client_key.is_empty();
+        if cert_set != key_set {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpTlsConfig".to_string(),
+                reason:
+                    "client_certificate and client_key must be set together (mTLS)"
+                        .to_string(),
+            });
+        }
+        if !self.min_tls_version.is_empty()
+            && self.min_tls_version != "1.2"
+            && self.min_tls_version != "1.3"
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpTlsConfig.min_tls_version".to_string(),
+                reason: format!(
+                    "must be \"1.2\" or \"1.3\", got {}",
+                    self.min_tls_version
+                ),
             });
         }
         Ok(())
@@ -560,8 +728,9 @@ pub struct HttpSinkConfig {
     pub url: String,
     /// Per-sink authentication. When `Some`, the worker will load the
     /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
-    /// (where `{{SERVER}}` is the sink name upper-cased with non-alphanumeric
-    /// characters replaced by `_`).
+    /// and the API key from `AVE_SINK_APIKEY_{{SERVER}}` (where `{{SERVER}}`
+    /// is the sink name upper-cased with non-alphanumeric characters replaced
+    /// by `_`).
     pub auth: Option<SinkAuthConfig>,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
@@ -570,6 +739,11 @@ pub struct HttpSinkConfig {
     /// Optional dedicated health-check URL.
     pub health_check_url: Option<String>,
     pub token_refresh_margin_secs: u64,
+    /// TLS customization: additional root CA, mTLS identity, minimum version.
+    pub tls: Option<HttpTlsConfig>,
+    /// Sign each delivery with the node's Ed25519 identity and send the
+    /// signature in the `X-Ave-Signature*` headers.
+    pub signature: bool,
 }
 
 impl Default for HttpSinkConfig {
@@ -583,6 +757,8 @@ impl Default for HttpSinkConfig {
             retry_base_delay_ms: 500,
             health_check_url: None,
             token_refresh_margin_secs: 30,
+            tls: None,
+            signature: false,
         }
     }
 }
@@ -628,6 +804,12 @@ impl HttpSinkConfig {
             "HttpSinkConfig.token_refresh_margin_secs",
             self.token_refresh_margin_secs,
         )?;
+        if let Some(tls) = &self.tls {
+            tls.validate().map_err(|e| Error::InvalidConfiguration {
+                component: "HttpSinkConfig.tls".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
         Ok(())
     }
 }

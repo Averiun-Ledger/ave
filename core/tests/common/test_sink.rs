@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use ave_common::IncomingSinkEvent;
 use axum::{
@@ -8,8 +12,17 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType,
+};
 use serde::Deserialize;
 use tokio::{sync::Mutex, task::JoinHandle};
+use tokio_rustls::rustls::{
+    RootCertStore, ServerConfig as RustlsServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    server::WebPkiClientVerifier,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Response mode of the test sink.
@@ -66,12 +79,109 @@ struct TestSinkState {
     auth_mode: AuthResponseMode,
     auth_requests: Vec<AuthRequest>,
     authorization_headers: Vec<Option<String>>,
+    signature_headers: Vec<SignatureHeaders>,
+    raw_bodies: Vec<String>,
     unauthorized_once_consumed: bool,
+}
+
+/// Signature headers captured on a `/events` delivery.
+#[derive(Debug, Clone, Default)]
+pub struct SignatureHeaders {
+    /// `X-Ave-Signature` value; `None` when the header was absent.
+    pub signature: Option<String>,
+    /// `X-Ave-Signature-Timestamp` value; `None` when the header was absent.
+    pub timestamp: Option<String>,
+    /// `X-Ave-Public-Key` value; `None` when the header was absent.
+    pub public_key: Option<String>,
+}
+
+impl SignatureHeaders {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_owned())
+        };
+        Self {
+            signature: get("X-Ave-Signature"),
+            timestamp: get("X-Ave-Signature-Timestamp"),
+            public_key: get("X-Ave-Public-Key"),
+        }
+    }
+}
+
+/// TLS material of an HTTPS test sink: a throwaway CA, a server certificate
+/// valid for `127.0.0.1` and a client certificate, both signed by that CA.
+pub struct TestTlsMaterial {
+    /// CA certificate in PEM; configure it as `tls.ca_certificate` so the
+    /// node trusts the sink.
+    pub ca_pem: String,
+    /// Client certificate chain in PEM; configure it as
+    /// `tls.client_certificate` for mTLS.
+    pub client_cert_pem: String,
+    /// Client private key in PEM; configure it as `tls.client_key` for mTLS.
+    pub client_key_pem: String,
+    ca_der: CertificateDer<'static>,
+    server_cert_pem: String,
+    server_key_pem: String,
+    server_cert_der: CertificateDer<'static>,
+    server_key_der: Vec<u8>,
+}
+
+impl TestTlsMaterial {
+    /// Generate a fresh CA, server and client certificates.
+    pub fn generate() -> Self {
+        let ca_key = KeyPair::generate().expect("CA key should generate");
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "ave-test-ca");
+        let ca_cert = ca_params
+            .self_signed(&ca_key)
+            .expect("CA cert should generate");
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let server_key =
+            KeyPair::generate().expect("server key should generate");
+        let mut server_params = CertificateParams::default();
+        server_params
+            .distinguished_name
+            .push(DnType::CommonName, "ave-test-server");
+        server_params.subject_alt_names =
+            vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        let server_cert = server_params
+            .signed_by(&server_key, &issuer)
+            .expect("server cert should generate");
+
+        let client_key =
+            KeyPair::generate().expect("client key should generate");
+        let mut client_params = CertificateParams::default();
+        client_params
+            .distinguished_name
+            .push(DnType::CommonName, "ave-test-client");
+        let client_cert = client_params
+            .signed_by(&client_key, &issuer)
+            .expect("client cert should generate");
+
+        Self {
+            ca_pem: ca_cert.pem(),
+            client_cert_pem: client_cert.pem(),
+            client_key_pem: client_key.serialize_pem(),
+            ca_der: ca_cert.der().clone(),
+            server_cert_pem: server_cert.pem(),
+            server_key_pem: server_key.serialize_pem(),
+            server_cert_der: server_cert.der().clone(),
+            server_key_der: server_key.serialize_der(),
+        }
+    }
 }
 
 /// A real HTTP sink used by integration tests.
 pub struct TestSink {
     addr: SocketAddr,
+    scheme: &'static str,
     state: Arc<Mutex<TestSinkState>>,
     #[allow(dead_code)]
     handle: JoinHandle<()>,
@@ -80,20 +190,30 @@ pub struct TestSink {
 }
 
 impl TestSink {
-    /// Bind to `127.0.0.1:0` and start accepting requests.
-    pub async fn start() -> Self {
-        let state = Arc::new(Mutex::new(TestSinkState {
+    fn new_state() -> Arc<Mutex<TestSinkState>> {
+        Arc::new(Mutex::new(TestSinkState {
             events: Vec::new(),
             mode: ResponseMode::Accept,
             auth_mode: AuthResponseMode::TokenSuccess,
             auth_requests: Vec::new(),
             authorization_headers: Vec::new(),
+            signature_headers: Vec::new(),
+            raw_bodies: Vec::new(),
             unauthorized_once_consumed: false,
-        }));
-        let app = Router::new()
+        }))
+    }
+
+    fn app(state: Arc<Mutex<TestSinkState>>) -> Router {
+        Router::new()
             .route("/events", post(Self::receive).get(Self::health))
             .route("/auth/token", post(Self::auth))
-            .with_state(state.clone());
+            .with_state(state)
+    }
+
+    /// Bind to `127.0.0.1:0` and start accepting requests.
+    pub async fn start() -> Self {
+        let state = Self::new_state();
+        let app = Self::app(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -112,18 +232,91 @@ impl TestSink {
 
         Self {
             addr,
+            scheme: "http",
             state,
             handle,
             cancel,
         }
     }
 
+    /// Bind to `127.0.0.1:0` and serve HTTPS with a freshly generated CA.
+    ///
+    /// When `require_client_cert` is true the sink demands a client
+    /// certificate signed by the same CA (mTLS). Returns the sink and the
+    /// TLS material so tests can point the node's `tls` config at the CA
+    /// and client credentials.
+    pub async fn start_tls(require_client_cert: bool) -> (Self, TestTlsMaterial) {
+        let material = TestTlsMaterial::generate();
+        let state = Self::new_state();
+        let app = Self::app(state.clone());
+
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("test sink should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("listener should be non-blocking");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let rustls_config = if require_client_cert {
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(material.ca_der.clone())
+                .expect("CA cert should parse");
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .expect("client verifier should build");
+            let mut server_config = RustlsServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(
+                    vec![material.server_cert_der.clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        material.server_key_der.clone(),
+                    )),
+                )
+                .expect("server cert/key should be valid");
+            server_config.alpn_protocols =
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            RustlsConfig::from_config(Arc::new(server_config))
+        } else {
+            RustlsConfig::from_pem(
+                material.server_cert_pem.clone().into_bytes(),
+                material.server_key_pem.clone().into_bytes(),
+            )
+            .await
+            .expect("PEM should build rustls config")
+        };
+
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let server = axum_server::from_tcp(listener)
+                .expect("listener should convert to tokio")
+                .acceptor(RustlsAcceptor::new(rustls_config))
+                .serve(app.into_make_service());
+            tokio::select! {
+                _ = server => {}
+                _ = task_cancel.cancelled() => {}
+            }
+        });
+
+        (
+            Self {
+                addr,
+                scheme: "https",
+                state,
+                handle,
+                cancel,
+            },
+            material,
+        )
+    }
+
     pub fn url(&self) -> String {
-        format!("http://{}/events", self.addr)
+        format!("{}://{}/events", self.scheme, self.addr)
     }
 
     pub fn auth_url(&self) -> String {
-        format!("http://{}/auth/token", self.addr)
+        format!("{}://{}/auth/token", self.scheme, self.addr)
     }
 
     /// Change the response mode for subsequent `/events` requests.
@@ -218,6 +411,27 @@ impl TestSink {
         }
     }
 
+    /// Wait until `count` raw request bodies have been received, including
+    /// failed delivery attempts (they are recorded before the response mode
+    /// is applied).
+    pub async fn wait_for_raw_count(&self, count: usize, timeout: bool) {
+        let mut attempts = 0;
+        loop {
+            let current = self.state.lock().await.raw_bodies.len();
+            if current >= count {
+                return;
+            }
+            if timeout && attempts > 100 {
+                panic!(
+                    "test sink did not receive {} raw deliveries; received {}",
+                    count, current
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            attempts += 1;
+        }
+    }
+
     /// Return a snapshot of the events received so far.
     pub async fn snapshot(&self) -> Vec<IncomingSinkEvent> {
         self.state.lock().await.events.clone()
@@ -265,18 +479,44 @@ impl TestSink {
         self.state.lock().await.authorization_headers.clone()
     }
 
+    /// Return a snapshot of the `X-Ave-Signature*` headers received on
+    /// `/events`, in request order.
+    pub async fn signature_headers(&self) -> Vec<SignatureHeaders> {
+        self.state.lock().await.signature_headers.clone()
+    }
+
+    /// Return a snapshot of the raw request bodies received on `/events`,
+    /// in request order.
+    pub async fn raw_bodies(&self) -> Vec<String> {
+        self.state.lock().await.raw_bodies.clone()
+    }
+
     async fn receive(
         State(state): State<Arc<Mutex<TestSinkState>>>,
         headers: HeaderMap,
-        Json(event): Json<IncomingSinkEvent>,
+        body: String,
     ) -> Response {
         let auth_header = headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned());
+        let signature_headers = SignatureHeaders::from_headers(&headers);
+
+        let event: IncomingSinkEvent = match serde_json::from_str(&body) {
+            Ok(event) => event,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid event JSON: {}", e),
+                )
+                    .into_response();
+            }
+        };
 
         let mut guard = state.lock().await;
         guard.authorization_headers.push(auth_header);
+        guard.signature_headers.push(signature_headers);
+        guard.raw_bodies.push(body);
 
         match guard.mode {
             ResponseMode::Accept => {

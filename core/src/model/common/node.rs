@@ -36,6 +36,8 @@ pub enum SignTypesNode {
 
     EventRequest(EventRequest),
     LedgerSeal(LedgerSeal),
+
+    SinkDelivery(Vec<u8>),
 }
 
 pub async fn i_owner_new_owner<A>(

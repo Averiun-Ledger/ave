@@ -22,7 +22,7 @@ pub use registry::{
 pub use subject_worker::{
     SinkSubjectWorker, SinkSubjectWorkerMessage, SinkSubjectWorkerResponse,
 };
-pub use transport::{SinkTransport, build_transport};
+pub use transport::{NodeSigner, SinkTransport, build_transport};
 pub use worker::{SinkWorker, SinkWorkerMessage, SinkWorkerResponse};
 
 use std::time::Duration;

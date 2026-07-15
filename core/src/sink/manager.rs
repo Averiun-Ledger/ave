@@ -25,12 +25,14 @@ use ave_common::{
 };
 
 use ave_common::sink::{
-    SinkServer, default_sink_healthcheck_intervals_secs,
+    SinkServer, SinkTransportConfig, default_sink_healthcheck_intervals_secs,
     default_sink_worker_idle_timeout_ms,
 };
 
 use crate::db::Storable;
 use crate::metrics::try_core_metrics;
+use crate::node::Node;
+use crate::sink::NodeSigner;
 use crate::sink::extract_sn;
 use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
 use crate::system::ConfigHelper;
@@ -999,10 +1001,23 @@ impl SinkManager {
                             ),
                         }
                     })?;
+                // Only HTTP sinks with signature enabled need the node
+                // identity to sign deliveries.
+                let signer = match &server.transport {
+                    SinkTransportConfig::Http(http) if http.signature => {
+                        let node = ctx
+                            .system()
+                            .get_actor::<Node>(&ActorPath::from("/user/node"))
+                            .await?;
+                        Some(NodeSigner::new(node))
+                    }
+                    _ => None,
+                };
                 let worker = SinkWorker::new(
                     sink_name.to_owned(),
                     server.clone(),
                     self.is_governance,
+                    signer,
                 )
                 .map_err(|e| ActorError::Functional {
                     description: format!(
