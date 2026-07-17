@@ -10,8 +10,9 @@ use ave_common::Error;
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 
 pub use ave_common::sink::{
-    HttpSinkConfig, KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry,
-    SinkServer, SinkTarget, SinkTransportConfig,
+    HttpCompression, HttpSinkConfig, HttpTlsVersion, KafkaAcks,
+    KafkaCompression, KafkaSaslMechanism, KafkaSecurityConfig, KafkaSinkConfig,
+    SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
 };
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};

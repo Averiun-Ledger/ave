@@ -13,6 +13,7 @@ use crate::node::{Node, NodeMessage, NodeResponse};
 use crate::sink::{
     error::SinkError, http::HttpTransport, kafka::KafkaTransport,
 };
+use ave_common::IncomingSinkEvent;
 
 /// Transport contract implemented by each sink delivery mechanism.
 #[async_trait]
@@ -21,6 +22,22 @@ pub trait SinkTransport: Send + Sync + std::fmt::Debug {
     async fn send(&self, data: Arc<DataToSink>) -> Result<(), SinkError>;
     /// Deliver a light event (event type not covered by the `events` filter).
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError>;
+    /// Deliver a batch of events as a single payload. Only used when the
+    /// sink opts into batch delivery. The default implementation delivers
+    /// the events sequentially, preserving order and aborting on the first
+    /// error.
+    async fn send_batch(
+        &self,
+        events: Vec<IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        for event in events {
+            match event {
+                IncomingSinkEvent::Full(data) => self.send((*data).into()).await?,
+                IncomingSinkEvent::Light(light) => self.send_light(light).await?,
+            }
+        }
+        Ok(())
+    }
     /// Health check of the endpoint.
     async fn health_check(&self) -> Result<(), SinkError>;
     /// Transport startup logic (HTTP: eager OAuth2 token fetch).
@@ -56,6 +73,7 @@ impl NodeSigner {
             .map_err(|e| SinkError::Delivery {
                 message: format!("node signing request failed: {}", e),
                 retryable: true,
+                retry_after_ms: None,
             })?;
 
         match response {
@@ -64,6 +82,7 @@ impl NodeSigner {
                 message: "unexpected node response to signing request"
                     .to_owned(),
                 retryable: true,
+                retry_after_ms: None,
             }),
         }
     }

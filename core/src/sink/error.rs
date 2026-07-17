@@ -11,8 +11,14 @@ pub enum SinkError {
     ClientBuild(String),
 
     /// Delivery failure (network/protocol). `retryable` drives the retry loop.
+    /// `retry_after_ms` carries the server-provided `Retry-After` hint (429 /
+    /// 503 responses), in milliseconds from the moment the error was raised.
     #[error("failed to deliver data to sink: {message}")]
-    Delivery { message: String, retryable: bool },
+    Delivery {
+        message: String,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+    },
 
     /// Authentication/authorization failed. The worker treats it as
     /// AuthFailed (subject goes to lagging, retried via catch-up).

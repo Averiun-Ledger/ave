@@ -179,6 +179,22 @@ impl std::fmt::Display for SinkTypes {
     }
 }
 
+impl SinkTypes {
+    /// Lower-case wire name of the event type, matching the serde
+    /// representation (`"create"`, `"fact"`, ...). Used in delivery headers.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Fact => "fact",
+            Self::Transfer => "transfer",
+            Self::Confirm => "confirm",
+            Self::Reject => "reject",
+            Self::EOL => "eol",
+            Self::All => "all",
+        }
+    }
+}
+
 impl From<&DataToSink> for SinkTypes {
     fn from(value: &DataToSink) -> Self {
         match value.payload {
@@ -429,17 +445,23 @@ mod tests {
     }
 
     #[test]
-    fn test_kafka_sink_config_validate_rejects_invalid_acks() {
-        let mut cfg = valid_kafka_config();
-        cfg.acks = "2".to_string();
-        assert!(cfg.validate().is_err());
+    fn test_kafka_sink_config_serde_rejects_invalid_acks() {
+        // Unknown acks values are rejected at deserialization time.
+        assert!(
+            serde_json::from_str::<KafkaSinkConfig>(r#"{"acks": "2"}"#)
+                .is_err()
+        );
     }
 
     #[test]
-    fn test_kafka_sink_config_validate_rejects_invalid_compression() {
-        let mut cfg = valid_kafka_config();
-        cfg.compression = "brotli".to_string();
-        assert!(cfg.validate().is_err());
+    fn test_kafka_sink_config_serde_rejects_invalid_compression() {
+        // Unknown compression codecs are rejected at deserialization time.
+        assert!(
+            serde_json::from_str::<KafkaSinkConfig>(
+                r#"{"compression": "brotli"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -450,20 +472,21 @@ mod tests {
     }
 
     #[test]
-    fn test_kafka_security_validate_rejects_invalid_mechanism() {
-        let mut cfg = valid_kafka_config();
-        cfg.security = KafkaSecurityConfig::SaslSsl {
-            mechanism: "GSSAPI".to_string(),
-            username: "ave".to_string(),
-        };
-        assert!(cfg.validate().is_err());
+    fn test_kafka_security_serde_rejects_invalid_mechanism() {
+        // Unknown SASL mechanisms are rejected at deserialization time.
+        let json = r#"{
+            "protocol": "sasl_ssl",
+            "mechanism": "GSSAPI",
+            "username": "ave"
+        }"#;
+        assert!(serde_json::from_str::<KafkaSecurityConfig>(json).is_err());
     }
 
     #[test]
     fn test_kafka_security_validate_requires_username() {
         let mut cfg = valid_kafka_config();
         cfg.security = KafkaSecurityConfig::SaslPlaintext {
-            mechanism: "PLAIN".to_string(),
+            mechanism: KafkaSaslMechanism::Plain,
             username: String::new(),
         };
         assert!(cfg.validate().is_err());
@@ -474,8 +497,8 @@ mod tests {
         let cfg: KafkaSinkConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, KafkaSinkConfig::default());
         assert_eq!(cfg.client_id, "ave-sink");
-        assert_eq!(cfg.acks, "all");
-        assert_eq!(cfg.compression, "none");
+        assert_eq!(cfg.acks, KafkaAcks::All);
+        assert_eq!(cfg.compression, KafkaCompression::None);
         assert_eq!(cfg.request_timeout_ms, 5_000);
         // The default is incomplete: servers and topic are mandatory.
         assert!(cfg.validate().is_err());
@@ -498,9 +521,14 @@ mod tests {
         }"#;
         let cfg: KafkaSinkConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.acks, KafkaAcks::All);
+        assert_eq!(cfg.compression, KafkaCompression::Zstd);
         match cfg.security {
-            KafkaSecurityConfig::SaslSsl { mechanism, username } => {
-                assert_eq!(mechanism, "SCRAM-SHA-256");
+            KafkaSecurityConfig::SaslSsl {
+                mechanism,
+                username,
+            } => {
+                assert_eq!(mechanism, KafkaSaslMechanism::ScramSha256);
                 assert_eq!(username, "ave");
             }
             other => panic!("expected SaslSsl, got {other:?}"),
@@ -579,7 +607,7 @@ mod tests {
             ca_certificate: "/etc/ssl/ca.pem".to_owned(),
             client_certificate: "/etc/ssl/client.pem".to_owned(),
             client_key: "/etc/ssl/client.key".to_owned(),
-            min_tls_version: "1.2".to_owned(),
+            min_tls_version: Some(HttpTlsVersion::Tls12),
         };
         assert!(tls.validate().is_ok());
         assert!(HttpTlsConfig::default().validate().is_ok());
@@ -600,12 +628,17 @@ mod tests {
     }
 
     #[test]
-    fn test_http_tls_config_validate_rejects_invalid_min_version() {
-        let tls = HttpTlsConfig {
-            min_tls_version: "1.1".to_owned(),
-            ..HttpTlsConfig::default()
-        };
-        assert!(tls.validate().is_err());
+    fn test_http_tls_version_serde() {
+        let tls: HttpTlsConfig =
+            serde_json::from_str(r#"{"min_tls_version": "1.3"}"#).unwrap();
+        assert_eq!(tls.min_tls_version, Some(HttpTlsVersion::Tls13));
+        // Unknown versions are rejected at deserialization time.
+        assert!(
+            serde_json::from_str::<HttpTlsConfig>(
+                r#"{"min_tls_version": "1.1"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -615,11 +648,128 @@ mod tests {
         assert!(cfg.tls.is_none());
         assert!(!cfg.signature);
     }
+
+    fn valid_http_config() -> HttpSinkConfig {
+        HttpSinkConfig {
+            url: "https://sink.example.com/{{subject-id}}".to_owned(),
+            ..HttpSinkConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_http_sink_config_serde_defaults_new_fields() {
+        let cfg: HttpSinkConfig =
+            serde_json::from_str(r#"{"url": "https://example.com"}"#).unwrap();
+        assert!(cfg.proxy.is_none());
+        assert_eq!(cfg.retry_max_delay_ms, 30_000);
+        assert!(!cfg.batch_delivery);
+        assert_eq!(cfg.batch_max_delay_ms, 100);
+        assert_eq!(cfg.compression, HttpCompression::None);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_rejects_zero_retry_max_delay() {
+        let mut cfg = valid_http_config();
+        cfg.retry_max_delay_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_compression_serde() {
+        let cfg: HttpSinkConfig = serde_json::from_str(
+            r#"{"url": "https://example.com", "compression": "gzip"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.compression, HttpCompression::Gzip);
+        let cfg: HttpSinkConfig = serde_json::from_str(
+            r#"{"url": "https://example.com", "compression": "none"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.compression, HttpCompression::None);
+        // Unknown values are rejected at deserialization time.
+        assert!(
+            serde_json::from_str::<HttpSinkConfig>(
+                r#"{"url": "https://example.com", "compression": "brotli"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_batch_delay_only_when_enabled() {
+        let mut cfg = valid_http_config();
+        cfg.batch_max_delay_ms = 0;
+        // Ignored while batch delivery is disabled.
+        assert!(cfg.validate().is_ok());
+        cfg.batch_delivery = true;
+        assert!(cfg.validate().is_err());
+        cfg.batch_max_delay_ms = 50;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_http_proxy_config_validate_ok() {
+        let proxy = HttpProxyConfig {
+            url: "http://proxy.local:3128".to_owned(),
+            username: "ave".to_owned(),
+            no_proxy: vec!["localhost".to_owned(), ".internal".to_owned()],
+        };
+        assert!(proxy.validate().is_ok());
+        assert!(
+            HttpProxyConfig {
+                url: "http://proxy.local:3128".to_owned(),
+                ..HttpProxyConfig::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_http_proxy_config_validate_rejects_invalid_url() {
+        let proxy = HttpProxyConfig {
+            url: "not a url".to_owned(),
+            ..HttpProxyConfig::default()
+        };
+        assert!(proxy.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_proxy_config_validate_rejects_embedded_credentials() {
+        let proxy = HttpProxyConfig {
+            url: "http://user:pass@proxy.local:3128".to_owned(),
+            ..HttpProxyConfig::default()
+        };
+        let err = proxy.validate().unwrap_err().to_string();
+        assert!(err.contains("credentials"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_http_proxy_config_validate_rejects_empty_no_proxy_entry() {
+        let proxy = HttpProxyConfig {
+            url: "http://proxy.local:3128".to_owned(),
+            no_proxy: vec![String::new()],
+            ..HttpProxyConfig::default()
+        };
+        assert!(proxy.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_propagates_proxy_error() {
+        let mut cfg = valid_http_config();
+        cfg.proxy = Some(HttpProxyConfig {
+            url: String::new(),
+            ..HttpProxyConfig::default()
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("proxy"), "unexpected error: {err}");
+    }
 }
 
 /// Per-sink authentication configuration.
 /// When present, the sink requires authentication for delivery and health-check.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -632,19 +782,26 @@ pub struct SinkAuthConfig {
     /// May be empty when the key is provided through the environment variable
     /// `AVE_SINK_APIKEY_{{SERVER}}`, which is the recommended option and
     /// takes precedence over this field. Always serialized redacted.
-    #[serde(default, serialize_with = "serialize_redacted")]
+    #[serde(default)]
     pub api_key: String,
 }
 
-/// Serializes a secret as `"***"` so it never leaks through API responses.
-fn serialize_redacted<S: serde::Serializer>(
-    value: &str,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    if value.is_empty() {
-        serializer.serialize_str("")
-    } else {
-        serializer.serialize_str("***")
+// Manual `Serialize` impl instead of `serialize_with`: ts-rs cannot parse
+// that attribute and warns on every build. The emitted JSON is identical,
+// with `api_key` always redacted so it never leaks through API responses.
+impl Serialize for SinkAuthConfig {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("SinkAuthConfig", 3)?;
+        state.serialize_field("auth_url", &self.auth_url)?;
+        state.serialize_field("username", &self.username)?;
+        let api_key = if self.api_key.is_empty() { "" } else { "***" };
+        state.serialize_field("api_key", api_key)?;
+        state.end()
     }
 }
 
@@ -666,6 +823,20 @@ impl SinkAuthConfig {
     }
 }
 
+/// TLS protocol version accepted as minimum for a sink connection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub enum HttpTlsVersion {
+    /// TLS 1.2.
+    #[serde(rename = "1.2")]
+    Tls12,
+    /// TLS 1.3.
+    #[serde(rename = "1.3")]
+    Tls13,
+}
+
 /// TLS configuration for the HTTP transport.
 ///
 /// Certificates are referenced by filesystem path; the client private key
@@ -685,9 +856,9 @@ pub struct HttpTlsConfig {
     /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
     /// Must be set together with `client_certificate`.
     pub client_key: String,
-    /// Minimum TLS version accepted: `"1.2"` or `"1.3"`.
-    /// Empty uses the TLS library default.
-    pub min_tls_version: String,
+    /// Minimum TLS version accepted (`"1.2"` or `"1.3"`); when unset, the
+    /// TLS library default is used.
+    pub min_tls_version: Option<HttpTlsVersion>,
 }
 
 impl HttpTlsConfig {
@@ -702,19 +873,76 @@ impl HttpTlsConfig {
                         .to_string(),
             });
         }
-        if !self.min_tls_version.is_empty()
-            && self.min_tls_version != "1.2"
-            && self.min_tls_version != "1.3"
-        {
+        Ok(())
+    }
+}
+
+/// Proxy configuration for the HTTP transport.
+///
+/// The proxy password is never stored in the configuration: when `username`
+/// is set, it is read from the environment variable
+/// `AVE_SINK_PROXY_PASSWORD_{{SERVER}}` (same pattern as the OAuth2
+/// password and the API key).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct HttpProxyConfig {
+    /// Proxy URL (`http://` or `https://`). Must not embed credentials.
+    pub url: String,
+    /// Optional proxy username. When set, the password is read from
+    /// `AVE_SINK_PROXY_PASSWORD_{{SERVER}}`.
+    pub username: String,
+    /// Hosts that bypass the proxy (e.g. `"localhost"`, `".internal"`).
+    pub no_proxy: Vec<String>,
+}
+
+impl HttpProxyConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_url("HttpProxyConfig.url", &self.url)?;
+        // Credentials embedded in the URL would leak through API responses;
+        // force the username + environment variable pattern instead.
+        let after_scheme = self.url.split("://").nth(1).unwrap_or("");
+        let authority = after_scheme.split('/').next().unwrap_or("");
+        if authority.contains('@') {
             return Err(Error::InvalidConfiguration {
-                component: "HttpTlsConfig.min_tls_version".to_string(),
-                reason: format!(
-                    "must be \"1.2\" or \"1.3\", got {}",
-                    self.min_tls_version
-                ),
+                component: "HttpProxyConfig.url".to_string(),
+                reason: "must not embed credentials; use 'username' and the AVE_SINK_PROXY_PASSWORD_{{SERVER}} environment variable".to_string(),
+            });
+        }
+        if self.no_proxy.iter().any(|h| h.is_empty()) {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpProxyConfig.no_proxy".to_string(),
+                reason: "entries must not be empty".to_string(),
             });
         }
         Ok(())
+    }
+}
+
+/// Body compression applied to HTTP deliveries.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum HttpCompression {
+    /// No compression (default).
+    #[default]
+    None,
+    /// gzip compression (`Content-Encoding: gzip`).
+    Gzip,
+}
+
+impl HttpCompression {
+    /// `Content-Encoding` header value for this compression, or `None` when
+    /// no compression is applied (the header must then be omitted).
+    pub fn content_encoding(&self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Gzip => Some("gzip"),
+        }
     }
 }
 
@@ -744,6 +972,24 @@ pub struct HttpSinkConfig {
     /// Sign each delivery with the node's Ed25519 identity and send the
     /// signature in the `X-Ave-Signature*` headers.
     pub signature: bool,
+    /// Outbound proxy for this sink's requests.
+    pub proxy: Option<HttpProxyConfig>,
+    /// Upper bound for any delivery retry delay, including server-provided
+    /// `Retry-After` hints.
+    pub retry_max_delay_ms: u64,
+    /// Deliver events in batches: a single `POST` with a JSON array
+    /// (`[ev1, ..., evN]`) instead of one `POST` per event. Opt-in: it
+    /// changes the contract with the receiver. Per-event `X-Ave-*` and
+    /// `Idempotency-Key` headers are not sent in this mode; each array
+    /// element already carries `subject_id`, `sn` and the event type.
+    pub batch_delivery: bool,
+    /// Maximum time a live event waits for a batch to fill before it is
+    /// flushed. Batches are also flushed when they reach `batch_size`
+    /// events. Only used when `batch_delivery` is enabled.
+    pub batch_max_delay_ms: u64,
+    /// Body compression for deliveries: `none` (default) or `gzip`
+    /// (`Content-Encoding: gzip`).
+    pub compression: HttpCompression,
 }
 
 impl Default for HttpSinkConfig {
@@ -759,6 +1005,11 @@ impl Default for HttpSinkConfig {
             token_refresh_margin_secs: 30,
             tls: None,
             signature: false,
+            proxy: None,
+            retry_max_delay_ms: 30_000,
+            batch_delivery: false,
+            batch_max_delay_ms: 100,
+            compression: HttpCompression::None,
         }
     }
 }
@@ -810,7 +1061,57 @@ impl HttpSinkConfig {
                 reason: e.to_string(),
             })?;
         }
+        if let Some(proxy) = &self.proxy {
+            proxy.validate().map_err(|e| Error::InvalidConfiguration {
+                component: "HttpSinkConfig.proxy".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+        require_positive_u64(
+            "HttpSinkConfig.retry_max_delay_ms",
+            self.retry_max_delay_ms,
+        )?;
+        if self.batch_delivery {
+            require_positive_u64(
+                "HttpSinkConfig.batch_max_delay_ms",
+                self.batch_max_delay_ms,
+            )?;
+        }
         Ok(())
+    }
+}
+
+/// SASL authentication mechanism for the Kafka transport.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub enum KafkaSaslMechanism {
+    /// PLAIN username/password authentication.
+    #[serde(rename = "PLAIN")]
+    Plain,
+    /// SCRAM challenge-response with SHA-256.
+    #[serde(rename = "SCRAM-SHA-256")]
+    ScramSha256,
+    /// SCRAM challenge-response with SHA-512.
+    #[serde(rename = "SCRAM-SHA-512")]
+    ScramSha512,
+}
+
+impl KafkaSaslMechanism {
+    /// librdkafka `sasl.mechanism` configuration value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plain => "PLAIN",
+            Self::ScramSha256 => "SCRAM-SHA-256",
+            Self::ScramSha512 => "SCRAM-SHA-512",
+        }
+    }
+}
+
+impl std::fmt::Display for KafkaSaslMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -832,38 +1133,26 @@ pub enum KafkaSecurityConfig {
     Ssl,
     /// SASL authentication over a plaintext connection.
     SaslPlaintext {
-        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
-        mechanism: String,
+        /// SASL mechanism.
+        mechanism: KafkaSaslMechanism,
         /// SASL username.
         username: String,
     },
     /// SASL authentication over a TLS connection.
     SaslSsl {
-        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
-        mechanism: String,
+        /// SASL mechanism.
+        mechanism: KafkaSaslMechanism,
         /// SASL username.
         username: String,
     },
 }
 
 impl KafkaSecurityConfig {
-    /// SASL mechanisms supported by the builtin librdkafka implementation.
-    const MECHANISMS: [&str; 3] = ["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"];
-
     pub fn validate(&self) -> Result<(), Error> {
         match self {
             Self::Plaintext | Self::Ssl => Ok(()),
-            Self::SaslPlaintext { mechanism, username }
-            | Self::SaslSsl { mechanism, username } => {
-                if !Self::MECHANISMS.contains(&mechanism.as_str()) {
-                    return Err(Error::InvalidConfiguration {
-                        component: "KafkaSecurityConfig.mechanism".to_string(),
-                        reason: format!(
-                            "must be one of {}, got {mechanism}",
-                            Self::MECHANISMS.join(", ")
-                        ),
-                    });
-                }
+            Self::SaslPlaintext { username, .. }
+            | Self::SaslSsl { username, .. } => {
                 if username.is_empty() {
                     return Err(Error::InvalidConfiguration {
                         component: "KafkaSecurityConfig.username".to_string(),
@@ -873,6 +1162,80 @@ impl KafkaSecurityConfig {
                 Ok(())
             }
         }
+    }
+}
+
+/// Acknowledgement level required from the Kafka brokers.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub enum KafkaAcks {
+    /// No acknowledgement is required (fire and forget).
+    #[serde(rename = "0")]
+    Zero,
+    /// Only the leader broker acknowledges the write.
+    #[serde(rename = "1")]
+    One,
+    /// All in-sync replicas acknowledge the write (default).
+    #[default]
+    #[serde(rename = "all")]
+    All,
+}
+
+impl KafkaAcks {
+    /// librdkafka `acks` configuration value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Zero => "0",
+            Self::One => "1",
+            Self::All => "all",
+        }
+    }
+}
+
+impl std::fmt::Display for KafkaAcks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Compression codec applied to Kafka message batches.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum KafkaCompression {
+    /// No compression (default).
+    #[default]
+    None,
+    /// gzip compression.
+    Gzip,
+    /// Snappy compression.
+    Snappy,
+    /// LZ4 compression.
+    Lz4,
+    /// Zstandard compression.
+    Zstd,
+}
+
+impl KafkaCompression {
+    /// librdkafka `compression.type` configuration value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Gzip => "gzip",
+            Self::Snappy => "snappy",
+            Self::Lz4 => "lz4",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+impl std::fmt::Display for KafkaCompression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -893,10 +1256,10 @@ pub struct KafkaSinkConfig {
     pub client_id: String,
     /// Security configuration for the brokers.
     pub security: KafkaSecurityConfig,
-    /// Required acknowledgements: "0", "1" or "all".
-    pub acks: String,
-    /// Compression codec: none, gzip, snappy, lz4 or zstd.
-    pub compression: String,
+    /// Required acknowledgements.
+    pub acks: KafkaAcks,
+    /// Compression codec.
+    pub compression: KafkaCompression,
     /// Per-message produce timeout in milliseconds.
     pub request_timeout_ms: u64,
 }
@@ -908,17 +1271,14 @@ impl Default for KafkaSinkConfig {
             topic: String::new(),
             client_id: "ave-sink".to_string(),
             security: KafkaSecurityConfig::default(),
-            acks: "all".to_string(),
-            compression: "none".to_string(),
+            acks: KafkaAcks::default(),
+            compression: KafkaCompression::default(),
             request_timeout_ms: 5_000,
         }
     }
 }
 
 impl KafkaSinkConfig {
-    const ACKS: [&str; 3] = ["0", "1", "all"];
-    const COMPRESSION: [&str; 5] = ["none", "gzip", "snappy", "lz4", "zstd"];
-
     pub fn validate(&self) -> Result<(), Error> {
         if self.bootstrap_servers.is_empty() {
             return Err(Error::InvalidConfiguration {
@@ -932,32 +1292,12 @@ impl KafkaSinkConfig {
                 reason: "must not be empty".to_string(),
             });
         }
-        if !Self::ACKS.contains(&self.acks.as_str()) {
-            return Err(Error::InvalidConfiguration {
-                component: "KafkaSinkConfig.acks".to_string(),
-                reason: format!(
-                    "must be one of {}, got {}",
-                    Self::ACKS.join(", "),
-                    self.acks
-                ),
-            });
-        }
-        if !Self::COMPRESSION.contains(&self.compression.as_str()) {
-            return Err(Error::InvalidConfiguration {
-                component: "KafkaSinkConfig.compression".to_string(),
-                reason: format!(
-                    "must be one of {}, got {}",
-                    Self::COMPRESSION.join(", "),
-                    self.compression
-                ),
-            });
-        }
-        self.security.validate().map_err(|e| {
-            Error::InvalidConfiguration {
+        self.security
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
                 component: "KafkaSinkConfig.security".to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         require_positive_u64(
             "KafkaSinkConfig.request_timeout_ms",
             self.request_timeout_ms,

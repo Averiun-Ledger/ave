@@ -1,4 +1,7 @@
-use ave_http::config_types::ConfigHttp;
+use ave_http::config_types::{
+    ConfigHttp, HashAlgorithmHttp, KeyPairAlgorithmHttp, LoggingRotationHttp,
+    MemoryLimitsConfigHttp, NodeTypeHttp,
+};
 use std::{
     collections::{BTreeSet, HashSet},
     time::Duration,
@@ -2012,7 +2015,7 @@ async fn test_system_info_deserialization() {
     let expected_auth_db_path = dirs[4].path().to_string_lossy().to_string();
     let expected_listen_address = format!("/memory/{}", server.memory_port());
 
-    assert_eq!(config.node.keypair_algorithm, "Ed25519");
+    assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithmHttp::Ed25519);
     #[cfg(feature = "sqlite")]
     {
         assert_eq!(config.node.internal_db.db, "Sqlite");
@@ -2022,7 +2025,7 @@ async fn test_system_info_deserialization() {
         assert_eq!(config.node.internal_db.db, "Rocksdb");
     }
     assert_eq!(config.node.external_db.db, "Sqlite");
-    assert_eq!(config.node.hash_algorithm, "Blake3");
+    assert_eq!(config.node.hash_algorithm, HashAlgorithmHttp::Blake3);
 
     assert_eq!(config.node.tracking_size, 200);
     assert!(config.node.is_service);
@@ -2053,7 +2056,7 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);
 
-    assert_eq!(config.node.network.node_type, "Bootstrap");
+    assert_eq!(config.node.network.node_type, NodeTypeHttp::Bootstrap);
     assert_eq!(
         config.node.network.listen_addresses,
         vec![expected_listen_address]
@@ -2093,7 +2096,7 @@ async fn test_system_info_deserialization() {
     assert!(!config.logging.output.api);
     assert!(config.logging.api_url.is_none());
     assert_eq!(config.logging.file_path, "logs");
-    assert_eq!(config.logging.rotation, "Size");
+    assert_eq!(config.logging.rotation, LoggingRotationHttp::Size);
     assert_eq!(config.logging.max_size, 104_857_600);
     assert_eq!(config.logging.max_files, 3);
 
@@ -2151,7 +2154,10 @@ async fn test_system_info_deserialization() {
     assert!(config.node.spec.is_none());
 
     // Network buffer/message limits defaults
-    assert_eq!(config.node.network.memory_limits, "disabled");
+    assert_eq!(
+        config.node.network.memory_limits,
+        MemoryLimitsConfigHttp::Disabled
+    );
     assert_eq!(config.node.network.max_app_message_bytes, 1_048_576);
     assert_eq!(
         config.node.network.max_pending_inbound_bytes_per_peer,

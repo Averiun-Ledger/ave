@@ -28,7 +28,6 @@ file-rotate = { workspace = true }
 futures = { workspace = true }
 
 reqwest = { workspace = true }
-rustls = { version = "0.23.41", features = ["ring"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { workspace = true }
 ip_network = { workspace = true }

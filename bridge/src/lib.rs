@@ -37,7 +37,7 @@ pub use ave_core::{
     error::Error,
 };
 pub use ave_network::{
-    Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
+    Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig, NodeType,
     RoutingConfig, RoutingNode,
 };
 use config::Config;

@@ -11,7 +11,7 @@ use crate::{
     server::build_routes,
 };
 use ave_bridge::{
-    Bridge, SinkConfigEntry, SinkTarget,
+    Bridge,
     clap::Parser,
     config::Config as BridgeConfig,
     settings::{
@@ -72,9 +72,6 @@ pub enum StartupError {
 
     #[error("invalid HTTPS listen address '{address}': {message}")]
     HttpsAddress { address: String, message: String },
-
-    #[error("TLS crypto provider initialization failed: {0}")]
-    TlsProvider(String),
 
     #[error("HTTPS is enabled but no certificate path is configured")]
     MissingHttpsCertPath,
@@ -206,547 +203,115 @@ fn log_effective_configuration(
         }
     );
 
-    info!(target: TARGET, "[http]");
-    info!(target: TARGET, "  address   : {}", config.http.http_address);
-    if let Some(ref https) = config.http.https_address {
-        info!(target: TARGET, "  https     : {}", https);
-        if let Some(ref cert) = config.http.https_cert_path {
-            info!(target: TARGET, "  cert      : {}", cert.display());
-        }
-        if let Some(ref key) = config.http.https_private_key_path {
-            info!(target: TARGET, "  cert key  : {}", key.display());
-        }
-    } else {
-        info!(target: TARGET, "  https     : disabled");
-    }
-    if config.http.self_signed_cert.enabled {
-        info!(
-            target: TARGET,
-            "  self-signed: enabled (cn: {})",
-            config.http.self_signed_cert.common_name
-        );
-        info!(
-            target: TARGET,
-            "  self-signed san: {}",
-            config.http.self_signed_cert.san.join(", ")
-        );
-        info!(
-            target: TARGET,
-            "  self-signed ttl: {}d | renew before: {}d | check: {}s",
-            config.http.self_signed_cert.validity_days,
-            config.http.self_signed_cert.renew_before_days,
-            config.http.self_signed_cert.check_interval_secs
-        );
-    } else {
-        info!(target: TARGET, "  self-signed: disabled");
-    }
-    info!(target: TARGET, "  docs      : {}", config.http.enable_doc);
-    if config.http.cors.enabled {
-        if config.http.cors.allow_any_origin {
-            info!(
-                target: TARGET,
-                "  cors      : enabled (any origin - WARNING)"
-            );
-        } else {
-            info!(
-                target: TARGET,
-                "  cors      : enabled ({} origins)",
-                config.http.cors.allowed_origins.len()
-            );
-            for origin in &config.http.cors.allowed_origins {
-                info!(target: TARGET, "  cors orig : {}", origin);
-            }
-        }
-        info!(
-            target: TARGET,
-            "  cors creds: {}",
-            config.http.cors.allow_credentials
-        );
-    } else {
-        info!(target: TARGET, "  cors      : disabled");
-    }
-    info!(
-        target: TARGET,
-        "  proxy trust peers: {}",
-        config.http.proxy.trusted_proxies.len()
-    );
-    if !config.http.proxy.trusted_proxies.is_empty() {
-        for trusted_proxy in &config.http.proxy.trusted_proxies {
-            info!(target: TARGET, "  proxy peer: {}", trusted_proxy);
-        }
-    }
-    info!(
-        target: TARGET,
-        "  proxy xff : {} | x-real-ip: {}",
-        config.http.proxy.trust_x_forwarded_for,
-        config.http.proxy.trust_x_real_ip
-    );
-
-    info!(target: TARGET, "[network]");
-    info!(target: TARGET, "  type      : {}", config.node.network.node_type);
-    if config.node.network.listen_addresses.is_empty() {
-        info!(target: TARGET, "  listen    : none");
-    } else {
-        for addr in &config.node.network.listen_addresses {
-            info!(target: TARGET, "  listen    : {}", addr);
-        }
-    }
-    if config.node.network.external_addresses.is_empty() {
-        info!(target: TARGET, "  external  : none");
-    } else {
-        for addr in &config.node.network.external_addresses {
-            info!(target: TARGET, "  external  : {}", addr);
-        }
-    }
-    if config.node.network.boot_nodes.is_empty() {
-        info!(target: TARGET, "  boot nodes: 0");
-    } else {
-        info!(
-            target: TARGET,
-            "  boot nodes: {}",
-            config.node.network.boot_nodes.len()
-        );
-        for boot in &config.node.network.boot_nodes {
-            info!(
-                target: TARGET,
-                "  boot node : {} ({} addr)",
-                boot.peer_id,
-                boot.address.len()
-            );
-            for addr in &boot.address {
-                info!(target: TARGET, "    addr    : {}", addr);
-            }
-        }
-    }
-    info!(
-        target: TARGET,
-        "  mem limits: {}",
-        config.node.network.memory_limits
-    );
-    info!(
-        target: TARGET,
-        "  dht walk  : {}",
-        config.node.network.routing.get_dht_random_walk()
-    );
-    info!(
-        target: TARGET,
-        "  discover< : {}",
-        config.node.network.routing.get_discovery_limit()
-    );
-    info!(
-        target: TARGET,
-        "  dht private: {}",
-        config.node.network.routing.get_allow_private_address_in_dht()
-    );
-    info!(
-        target: TARGET,
-        "  dht dns   : {}",
-        config.node.network.routing.get_allow_dns_address_in_dht()
-    );
-    info!(
-        target: TARGET,
-        "  dht loopbk: {}",
-        config.node.network.routing.get_allow_loop_back_address_in_dht()
-    );
-    info!(
-        target: TARGET,
-        "  dht disjnt: {}",
-        config
-            .node
-            .network
-            .routing
-            .get_kademlia_disjoint_query_paths()
-    );
-    let control = &config.node.network.control_list;
-    let allow_list = control.get_allow_list();
-    let block_list = control.get_block_list();
-    let allow_services = control.get_service_allow_list();
-    let block_services = control.get_service_block_list();
-    info!(
-        target: TARGET,
-        "  control-list enabled: {}",
-        control.get_enable()
-    );
-    info!(
-        target: TARGET,
-        "  control-list interval: {}s",
-        control.get_interval_request().as_secs()
-    );
-    info!(
-        target: TARGET,
-        "  control-list timeout : {}s",
-        control.get_request_timeout().as_secs()
-    );
-    info!(
-        target: TARGET,
-        "  control-list concurr : {}",
-        control.get_max_concurrent_requests()
-    );
-    info!(
-        target: TARGET,
-        "  control-list allow peers: {}",
-        allow_list.len()
-    );
-    info!(
-        target: TARGET,
-        "  control-list blocked peers: {}",
-        block_list.len()
-    );
-    info!(
-        target: TARGET,
-        "  control-list allow services: {}",
-        allow_services.len()
-    );
-    info!(
-        target: TARGET,
-        "  control-list block services: {}",
-        block_services.len()
-    );
-    for peer in &allow_list {
-        info!(target: TARGET, "    allow peer: {}", peer);
-    }
-    for peer in &block_list {
-        info!(target: TARGET, "    blocked peer: {}", peer);
-    }
-    for service in &allow_services {
-        info!(target: TARGET, "    allow service: {}", service);
-    }
-    for service in &block_services {
-        info!(target: TARGET, "    block service: {}", service);
-    }
-    info!(
-        target: TARGET,
-        "  msg limit : {} bytes",
-        config.node.network.max_app_message_bytes
-    );
-    info!(
-        target: TARGET,
-        "  out limit : {} bytes/peer",
-        config.node.network.max_pending_outbound_bytes_per_peer
-    );
-    info!(
-        target: TARGET,
-        "  in limit  : {} bytes/peer",
-        config.node.network.max_pending_inbound_bytes_per_peer
-    );
-    info!(
-        target: TARGET,
-        "  out total : {} bytes (0=unlimited)",
-        config.node.network.max_pending_outbound_bytes_total
-    );
-    info!(
-        target: TARGET,
-        "  in total  : {} bytes (0=unlimited)",
-        config.node.network.max_pending_inbound_bytes_total
-    );
-
-    info!(target: TARGET, "[node]");
-    info!(target: TARGET, "  keys      : {}", config.keys_path.display());
-    info!(target: TARGET, "  db        : {:?}", config.node.internal_db.db);
-    info!(
-        target: TARGET,
-        "  db durable: {}",
-        config.node.internal_db.durability
-    );
-    info!(target: TARGET, "  ext db    : {:?}", config.node.external_db.db);
-    info!(
-        target: TARGET,
-        "  ext durable: {}",
-        config.node.external_db.durability
-    );
-    info!(
-        target: TARGET,
-        "  keypair   : {:?}",
-        config.node.keypair_algorithm
-    );
-    info!(target: TARGET, "  hash      : {:?}", config.node.hash_algorithm);
-    info!(
-        target: TARGET,
-        "  contracts : {}",
-        config.node.contracts_path.display()
-    );
-    info!(target: TARGET, "  tracking  : {}", config.node.tracking_size);
-    match &config.node.spec {
-        Some(spec) => info!(target: TARGET, "  wasm spec : {:?}", spec),
-        None => info!(target: TARGET, "  wasm spec : auto"),
-    }
-    info!(target: TARGET, "  always acc: {}", config.node.always_accept);
-    info!(target: TARGET, "  service   : {}", config.node.is_service);
-    info!(
-        target: TARGET,
-        "  only clear: {}",
-        config.node.only_clear_events
-    );
-    info!(
-        target: TARGET,
-        "  ledger batch size           : {}",
-        config.node.sync.ledger_batch_size
-    );
-    info!(
-        target: TARGET,
-        "  version sync interval        : {}s",
-        config.node.sync.governance.interval_secs
-    );
-    info!(
-        target: TARGET,
-        "  version sync sample size     : {}",
-        config.node.sync.governance.sample_size
-    );
-    info!(
-        target: TARGET,
-        "  version sync response timeout: {}s",
-        config.node.sync.governance.response_timeout_secs
-    );
-    info!(
-        target: TARGET,
-        "  tracker sync interval        : {}s",
-        config.node.sync.tracker.interval_secs
-    );
-    info!(
-        target: TARGET,
-        "  tracker sync page size       : {}",
-        config.node.sync.tracker.page_size
-    );
-    info!(
-        target: TARGET,
-        "  tracker sync response timeout: {}s",
-        config.node.sync.tracker.response_timeout_secs
-    );
-    info!(
-        target: TARGET,
-        "  tracker sync update batch size : {}",
-        config.node.sync.tracker.update_batch_size
-    );
-    info!(
-        target: TARGET,
-        "  tracker sync update timeout  : {}s",
-        config.node.sync.tracker.update_timeout_secs
-    );
-    info!(
-        target: TARGET,
-        "  update round retry interval  : {}s",
-        config.node.sync.update.round_retry_interval_secs
-    );
-    info!(
-        target: TARGET,
-        "  update max round retries     : {}",
-        config.node.sync.update.max_round_retries
-    );
-    info!(
-        target: TARGET,
-        "  update witness retry count   : {}",
-        config.node.sync.update.witness_retry_count
-    );
-    info!(
-        target: TARGET,
-        "  update witness retry interval: {}s",
-        config.node.sync.update.witness_retry_interval_secs
-    );
-    info!(
-        target: TARGET,
-        "  reboot stability interval    : {}s",
-        config.node.sync.reboot.stability_check_interval_secs
-    );
-    info!(
-        target: TARGET,
-        "  reboot stability retries     : {}",
-        config.node.sync.reboot.stability_check_max_retries
-    );
-    info!(
-        target: TARGET,
-        "  reboot diff schedule         : {:?}",
-        config.node.sync.reboot.diff_retry_schedule_secs
-    );
-    info!(
-        target: TARGET,
-        "  reboot timeout schedule      : {:?}",
-        config.node.sync.reboot.timeout_retry_schedule_secs
-    );
-
-    info!(target: TARGET, "[auth]");
-    info!(target: TARGET, "  enabled   : {}", config.auth.enable);
-    info!(
-        target: TARGET,
-        "  database  : {}",
-        config.auth.database_path.display()
-    );
-    info!(target: TARGET, "  durability: {}", config.auth.durability);
-    let has_superadmin = !config.auth.superadmin.trim().is_empty();
-    info!(
-        target: TARGET,
-        "  superadmin: {}",
-        if has_superadmin {
-            "configured (redacted)"
-        } else {
-            "not configured"
-        }
-    );
-    info!(
-        target: TARGET,
-        "  key ttl   : {}s | max {} per user | prefix: {}",
-        config.auth.api_key.default_ttl_seconds,
-        config.auth.api_key.max_keys_per_user,
-        config.auth.api_key.prefix
-    );
-    info!(
-        target: TARGET,
-        "  lockout   : {} attempts -> {}s",
-        config.auth.lockout.max_attempts,
-        config.auth.lockout.duration_seconds
-    );
-    if config.auth.rate_limit.enable {
-        info!(
-            target: TARGET,
-            "  ratelimit : {} req / {}s window",
-            config.auth.rate_limit.max_requests,
-            config.auth.rate_limit.window_seconds
-        );
-        info!(
-            target: TARGET,
-            "  rl by key : {} | by ip: {} | cleanup: {}s",
-            config.auth.rate_limit.limit_by_key,
-            config.auth.rate_limit.limit_by_ip,
-            config.auth.rate_limit.cleanup_interval_seconds
-        );
-        info!(
-            target: TARGET,
-            "  rl sensitv: {} endpoint(s)",
-            config.auth.rate_limit.sensitive_endpoints.len()
-        );
-        for endpoint in &config.auth.rate_limit.sensitive_endpoints {
-            match endpoint.window_seconds {
-                Some(window) => info!(
-                    target: TARGET,
-                    "    - {} => {} req / {}s",
-                    endpoint.endpoint,
-                    endpoint.max_requests,
-                    window
-                ),
-                None => info!(
-                    target: TARGET,
-                    "    - {} => {} req / default window",
-                    endpoint.endpoint,
-                    endpoint.max_requests
-                ),
-            }
-        }
-    } else {
-        info!(target: TARGET, "  ratelimit : disabled");
-    }
-    info!(
-        target: TARGET,
-        "  session   : audit={} retention={}d max={}",
-        config.auth.session.audit_enable,
-        config.auth.session.audit_retention_days,
-        config.auth.session.audit_max_entries
-    );
-
-    info!(target: TARGET, "[logging]");
-    info!(target: TARGET, "  level     : {}", config.logging.level);
-    info!(target: TARGET, "  stdout    : {}", config.logging.output.stdout);
-    info!(target: TARGET, "  file      : {}", config.logging.output.file);
-    info!(target: TARGET, "  api       : {}", config.logging.output.api);
-    if config.logging.output.file {
-        info!(
-            target: TARGET,
-            "  file path : {}",
-            config.logging.file_path.display()
-        );
-        info!(
-            target: TARGET,
-            "  rotation  : {} | max size: {} | max files: {}",
-            config.logging.rotation,
-            config.logging.max_size,
-            config.logging.max_files
-        );
-    }
-    if config.logging.output.api {
-        match &config.logging.api_url {
-            Some(api_url) => info!(target: TARGET, "  api url   : {}", api_url),
-            None => info!(target: TARGET, "  api url   : missing"),
-        }
-    }
-
-    info!(target: TARGET, "[sink]");
-    info!(target: TARGET, "  entries   : {}", config.sinks.len());
-    for SinkConfigEntry { target, servers } in &config.sinks {
-        let SinkTarget::Schema {
-            schema_id,
-            governance_id,
-        } = target;
-        let target_label = if schema_id == "governance" {
-            "governance".to_string()
-        } else {
-            format!(
-                "schema '{}' (governance {})",
-                schema_id,
-                governance_id.as_deref().unwrap_or("?")
-            )
-        };
-        info!(
-            target: TARGET,
-            "  target {}: {} server(s)",
-            target_label,
-            servers.len()
-        );
-        for s in servers {
-            match &s.transport {
-                ave_bridge::SinkTransportConfig::Http(http) => {
-                    info!(
-                        target: TARGET,
-                        "    - {} | http | {} | auth: {:?} | events: {:?}",
-                        s.server,
-                        http.url,
-                        http.auth.is_some(),
-                        s.events
-                    );
-                    info!(target: TARGET, "      batch_size: {}", s.batch_size);
-                    info!(
-                        target: TARGET,
-                        "      connect: {}ms | request: {}ms | retries: {}",
-                        http.connect_timeout_ms,
-                        http.request_timeout_ms,
-                        http.max_retries
-                    );
-                }
-                ave_bridge::SinkTransportConfig::Kafka(kafka) => {
-                    let protocol = match &kafka.security {
-                        ave_bridge::KafkaSecurityConfig::Plaintext => {
-                            "plaintext"
-                        }
-                        ave_bridge::KafkaSecurityConfig::Ssl => "ssl",
-                        ave_bridge::KafkaSecurityConfig::SaslPlaintext {
-                            mechanism,
-                            ..
-                        }
-                        | ave_bridge::KafkaSecurityConfig::SaslSsl {
-                            mechanism,
-                            ..
-                        } => mechanism.as_str(),
-                    };
-                    info!(
-                        target: TARGET,
-                        "    - {} | kafka | {} | topic: {} | security: {} | events: {:?}",
-                        s.server,
-                        kafka.bootstrap_servers,
-                        kafka.topic,
-                        protocol,
-                        s.events
-                    );
-                    info!(target: TARGET, "      batch_size: {}", s.batch_size);
-                    info!(
-                        target: TARGET,
-                        "      request: {}ms | acks: {} | compression: {}",
-                        kafka.request_timeout_ms,
-                        kafka.acks,
-                        kafka.compression
-                    );
+    match config_log_sections(config) {
+        Ok(sections) => {
+            for (section, lines) in &sections {
+                info!(target: TARGET, "[{section}]");
+                for line in lines {
+                    info!(target: TARGET, "  {line}");
                 }
             }
+        }
+        Err(e) => {
+            warn!(
+                target: TARGET,
+                "  failed to serialize configuration for logging: {e}"
+            );
         }
     }
 
     info!(target: TARGET, "--- end ---");
+}
+
+/// Config keys whose values must never appear in logs. Non-empty values are
+/// replaced with `"***"`; empty values are kept so "not configured" stays
+/// visible. (`api_key` is already redacted by `SinkAuthConfig` itself; the
+/// rest are redacted here.)
+const REDACTED_CONFIG_KEYS: [&str; 3] = ["api_key", "password", "superadmin"];
+
+/// Builds the effective-configuration dump: one `(section, lines)` pair per
+/// top-level configuration section, with every parameter flattened into a
+/// `dotted.path: value` line. It is built from the serialized configuration,
+/// so parameters added to the config types are logged automatically;
+/// sensitive values (see [`REDACTED_CONFIG_KEYS`]) are redacted first.
+fn config_log_sections(
+    config: &BridgeConfig,
+) -> Result<Vec<(String, Vec<String>)>, serde_json::Error> {
+    let mut value = serde_json::to_value(config)?;
+    redact_sensitive_values(&mut value);
+    let mut sections = Vec::new();
+    if let serde_json::Value::Object(map) = &value {
+        for (section, section_value) in map {
+            let mut lines = Vec::new();
+            flatten_config_value(section_value, section.clone(), &mut lines);
+            sections.push((section.clone(), lines));
+        }
+    }
+    Ok(sections)
+}
+
+/// Replaces the values of [`REDACTED_CONFIG_KEYS`] with `"***"`, recursively.
+fn redact_sensitive_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if REDACTED_CONFIG_KEYS.contains(&key.as_str())
+                    && matches!(
+                        entry,
+                        serde_json::Value::String(s) if !s.is_empty()
+                    )
+                {
+                    *entry = serde_json::Value::String("***".to_string());
+                } else {
+                    redact_sensitive_values(entry);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_sensitive_values(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Flattens a JSON value into `path.to.leaf: value` lines, one per scalar.
+/// Arrays of scalars stay on a single line; arrays of objects (e.g. the sink
+/// entries) are flattened with indexed paths.
+fn flatten_config_value(
+    value: &serde_json::Value,
+    path: String,
+    lines: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                lines.push(format!("{path}: {{}}"));
+            }
+            for (key, entry) in map {
+                flatten_config_value(entry, format!("{path}.{key}"), lines);
+            }
+        }
+        serde_json::Value::Array(items)
+            if items.is_empty()
+                || items.iter().all(|item| {
+                    !matches!(
+                        item,
+                        serde_json::Value::Object(_)
+                            | serde_json::Value::Array(_)
+                    )
+                }) =>
+        {
+            lines.push(format!("{path}: {value}"));
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                flatten_config_value(item, format!("{path}[{index}]"), lines);
+            }
+        }
+        _ => lines.push(format!("{path}: {value}")),
+    }
 }
 
 fn build_cors_layer(
@@ -971,13 +536,6 @@ async fn serve_https(args: HttpsServeArgs<'_>) -> Result<(), StartupError> {
             );
         }
     });
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|_| {
-            StartupError::TlsProvider(
-                "failed to install default rustls ring provider".to_string(),
-            )
-        })?;
 
     let cert_path = config
         .http
@@ -1179,4 +737,152 @@ async fn redirect_http_to_https(
     axum::serve(listener_http, app)
         .await
         .map_err(|error| StartupError::RedirectServer(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_bridge::ave_common::sink::SinkAuthConfig;
+    use ave_bridge::{
+        HttpSinkConfig, KafkaSinkConfig, SinkConfigEntry, SinkServer,
+        SinkTarget, SinkTransportConfig,
+    };
+
+    /// Config exercising the dump: both sink transports, nested targets and
+    /// secrets that must be redacted.
+    fn test_config() -> BridgeConfig {
+        let mut config = BridgeConfig::default();
+        config.auth.superadmin = "superadmin-secret-name".to_string();
+        config.sinks = vec![
+            SinkConfigEntry {
+                target: SinkTarget::Schema {
+                    schema_id: "governance".to_string(),
+                    governance_id: None,
+                },
+                servers: vec![SinkServer {
+                    server: "http-sink".to_string(),
+                    transport: SinkTransportConfig::Http(HttpSinkConfig {
+                        url: "https://sink.example.com".to_string(),
+                        auth: Some(SinkAuthConfig {
+                            auth_url: String::new(),
+                            username: String::new(),
+                            api_key: "top-secret-key".to_string(),
+                        }),
+                        ..HttpSinkConfig::default()
+                    }),
+                    ..SinkServer::default()
+                }],
+            },
+            SinkConfigEntry {
+                target: SinkTarget::Schema {
+                    schema_id: "Example".to_string(),
+                    governance_id: Some("gov-1".to_string()),
+                },
+                servers: vec![SinkServer {
+                    server: "kafka-sink".to_string(),
+                    transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                        bootstrap_servers: "broker:9092".to_string(),
+                        topic: "ave".to_string(),
+                        ..KafkaSinkConfig::default()
+                    }),
+                    ..SinkServer::default()
+                }],
+            },
+        ];
+        config
+    }
+
+    /// Independent leaf walk used by the completeness check: computes the
+    /// `path: value` lines the dump must contain, straight from the
+    /// serialized configuration.
+    fn expected_leaves(
+        value: &serde_json::Value,
+        path: String,
+        lines: &mut Vec<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.is_empty() {
+                    lines.push(format!("{path}: {{}}"));
+                }
+                for (key, entry) in map {
+                    expected_leaves(entry, format!("{path}.{key}"), lines);
+                }
+            }
+            serde_json::Value::Array(items)
+                if items.is_empty()
+                    || items.iter().all(|item| {
+                        !matches!(
+                            item,
+                            serde_json::Value::Object(_)
+                                | serde_json::Value::Array(_)
+                        )
+                    }) =>
+            {
+                lines.push(format!("{path}: {value}"));
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    expected_leaves(item, format!("{path}[{index}]"), lines);
+                }
+            }
+            _ => lines.push(format!("{path}: {value}")),
+        }
+    }
+
+    /// Every configuration parameter must appear in the startup dump, and no
+    /// secret value may leak into it.
+    #[test]
+    fn config_dump_covers_every_parameter_and_redacts_secrets() {
+        let config = test_config();
+        let sections = config_log_sections(&config).unwrap();
+
+        // Every top-level config key is logged as a section.
+        let raw = serde_json::to_value(&config).unwrap();
+        let raw_map = raw.as_object().unwrap();
+        assert_eq!(sections.len(), raw_map.len());
+        for key in raw_map.keys() {
+            assert!(
+                sections.iter().any(|(section, _)| section == key),
+                "missing section [{key}]"
+            );
+        }
+
+        // Every parameter leaf appears in the dump (redacted when sensitive).
+        let mut expected = Vec::new();
+        for (key, value) in raw_map {
+            expected_leaves(value, key.clone(), &mut expected);
+        }
+        let lines: Vec<&String> = sections
+            .iter()
+            .flat_map(|(_, lines)| lines.iter())
+            .collect();
+        for leaf in &expected {
+            let sensitive = REDACTED_CONFIG_KEYS.iter().any(|key| {
+                leaf.contains(&format!(".{key}: ")) && !leaf.ends_with(": \"\"")
+            });
+            let expected_line = if sensitive {
+                let (path, _) = leaf.rsplit_once(": ").unwrap();
+                format!("{path}: \"***\"")
+            } else {
+                leaf.clone()
+            };
+            assert!(
+                lines.contains(&&expected_line),
+                "missing config line: {expected_line}"
+            );
+        }
+
+        // No secret value leaks into the dump.
+        for line in &lines {
+            assert!(
+                !line.contains("superadmin-secret-name"),
+                "superadmin leaks in: {line}"
+            );
+            assert!(
+                !line.contains("top-secret-key"),
+                "sink api_key leaks in: {line}"
+            );
+        }
+    }
 }

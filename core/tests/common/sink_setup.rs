@@ -2,7 +2,10 @@ use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
     IncomingSinkEvent, SinkTypes,
-    sink::{DataToSink, DataToSinkEvent, HttpTlsConfig, SinkAuthConfig},
+    sink::{
+        DataToSink, DataToSinkEvent, HttpCompression, HttpProxyConfig,
+        HttpTlsConfig, SinkAuthConfig,
+    },
 };
 use ave_core::{
     Api,
@@ -204,6 +207,107 @@ pub fn make_sink_entry_with_tls(
                 url,
                 tls: Some(tls),
                 max_retries: 0,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
+/// Returns a sink entry whose HTTP transport delivers events in batches
+/// (a single POST with a JSON array), optionally gzip-compressed.
+pub fn make_sink_entry_batch(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    compression: HttpCompression,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url,
+                batch_delivery: true,
+                batch_max_delay_ms: 100,
+                compression,
+                max_retries: 0,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
+/// Returns a sink entry whose HTTP transport routes deliveries through the
+/// given forward proxy.
+pub fn make_sink_entry_with_proxy(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    proxy: HttpProxyConfig,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url,
+                proxy: Some(proxy),
+                max_retries: 0,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
+/// Returns a sink entry with a custom retry policy, used to test backoff
+/// and server-provided `Retry-After` handling.
+pub fn make_sink_entry_with_retry_policy(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    max_retries: usize,
+    retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(HttpSinkConfig {
+                url,
+                max_retries,
+                retry_base_delay_ms,
+                retry_max_delay_ms,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()

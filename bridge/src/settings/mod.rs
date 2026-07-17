@@ -37,8 +37,9 @@ mod tests {
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::config::{
         AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-        HttpSinkConfig, LoggingOutput, LoggingRotation, MachineSpec,
-        SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
+        HttpCompression, HttpSinkConfig, LoggingOutput, LoggingRotation,
+        MachineSpec, SinkConfigEntry, SinkServer, SinkTarget,
+        SinkTransportConfig,
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
@@ -815,6 +816,11 @@ http:
                         token_refresh_margin_secs: 30,
                         tls: None,
                         signature: false,
+                        proxy: None,
+                        retry_max_delay_ms: 30_000,
+                        batch_delivery: false,
+                        batch_max_delay_ms: 100,
+                        compression: HttpCompression::None,
                     }),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
@@ -838,6 +844,11 @@ http:
                         token_refresh_margin_secs: 30,
                         tls: None,
                         signature: false,
+                        proxy: None,
+                        retry_max_delay_ms: 30_000,
+                        batch_delivery: false,
+                        batch_max_delay_ms: 100,
+                        compression: HttpCompression::None,
                     }),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,

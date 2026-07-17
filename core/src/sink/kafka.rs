@@ -11,7 +11,7 @@ use tracing::debug;
 
 use ave_common::{DataToSink, LightEvent};
 
-use crate::config::{KafkaSecurityConfig, KafkaSinkConfig};
+use crate::config::{KafkaAcks, KafkaSecurityConfig, KafkaSinkConfig};
 use crate::sink::SinkError;
 use crate::sink::http::sink_password_env_var;
 use crate::sink::template::CompiledTemplate;
@@ -36,26 +36,16 @@ impl std::fmt::Debug for KafkaTransport {
 }
 
 impl KafkaTransport {
-    const ACKS: [&str; 3] = ["0", "1", "all"];
-
     pub fn new(
         sink_name: String,
         config: KafkaSinkConfig,
     ) -> Result<Self, SinkError> {
-        if !Self::ACKS.contains(&config.acks.as_str()) {
-            return Err(SinkError::ClientBuild(format!(
-                "invalid acks value '{}', must be one of {:?}",
-                config.acks,
-                Self::ACKS
-            )));
-        }
-
         let mut client_config = ClientConfig::new();
         client_config
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("client.id", &config.client_id)
-            .set("acks", &config.acks)
-            .set("compression.type", &config.compression)
+            .set("acks", config.acks.as_str())
+            .set("compression.type", config.compression.as_str())
             .set(
                 "message.timeout.ms",
                 config.request_timeout_ms.to_string(),
@@ -65,7 +55,11 @@ impl KafkaTransport {
         // producer configuration. Keep it enabled only for the default acks.
         client_config.set(
             "enable.idempotence",
-            if config.acks == "all" { "true" } else { "false" },
+            if matches!(config.acks, KafkaAcks::All) {
+                "true"
+            } else {
+                "false"
+            },
         );
 
         match &config.security {
@@ -78,14 +72,14 @@ impl KafkaTransport {
             KafkaSecurityConfig::SaslPlaintext { mechanism, username } => {
                 client_config
                     .set("security.protocol", "sasl_plaintext")
-                    .set("sasl.mechanism", mechanism)
+                    .set("sasl.mechanism", mechanism.as_str())
                     .set("sasl.username", username)
                     .set("sasl.password", sasl_password(&sink_name)?);
             }
             KafkaSecurityConfig::SaslSsl { mechanism, username } => {
                 client_config
                     .set("security.protocol", "sasl_ssl")
-                    .set("sasl.mechanism", mechanism)
+                    .set("sasl.mechanism", mechanism.as_str())
                     .set("sasl.username", username)
                     .set("sasl.password", sasl_password(&sink_name)?);
             }
@@ -145,6 +139,7 @@ impl KafkaTransport {
                 SinkError::Delivery { .. } => SinkError::Delivery {
                     message: format!("kafka metadata fetch failed: {e}"),
                     retryable: true,
+                    retry_after_ms: None,
                 },
                 other => other,
             })
@@ -170,6 +165,7 @@ fn map_produce_error(err: KafkaError) -> SinkError {
         e => SinkError::Delivery {
             message: format!("kafka produce failed: {e}"),
             retryable: true,
+            retry_after_ms: None,
         },
     }
 }
@@ -199,6 +195,7 @@ fn map_produce_code(code: RDKafkaErrorCode) -> SinkError {
         other => SinkError::Delivery {
             message: format!("kafka produce failed ({other})"),
             retryable: true,
+            retry_after_ms: None,
         },
     }
 }
@@ -212,6 +209,7 @@ impl SinkTransport for KafkaTransport {
             SinkError::Delivery {
                 message: format!("JSON serialization failed: {e}"),
                 retryable: false,
+                retry_after_ms: None,
             }
         })?;
 
@@ -225,6 +223,7 @@ impl SinkTransport for KafkaTransport {
             SinkError::Delivery {
                 message: format!("JSON serialization failed: {e}"),
                 retryable: false,
+                retry_after_ms: None,
             }
         })?;
 

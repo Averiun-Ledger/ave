@@ -12,7 +12,10 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
-    sink::{DataToSinkEvent, HttpTlsConfig, IncomingSinkEvent, SinkAuthConfig},
+    sink::{
+        DataToSinkEvent, HttpCompression, HttpProxyConfig, HttpTlsConfig,
+        IncomingSinkEvent, SinkAuthConfig,
+    },
 };
 use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
@@ -46,15 +49,17 @@ use crate::common::{
         example_schema_governance_fact, example_sink_config,
         flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
-        make_governance_sink_entry, make_sink_entry, make_sink_entry_with_auth,
-        make_sink_entry_with_concurrency, make_sink_entry_with_signature,
+        make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
+        make_sink_entry_with_auth, make_sink_entry_with_concurrency,
+        make_sink_entry_with_proxy, make_sink_entry_with_retry_policy,
+        make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
         restart_config, restart_config_safe_mode, restart_config_with_peers,
         sample_sinks, short_idle_sink_config, transient_error_sink_config,
         wait_for_sink_blocked, wait_for_sink_caught_up,
         wait_for_sink_lagging_subjects, wait_for_sink_unblocked,
     },
-    test_sink::{AuthResponseMode, ResponseMode, TestSink},
+    test_sink::{AuthResponseMode, ResponseMode, TestProxy, TestSink},
 };
 use ave_network::RoutingNode;
 
@@ -6254,7 +6259,7 @@ async fn sink_signature_headers_verify() {
 
         // Rebuild the signed payload exactly as `Signature::new` does:
         // borsh(content, timestamp), then BLAKE3.
-        let content = body.as_bytes().to_vec();
+        let content = body.clone();
         let timestamp = TimeStamp::from_nanos(
             timestamp
                 .parse::<u64>()
@@ -7912,8 +7917,7 @@ async fn sink_signature_reused_across_retries() {
     );
 
     // The shared signature must verify against the delivered body.
-    let body = &sink.raw_bodies().await[0];
-    let content = body.as_bytes().to_vec();
+    let content = sink.raw_bodies().await[0].clone();
     let timestamp = TimeStamp::from_nanos(
         timestamp
             .parse::<u64>()
@@ -7934,4 +7938,1220 @@ async fn sink_signature_reused_across_retries() {
     sink.set_mode(ResponseMode::Accept).await;
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
         .await;
+}
+
+/// Idempotency headers: every individual HTTP delivery must carry
+/// `X-Ave-Subject-Id`, `X-Ave-SN`, `X-Ave-Event-Type` and `Idempotency-Key`
+/// so receivers can deduplicate without parsing the body.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a sink whose filter is only `Create`, so the create event
+///    is delivered full and the two facts as lightweight events.
+/// 3. Startup catch-up delivers the three events.
+///
+/// **Verifications:**
+/// - Each delivery carries the four headers with values matching the
+///   delivered event: subject, sn, event type and an idempotency key of the
+///   form `<subject_id>-<sn>`.
+#[traced_test]
+#[tokio::test]
+async fn sink_idempotency_headers() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "idem-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up delivers the create event (SN 0, full) plus the two
+    // facts as lightweight events.
+    sink.wait_for_count(3, true).await;
+
+    let events = sink.snapshot().await;
+    let headers = sink.idempotency_headers().await;
+    assert_eq!(events.len(), 3);
+    assert_eq!(headers.len(), 3);
+
+    for (headers, event) in headers.iter().zip(events.iter()) {
+        assert_eq!(
+            headers.subject_id.as_deref(),
+            Some(event.subject_id()),
+            "X-Ave-Subject-Id must match the delivered event"
+        );
+        assert_eq!(
+            headers.sn.as_deref(),
+            Some(event.sn().to_string()).as_deref(),
+            "X-Ave-SN must match the delivered event"
+        );
+        assert_eq!(
+            headers.event_type.as_deref(),
+            Some(event.event_type().as_str()),
+            "X-Ave-Event-Type must match the delivered event"
+        );
+        assert_eq!(
+            headers.key.as_deref(),
+            Some(format!("{}-{}", event.subject_id(), event.sn())).as_deref(),
+            "Idempotency-Key must be '<subject_id>-<sn>'"
+        );
+    }
+}
+
+/// Proxy deliveries: a sink configured with `proxy` must route its requests
+/// through the forward proxy instead of connecting directly to the sink.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit one fact.
+/// 2. Restart with a sink whose URL is the real sink but with a proxy
+///    configured (no credentials).
+///
+/// **Verifications:**
+/// - The sink receives both events (the proxy forwards correctly).
+/// - The proxy recorded the delivery requests in absolute-URI form.
+#[traced_test]
+#[tokio::test]
+async fn sink_proxy_delivery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let proxy = TestProxy::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_proxy(
+            "proxy-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpProxyConfig {
+                url: proxy.url(),
+                username: String::new(),
+                no_proxy: vec![],
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(2, true).await;
+
+    let proxied = proxy.proxied_requests().await;
+    let post_line = format!("POST {}", sink.url());
+    assert!(
+        proxied
+            .iter()
+            .filter(|r| r.request_line == post_line)
+            .count()
+            >= 2,
+        "the proxy must record the two deliveries to {}, got {:?}",
+        post_line,
+        proxied
+            .iter()
+            .map(|r| r.request_line.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        proxied.iter().all(|r| r.proxy_authorization.is_none()),
+        "no proxy credentials are configured, none must be sent"
+    );
+}
+
+/// Proxy authentication: with `proxy.username` set, the worker must read the
+/// password from `AVE_SINK_PROXY_PASSWORD_{{SERVER}}` and send proxy basic
+/// auth on every request.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink behind a proxy with credentials; the password is
+///    provided through the environment variable.
+///
+/// **Verifications:**
+/// - The delivery succeeds through the proxy.
+/// - The proxy receives the `Proxy-Authorization` header with the basic auth
+///   credentials.
+#[traced_test]
+#[tokio::test]
+async fn sink_proxy_delivery_with_auth() {
+    let proxy_password_env = "AVE_SINK_PROXY_PASSWORD_PROXY_AUTH_SINK";
+    unsafe {
+        std::env::set_var(proxy_password_env, "proxy-secret");
+    }
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let proxy = TestProxy::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_proxy(
+            "proxy-auth-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpProxyConfig {
+                url: proxy.url(),
+                username: "ave".to_owned(),
+                no_proxy: vec![],
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(1, true).await;
+
+    use base64::Engine as _;
+    let expected_auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("ave:proxy-secret")
+    );
+    let proxied = proxy.proxied_requests().await;
+    assert!(
+        proxied
+            .iter()
+            .any(|r| r.proxy_authorization.as_deref()
+                == Some(expected_auth.as_str())),
+        "the proxy must receive the basic auth header, got {:?}",
+        proxied
+    );
+
+    unsafe {
+        std::env::remove_var(proxy_password_env);
+    }
+}
+
+/// `Retry-After` handling: a 429 response with a `Retry-After` header must
+/// delay the next delivery attempt by at least the server-provided time,
+/// even when the configured backoff is shorter.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a sink that rejects the first delivery with 429 and
+///    `Retry-After: 2`, with a fast configured backoff (100 ms).
+///
+/// **Verifications:**
+/// - The first delivery is retried and all events arrive.
+/// - The time between the first attempt and the retry is at least ~2
+///   seconds, not the configured 100 ms backoff.
+#[traced_test]
+#[tokio::test]
+async fn sink_retry_after_respected() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::RateLimitOnce(2)).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_retry_policy(
+            "ratelimit-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+            100,
+            30_000,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // First attempt (429) plus the retry. Only a lower bound is asserted:
+    // the configured sleep is exact, and a loaded machine can only make the
+    // observed delta larger, never smaller.
+    sink.wait_for_raw_count(2, true).await;
+    let received_at = sink.received_at().await;
+    let delta = received_at[1].duration_since(received_at[0]);
+    assert!(
+        delta >= Duration::from_millis(1_900),
+        "the retry must honor Retry-After (~2s), waited {:?}",
+        delta
+    );
+
+    // Every event is delivered after the successful retry.
+    sink.wait_for_count(3, true).await;
+}
+
+/// `retry_max_delay_ms` cap: the server-provided `Retry-After` hint must be
+/// capped by the sink's configured maximum retry delay.
+///
+/// **Flow:**
+/// Same as `sink_retry_after_respected`, but the sink asks for 10 seconds
+/// while `retry_max_delay_ms` is set to 500 ms.
+///
+/// **Verifications:**
+/// - The retry happens after ~500 ms: well above the configured 100 ms base
+///   backoff (so the hint was not ignored) and far below the requested 10
+///   seconds (so the cap applied).
+#[traced_test]
+#[tokio::test]
+async fn sink_retry_after_capped() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::RateLimitOnce(10)).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_retry_policy(
+            "ratelimit-capped-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+            100,
+            500,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The sink asks for 10 s but `retry_max_delay_ms` caps the wait at
+    // 500 ms. The bounds discriminate the three possible behaviors rather
+    // than measuring a fixed duration: ignoring the hint would wait ~100 ms
+    // (the configured base backoff) and honoring it would wait ~10 s; both
+    // fall outside the window on any machine.
+    sink.wait_for_raw_count(2, true).await;
+    let received_at = sink.received_at().await;
+    let delta = received_at[1].duration_since(received_at[0]);
+    assert!(
+        delta >= Duration::from_millis(400),
+        "the retry must wait the capped delay (~500ms), waited {:?}",
+        delta
+    );
+    assert!(
+        delta < Duration::from_secs(5),
+        "retry_max_delay_ms must cap the 10s Retry-After hint, waited {:?}",
+        delta
+    );
+
+    sink.wait_for_count(1, true).await;
+}
+
+/// Batch delivery in catch-up: with `batch_delivery` the pending events of a
+/// subject are delivered as a single POST with a JSON array body instead of
+/// one POST per event.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit three facts.
+/// 2. Restart with a batch sink; startup catch-up delivers the four pending
+///    events.
+///
+/// **Verifications:**
+/// - Exactly one POST reaches the sink, with a JSON array of the four
+///   events in SN order.
+/// - Batch deliveries do not carry the per-event `X-Ave-*` /
+///   `Idempotency-Key` headers.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_catch_up() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(4, true).await;
+
+    // A single POST delivered the whole catch-up batch.
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(
+        raw_bodies.len(),
+        1,
+        "the catch-up must be a single batch POST"
+    );
+    let body: Vec<serde_json::Value> =
+        serde_json::from_slice(&raw_bodies[0]).expect("body must be a JSON array");
+    assert_eq!(body.len(), 4, "the batch must contain the four events");
+
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(batch_lens, vec![4]);
+
+    // Events arrive in SN order and nothing is duplicated.
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+
+    // Batch deliveries carry no per-event idempotency headers.
+    let headers = sink.idempotency_headers().await;
+    assert_eq!(headers.len(), 1);
+    assert!(headers[0].subject_id.is_none());
+    assert!(headers[0].sn.is_none());
+    assert!(headers[0].event_type.is_none());
+    assert!(headers[0].key.is_none());
+}
+
+/// Batch delivery with gzip: with `compression = "gzip"` the batch body is
+/// sent gzip-compressed with the `Content-Encoding: gzip` header.
+///
+/// **Flow:**
+/// Same as `sink_batch_delivery_catch_up` with gzip compression enabled.
+///
+/// **Verifications:**
+/// - The request carries `Content-Encoding: gzip`.
+/// - The raw body is gzip (magic bytes) and decompresses to the JSON array
+///   of the four events.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_gzip() {
+    use std::io::Read as _;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-gzip-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpCompression::Gzip,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(4, true).await;
+
+    let content_encodings = sink.content_encodings().await;
+    assert_eq!(content_encodings.len(), 1);
+    assert_eq!(content_encodings[0].as_deref(), Some("gzip"));
+
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(raw_bodies.len(), 1);
+    let body = &raw_bodies[0];
+    assert!(
+        body.len() > 2 && body[0] == 0x1f && body[1] == 0x8b,
+        "the body must be gzip-compressed"
+    );
+
+    let mut decoder = flate2::read::GzDecoder::new(body.as_slice());
+    let mut decompressed = Vec::new();
+    decoder
+        .read_to_end(&mut decompressed)
+        .expect("the body must gunzip");
+    let events: Vec<serde_json::Value> = serde_json::from_slice(&decompressed)
+        .expect("the decompressed body must be a JSON array");
+    assert_eq!(events.len(), 4, "the batch must contain the four events");
+}
+
+/// Batch delivery of live events: in `batch_delivery` mode, events emitted
+/// while the node runs are buffered and flushed as JSON arrays (on size or
+/// delay), never as individual POSTs.
+///
+/// **Flow:**
+/// 1. Create governance and schema; restart with a batch sink.
+/// 2. Create a subject and emit three facts (live delivery).
+///
+/// **Verifications:**
+/// - Every delivery is a JSON array (no individual POSTs) and together they
+///   carry the four events of the subject in SN order.
+/// - No delivery carries the per-event idempotency headers.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_live() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-live-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Live deliveries after the restart.
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(4, true).await;
+
+    // Every raw delivery is a JSON array; together they carry the 4 events.
+    let raw_bodies = sink.raw_bodies().await;
+    assert!(!raw_bodies.is_empty());
+    for body in &raw_bodies {
+        assert!(
+            body.first() == Some(&b'['),
+            "every batch delivery must be a JSON array"
+        );
+    }
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(
+        batch_lens.iter().sum::<usize>(),
+        4,
+        "the batches must carry the four events in total"
+    );
+
+    // SN order is preserved across batches.
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id.to_string())
+        .map(|e| e.sn())
+        .collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+
+    // No individual headers on any batch delivery.
+    let headers = sink.idempotency_headers().await;
+    assert_eq!(headers.len(), raw_bodies.len());
+    assert!(
+        headers
+            .iter()
+            .all(|h| h.subject_id.is_none() && h.key.is_none()),
+        "batch deliveries must not carry per-event idempotency headers"
+    );
+}
+
+/// Proxy `no_proxy` bypass: hosts listed in `proxy.no_proxy` must be
+/// contacted directly, skipping the configured proxy.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink behind a proxy whose `no_proxy` list contains
+///    `127.0.0.1` (the sink's host).
+///
+/// **Verifications:**
+/// - The delivery succeeds (direct connection).
+/// - The proxy records no request at all.
+#[traced_test]
+#[tokio::test]
+async fn sink_proxy_no_proxy_bypass() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let proxy = TestProxy::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_proxy(
+            "proxy-bypass-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpProxyConfig {
+                url: proxy.url(),
+                username: String::new(),
+                no_proxy: vec!["127.0.0.1".to_owned()],
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(1, true).await;
+
+    assert!(
+        proxy.proxied_requests().await.is_empty(),
+        "no_proxy hosts must bypass the proxy entirely"
+    );
+}
+
+/// Idempotency key stability across retries: every retry of the same event
+/// carries the same `Idempotency-Key`, so the receiver can deduplicate
+/// retried deliveries.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink with `max_retries: 1` while the `TestSink` rejects
+///    deliveries (HTTP 500).
+/// 3. Startup catch-up attempts the create event twice.
+///
+/// **Verifications:**
+/// - Both attempts carry identical `X-Ave-Subject-Id`, `X-Ave-SN`,
+///   `X-Ave-Event-Type` and `Idempotency-Key` headers.
+/// - Once the sink accepts again, the event is delivered.
+#[traced_test]
+#[tokio::test]
+async fn sink_idempotency_key_stable_across_retries() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ServerError).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_retry_policy(
+            "idem-retry-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+            100,
+            30_000,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The initial attempt plus one retry both reach the sink as raw
+    // deliveries (failures are recorded before the response mode applies).
+    sink.wait_for_raw_count(2, true).await;
+
+    let headers = sink.idempotency_headers().await;
+    let first = &headers[0];
+    let second = &headers[1];
+
+    assert_eq!(
+        first.subject_id.as_deref(),
+        Some(subject_id.to_string()).as_deref()
+    );
+    assert_eq!(first.subject_id, second.subject_id);
+    assert_eq!(first.sn, second.sn);
+    assert_eq!(first.event_type, second.event_type);
+    assert_eq!(
+        first.key.as_deref(),
+        Some(format!("{}-0", subject_id)).as_deref(),
+        "Idempotency-Key must be '<subject_id>-<sn>'"
+    );
+    assert_eq!(
+        first.key, second.key,
+        "the retry must reuse the idempotency key of the first attempt"
+    );
+
+    // When the sink accepts again, the worker catches up.
+    sink.set_mode(ResponseMode::Accept).await;
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
+        .await;
+}
+
+/// Batch failure semantics: when a batch delivery fails, the cursor does not
+/// advance and the whole batch is delivered again by the next catch-up —
+/// nothing is lost and nothing is partially applied.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit three facts.
+/// 2. Restart with a batch sink while the `TestSink` rejects deliveries
+///    (HTTP 500); the subject goes lagging.
+/// 3. The sink accepts again and the automatic catch-up redelivers.
+///
+/// **Verifications:**
+/// - Failed attempts are also batch POSTs (JSON arrays), not individual
+///   events.
+/// - After recovery, the four events arrive exactly once and in SN order.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_failure_retries_whole_batch() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ServerError).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-fail-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The failed batch delivery sends the subject to lagging.
+    wait_for_sink_lagging_subjects(&node.api, "batch-fail-sink", 1).await;
+    sink.wait_for_raw_count(1, true).await;
+
+    // Failed attempts are batch POSTs (JSON arrays), never individual POSTs.
+    for body in &sink.raw_bodies().await {
+        assert!(
+            body.first() == Some(&b'['),
+            "failed deliveries must also be JSON arrays"
+        );
+    }
+    assert!(
+        sink.snapshot().await.is_empty(),
+        "no event is accepted while the sink returns 500"
+    );
+
+    // After recovery the whole batch is delivered again, exactly once and in
+    // order.
+    sink.set_mode(ResponseMode::Accept).await;
+    sink.wait_for_count(4, true).await;
+    wait_for_sink_caught_up(&node.api, "batch-fail-sink").await;
+
+    let events = sink.snapshot().await;
+    assert_no_duplicate_events(&events);
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+}
+
+/// Mixed batch contents: with a filter that matches only part of the events,
+/// a batch delivery is a JSON array that mixes full events and lightweight
+/// projections, both decodable by the receiver.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a batch sink whose filter is only `Create`; startup
+///    catch-up delivers the three events in one batch.
+///
+/// **Verifications:**
+/// - A single POST carries the three events as a JSON array.
+/// - The create event is full and the two facts are lightweight, inside the
+///   same array.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_mixed_full_light() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-mixed-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+            HttpCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(3, true).await;
+
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(
+        batch_lens,
+        vec![3],
+        "the three events must arrive in a single batch"
+    );
+
+    let events = sink.snapshot().await;
+    assert!(
+        matches!(events.first(), Some(IncomingSinkEvent::Full(_))),
+        "the create event must be delivered full inside the batch"
+    );
+    assert!(
+        events[1..]
+            .iter()
+            .all(|e| matches!(e, IncomingSinkEvent::Light(_))),
+        "facts must be lightweight inside the batch"
+    );
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2]);
 }

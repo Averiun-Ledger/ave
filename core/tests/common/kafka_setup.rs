@@ -5,21 +5,33 @@ use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::{ClientConfig, Message};
 use testcontainers::core::{
-    CmdWaitFor, ContainerPort, CopyDataSource, CopyToContainer, ExecCommand, WaitFor,
+    CmdWaitFor, ContainerPort, CopyDataSource, CopyToContainer, ExecCommand,
+    WaitFor,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, Image, ImageExt};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 const IMAGE_NAME: &str = "redpandadata/redpanda";
 const IMAGE_TAG: &str = "v24.2.7";
 const KAFKA_PORT: u16 = 9092;
 const ADMIN_API_PORT: u16 = 9644;
 
+/// Redpanda (seastar) reserves ~10_000 AIO events per container while the
+/// host limit (`/proc/sys/fs/aio-max-nr`, typically 65_536) fits only ~6.
+/// Parallel tests start containers faster than finished ones release their
+/// AIO allocation, so under load a container can die at startup. Cap
+/// concurrent containers at 3 (~30_000 events, half the limit): extra tests
+/// wait for a free slot, keeping the suite green no matter how many Kafka
+/// tests are added or how loaded the machine is.
+static REDPANDA_SLOTS: Semaphore = Semaphore::const_new(3);
+
 /// Pick a free local TCP port. There is a small race window between dropping
 /// the temporary socket and the container binding the same port, but for a
 /// single-node test it is acceptable.
 pub fn free_local_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let listener =
+        TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr: SocketAddr = listener.local_addr().expect("local address");
     drop(listener);
     addr.port()
@@ -49,20 +61,25 @@ pub struct RedpandaEnv {
     #[allow(dead_code)]
     container: ContainerAsync<Redpanda>,
     pub bootstrap_servers: String,
+    /// Held for the container's lifetime; releases a `REDPANDA_SLOTS` slot
+    /// on drop so a waiting test can start its own container.
+    _slot: SemaphorePermit<'static>,
 }
 
 impl RedpandaEnv {
     pub async fn start() -> Self {
+        let slot = REDPANDA_SLOTS
+            .acquire()
+            .await
+            .expect("redpanda semaphore is never closed");
         let host_port = free_local_port();
         let image = Redpanda::new(host_port)
             .with_mapped_port(host_port, ContainerPort::Tcp(KAFKA_PORT));
-        let container = image
-            .start()
-            .await
-            .expect("start redpanda container");
+        let container = image.start().await.expect("start redpanda container");
         Self {
             container,
             bootstrap_servers: format!("127.0.0.1:{host_port}"),
+            _slot: slot,
         }
     }
 
@@ -111,7 +128,9 @@ impl Image for Redpanda {
         redpanda_ready_conditions()
     }
 
-    fn cmd(&self) -> impl IntoIterator<Item = impl Into<std::borrow::Cow<'_, str>>> {
+    fn cmd(
+        &self,
+    ) -> impl IntoIterator<Item = impl Into<std::borrow::Cow<'_, str>>> {
         redpanda_start_cmd(self.host_port)
     }
 
@@ -130,24 +149,34 @@ pub struct RedpandaSaslEnv {
     pub bootstrap_servers: String,
     pub username: String,
     pub password: String,
+    /// Held for the container's lifetime; releases a `REDPANDA_SLOTS` slot
+    /// on drop so a waiting test can start its own container.
+    _slot: SemaphorePermit<'static>,
 }
 
 impl RedpandaSaslEnv {
-    pub async fn start(username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub async fn start(
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        let slot = REDPANDA_SLOTS
+            .acquire()
+            .await
+            .expect("redpanda semaphore is never closed");
         let username = username.into();
         let password = password.into();
         let host_port = free_local_port();
-        let image = RedpandaSasl::new(host_port, username.clone(), password.clone())
-            .with_mapped_port(host_port, ContainerPort::Tcp(KAFKA_PORT));
-        let container = image
-            .start()
-            .await
-            .expect("start redpanda sasl container");
+        let image =
+            RedpandaSasl::new(host_port, username.clone(), password.clone())
+                .with_mapped_port(host_port, ContainerPort::Tcp(KAFKA_PORT));
+        let container =
+            image.start().await.expect("start redpanda sasl container");
         Self {
             container,
             bootstrap_servers: format!("127.0.0.1:{host_port}"),
             username,
             password,
+            _slot: slot,
         }
     }
 
@@ -224,7 +253,9 @@ impl Image for RedpandaSasl {
         redpanda_ready_conditions()
     }
 
-    fn cmd(&self) -> impl IntoIterator<Item = impl Into<std::borrow::Cow<'_, str>>> {
+    fn cmd(
+        &self,
+    ) -> impl IntoIterator<Item = impl Into<std::borrow::Cow<'_, str>>> {
         redpanda_start_cmd(self.host_port)
     }
 
@@ -243,24 +274,29 @@ impl Image for RedpandaSasl {
         &self,
         _cs: testcontainers::core::ContainerState,
     ) -> testcontainers::core::error::Result<Vec<ExecCommand>> {
-        Ok(vec![ExecCommand::new([
-            "rpk",
-            "acl",
-            "user",
-            "create",
-            &self.username,
-            "-p",
-            &self.password,
-            "--mechanism",
-            "SCRAM-SHA-256",
+        Ok(vec![
+            ExecCommand::new([
+                "rpk",
+                "acl",
+                "user",
+                "create",
+                &self.username,
+                "-p",
+                &self.password,
+                "--mechanism",
+                "SCRAM-SHA-256",
+            ])
+            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
         ])
-        .with_cmd_ready_condition(CmdWaitFor::exit_code(0))])
     }
 }
 
 enum ConsumerAuth<'a> {
     None,
-    Sasl { username: &'a str, password: &'a str },
+    Sasl {
+        username: &'a str,
+        password: &'a str,
+    },
 }
 
 fn consumer_config(
@@ -295,9 +331,10 @@ async fn consume_string_with_config(
     // Use a unique consumer group per topic so parallel tests do not interfere
     // with each other through shared group state.
     let group_id = format!("test-group-{topic}");
-    let consumer: StreamConsumer = consumer_config(bootstrap_servers, &group_id, auth)
-        .create()
-        .expect("create stream consumer");
+    let consumer: StreamConsumer =
+        consumer_config(bootstrap_servers, &group_id, auth)
+            .create()
+            .expect("create stream consumer");
     consumer.subscribe(&[topic]).expect("subscribe to topic");
 
     let mut stream = consumer.stream();

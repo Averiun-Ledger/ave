@@ -293,12 +293,48 @@ impl From<ave_bridge::CorsConfig> for CorsConfigHttp {
     }
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+pub enum KeyPairAlgorithmHttp {
+    /// Ed25519 elliptic curve signature scheme.
+    Ed25519,
+}
+
+impl From<ave_bridge::ave_common::identity::KeyPairAlgorithm>
+    for KeyPairAlgorithmHttp
+{
+    fn from(value: ave_bridge::ave_common::identity::KeyPairAlgorithm) -> Self {
+        match value {
+            ave_bridge::ave_common::identity::KeyPairAlgorithm::Ed25519 => {
+                Self::Ed25519
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+pub enum HashAlgorithmHttp {
+    /// Blake3 hash algorithm.
+    Blake3,
+}
+
+impl From<ave_bridge::ave_common::identity::HashAlgorithm>
+    for HashAlgorithmHttp
+{
+    fn from(value: ave_bridge::ave_common::identity::HashAlgorithm) -> Self {
+        match value {
+            ave_bridge::ave_common::identity::HashAlgorithm::Blake3 => {
+                Self::Blake3
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct AveConfigHttp {
     /// Keypair algorithm
-    pub keypair_algorithm: String,
+    pub keypair_algorithm: KeyPairAlgorithmHttp,
     /// Hash algorithm
-    pub hash_algorithm: String,
+    pub hash_algorithm: HashAlgorithmHttp,
     /// AVE database path
     pub internal_db: AveStoreConfigHttp,
     /// External database path
@@ -367,8 +403,8 @@ pub struct RebootSyncConfigHttp {
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
     fn from(value: ave_bridge::AveConfig) -> Self {
         Self {
-            keypair_algorithm: format!("{:?}", value.keypair_algorithm),
-            hash_algorithm: format!("{:?}", value.hash_algorithm),
+            keypair_algorithm: value.keypair_algorithm.into(),
+            hash_algorithm: value.hash_algorithm.into(),
             internal_db: AveStoreConfigHttp::from(value.internal_db),
             external_db: AveStoreConfigHttp::from(value.external_db),
             network: NetworkConfigHttp::from(value.network),
@@ -458,10 +494,60 @@ impl From<AveExternalDBConfig> for AveStoreConfigHttp {
     }
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+pub enum NodeTypeHttp {
+    /// Bootstrap node.
+    Bootstrap,
+    /// Addressable node.
+    Addressable,
+    /// Ephemeral node.
+    Ephemeral,
+}
+
+impl From<ave_bridge::NodeType> for NodeTypeHttp {
+    fn from(value: ave_bridge::NodeType) -> Self {
+        match value {
+            ave_bridge::NodeType::Bootstrap => Self::Bootstrap,
+            ave_bridge::NodeType::Addressable => Self::Addressable,
+            ave_bridge::NodeType::Ephemeral => Self::Ephemeral,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MemoryLimitsConfigHttp {
+    /// No memory-based connection limit.
+    Disabled,
+    /// Reject new connections when process memory exceeds `value` fraction
+    /// of total RAM (range 0.0–1.0, e.g. `0.8` means 80% of system RAM).
+    Percentage {
+        /// Fraction of total system RAM, in the range 0.0–1.0.
+        value: f64,
+    },
+    /// Reject new connections when process memory exceeds `value` megabytes.
+    Mb {
+        /// Limit in megabytes.
+        value: usize,
+    },
+}
+
+impl From<ave_bridge::MemoryLimitsConfig> for MemoryLimitsConfigHttp {
+    fn from(value: ave_bridge::MemoryLimitsConfig) -> Self {
+        match value {
+            ave_bridge::MemoryLimitsConfig::Disabled => Self::Disabled,
+            ave_bridge::MemoryLimitsConfig::Percentage { value } => {
+                Self::Percentage { value }
+            }
+            ave_bridge::MemoryLimitsConfig::Mb { value } => Self::Mb { value },
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct NetworkConfigHttp {
     /// The node type (Bootstrap, Addressable, Ephemeral)
-    pub node_type: String,
+    pub node_type: NodeTypeHttp,
     /// Listen addresses for the network
     pub listen_addresses: Vec<String>,
     /// External addresses advertised to the network
@@ -472,8 +558,8 @@ pub struct NetworkConfigHttp {
     pub routing: RoutingConfigHttp,
     /// Control list configuration (allow/deny lists)
     pub control_list: ControlListConfigHttp,
-    /// Memory-based connection limit policy ("disabled", "80% of system RAM", "512 MB")
-    pub memory_limits: String,
+    /// Memory-based connection limit policy
+    pub memory_limits: MemoryLimitsConfigHttp,
     /// Maximum accepted application message payload in bytes.
     pub max_app_message_bytes: usize,
     /// Maximum buffered inbound bytes per peer while waiting for helper delivery.
@@ -491,7 +577,7 @@ pub struct NetworkConfigHttp {
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
     fn from(value: ave_bridge::NetworkConfig) -> Self {
         Self {
-            node_type: format!("{:?}", value.node_type),
+            node_type: value.node_type.into(),
             listen_addresses: value.listen_addresses,
             external_addresses: value.external_addresses,
             boot_nodes: value
@@ -501,7 +587,7 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .collect(),
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
-            memory_limits: value.memory_limits.to_string(),
+            memory_limits: value.memory_limits.into(),
             max_app_message_bytes: value.max_app_message_bytes,
             max_pending_outbound_bytes_per_peer: value
                 .max_pending_outbound_bytes_per_peer,
@@ -599,6 +685,39 @@ impl From<ave_bridge::RoutingNode> for RoutingNodeHttp {
     }
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LoggingRotationHttp {
+    /// Rotate when the log file reaches `max_size` bytes.
+    Size,
+    /// Rotate every hour.
+    Hourly,
+    /// Rotate every day.
+    Daily,
+    /// Rotate every week.
+    Weekly,
+    /// Rotate every month.
+    Monthly,
+    /// Rotate every year.
+    Yearly,
+    /// Never rotate.
+    Never,
+}
+
+impl From<ave_bridge::LoggingRotation> for LoggingRotationHttp {
+    fn from(value: ave_bridge::LoggingRotation) -> Self {
+        match value {
+            ave_bridge::LoggingRotation::Size => Self::Size,
+            ave_bridge::LoggingRotation::Hourly => Self::Hourly,
+            ave_bridge::LoggingRotation::Daily => Self::Daily,
+            ave_bridge::LoggingRotation::Weekly => Self::Weekly,
+            ave_bridge::LoggingRotation::Monthly => Self::Monthly,
+            ave_bridge::LoggingRotation::Yearly => Self::Yearly,
+            ave_bridge::LoggingRotation::Never => Self::Never,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct LoggingHttp {
     /// Logging output configuration
@@ -607,8 +726,8 @@ pub struct LoggingHttp {
     pub api_url: Option<String>,
     /// Path to the log file
     pub file_path: String,
-    /// Log rotation policy (Size, Hourly, Daily, Weekly, Monthly, Yearly, Never)
-    pub rotation: String,
+    /// Log rotation policy (size, hourly, daily, weekly, monthly, yearly, never)
+    pub rotation: LoggingRotationHttp,
     /// Maximum size of the log file in bytes
     pub max_size: usize,
     /// Maximum number of log files to keep
@@ -623,7 +742,7 @@ impl From<ave_bridge::LoggingConfig> for LoggingHttp {
             output: LoggingOutputHttp::from(value.output),
             api_url: value.api_url,
             file_path: value.file_path.to_string_lossy().to_string(),
-            rotation: format!("{:?}", value.rotation),
+            rotation: value.rotation.into(),
             max_size: value.max_size,
             max_files: value.max_files,
             level: value.level,
@@ -716,6 +835,25 @@ pub struct SinkAuthConfigHttp {
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub enum HttpTlsVersionHttp {
+    /// TLS 1.2.
+    #[serde(rename = "1.2")]
+    Tls12,
+    /// TLS 1.3.
+    #[serde(rename = "1.3")]
+    Tls13,
+}
+
+impl From<ave_bridge::ave_common::sink::HttpTlsVersion> for HttpTlsVersionHttp {
+    fn from(value: ave_bridge::ave_common::sink::HttpTlsVersion) -> Self {
+        match value {
+            ave_bridge::ave_common::sink::HttpTlsVersion::Tls12 => Self::Tls12,
+            ave_bridge::ave_common::sink::HttpTlsVersion::Tls13 => Self::Tls13,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct HttpTlsConfigHttp {
     /// Path to an additional PEM-encoded root CA certificate to trust.
     pub ca_certificate: String,
@@ -723,11 +861,44 @@ pub struct HttpTlsConfigHttp {
     pub client_certificate: String,
     /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
     pub client_key: String,
-    /// Minimum TLS version accepted: `"1.2"` or `"1.3"`.
-    pub min_tls_version: String,
+    /// Minimum TLS version accepted (`"1.2"` or `"1.3"`); absent uses the
+    /// TLS library default.
+    pub min_tls_version: Option<HttpTlsVersionHttp>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct HttpProxyConfigHttp {
+    /// Proxy URL (`http://` or `https://`), without embedded credentials.
+    pub url: String,
+    /// Proxy username; the password is read from the
+    /// `AVE_SINK_PROXY_PASSWORD_{{SERVER}}` environment variable.
+    pub username: String,
+    /// Hosts that bypass the proxy.
+    pub no_proxy: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpCompressionHttp {
+    /// No compression.
+    None,
+    /// gzip compression (`Content-Encoding: gzip`).
+    Gzip,
+}
+
+impl From<ave_bridge::ave_common::sink::HttpCompression>
+    for HttpCompressionHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::HttpCompression) -> Self {
+        match value {
+            ave_bridge::ave_common::sink::HttpCompression::None => Self::None,
+            ave_bridge::ave_common::sink::HttpCompression::Gzip => Self::Gzip,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(default)]
 pub struct HttpSinkConfigHttp {
     /// URL endpoint for the sink
     pub url: String,
@@ -743,6 +914,66 @@ pub struct HttpSinkConfigHttp {
     pub tls: Option<HttpTlsConfigHttp>,
     /// Whether deliveries are signed with the node identity
     pub signature: bool,
+    /// Outbound proxy for this sink's requests
+    pub proxy: Option<HttpProxyConfigHttp>,
+    /// Upper bound for any delivery retry delay, in milliseconds
+    pub retry_max_delay_ms: u64,
+    /// Whether events are delivered in batches (single POST with a JSON array)
+    pub batch_delivery: bool,
+    /// Maximum time a live event waits for a batch to fill, in milliseconds
+    pub batch_max_delay_ms: u64,
+    /// Body compression for deliveries: `none` or `"gzip"`
+    pub compression: HttpCompressionHttp,
+}
+
+impl Default for HttpSinkConfigHttp {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            auth: None,
+            connect_timeout_ms: 2_000,
+            request_timeout_ms: 5_000,
+            max_retries: 2,
+            tls: None,
+            signature: false,
+            proxy: None,
+            retry_max_delay_ms: 30_000,
+            batch_delivery: false,
+            batch_max_delay_ms: 100,
+            compression: HttpCompressionHttp::None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub enum KafkaSaslMechanismHttp {
+    /// PLAIN username/password authentication.
+    #[serde(rename = "PLAIN")]
+    Plain,
+    /// SCRAM challenge-response with SHA-256.
+    #[serde(rename = "SCRAM-SHA-256")]
+    ScramSha256,
+    /// SCRAM challenge-response with SHA-512.
+    #[serde(rename = "SCRAM-SHA-512")]
+    ScramSha512,
+}
+
+impl From<ave_bridge::ave_common::sink::KafkaSaslMechanism>
+    for KafkaSaslMechanismHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::KafkaSaslMechanism) -> Self {
+        match value {
+            ave_bridge::ave_common::sink::KafkaSaslMechanism::Plain => {
+                Self::Plain
+            }
+            ave_bridge::ave_common::sink::KafkaSaslMechanism::ScramSha256 => {
+                Self::ScramSha256
+            }
+            ave_bridge::ave_common::sink::KafkaSaslMechanism::ScramSha512 => {
+                Self::ScramSha512
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -754,18 +985,72 @@ pub enum KafkaSecurityConfigHttp {
     Ssl,
     /// SASL authentication over a plaintext connection.
     SaslPlaintext {
-        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
-        mechanism: String,
+        /// SASL mechanism.
+        mechanism: KafkaSaslMechanismHttp,
         /// SASL username.
         username: String,
     },
     /// SASL authentication over a TLS connection.
     SaslSsl {
-        /// SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
-        mechanism: String,
+        /// SASL mechanism.
+        mechanism: KafkaSaslMechanismHttp,
         /// SASL username.
         username: String,
     },
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub enum KafkaAcksHttp {
+    /// No acknowledgement is required (fire and forget).
+    #[serde(rename = "0")]
+    Zero,
+    /// Only the leader broker acknowledges the write.
+    #[serde(rename = "1")]
+    One,
+    /// All in-sync replicas acknowledge the write.
+    #[serde(rename = "all")]
+    All,
+}
+
+impl From<ave_bridge::ave_common::sink::KafkaAcks> for KafkaAcksHttp {
+    fn from(value: ave_bridge::ave_common::sink::KafkaAcks) -> Self {
+        match value {
+            ave_bridge::ave_common::sink::KafkaAcks::Zero => Self::Zero,
+            ave_bridge::ave_common::sink::KafkaAcks::One => Self::One,
+            ave_bridge::ave_common::sink::KafkaAcks::All => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KafkaCompressionHttp {
+    /// No compression.
+    None,
+    /// gzip compression.
+    Gzip,
+    /// Snappy compression.
+    Snappy,
+    /// LZ4 compression.
+    Lz4,
+    /// Zstandard compression.
+    Zstd,
+}
+
+impl From<ave_bridge::ave_common::sink::KafkaCompression>
+    for KafkaCompressionHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::KafkaCompression) -> Self {
+        match value {
+            ave_bridge::ave_common::sink::KafkaCompression::None => Self::None,
+            ave_bridge::ave_common::sink::KafkaCompression::Gzip => Self::Gzip,
+            ave_bridge::ave_common::sink::KafkaCompression::Snappy => {
+                Self::Snappy
+            }
+            ave_bridge::ave_common::sink::KafkaCompression::Lz4 => Self::Lz4,
+            ave_bridge::ave_common::sink::KafkaCompression::Zstd => Self::Zstd,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -778,10 +1063,10 @@ pub struct KafkaSinkConfigHttp {
     pub client_id: String,
     /// Security configuration for the brokers.
     pub security: KafkaSecurityConfigHttp,
-    /// Required acknowledgements: "0", "1" or "all".
-    pub acks: String,
-    /// Compression codec: none, gzip, snappy, lz4 or zstd.
-    pub compression: String,
+    /// Required acknowledgements.
+    pub acks: KafkaAcksHttp,
+    /// Compression codec.
+    pub compression: KafkaCompressionHttp,
     /// Per-message produce timeout in milliseconds.
     pub request_timeout_ms: u64,
 }
@@ -826,9 +1111,18 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         ca_certificate: t.ca_certificate,
                         client_certificate: t.client_certificate,
                         client_key: t.client_key,
-                        min_tls_version: t.min_tls_version,
+                        min_tls_version: t.min_tls_version.map(Into::into),
                     }),
                     signature: http.signature,
+                    proxy: http.proxy.map(|p| HttpProxyConfigHttp {
+                        url: p.url,
+                        username: p.username,
+                        no_proxy: p.no_proxy,
+                    }),
+                    retry_max_delay_ms: http.retry_max_delay_ms,
+                    batch_delivery: http.batch_delivery,
+                    batch_max_delay_ms: http.batch_max_delay_ms,
+                    compression: http.compression.into(),
                 })
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
@@ -837,8 +1131,8 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     topic: kafka.topic,
                     client_id: kafka.client_id,
                     security: kafka_security_to_http(kafka.security),
-                    acks: kafka.acks,
-                    compression: kafka.compression,
+                    acks: kafka.acks.into(),
+                    compression: kafka.compression.into(),
                     request_timeout_ms: kafka.request_timeout_ms,
                 })
             }
@@ -863,19 +1157,18 @@ fn kafka_security_to_http(
             mechanism,
             username,
         } => KafkaSecurityConfigHttp::SaslPlaintext {
-            mechanism,
+            mechanism: mechanism.into(),
             username,
         },
         ave_bridge::KafkaSecurityConfig::SaslSsl {
             mechanism,
             username,
         } => KafkaSecurityConfigHttp::SaslSsl {
-            mechanism,
+            mechanism: mechanism.into(),
             username,
         },
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -906,10 +1199,7 @@ mod tests {
             !json.contains("real-secret-key"),
             "the API key must never be exposed: {json}"
         );
-        assert!(
-            json.contains("***"),
-            "the API key must be redacted: {json}"
-        );
+        assert!(json.contains("***"), "the API key must be redacted: {json}");
         assert!(json.contains("/etc/ave/ca.pem"));
         assert!(json.contains("\"signature\":true"));
     }

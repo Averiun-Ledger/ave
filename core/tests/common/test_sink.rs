@@ -49,6 +49,10 @@ pub enum ResponseMode {
     UnauthorizedOnce,
     /// Always return HTTP 401. Used to test persistent auth failures.
     UnauthorizedAlways,
+    /// Return HTTP 429 with a `Retry-After: <secs>` header on the first
+    /// delivery request, then accept subsequent ones. Used to test that the
+    /// worker honors the server-provided retry delay.
+    RateLimitOnce(u64),
 }
 
 /// Response mode of the test sink's OAuth2 token endpoint.
@@ -80,8 +84,15 @@ struct TestSinkState {
     auth_requests: Vec<AuthRequest>,
     authorization_headers: Vec<Option<String>>,
     signature_headers: Vec<SignatureHeaders>,
-    raw_bodies: Vec<String>,
+    idempotency_headers: Vec<IdempotencyHeaders>,
+    content_encodings: Vec<Option<String>>,
+    raw_bodies: Vec<Vec<u8>>,
+    received_at: Vec<std::time::Instant>,
+    /// Number of events accepted per request (1 for individual deliveries,
+    /// N for batch deliveries).
+    batch_lens: Vec<usize>,
     unauthorized_once_consumed: bool,
+    ratelimit_once_consumed: bool,
 }
 
 /// Signature headers captured on a `/events` delivery.
@@ -93,6 +104,37 @@ pub struct SignatureHeaders {
     pub timestamp: Option<String>,
     /// `X-Ave-Public-Key` value; `None` when the header was absent.
     pub public_key: Option<String>,
+}
+
+/// Idempotency headers captured on a `/events` delivery. All fields are
+/// `None` on batch deliveries, which do not carry them.
+#[derive(Debug, Clone, Default)]
+pub struct IdempotencyHeaders {
+    /// `X-Ave-Subject-Id` value; `None` when the header was absent.
+    pub subject_id: Option<String>,
+    /// `X-Ave-SN` value; `None` when the header was absent.
+    pub sn: Option<String>,
+    /// `X-Ave-Event-Type` value; `None` when the header was absent.
+    pub event_type: Option<String>,
+    /// `Idempotency-Key` value; `None` when the header was absent.
+    pub key: Option<String>,
+}
+
+impl IdempotencyHeaders {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_owned())
+        };
+        Self {
+            subject_id: get("X-Ave-Subject-Id"),
+            sn: get("X-Ave-SN"),
+            event_type: get("X-Ave-Event-Type"),
+            key: get("Idempotency-Key"),
+        }
+    }
 }
 
 impl SignatureHeaders {
@@ -198,8 +240,13 @@ impl TestSink {
             auth_requests: Vec::new(),
             authorization_headers: Vec::new(),
             signature_headers: Vec::new(),
+            idempotency_headers: Vec::new(),
+            content_encodings: Vec::new(),
             raw_bodies: Vec::new(),
+            received_at: Vec::new(),
+            batch_lens: Vec::new(),
             unauthorized_once_consumed: false,
+            ratelimit_once_consumed: false,
         }))
     }
 
@@ -245,13 +292,15 @@ impl TestSink {
     /// certificate signed by the same CA (mTLS). Returns the sink and the
     /// TLS material so tests can point the node's `tls` config at the CA
     /// and client credentials.
-    pub async fn start_tls(require_client_cert: bool) -> (Self, TestTlsMaterial) {
+    pub async fn start_tls(
+        require_client_cert: bool,
+    ) -> (Self, TestTlsMaterial) {
         let material = TestTlsMaterial::generate();
         let state = Self::new_state();
         let app = Self::app(state.clone());
 
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("test sink should bind");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("test sink should bind");
         listener
             .set_nonblocking(true)
             .expect("listener should be non-blocking");
@@ -486,43 +535,111 @@ impl TestSink {
     }
 
     /// Return a snapshot of the raw request bodies received on `/events`,
-    /// in request order.
-    pub async fn raw_bodies(&self) -> Vec<String> {
+    /// in request order. Bodies are stored exactly as received (still
+    /// compressed when the sink used `Content-Encoding`).
+    pub async fn raw_bodies(&self) -> Vec<Vec<u8>> {
         self.state.lock().await.raw_bodies.clone()
+    }
+
+    /// Return a snapshot of the idempotency headers received on `/events`,
+    /// in request order.
+    pub async fn idempotency_headers(&self) -> Vec<IdempotencyHeaders> {
+        self.state.lock().await.idempotency_headers.clone()
+    }
+
+    /// Return a snapshot of the `Content-Encoding` values received on
+    /// `/events`, in request order. `None` means the header was absent.
+    pub async fn content_encodings(&self) -> Vec<Option<String>> {
+        self.state.lock().await.content_encodings.clone()
+    }
+
+    /// Return the instants at which each `/events` request was received,
+    /// in request order.
+    pub async fn received_at(&self) -> Vec<std::time::Instant> {
+        self.state.lock().await.received_at.clone()
+    }
+
+    /// Return the number of events accepted per request, in request order
+    /// (1 for individual deliveries, N for batch deliveries).
+    pub async fn batch_lens(&self) -> Vec<usize> {
+        self.state.lock().await.batch_lens.clone()
     }
 
     async fn receive(
         State(state): State<Arc<Mutex<TestSinkState>>>,
         headers: HeaderMap,
-        body: String,
+        body: axum::body::Bytes,
     ) -> Response {
         let auth_header = headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned());
         let signature_headers = SignatureHeaders::from_headers(&headers);
+        let idempotency_headers = IdempotencyHeaders::from_headers(&headers);
+        let content_encoding = headers
+            .get("Content-Encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
 
-        let event: IncomingSinkEvent = match serde_json::from_str(&body) {
-            Ok(event) => event,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid event JSON: {}", e),
-                )
-                    .into_response();
+        // Decompress the body for JSON parsing; the raw bytes are stored
+        // untouched so tests can verify the exact wire payload.
+        let decoded;
+        let json_bytes: &[u8] = match content_encoding.as_deref() {
+            Some("gzip") => {
+                let mut decoder = flate2::read::GzDecoder::new(body.as_ref());
+                let mut buf = Vec::new();
+                match std::io::Read::read_to_end(&mut decoder, &mut buf) {
+                    Ok(_) => {
+                        decoded = buf;
+                        &decoded
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("invalid gzip body: {}", e),
+                        )
+                            .into_response();
+                    }
+                }
             }
+            _ => &body,
         };
+
+        // A delivery is either a single event object or a JSON array of
+        // events (batch delivery).
+        let received_events: Vec<IncomingSinkEvent> =
+            match serde_json::from_slice::<Vec<IncomingSinkEvent>>(json_bytes) {
+                Ok(events) => events,
+                Err(_) => {
+                    match serde_json::from_slice::<IncomingSinkEvent>(
+                        json_bytes,
+                    ) {
+                        Ok(event) => vec![event],
+                        Err(e) => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                format!("invalid event JSON: {}", e),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+            };
 
         let mut guard = state.lock().await;
         guard.authorization_headers.push(auth_header);
         guard.signature_headers.push(signature_headers);
-        guard.raw_bodies.push(body);
+        guard.idempotency_headers.push(idempotency_headers);
+        guard.content_encodings.push(content_encoding);
+        guard.raw_bodies.push(body.to_vec());
+        guard.received_at.push(std::time::Instant::now());
 
         match guard.mode {
             ResponseMode::Accept => {
                 // Store every event the sink is asked to accept, including
                 // lightweight events, so tests can verify partial filters.
-                guard.events.push(event);
+                guard.batch_lens.push(received_events.len());
+                guard.events.extend(received_events);
                 StatusCode::OK.into_response()
             }
             ResponseMode::ServerError => {
@@ -538,7 +655,8 @@ impl TestSink {
             ResponseMode::Timeout(ms) => {
                 // Store the event before sleeping so the slow response still
                 // counts as a successful delivery.
-                guard.events.push(event);
+                guard.batch_lens.push(received_events.len());
+                guard.events.extend(received_events);
                 drop(guard);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 StatusCode::OK.into_response()
@@ -560,13 +678,30 @@ impl TestSink {
                     drop(guard);
                     (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
                 } else {
-                    guard.events.push(event);
+                    guard.batch_lens.push(received_events.len());
+                    guard.events.extend(received_events);
                     StatusCode::OK.into_response()
                 }
             }
             ResponseMode::UnauthorizedAlways => {
                 drop(guard);
                 (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+            }
+            ResponseMode::RateLimitOnce(secs) => {
+                if !guard.ratelimit_once_consumed {
+                    guard.ratelimit_once_consumed = true;
+                    drop(guard);
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(axum::http::header::RETRY_AFTER, secs.to_string())],
+                        "rate limited",
+                    )
+                        .into_response()
+                } else {
+                    guard.batch_lens.push(received_events.len());
+                    guard.events.extend(received_events);
+                    StatusCode::OK.into_response()
+                }
             }
         }
     }
@@ -597,6 +732,142 @@ impl TestSink {
                 (StatusCode::UNAUTHORIZED, "invalid credentials")
                     .into_response()
             }
+        }
+    }
+}
+
+/// A request proxied by [`TestProxy`].
+#[derive(Debug, Clone)]
+pub struct ProxiedRequest {
+    /// Request line as received: `"METHOD absolute-uri"`.
+    pub request_line: String,
+    /// `Proxy-Authorization` header value; `None` when absent.
+    pub proxy_authorization: Option<String>,
+}
+
+/// A minimal forward proxy used to test the sink `proxy` configuration.
+///
+/// Requests arrive in the standard HTTP proxy absolute-URI form
+/// (`POST http://real-sink/events`) and are forwarded to that URI with a
+/// plain HTTP client. Every proxied request is recorded.
+pub struct TestProxy {
+    addr: SocketAddr,
+    state: Arc<Mutex<Vec<ProxiedRequest>>>,
+    #[allow(dead_code)]
+    handle: JoinHandle<()>,
+    #[allow(dead_code)]
+    cancel: CancellationToken,
+}
+
+impl TestProxy {
+    /// Bind to `127.0.0.1:0` and start accepting requests.
+    pub async fn start() -> Self {
+        let state: Arc<Mutex<Vec<ProxiedRequest>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .fallback(Self::forward)
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test proxy should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let server = axum::serve(listener, app);
+            tokio::select! {
+                _ = server => {}
+                _ = task_cancel.cancelled() => {}
+            }
+        });
+
+        Self {
+            addr,
+            state,
+            handle,
+            cancel,
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Requests proxied so far, in request order.
+    pub async fn proxied_requests(&self) -> Vec<ProxiedRequest> {
+        self.state.lock().await.clone()
+    }
+
+    async fn forward(
+        State(state): State<Arc<Mutex<Vec<ProxiedRequest>>>>,
+        request: axum::extract::Request,
+    ) -> Response {
+        let uri = request.uri().clone();
+        let method = request.method().clone();
+        let headers = request.headers().clone();
+
+        if uri.scheme().is_none() || uri.authority().is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "proxy requests must use absolute-form URIs",
+            )
+                .into_response();
+        }
+        let target = uri.to_string();
+
+        let body =
+            match axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
+                .await
+            {
+                Ok(body) => body,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("cannot read request body: {}", e),
+                    )
+                        .into_response();
+                }
+            };
+
+        let proxy_authorization = headers
+            .get(axum::http::header::PROXY_AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        state.lock().await.push(ProxiedRequest {
+            request_line: format!("{} {}", method, target),
+            proxy_authorization,
+        });
+
+        let mut out = reqwest::Client::new()
+            .request(method, &target)
+            .body(body.to_vec());
+        for (name, value) in headers.iter() {
+            if name == axum::http::header::HOST
+                || name == axum::http::header::CONTENT_LENGTH
+                || name == axum::http::header::PROXY_AUTHORIZATION
+            {
+                // HOST and CONTENT_LENGTH are recomputed by the forwarding
+                // client; Proxy-Authorization is hop-by-hop and a real proxy
+                // never leaks it upstream.
+                continue;
+            }
+            out = out.header(name, value);
+        }
+
+        match out.send().await {
+            Ok(resp) => {
+                let status = StatusCode::from_u16(resp.status().as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let body = resp.bytes().await.unwrap_or_default();
+                (status, body.to_vec()).into_response()
+            }
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("proxy upstream error: {}", e),
+            )
+                .into_response(),
         }
     }
 }

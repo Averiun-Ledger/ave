@@ -12,7 +12,8 @@ use ave_common::{
     SchemaType,
 };
 use ave_core::config::{
-    KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry, SinkServer, SinkTransportConfig,
+    KafkaAcks, KafkaCompression, KafkaSaslMechanism, KafkaSecurityConfig,
+    KafkaSinkConfig, SinkConfigEntry, SinkServer, SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
 use ave_core::sink::SinkTransport;
@@ -91,7 +92,7 @@ fn kafka_sink_config_sasl(
         bootstrap_servers: bootstrap_servers.to_string(),
         topic: topic.to_string(),
         security: KafkaSecurityConfig::SaslPlaintext {
-            mechanism: "SCRAM-SHA-256".to_string(),
+            mechanism: KafkaSaslMechanism::ScramSha256,
             username: username.to_string(),
         },
         ..KafkaSinkConfig::default()
@@ -187,11 +188,18 @@ async fn kafka_transport_happy_path() {
 async fn kafka_transport_config_variants() {
     let env = RedpandaEnv::start().await;
 
-    for compression in ["none", "gzip", "snappy", "lz4", "zstd"] {
+    for compression in [
+        KafkaCompression::None,
+        KafkaCompression::Gzip,
+        KafkaCompression::Snappy,
+        KafkaCompression::Lz4,
+        KafkaCompression::Zstd,
+    ] {
+        let name = compression.as_str();
         let config = kafka_sink_config_with(
             &env.bootstrap_servers,
-            &format!("comp-{compression}"),
-            |cfg| cfg.compression = compression.to_string(),
+            &format!("comp-{name}"),
+            |cfg| cfg.compression = compression,
         );
         let transport = KafkaTransport::new("test".to_string(), config).unwrap();
         transport
@@ -200,17 +208,18 @@ async fn kafka_transport_config_variants() {
             .unwrap();
 
         let messages = env
-            .consume_string(&format!("comp-{compression}"), 1, TIMEOUT)
+            .consume_string(&format!("comp-{name}"), 1, TIMEOUT)
             .await;
-        assert_eq!(messages.len(), 1, "compression={compression}");
+        assert_eq!(messages.len(), 1, "compression={name}");
         assert_eq!(messages[0].0, SUBJECT_ID);
     }
 
-    for acks in ["0", "1", "all"] {
+    for acks in [KafkaAcks::Zero, KafkaAcks::One, KafkaAcks::All] {
+        let name = acks.as_str();
         let config = kafka_sink_config_with(
             &env.bootstrap_servers,
-            &format!("acks-{acks}"),
-            |cfg| cfg.acks = acks.to_string(),
+            &format!("acks-{name}"),
+            |cfg| cfg.acks = acks,
         );
         let transport = KafkaTransport::new("test".to_string(), config).unwrap();
         transport
@@ -219,9 +228,9 @@ async fn kafka_transport_config_variants() {
             .unwrap();
 
         let messages = env
-            .consume_string(&format!("acks-{acks}"), 1, TIMEOUT)
+            .consume_string(&format!("acks-{name}"), 1, TIMEOUT)
             .await;
-        assert_eq!(messages.len(), 1, "acks={acks}");
+        assert_eq!(messages.len(), 1, "acks={name}");
         assert_eq!(messages[0].0, SUBJECT_ID);
     }
 }
@@ -235,7 +244,7 @@ async fn kafka_transport_error_handling() {
         bootstrap_servers: "broker:9092".to_string(),
         topic: "t".to_string(),
         security: KafkaSecurityConfig::SaslPlaintext {
-            mechanism: "PLAIN".to_string(),
+            mechanism: KafkaSaslMechanism::Plain,
             username: "u".to_string(),
         },
         ..KafkaSinkConfig::default()
@@ -243,15 +252,13 @@ async fn kafka_transport_error_handling() {
     let err = KafkaTransport::new("test".to_string(), config).unwrap_err();
     assert!(matches!(err, SinkError::ClientBuild(_)));
 
-    // Invalid acks value.
-    let config = KafkaSinkConfig {
-        bootstrap_servers: "broker:9092".to_string(),
-        topic: "t".to_string(),
-        acks: "2".to_string(),
-        ..KafkaSinkConfig::default()
-    };
-    let err = KafkaTransport::new("test".to_string(), config).unwrap_err();
-    assert!(matches!(err, SinkError::ClientBuild(_)));
+    // Invalid acks values are rejected at deserialization time.
+    assert!(
+        serde_json::from_str::<KafkaSinkConfig>(
+            r#"{"bootstrap_servers": "broker:9092", "topic": "t", "acks": "2"}"#
+        )
+        .is_err()
+    );
 
     // Unreachable broker is reported as a retryable delivery error.
     let config = KafkaSinkConfig {
@@ -322,7 +329,7 @@ async fn kafka_transport_sasl() {
         bootstrap_servers: env.bootstrap_servers.clone(),
         topic: "ave-sasl-bad".to_string(),
         security: KafkaSecurityConfig::SaslPlaintext {
-            mechanism: "SCRAM-SHA-256".to_string(),
+            mechanism: KafkaSaslMechanism::ScramSha256,
             username: username.to_string(),
         },
         request_timeout_ms: 30_000,

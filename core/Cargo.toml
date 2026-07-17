@@ -37,6 +37,8 @@ lru = { workspace = true }
 prometheus-client = { workspace = true }
 futures = { workspace = true }
 rdkafka = { workspace = true }
+httpdate = "1"
+flate2 = "1"
 
 [dev-dependencies]
 test-log = { workspace = true }

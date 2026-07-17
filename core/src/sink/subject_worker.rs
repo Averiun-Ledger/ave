@@ -1,6 +1,7 @@
 //! SinkSubjectWorker: ephemeral child actor that handles a single subject.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -10,14 +11,15 @@ use ave_actors::{
 use serde::{Deserialize, Serialize};
 use tracing::{error, info_span};
 
-use crate::config::SinkServer;
+use crate::config::{SinkServer, SinkTransportConfig};
 use crate::sink::SinkError;
 use crate::sink::extract_sn;
+use crate::sink::manager::SendResult;
 use crate::sink::transport::SinkTransport;
 use crate::sink::worker::{
     SinkSubjectWorkerError, SinkWorker, SinkWorkerMessage,
 };
-use ave_common::{DataToSink, LightEvent, SinkTypes};
+use ave_common::{DataToSink, IncomingSinkEvent, LightEvent, SinkTypes};
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -34,6 +36,8 @@ pub enum SinkSubjectWorkerMessage {
         data: Arc<DataToSink>,
         remaining: Vec<DataToSink>,
     },
+    /// Flush the buffered live events (only used in `batch_delivery` mode).
+    FlushBatch,
     Pause,
     Resume,
     Stop,
@@ -59,6 +63,16 @@ pub struct SinkSubjectWorker {
     /// is under Node). `false` when it handles tracker events (parent is under
     /// Governance).
     is_governance: bool,
+    /// Batch delivery mode (HTTP `batch_delivery`): live events are buffered
+    /// and flushed as a single JSON-array `POST`, and catch-up batches are
+    /// sent whole instead of event by event.
+    batch_delivery: bool,
+    /// Maximum time a live event waits in the buffer before it is flushed.
+    batch_max_delay_ms: u64,
+    /// Live events buffered for the next batch flush.
+    pending: Vec<IncomingSinkEvent>,
+    /// Whether a `FlushBatch` timer is already scheduled.
+    flush_scheduled: bool,
 }
 
 impl std::fmt::Debug for SinkSubjectWorker {
@@ -67,6 +81,7 @@ impl std::fmt::Debug for SinkSubjectWorker {
             .field("sink_name", &self.sink_name)
             .field("server", &self.server.server)
             .field("paused", &self.paused)
+            .field("batch_delivery", &self.batch_delivery)
             .finish()
     }
 }
@@ -104,101 +119,43 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                     return Ok(SinkSubjectWorkerResponse::Ok);
                 }
 
+                if self.batch_delivery {
+                    self.pending.push(self.to_incoming_event(&data));
+                    if self.pending.len() >= self.server.batch_size {
+                        self.flush_pending(ctx).await;
+                    } else if !self.flush_scheduled {
+                        match ctx.schedule_once(
+                            Duration::from_millis(self.batch_max_delay_ms),
+                            SinkSubjectWorkerMessage::FlushBatch,
+                        ) {
+                            Ok(_) => self.flush_scheduled = true,
+                            Err(e) => {
+                                error!(msg_type = "ScheduleFlush", sink = %self.sink_name, error = %e, "Failed to schedule batch flush; flushing inline");
+                                self.flush_pending(ctx).await;
+                            }
+                        }
+                    }
+                    return Ok(SinkSubjectWorkerResponse::Ok);
+                }
+
                 let (subject_id, _schema_id) =
                     data.payload.get_subject_schema();
                 let sn = extract_sn(&data);
-                let event_type = SinkTypes::from(data.as_ref());
 
-                let send_full = self.server.events.contains(&event_type)
-                    || self.server.events.contains(&SinkTypes::All);
-                let send_result = if send_full {
+                let send_result = if self.sends_full(&data) {
                     self.client.send(Arc::clone(&data)).await
                 } else {
-                    let light = LightEvent::from(data.as_ref());
-                    self.client.send_light(light).await
+                    self.client
+                        .send_light(LightEvent::from(data.as_ref()))
+                        .await
                 };
 
                 match send_result {
-                    Ok(()) => match ctx.get_parent::<SinkWorker>().await {
-                        Ok(parent) => {
-                            if let Err(e) = parent
-                                    .tell(SinkWorkerMessage::DeliveryResult {
-                                        subject_id,
-                                        sn,
-                                        result: crate::sink::manager::SendResult::Success,
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery result");
-                                }
-                        }
-                        Err(e) => {
-                            error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                        }
-                    },
-                    Err(e @ SinkError::Auth { .. }) => {
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(
-                                        SinkSubjectWorkerError::AuthFailed {
-                                            subject_id,
-                                            sn,
-                                            error: e.to_string(),
-                                            from_catch_up: false,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report auth failed");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
-                    }
-                    Err(e @ SinkError::Delivery { retryable: true, .. }) => {
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
-                                        subject_id,
-                                        sn,
-                                        reason: e.to_string(),
-                                        from_catch_up: false,
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery failed");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
+                    Ok(()) => {
+                        self.report_success(ctx, subject_id, sn, false).await
                     }
                     Err(e) => {
-                        // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(
-                                        SinkSubjectWorkerError::Blocked {
-                                            subject_id,
-                                            sn,
-                                            reason: e.to_string(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report blocked");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
+                        self.report_error(ctx, subject_id, sn, e, false).await
                     }
                 }
 
@@ -255,6 +212,45 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                     return Ok(SinkSubjectWorkerResponse::Ok);
                 }
 
+                if self.batch_delivery {
+                    let incoming: Vec<IncomingSinkEvent> = events
+                        .iter()
+                        .map(|e| self.to_incoming_event(e))
+                        .collect();
+                    // `events` is not empty (checked above).
+                    let first_sn =
+                        incoming.first().map_or(from_sn, IncomingSinkEvent::sn);
+                    let last_sn =
+                        incoming.last().map_or(first_sn, IncomingSinkEvent::sn);
+
+                    match self.client.send_batch(incoming).await {
+                        Ok(()) => {
+                            self.report_success(
+                                ctx,
+                                subject_id.clone(),
+                                last_sn,
+                                true,
+                            )
+                            .await;
+                            let self_ref = ctx.reference().await?;
+                            if let Err(e) = self_ref
+                                .tell(SinkSubjectWorkerMessage::CatchUpBatch {
+                                    from_sn: last_sn + 1,
+                                    batch_size: self.server.batch_size,
+                                })
+                                .await
+                            {
+                                error!(msg_type = "CatchUpBatch", sink = %self.sink_name, error = %e, "Failed to send CatchUpBatch to self");
+                            }
+                        }
+                        Err(e) => {
+                            self.report_error(ctx, subject_id, first_sn, e, true)
+                                .await;
+                        }
+                    }
+                    return Ok(SinkSubjectWorkerResponse::Ok);
+                }
+
                 let mut events = events;
                 let event = events.remove(0);
                 let remaining = events;
@@ -274,133 +270,63 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 let (subject_id, _schema_id) =
                     data.payload.get_subject_schema();
                 let sn = extract_sn(&data);
-                let event_type = SinkTypes::from(data.as_ref());
 
-                let send_full = self.server.events.contains(&event_type)
-                    || self.server.events.contains(&SinkTypes::All);
-                let send_result = if send_full {
+                let send_result = if self.sends_full(&data) {
                     self.client.send(Arc::clone(&data)).await
                 } else {
-                    let light = LightEvent::from(data.as_ref());
-                    self.client.send_light(light).await
+                    self.client
+                        .send_light(LightEvent::from(data.as_ref()))
+                        .await
                 };
 
                 match send_result {
-                    Ok(()) => match ctx.get_parent::<SinkWorker>().await {
-                        Ok(parent) => {
-                            if let Err(e) = parent
-                                    .tell(SinkWorkerMessage::CatchUpProgress {
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        result: crate::sink::manager::SendResult::Success,
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
-                                }
-                        }
-                        Err(e) => {
-                            error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                        }
-                    },
-                    Err(e @ SinkError::Auth { .. }) => {
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(
-                                        SinkSubjectWorkerError::AuthFailed {
-                                            subject_id: subject_id.clone(),
-                                            sn,
-                                            error: e.to_string(),
-                                            from_catch_up: true,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
-                                }
+                    Ok(()) => {
+                        self.report_success(ctx, subject_id.clone(), sn, true)
+                            .await;
+
+                        if !remaining.is_empty() {
+                            let mut remaining = remaining;
+                            let next_event = remaining.remove(0);
+                            let self_ref = ctx.reference().await?;
+                            if let Err(e) = self_ref
+                                .tell(SinkSubjectWorkerMessage::ProcessNextEvent {
+                                    data: Arc::new(next_event),
+                                    remaining,
+                                })
+                                .await
+                            {
+                                error!(msg_type = "ProcessNextEvent", sink = %self.sink_name, error = %e, "Failed to send ProcessNextEvent to self");
                             }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                        } else {
+                            let self_ref = ctx.reference().await?;
+                            if let Err(e) = self_ref
+                                .tell(SinkSubjectWorkerMessage::CatchUpBatch {
+                                    from_sn: sn + 1,
+                                    batch_size: self.server.batch_size,
+                                })
+                                .await
+                            {
+                                error!(msg_type = "CatchUpBatch", sink = %self.sink_name, error = %e, "Failed to send CatchUpBatch to self");
                             }
                         }
-                        return Ok(SinkSubjectWorkerResponse::Ok);
-                    }
-                    Err(e @ SinkError::Delivery { retryable: true, .. }) => {
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
-                                        subject_id: subject_id.clone(),
-                                        sn,
-                                        reason: e.to_string(),
-                                        from_catch_up: true,
-                                    })
-                                    .await
-                                {
-                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
-                        return Ok(SinkSubjectWorkerResponse::Ok);
                     }
                     Err(e) => {
-                        // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
-                        match ctx.get_parent::<SinkWorker>().await {
-                            Ok(parent) => {
-                                if let Err(e) = parent
-                                    .emit_error(
-                                        SinkSubjectWorkerError::Blocked {
-                                            subject_id: subject_id.clone(),
-                                            sn,
-                                            reason: e.to_string(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    error!(msg_type = "ReportCatchUpProgress", sink = %self.sink_name, error = %e, "Failed to report catch-up progress");
-                                }
-                            }
-                            Err(e) => {
-                                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
-                            }
-                        }
-                        return Ok(SinkSubjectWorkerResponse::Ok);
-                    }
-                }
-
-                if !remaining.is_empty() {
-                    let mut remaining = remaining;
-                    let next_event = remaining.remove(0);
-                    let self_ref = ctx.reference().await?;
-                    if let Err(e) = self_ref
-                        .tell(SinkSubjectWorkerMessage::ProcessNextEvent {
-                            data: Arc::new(next_event),
-                            remaining,
-                        })
-                        .await
-                    {
-                        error!(msg_type = "ProcessNextEvent", sink = %self.sink_name, error = %e, "Failed to send ProcessNextEvent to self");
-                    }
-                } else {
-                    let self_ref = ctx.reference().await?;
-                    if let Err(e) = self_ref
-                        .tell(SinkSubjectWorkerMessage::CatchUpBatch {
-                            from_sn: sn + 1,
-                            batch_size: self.server.batch_size,
-                        })
-                        .await
-                    {
-                        error!(msg_type = "CatchUpBatch", sink = %self.sink_name, error = %e, "Failed to send CatchUpBatch to self");
+                        // The whole chain stops on failure: the subject goes
+                        // back to lagging and catch-up retries it later.
+                        self.report_error(ctx, subject_id, sn, e, true).await;
                     }
                 }
 
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
+            SinkSubjectWorkerMessage::FlushBatch => {
+                self.flush_pending(ctx).await;
+                Ok(SinkSubjectWorkerResponse::Ok)
+            }
             SinkSubjectWorkerMessage::Pause => {
+                // Flush first so buffered events are not held in memory (and
+                // possibly duplicated by a later catch-up) while paused.
+                self.flush_pending(ctx).await;
                 self.paused = true;
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
@@ -409,6 +335,8 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Stop => {
+                // Best effort: do not lose buffered events on shutdown.
+                self.flush_pending(ctx).await;
                 ctx.stop(None).await;
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
@@ -423,12 +351,138 @@ impl SinkSubjectWorker {
         client: Arc<dyn SinkTransport>,
         is_governance: bool,
     ) -> Self {
+        let (batch_delivery, batch_max_delay_ms) = match &server.transport {
+            SinkTransportConfig::Http(http) => {
+                (http.batch_delivery, http.batch_max_delay_ms)
+            }
+            SinkTransportConfig::Kafka(_) => (false, 0),
+        };
         Self {
             sink_name,
             server,
             client,
             paused: false,
             is_governance,
+            batch_delivery,
+            batch_max_delay_ms,
+            pending: Vec::new(),
+            flush_scheduled: false,
+        }
+    }
+
+    /// Whether the event is delivered with its full payload (`events` filter
+    /// match) or as a light projection.
+    fn sends_full(&self, data: &DataToSink) -> bool {
+        let event_type = SinkTypes::from(data);
+        self.server.events.contains(&event_type)
+            || self.server.events.contains(&SinkTypes::All)
+    }
+
+    /// Build the wire representation of an event, honoring the sink's
+    /// `events` filter (full payload or light projection).
+    fn to_incoming_event(&self, data: &DataToSink) -> IncomingSinkEvent {
+        if self.sends_full(data) {
+            IncomingSinkEvent::Full(Box::new(data.clone()))
+        } else {
+            IncomingSinkEvent::Light(LightEvent::from(data))
+        }
+    }
+
+    /// Send the buffered live events as a single batch delivery and report
+    /// the outcome to the parent worker. No-op when the buffer is empty.
+    async fn flush_pending(&mut self, ctx: &mut ActorContext<SinkSubjectWorker>) {
+        self.flush_scheduled = false;
+        let events = std::mem::take(&mut self.pending);
+        let Some(first) = events.first() else {
+            return;
+        };
+        let subject_id = first.subject_id().to_owned();
+        let first_sn = first.sn();
+        let last_sn = events.last().map_or(first_sn, IncomingSinkEvent::sn);
+
+        match self.client.send_batch(events).await {
+            Ok(()) => self.report_success(ctx, subject_id, last_sn, false).await,
+            Err(e) => self.report_error(ctx, subject_id, first_sn, e, false).await,
+        }
+    }
+
+    /// Report a successful delivery to the parent worker: `DeliveryResult`
+    /// for live events, `CatchUpProgress` during catch-up.
+    async fn report_success(
+        &self,
+        ctx: &mut ActorContext<SinkSubjectWorker>,
+        subject_id: String,
+        sn: u64,
+        from_catch_up: bool,
+    ) {
+        let message = if from_catch_up {
+            SinkWorkerMessage::CatchUpProgress {
+                subject_id,
+                sn,
+                result: SendResult::Success,
+            }
+        } else {
+            SinkWorkerMessage::DeliveryResult {
+                subject_id,
+                sn,
+                result: SendResult::Success,
+            }
+        };
+        match ctx.get_parent::<SinkWorker>().await {
+            Ok(parent) => {
+                if let Err(e) = parent.tell(message).await {
+                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery result");
+                }
+            }
+            Err(e) => {
+                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+            }
+        }
+    }
+
+    /// Report a delivery failure to the parent worker following the sink
+    /// error taxonomy: auth failures send the subject to lagging, retryable
+    /// network failures are retried via catch-up and permanent failures
+    /// block the sink.
+    async fn report_error(
+        &self,
+        ctx: &mut ActorContext<SinkSubjectWorker>,
+        subject_id: String,
+        sn: u64,
+        error: SinkError,
+        from_catch_up: bool,
+    ) {
+        let worker_error = match error {
+            e @ SinkError::Auth { .. } => SinkSubjectWorkerError::AuthFailed {
+                subject_id,
+                sn,
+                error: e.to_string(),
+                from_catch_up,
+            },
+            e @ SinkError::Delivery { retryable: true, .. } => {
+                SinkSubjectWorkerError::DeliveryFailed {
+                    subject_id,
+                    sn,
+                    reason: e.to_string(),
+                    from_catch_up,
+                }
+            }
+            // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
+            e => SinkSubjectWorkerError::Blocked {
+                subject_id,
+                sn,
+                reason: e.to_string(),
+            },
+        };
+        match ctx.get_parent::<SinkWorker>().await {
+            Ok(parent) => {
+                if let Err(e) = parent.emit_error(worker_error).await {
+                    error!(msg_type = "ReportProgress", sink = %self.sink_name, error = %e, "Failed to report delivery error");
+                }
+            }
+            Err(e) => {
+                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+            }
         }
     }
 

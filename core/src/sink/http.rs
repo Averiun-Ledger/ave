@@ -1,19 +1,25 @@
 //! HTTP delivery logic for a single external sink.
 
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use reqwest::{Certificate, Client, Identity, tls::Version};
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use crate::config::{HttpSinkConfig, TokenResponse};
+use crate::config::{
+    HttpCompression, HttpSinkConfig, HttpTlsVersion, TokenResponse,
+};
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
+use crate::sink::extract_sn;
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
-use ave_common::{DataToSink, LightEvent};
+use ave_common::{DataToSink, IncomingSinkEvent, LightEvent, SinkTypes};
 
 /// Build the environment variable name for a sink's password.
 /// Format: `AVE_SINK_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
@@ -27,6 +33,13 @@ pub fn sink_password_env_var(sink_name: &str) -> String {
 /// chars are replaced by `_`.
 pub fn sink_apikey_env_var(sink_name: &str) -> String {
     sink_secret_env_var("AVE_SINK_APIKEY_", sink_name)
+}
+
+/// Build the environment variable name for a sink's proxy password.
+/// Format: `AVE_SINK_PROXY_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
+/// chars are replaced by `_`.
+pub fn sink_proxy_password_env_var(sink_name: &str) -> String {
+    sink_secret_env_var("AVE_SINK_PROXY_PASSWORD_", sink_name)
 }
 
 /// Build the environment variable name for a sink secret with the given
@@ -63,13 +76,24 @@ fn build_http_client(
                 "ca_certificate",
                 &tls.ca_certificate,
             )?;
-            let cert = Certificate::from_pem(&pem).map_err(|e| {
+            // With the rustls backend `Certificate::from_pem` defers parsing
+            // and silently accepts a buffer without PEM sections, so parse
+            // the bundle here and require at least one certificate.
+            let certs = Certificate::from_pem_bundle(&pem).map_err(|e| {
                 SinkError::ClientBuild(format!(
                     "sink '{}': invalid CA certificate '{}': {}",
                     sink_name, tls.ca_certificate, e
                 ))
             })?;
-            builder = builder.add_root_certificate(cert);
+            if certs.is_empty() {
+                return Err(SinkError::ClientBuild(format!(
+                    "sink '{}': invalid CA certificate '{}': no PEM certificates found",
+                    sink_name, tls.ca_certificate
+                )));
+            }
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
         }
 
         if !tls.client_certificate.is_empty() {
@@ -91,17 +115,45 @@ fn build_http_client(
             builder = builder.identity(identity);
         }
 
-        match tls.min_tls_version.as_str() {
-            "" => {}
-            "1.2" => builder = builder.tls_version_min(Version::TLS_1_2),
-            "1.3" => builder = builder.tls_version_min(Version::TLS_1_3),
-            other => {
+        if let Some(min_version) = &tls.min_tls_version {
+            let version = match min_version {
+                HttpTlsVersion::Tls12 => Version::TLS_1_2,
+                HttpTlsVersion::Tls13 => Version::TLS_1_3,
+            };
+            builder = builder.tls_version_min(version);
+        }
+    }
+
+    if let Some(proxy_config) = &config.proxy {
+        let mut proxy =
+            reqwest::Proxy::all(&proxy_config.url).map_err(|e| {
+                SinkError::ClientBuild(format!(
+                    "sink '{}': invalid proxy URL '{}': {}",
+                    sink_name, proxy_config.url, e
+                ))
+            })?;
+
+        if !proxy_config.username.is_empty() {
+            let env_var = sink_proxy_password_env_var(sink_name);
+            let password = std::env::var(&env_var).unwrap_or_default();
+            if password.is_empty() {
                 return Err(SinkError::ClientBuild(format!(
-                    "sink '{}': min_tls_version must be \"1.2\" or \"1.3\", got {}",
-                    sink_name, other
+                    "proxy authentication configured for sink '{}' but password environment variable {} is not set",
+                    sink_name, env_var
                 )));
             }
+            proxy = proxy.basic_auth(&proxy_config.username, &password);
         }
+
+        if !proxy_config.no_proxy.is_empty() {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
+                &proxy_config.no_proxy.join(","),
+            ));
+        }
+
+        // Setting an explicit proxy also disables reqwest's automatic
+        // system proxy detection for this client.
+        builder = builder.proxy(proxy);
     }
 
     builder.build().map_err(|e| {
@@ -133,12 +185,31 @@ const SIGNATURE_TIMESTAMP_HEADER: &str = "X-Ave-Signature-Timestamp";
 /// Header carrying the signer's public key.
 const SIGNATURE_PUBLIC_KEY_HEADER: &str = "X-Ave-Public-Key";
 
+/// Header carrying the subject identifier of the delivered event.
+const SUBJECT_ID_HEADER: &str = "X-Ave-Subject-Id";
+/// Header carrying the sequence number of the delivered event.
+const SN_HEADER: &str = "X-Ave-SN";
+/// Header carrying the delivered event type (`create`, `fact`, ...).
+const EVENT_TYPE_HEADER: &str = "X-Ave-Event-Type";
+/// Header allowing the receiver to deduplicate deliveries
+/// (`<subject_id>-<sn>`, following the Stripe convention).
+const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
+
 /// Signature headers for one delivery, computed once per logical event and
 /// reused across retries of the same body.
 struct SignatureHeaders {
     signature: String,
     timestamp: String,
     public_key: String,
+}
+
+/// Idempotency metadata of a single-event delivery, sent as headers so the
+/// receiver can deduplicate without parsing the body. Not sent on batch
+/// deliveries, where each array element already carries this data.
+struct DeliveryMeta {
+    subject_id: String,
+    sn: u64,
+    event_type: SinkTypes,
 }
 
 /// HTTP transport for a single sink server.
@@ -166,8 +237,8 @@ impl HttpTransport {
     ) -> Result<Self, SinkError> {
         let client = build_http_client(&sink_name, &config)?;
 
-        let password =
-            std::env::var(sink_password_env_var(&sink_name)).unwrap_or_default();
+        let password = std::env::var(sink_password_env_var(&sink_name))
+            .unwrap_or_default();
         let api_key = std::env::var(sink_apikey_env_var(&sink_name))
             .ok()
             .filter(|k| !k.is_empty())
@@ -248,6 +319,7 @@ impl HttpTransport {
         &self,
         url: &str,
         payload: Vec<u8>,
+        meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
         let mut last_err = None;
         let sink_name = &self.sink_name;
@@ -260,19 +332,29 @@ impl HttpTransport {
                 }
                 let base_delay =
                     self.config.retry_base_delay_ms * (1_u64 << (attempt - 1));
-                let delay = crate::sink::add_jitter(base_delay);
+                let mut delay = crate::sink::add_jitter(base_delay);
+                // Honor the server-provided Retry-After hint when it exceeds
+                // the computed backoff.
+                if let Some(retry_after_ms) =
+                    last_err.as_ref().and_then(retry_after_of)
+                {
+                    delay = delay.max(retry_after_ms);
+                }
+                delay = delay.min(self.config.retry_max_delay_ms);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
 
             match self
-                .timed_send_once(url, &payload, &signature_headers)
+                .timed_send_once(url, &payload, &signature_headers, meta)
                 .await
             {
                 Ok(()) => {
                     return Ok(());
                 }
                 Err(
-                    e @ (SinkError::Delivery { retryable: false, .. }
+                    e @ (SinkError::Delivery {
+                        retryable: false, ..
+                    }
                     | SinkError::ClientBuild(_)
                     | SinkError::Rejected { .. }
                     | SinkError::Shutdown),
@@ -290,7 +372,12 @@ impl HttpTransport {
                     }
                     // Retry once with fresh auth.
                     return self
-                        .timed_send_once(url, &payload, &signature_headers)
+                        .timed_send_once(
+                            url,
+                            &payload,
+                            &signature_headers,
+                            meta,
+                        )
                         .await;
                 }
                 Err(e) => {
@@ -302,6 +389,7 @@ impl HttpTransport {
         Err(last_err.unwrap_or_else(|| SinkError::Delivery {
             message: "Max retries exceeded".to_owned(),
             retryable: false,
+            retry_after_ms: None,
         }))
     }
 
@@ -310,16 +398,20 @@ impl HttpTransport {
         url: &str,
         payload: &[u8],
         signature_headers: &Option<SignatureHeaders>,
+        meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
         let start = Instant::now();
-        let result = self.send_once(url, payload, signature_headers).await;
+        let result =
+            self.send_once(url, payload, signature_headers, meta).await;
         let duration = start.elapsed();
 
         if let Some(metrics) = try_core_metrics() {
             let result_label = match &result {
                 Ok(()) => "success",
                 Err(SinkError::Auth { .. }) => "auth",
-                Err(SinkError::Delivery { retryable: true, .. }) => "transient",
+                Err(SinkError::Delivery {
+                    retryable: true, ..
+                }) => "transient",
                 Err(SinkError::Shutdown) => "shutdown",
                 Err(_) => "permanent",
             };
@@ -338,6 +430,7 @@ impl HttpTransport {
         url: &str,
         payload: &[u8],
         signature_headers: &Option<SignatureHeaders>,
+        meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
         let mut request = self
             .client
@@ -352,6 +445,21 @@ impl HttpTransport {
                 .header(SIGNATURE_PUBLIC_KEY_HEADER, &headers.public_key);
         }
 
+        if let Some(meta) = meta {
+            request = request
+                .header(SUBJECT_ID_HEADER, &meta.subject_id)
+                .header(SN_HEADER, meta.sn.to_string())
+                .header(EVENT_TYPE_HEADER, meta.event_type.as_str())
+                .header(
+                    IDEMPOTENCY_KEY_HEADER,
+                    format!("{}-{}", meta.subject_id, meta.sn),
+                );
+        }
+
+        if let Some(encoding) = self.config.compression.content_encoding() {
+            request = request.header("Content-Encoding", encoding);
+        }
+
         if self.config.auth.is_some()
             && let Some(header) = self.build_auth_header().await?
         {
@@ -362,6 +470,7 @@ impl HttpTransport {
             request.send().await.map_err(|e| SinkError::Delivery {
                 message: format!("HTTP request failed: {}", e),
                 retryable: true,
+                retry_after_ms: None,
             })?;
 
         let status = response.status();
@@ -383,6 +492,12 @@ impl HttpTransport {
                 message: format!("HTTP {}: {}", status, body),
             })
         } else {
+            // Read the Retry-After hint before consuming the body.
+            let retry_after_ms = if status == 429 || status.is_server_error() {
+                parse_retry_after(response.headers())
+            } else {
+                None
+            };
             let body = response
                 .text()
                 .await
@@ -390,6 +505,7 @@ impl HttpTransport {
             Err(SinkError::Delivery {
                 message: format!("HTTP {}: {}", status, body),
                 retryable: status.is_server_error() || status == 429,
+                retry_after_ms,
             })
         }
     }
@@ -468,6 +584,34 @@ impl HttpTransport {
                 .to_owned(),
         })
     }
+
+    /// Serialize and, when configured, compress the delivery body.
+    /// Signing happens on the encoded bytes (the exact wire payload).
+    fn encode_body<T: serde::Serialize>(
+        &self,
+        body: &T,
+    ) -> Result<Vec<u8>, SinkError> {
+        let raw =
+            serde_json::to_vec(body).map_err(|e| SinkError::Delivery {
+                message: format!("JSON serialization failed: {}", e),
+                retryable: false,
+                retry_after_ms: None,
+            })?;
+
+        if matches!(self.config.compression, HttpCompression::None) {
+            return Ok(raw);
+        }
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&raw)
+            .and_then(|()| encoder.finish())
+            .map_err(|e| SinkError::Delivery {
+                message: format!("gzip compression failed: {}", e),
+                retryable: false,
+                retry_after_ms: None,
+            })
+    }
 }
 
 #[async_trait]
@@ -477,27 +621,28 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded(&subject_id, &schema_id);
-        let payload = serde_json::to_vec(data.as_ref()).map_err(|e| {
-            SinkError::Delivery {
-                message: format!("JSON serialization failed: {}", e),
-                retryable: false,
-            }
-        })?;
+        let payload = self.encode_body(data.as_ref())?;
+        let meta = DeliveryMeta {
+            subject_id,
+            sn: extract_sn(&data),
+            event_type: SinkTypes::from(data.as_ref()),
+        };
 
-        self.send_with_retry(&url, payload).await
+        self.send_with_retry(&url, payload, Some(&meta)).await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
         let url = self
             .url_template
             .render_url_encoded(&light.subject_id, &light.schema_id);
-        let payload =
-            serde_json::to_vec(&light).map_err(|e| SinkError::Delivery {
-                message: format!("JSON serialization failed: {}", e),
-                retryable: false,
-            })?;
+        let payload = self.encode_body(&light)?;
+        let meta = DeliveryMeta {
+            subject_id: light.subject_id.clone(),
+            sn: light.sn,
+            event_type: light.event_type.clone(),
+        };
 
-        self.send_with_retry(&url, payload).await
+        self.send_with_retry(&url, payload, Some(&meta)).await
     }
 
     /// Send a lightweight GET request to verify the sink is reachable.
@@ -532,6 +677,7 @@ impl SinkTransport for HttpTransport {
             request.send().await.map_err(|e| SinkError::Delivery {
                 message: format!("Health check request failed: {}", e),
                 retryable: true,
+                retry_after_ms: None,
             })?;
 
         let status = response.status();
@@ -554,8 +700,33 @@ impl SinkTransport for HttpTransport {
             Err(SinkError::Delivery {
                 message: format!("Health check returned {}: {}", status, body),
                 retryable: status.is_server_error() || status == 429,
+                retry_after_ms: None,
             })
         }
+    }
+
+    /// Deliver a batch of events as a single POST with a JSON array body.
+    /// Per-event idempotency headers are not sent: every array element
+    /// already carries `subject_id`, `sn` and the event type.
+    async fn send_batch(
+        &self,
+        events: Vec<IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        let Some(first) = events.first() else {
+            return Ok(());
+        };
+        let schema_id = match first {
+            IncomingSinkEvent::Full(data) => {
+                data.payload.get_subject_schema().1
+            }
+            IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+        };
+        let url = self
+            .url_template
+            .render_url_encoded(first.subject_id(), &schema_id);
+        let payload = self.encode_body(&events)?;
+
+        self.send_with_retry(&url, payload, None).await
     }
 
     /// If the sink has OAuth2 auth config, obtain a token eagerly on startup.
@@ -576,6 +747,32 @@ impl SinkTransport for HttpTransport {
         }
         Ok(())
     }
+}
+
+/// Extract the `Retry-After` hint carried by a delivery error, if any.
+fn retry_after_of(err: &SinkError) -> Option<u64> {
+    match err {
+        SinkError::Delivery { retry_after_ms, .. } => *retry_after_ms,
+        _ => None,
+    }
+}
+
+/// Parse the `Retry-After` header of a 429 / 5xx response. The value may be
+/// a number of seconds or an HTTP-date; the result is milliseconds from now.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+
+    let date = httpdate::parse_http_date(value).ok()?;
+    let delay = date.duration_since(std::time::SystemTime::now()).ok()?;
+    Some(delay.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -718,27 +915,12 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         config.tls = Some(HttpTlsConfig {
             client_certificate: cert_path.to_string_lossy().into_owned(),
             client_key: key_path.to_string_lossy().into_owned(),
-            min_tls_version: "1.2".to_owned(),
+            min_tls_version: Some(HttpTlsVersion::Tls12),
             ..HttpTlsConfig::default()
         });
         assert!(
             HttpTransport::new("unit-mtls".to_owned(), config, None).is_ok()
         );
-    }
-
-    #[test]
-    fn build_client_rejects_invalid_min_tls_version() {
-        let mut config = base_config();
-        config.tls = Some(HttpTlsConfig {
-            min_tls_version: "1.1".to_owned(),
-            ..HttpTlsConfig::default()
-        });
-        let err = client_build_error(HttpTransport::new(
-            "unit-tls-version".to_owned(),
-            config,
-            None,
-        ));
-        assert!(err.contains("min_tls_version"), "unexpected error: {}", err);
     }
 
     #[tokio::test]
@@ -808,5 +990,129 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             None,
         ));
         assert!(err.contains("no node signer"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn proxy_without_password_env_fails() {
+        let mut config = base_config();
+        config.proxy = Some(ave_common::sink::HttpProxyConfig {
+            url: "http://proxy.local:3128".to_owned(),
+            username: "ave".to_owned(),
+            no_proxy: vec![],
+        });
+        let err = client_build_error(HttpTransport::new(
+            "unit-proxy-nopass".to_owned(),
+            config,
+            None,
+        ));
+        assert!(
+            err.contains("AVE_SINK_PROXY_PASSWORD_UNIT_PROXY_NOPASS"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_with_invalid_url_fails() {
+        let mut config = base_config();
+        config.proxy = Some(ave_common::sink::HttpProxyConfig {
+            url: "not a url".to_owned(),
+            username: String::new(),
+            no_proxy: vec![],
+        });
+        let err = client_build_error(HttpTransport::new(
+            "unit-proxy-badurl".to_owned(),
+            config,
+            None,
+        ));
+        assert!(
+            err.contains("invalid proxy URL"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_with_password_env_builds() {
+        let env_var = "AVE_SINK_PROXY_PASSWORD_UNIT_PROXY_OK";
+        unsafe {
+            std::env::set_var(env_var, "proxy-secret");
+        }
+        let mut config = base_config();
+        config.proxy = Some(ave_common::sink::HttpProxyConfig {
+            url: "http://proxy.local:3128".to_owned(),
+            username: "ave".to_owned(),
+            no_proxy: vec!["localhost".to_owned()],
+        });
+        let result =
+            HttpTransport::new("unit-proxy-ok".to_owned(), config, None);
+        unsafe {
+            std::env::remove_var(env_var);
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_retry_after_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(2_000));
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let date = httpdate::fmt_http_date(
+            std::time::SystemTime::now() + Duration::from_secs(3),
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, date.parse().unwrap());
+        let parsed = parse_retry_after(&headers).unwrap();
+        assert!(
+            parsed > 0 && parsed <= 3_000,
+            "unexpected value: {}",
+            parsed
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_past_date_is_none() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Sun, 06 Nov 1994 08:49:37 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_garbage_is_none() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "soon".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), None);
+        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn encode_body_plain_when_no_compression() {
+        let transport =
+            HttpTransport::new("unit-plain".to_owned(), base_config(), None)
+                .unwrap();
+        let body = transport.encode_body(&serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(body, br#"{"a":1}"#.to_vec());
+    }
+
+    #[test]
+    fn encode_body_gzip_roundtrip() {
+        let mut config = base_config();
+        config.compression = HttpCompression::Gzip;
+        let transport =
+            HttpTransport::new("unit-gzip".to_owned(), config, None).unwrap();
+        let raw = serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap();
+        let body = transport.encode_body(&serde_json::json!({"a": 1})).unwrap();
+        assert_ne!(body, raw);
+        let mut decoder = flate2::read::GzDecoder::new(body.as_slice());
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(decoded, raw);
     }
 }
