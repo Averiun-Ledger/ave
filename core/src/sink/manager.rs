@@ -616,12 +616,12 @@ impl Actor for SinkManager {
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl Handler<SinkManager> for SinkManager {
+impl Handler<Self> for SinkManager {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SinkManagerMessage,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SinkManagerResponse, ActorError> {
         match msg {
             SinkManagerMessage::NotifyNewEvent(data) => {
@@ -706,7 +706,7 @@ impl Handler<SinkManager> for SinkManager {
     async fn on_child_error(
         &mut self,
         error: SinkWorkerError,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Some(metrics) = try_core_metrics() {
             match &error {
@@ -747,10 +747,8 @@ impl Handler<SinkManager> for SinkManager {
                     .copied();
                 let last_sn =
                     self.last_seen.get(&subject_id).copied().unwrap_or(0);
-                let is_outdated = match cursor_sn {
-                    Some(sn) => sn < last_sn,
-                    None => last_sn > 0,
-                };
+                let is_outdated =
+                    cursor_sn.map_or(last_sn > 0, |sn| sn < last_sn);
                 if is_outdated {
                     self.try_insert_lagging(&sink, subject_id.clone());
                     if let Err(e) = self
@@ -979,10 +977,7 @@ impl SinkManager {
                 // CR-4: If there is no cursor at all, the subject is outdated even
                 // when last_sn == 0 (e.g. a Create event that failed before cursor
                 // could be persisted).  Otherwise, outdated means cursor < last_sn.
-                let is_outdated = match cursor_sn {
-                    Some(sn) => sn < last_sn,
-                    None => true,
-                };
+                let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
                 if is_outdated {
                     outdated.push(subject_id);
                 }
@@ -1012,7 +1007,7 @@ impl SinkManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) {
-        for sink_name in self.sink_servers.keys().cloned().collect::<Vec<_>>() {
+        for sink_name in Vec::from_iter(self.sink_servers.keys().cloned()) {
             if let Err(e) = self.ensure_worker(&sink_name, ctx).await {
                 error!(
                     msg_type = "StartWorker",
@@ -1148,7 +1143,7 @@ impl SinkManager {
     async fn schedule_worker_shutdown(
         &mut self,
         sink_name: String,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) {
         // Cancel any existing shutdown timer for this worker
         if let Some(token) = self.pending_worker_shutdowns.remove(&sink_name) {
@@ -1209,7 +1204,7 @@ impl SinkManager {
     async fn handle_worker_stopped(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Drop the shutdown timer for the dead worker: cancel it if it was
         // still pending (abnormal stop), no-op if it already fired.
@@ -1230,10 +1225,7 @@ impl SinkManager {
                 .copied();
             // Same rule as rebuild_lagging (CR-4): no cursor means outdated
             // even when last_sn == 0.
-            let is_outdated = match cursor_sn {
-                Some(sn) => sn < last_sn,
-                None => true,
-            };
+            let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
             if is_outdated {
                 outdated.push(subject_id.clone());
             }
@@ -1264,7 +1256,7 @@ impl SinkManager {
     async fn schedule_healthcheck(
         &mut self,
         sink_name: String,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) {
         if let Some(token) = self.pending_healthchecks.remove(&sink_name) {
             token.cancel();
@@ -1314,7 +1306,7 @@ impl SinkManager {
     async fn handle_notify_new_event(
         &mut self,
         data: Arc<DataToSink>,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let subject_id = data.payload.get_subject_schema().0;
         let sn = extract_sn(&data);
@@ -1436,7 +1428,7 @@ impl SinkManager {
         sn: u64,
         result: SendResult,
         count: u64,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Some(metrics) = try_core_metrics() {
             match result {
@@ -1529,7 +1521,7 @@ impl SinkManager {
         &mut self,
         sink: String,
         subject_id: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let cursor_sn = self
             .cursors
@@ -1577,7 +1569,7 @@ impl SinkManager {
     async fn handle_replay_events(
         &mut self,
         requests: Vec<SinkReplayItem>,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SinkReplayResponse, ActorError> {
         // Defensive check: replay is a manual mutation and must not run in safe mode.
         let safe_mode = if let Some(config) =
@@ -1763,7 +1755,7 @@ impl SinkManager {
         &mut self,
         sink: String,
         subjects: Vec<String>,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             return Ok(());
@@ -1791,10 +1783,7 @@ impl SinkManager {
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
                 .copied();
-            let from_sn = match cursor_sn {
-                Some(sn) => sn + 1,
-                None => 0,
-            };
+            let from_sn = cursor_sn.map_or(0, |sn| sn + 1);
 
             // If the cursor is already up-to-date, there is nothing to catch up.
             if cursor_sn.is_some_and(|sn| sn >= last_sn) {
@@ -1827,7 +1816,7 @@ impl SinkManager {
     async fn handle_sink_recovered(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             return Ok(());
@@ -1859,7 +1848,7 @@ impl SinkManager {
     async fn handle_unblock_sink(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             info!(msg_type = "SinkUnblocked", sink = %sink, "Sink manually unblocked by operator");
@@ -1895,10 +1884,8 @@ impl SinkManager {
                         .cursors
                         .get(&(sink.clone(), subject_id.clone()))
                         .copied();
-                    let is_outdated = match cursor_sn {
-                        Some(sn) => sn < last_sn,
-                        None => true,
-                    };
+                    let is_outdated =
+                        cursor_sn.is_none_or(|sn| sn < last_sn);
                     if is_outdated {
                         Some(subject_id.clone())
                     } else {
@@ -1922,7 +1909,7 @@ impl SinkManager {
     async fn handle_delete_sink_cursors(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Double-check Safe Mode at the actor level: this operation is only valid
         // while the node is running in safe mode. In safe mode there are no
@@ -1975,12 +1962,9 @@ impl SinkManager {
     async fn handle_remove_subject(
         &mut self,
         subject_id: &str,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         info!(msg_type = "RemoveSubject", subject_id = %subject_id, "Removing subject from all sinks");
-
-        // Collect all sinks that have this subject in cursors or lagging.
-        let mut affected_sinks: HashSet<String> = HashSet::new();
 
         // Remove from lagging.
         let sinks_with_subject: Vec<String> = self
@@ -1990,7 +1974,6 @@ impl SinkManager {
             .map(|(sink, _)| sink.clone())
             .collect();
         for sink in sinks_with_subject {
-            affected_sinks.insert(sink.clone());
             if let Some(set) = self.lagging.get_mut(&sink) {
                 set.remove(subject_id);
                 if set.is_empty() {
@@ -2007,7 +1990,6 @@ impl SinkManager {
             .map(|(sink, _)| sink.clone())
             .collect();
         for sink in sinks_with_cursor {
-            affected_sinks.insert(sink.clone());
             self.persist(
                 SinkManagerEvent::CursorRemoved {
                     sink,

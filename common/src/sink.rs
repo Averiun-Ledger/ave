@@ -183,7 +183,7 @@ impl std::fmt::Display for SinkTypes {
 impl SinkTypes {
     /// Lower-case wire name of the event type, matching the serde
     /// representation (`"create"`, `"fact"`, ...). Used in delivery headers.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Create => "create",
             Self::Fact => "fact",
@@ -943,7 +943,7 @@ pub enum HttpCompression {
 impl HttpCompression {
     /// `Content-Encoding` header value for this compression, or `None` when
     /// no compression is applied (the header must then be omitted).
-    pub fn content_encoding(&self) -> Option<&'static str> {
+    pub const fn content_encoding(&self) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::Gzip => Some("gzip"),
@@ -1105,7 +1105,7 @@ pub enum KafkaSaslMechanism {
 
 impl KafkaSaslMechanism {
     /// librdkafka `sasl.mechanism` configuration value.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Plain => "PLAIN",
             Self::ScramSha256 => "SCRAM-SHA-256",
@@ -1190,7 +1190,7 @@ pub enum KafkaAcks {
 
 impl KafkaAcks {
     /// librdkafka `acks` configuration value.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Zero => "0",
             Self::One => "1",
@@ -1227,7 +1227,7 @@ pub enum KafkaCompression {
 
 impl KafkaCompression {
     /// librdkafka `compression.type` configuration value.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Gzip => "gzip",
@@ -1318,13 +1318,13 @@ impl KafkaSinkConfig {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfig {
-    Http(HttpSinkConfig),
+    Http(Box<HttpSinkConfig>),
     Kafka(KafkaSinkConfig),
 }
 
 impl Default for SinkTransportConfig {
     fn default() -> Self {
-        Self::Http(HttpSinkConfig::default())
+        Self::Http(Box::default())
     }
 }
 
@@ -1338,7 +1338,7 @@ impl SinkTransportConfig {
 
     /// Transport kind identifier, matching the serde `type` tag
     /// (`"http"`, `"kafka"`).
-    pub fn kind(&self) -> &'static str {
+    pub const fn kind(&self) -> &'static str {
         match self {
             Self::Http(_) => "http",
             Self::Kafka(_) => "kafka",

@@ -1085,7 +1085,7 @@ pub struct KafkaSinkConfigHttp {
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfigHttp {
-    Http(HttpSinkConfigHttp),
+    Http(Box<HttpSinkConfigHttp>),
     Kafka(KafkaSinkConfigHttp),
 }
 
@@ -1103,7 +1103,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
     fn from(value: ave_bridge::SinkServer) -> Self {
         let transport = match value.transport {
             ave_bridge::SinkTransportConfig::Http(http) => {
-                SinkTransportConfigHttp::Http(HttpSinkConfigHttp {
+                SinkTransportConfigHttp::Http(Box::new(HttpSinkConfigHttp {
                     url: http.url,
                     auth: http.auth.map(|a| SinkAuthConfigHttp {
                         auth_url: a.auth_url,
@@ -1137,7 +1137,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     compression: http.compression.into(),
                     health_check_url: http.health_check_url,
                     token_refresh_margin_secs: http.token_refresh_margin_secs,
-                })
+                }))
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
                 SinkTransportConfigHttp::Kafka(KafkaSinkConfigHttp {

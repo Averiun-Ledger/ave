@@ -69,7 +69,7 @@ pub struct NodeSigner {
 }
 
 impl NodeSigner {
-    pub fn new(node: ActorRef<Node>) -> Self {
+    pub const fn new(node: ActorRef<Node>) -> Self {
         Self { node }
     }
 
@@ -108,7 +108,7 @@ pub fn build_transport(
     match &server.transport {
         SinkTransportConfig::Http(http) => Ok(Arc::new(HttpTransport::new(
             server.server.clone(),
-            http.clone(),
+            *http.clone(),
             signer,
         )?)),
         SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(KafkaTransport::new(

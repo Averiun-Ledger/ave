@@ -407,13 +407,12 @@ impl Runner {
         };
 
         let module = {
-            let contracts = contracts.read().await;
-            let Some(module) = contracts.get(contract_name) else {
+            let Some(module) = contracts.read().await.get(contract_name).cloned() else {
                 return Err(RunnerError::ContractNotFound {
                     name: contract_name.to_owned(),
                 });
             };
-            module.clone()
+            module
         };
 
         let (result, _stats) = contract_runtime

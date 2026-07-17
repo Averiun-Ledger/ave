@@ -30,14 +30,11 @@ pub struct TokenResponse {
 
 impl TokenResponse {
     pub fn is_expired_or_expiring_soon(&self, margin_secs: u64) -> bool {
-        match self.obtained_at {
-            Some(t) => {
-                let elapsed = t.elapsed().as_secs();
-                self.expires_in > 0
-                    && elapsed + margin_secs >= self.expires_in as u64
-            }
-            None => true,
-        }
+        self.obtained_at.is_none_or(|t| {
+            let elapsed = t.elapsed().as_secs();
+            self.expires_in > 0
+                && elapsed + margin_secs >= self.expires_in as u64
+        })
     }
 }
 

@@ -95,13 +95,13 @@ pub fn make_sink_entry_with_concurrency(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             max_catch_up_concurrency,
@@ -125,14 +125,14 @@ pub fn make_sink_entry_with_auth(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 auth: Some(auth),
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -170,7 +170,7 @@ pub fn make_sink_entry_with_signature_and_retries(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 signature: true,
                 max_retries,
@@ -178,7 +178,7 @@ pub fn make_sink_entry_with_signature_and_retries(
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -203,14 +203,14 @@ pub fn make_sink_entry_with_tls(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 tls: Some(tls),
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -235,7 +235,7 @@ pub fn make_sink_entry_batch(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 batch_delivery: true,
                 batch_max_delay_ms: 100,
@@ -244,7 +244,7 @@ pub fn make_sink_entry_batch(
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -269,14 +269,14 @@ pub fn make_sink_entry_with_proxy(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 proxy: Some(proxy),
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -303,7 +303,7 @@ pub fn make_sink_entry_with_retry_policy(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries,
                 retry_base_delay_ms,
@@ -311,7 +311,7 @@ pub fn make_sink_entry_with_retry_policy(
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -345,12 +345,12 @@ pub fn flapping_sink_config(
         servers: vec![SinkServer {
             server: "example-sink".to_owned(),
             events: BTreeSet::from([SinkTypes::All]),
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 0,
                 request_timeout_ms: 500,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             max_recoveries_after_failure: 1,
@@ -374,13 +374,13 @@ pub fn transient_error_sink_config(
         servers: vec![SinkServer {
             server: "example-sink".to_owned(),
             events: BTreeSet::from([SinkTypes::All]),
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 2,
                 request_timeout_ms: 500,
                 retry_base_delay_ms: 100,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             sink_worker_idle_timeout_ms: 60_000,
@@ -406,12 +406,12 @@ pub fn short_idle_sink_config(
         servers: vec![SinkServer {
             server: "example-sink".to_owned(),
             events: BTreeSet::from([SinkTypes::All]),
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 0,
                 request_timeout_ms: 500,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             sink_worker_idle_timeout_ms: 200,
@@ -749,13 +749,13 @@ pub fn make_governance_sink_entry(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Http(HttpSinkConfig {
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             ..Default::default()
@@ -962,10 +962,10 @@ pub fn sample_sinks() -> Vec<SinkConfigEntry> {
             },
             servers: vec![SinkServer {
                 server: "gov-sink".to_owned(),
-                transport: SinkTransportConfig::Http(HttpSinkConfig {
+                transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                     url: "http://localhost:9000".to_owned(),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             }],
         },
@@ -976,10 +976,10 @@ pub fn sample_sinks() -> Vec<SinkConfigEntry> {
             },
             servers: vec![SinkServer {
                 server: "schema-sink".to_owned(),
-                transport: SinkTransportConfig::Http(HttpSinkConfig {
+                transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                     url: "http://localhost:9001".to_owned(),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             }],
         },

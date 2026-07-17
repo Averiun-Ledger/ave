@@ -168,14 +168,14 @@ impl HttpConfig {
         let https_enabled =
             self.https_address.is_some() || self.self_signed_cert.enabled;
 
-        if let Some(addr) = &self.https_address {
-            if addr.is_empty() {
+        if let Some(addr) = &self.https_address 
+            && addr.is_empty() {
                 return Err(Error::InvalidConfiguration {
                     component: "http.https_address".to_string(),
                     reason: "must not be empty when set".to_string(),
                 });
             }
-        }
+        
 
         if https_enabled {
             if self.https_cert_path.is_none() {

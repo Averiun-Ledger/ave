@@ -761,7 +761,7 @@ mod tests {
                 },
                 servers: vec![SinkServer {
                     server: "http-sink".to_string(),
-                    transport: SinkTransportConfig::Http(HttpSinkConfig {
+                    transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                         url: "https://sink.example.com".to_string(),
                         auth: Some(SinkAuthConfig {
                             auth_url: String::new(),
@@ -769,7 +769,7 @@ mod tests {
                             api_key: "top-secret-key".to_string(),
                         }),
                         ..HttpSinkConfig::default()
-                    }),
+                    })),
                     ..SinkServer::default()
                 }],
             },

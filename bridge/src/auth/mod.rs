@@ -321,13 +321,12 @@ impl EndpointRateLimit {
                 reason: "must be greater than zero".to_string(),
             });
         }
-        if let Some(window) = self.window_seconds {
-            if window <= 0 {
+        if let Some(window) = self.window_seconds
+            && window <= 0 {
                 return Err(Error::InvalidConfiguration {
                     component: "EndpointRateLimit.window_seconds".to_string(),
                     reason: "must be greater than zero when set".to_string(),
                 });
-            }
         }
         Ok(())
     }
@@ -361,7 +360,7 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
-    pub fn validate(&self) -> Result<(), Error> {
+    pub const fn validate(&self) -> Result<(), Error> {
         // audit_retention_days == 0 means keep forever; audit_max_entries == 0 means unlimited.
         // Both are valid defensive values, so no further validation is needed.
         Ok(())

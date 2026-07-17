@@ -801,7 +801,7 @@ http:
                 SinkServer {
                     server: "SinkOne".to_owned(),
                     events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
-                    transport: SinkTransportConfig::Http(HttpSinkConfig {
+                    transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                         url: "https://sink.one".to_owned(),
                         auth: Some(SinkAuthConfig {
                             auth_url: "https://auth.service".to_owned(),
@@ -821,7 +821,7 @@ http:
                         batch_delivery: false,
                         batch_max_delay_ms: 100,
                         compression: HttpCompression::None,
-                    }),
+                    })),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
@@ -833,7 +833,7 @@ http:
                 SinkServer {
                     server: "SinkTwo".to_owned(),
                     events: BTreeSet::from([SinkTypes::Transfer]),
-                    transport: SinkTransportConfig::Http(HttpSinkConfig {
+                    transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                         url: "https://sink.two".to_owned(),
                         auth: None,
                         connect_timeout_ms: 3_000,
@@ -849,7 +849,7 @@ http:
                         batch_delivery: false,
                         batch_max_delay_ms: 100,
                         compression: HttpCompression::None,
-                    }),
+                    })),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],

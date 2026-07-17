@@ -225,12 +225,12 @@ impl Actor for SinkWorker {
 }
 
 #[async_trait]
-impl Handler<SinkWorker> for SinkWorker {
+impl Handler<Self> for SinkWorker {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SinkWorkerMessage,
-        ctx: &mut ActorContext<SinkWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SinkWorkerResponse, ActorError> {
         match msg {
             SinkWorkerMessage::NotifyNewEvent(data) => {
@@ -509,7 +509,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
                 self.cancel_child_shutdown(ctx, &subject_id);
-                if let SendResult::Success = result {
+                if matches!(result, SendResult::Success) {
                     self.recoveries_after_failure = 0;
                     if matches!(
                         self.healthcheck_state,
@@ -564,7 +564,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
                 self.cancel_child_shutdown(ctx, &subject_id);
-                if let SendResult::Success = result {
+                if matches!(result, SendResult::Success) {
                     match ctx.get_parent::<SinkManager>().await {
                         Ok(parent) => {
                             if let Err(e) = parent
@@ -661,7 +661,7 @@ impl Handler<SinkWorker> for SinkWorker {
     async fn on_child_error(
         &mut self,
         error: SinkSubjectWorkerError,
-        ctx: &mut ActorContext<SinkWorker>,
+        ctx: &mut ActorContext<Self>,
     ) {
         match error {
             SinkSubjectWorkerError::DeliveryFailed {
@@ -826,7 +826,7 @@ impl SinkWorker {
     /// previously scheduled healthcheck to avoid redundant checks.
     fn schedule_healthcheck(
         &mut self,
-        ctx: &ActorContext<SinkWorker>,
+        ctx: &ActorContext<Self>,
         delay_secs: u64,
     ) {
         if let Some(key) = self.pending_healthcheck.take() {
@@ -852,7 +852,7 @@ impl SinkWorker {
 
     fn schedule_child_shutdown(
         &mut self,
-        ctx: &ActorContext<SinkWorker>,
+        ctx: &ActorContext<Self>,
         subject_id: String,
     ) {
         let timeout_ms = self.server.sink_subject_worker_idle_timeout_ms;
@@ -882,7 +882,7 @@ impl SinkWorker {
 
     fn cancel_child_shutdown(
         &mut self,
-        ctx: &ActorContext<SinkWorker>,
+        ctx: &ActorContext<Self>,
         subject_id: &str,
     ) {
         if let Some(key) = self.pending_child_shutdowns.remove(subject_id) {
@@ -974,7 +974,7 @@ impl SinkWorker {
     async fn broadcast_to_children(
         &mut self,
         msg: crate::sink::subject_worker::SinkSubjectWorkerMessage,
-        ctx: &ActorContext<SinkWorker>,
+        ctx: &ActorContext<Self>,
     ) {
         let mut dead = Vec::new();
         for (subject_id, child_ref) in &self.active_subject_workers {
@@ -1029,7 +1029,7 @@ impl SinkWorker {
     async fn report_catch_up_rejected(
         &self,
         subject_id: String,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) {
         match ctx.get_parent::<SinkManager>().await {
             Ok(parent) => {
@@ -1056,7 +1056,7 @@ impl SinkWorker {
     /// work to do, so it must remain alive.  The report is sent at most once
     /// per idle period to avoid duplicate shutdown timers while the manager is
     /// stopping the worker.
-    async fn report_idle(&mut self, ctx: &mut ActorContext<Self>) {
+    async fn report_idle(&mut self, ctx: &ActorContext<Self>) {
         if !self.pending_catch_ups.is_empty() || !self.in_catch_up.is_empty() {
             return;
         }

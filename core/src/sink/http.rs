@@ -584,6 +584,9 @@ impl HttpTransport {
                     }
                 }
             }
+            // Release the write lock before returning the error so other
+            // workers are not blocked behind a guard we no longer need.
+            drop(guard);
             return Err(last_token_err.unwrap_or_else(|| SinkError::Auth {
                 message: "token refresh failed".to_owned(),
             }));
@@ -599,7 +602,7 @@ impl HttpTransport {
     /// Signing happens on the encoded bytes (the exact wire payload).
     /// Compression runs in `spawn_blocking` because `GzEncoder` is CPU-bound
     /// and batches can be large.
-    async fn encode_body<T: serde::Serialize>(
+    async fn encode_body<T: serde::Serialize + Sync>(
         &self,
         body: &T,
     ) -> Result<Vec<u8>, SinkError> {
@@ -797,7 +800,7 @@ impl SinkTransport for HttpTransport {
 }
 
 /// Extract the `Retry-After` hint carried by a delivery error, if any.
-fn retry_after_of(err: &SinkError) -> Option<u64> {
+const fn retry_after_of(err: &SinkError) -> Option<u64> {
     match err {
         SinkError::Delivery { retry_after_ms, .. } => *retry_after_ms,
         _ => None,

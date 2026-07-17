@@ -119,7 +119,7 @@ impl ExternalDB {
             AveExternalDBFeatureConfig::Sqlite { path } => {
                 // Passive permission check before creating anything
                 check_dir_writable(&path)
-                    .map_err(|e| DatabaseError::PermissionDenied(e))?;
+                    .map_err(DatabaseError::PermissionDenied)?;
 
                 if !Path::new(&path).exists() {
                     fs::create_dir_all(&path).await.map_err(|e| {

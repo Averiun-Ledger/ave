@@ -39,7 +39,7 @@ pub fn add_jitter(base: u64) -> u64 {
 }
 
 /// Extract the sequence number from a `DataToSink` event.
-pub fn extract_sn(data: &DataToSink) -> u64 {
+pub const fn extract_sn(data: &DataToSink) -> u64 {
     match &data.payload {
         ave_common::DataToSinkEvent::Create { sn, .. } => *sn,
         ave_common::DataToSinkEvent::FactFull { sn, .. } => *sn,

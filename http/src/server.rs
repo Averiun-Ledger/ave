@@ -104,11 +104,12 @@ async fn server_error_metrics_layer(
     next: middleware::Next,
 ) -> Response {
     let response = next.run(req).await;
-    if response.status().is_server_error() {
-        if let Some(metrics) = try_core_metrics() {
-            metrics.observe_http_server_error();
-        }
+    if response.status().is_server_error()
+        && let Some(metrics) = try_core_metrics()
+    {
+        metrics.observe_http_server_error();
     }
+
     response
 }
 

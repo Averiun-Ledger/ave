@@ -107,12 +107,12 @@ impl Actor for SinkSubjectWorker {
 }
 
 #[async_trait]
-impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
+impl Handler<Self> for SinkSubjectWorker {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SinkSubjectWorkerMessage,
-        ctx: &mut ActorContext<SinkSubjectWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SinkSubjectWorkerResponse, ActorError> {
         match msg {
             SinkSubjectWorkerMessage::DeliverEvent(data) => {
@@ -411,7 +411,7 @@ impl SinkSubjectWorker {
     /// subject does not pay catch-up for events already delivered.
     async fn flush_pending(
         &mut self,
-        ctx: &mut ActorContext<SinkSubjectWorker>,
+        ctx: &ActorContext<Self>,
         best_effort: bool,
     ) {
         if let Some(key) = self.flush_timer.take() {
@@ -458,7 +458,7 @@ impl SinkSubjectWorker {
     /// for individual deliveries).
     async fn report_success(
         &self,
-        ctx: &mut ActorContext<SinkSubjectWorker>,
+        ctx: &ActorContext<Self>,
         subject_id: String,
         sn: u64,
         from_catch_up: bool,
@@ -497,7 +497,7 @@ impl SinkSubjectWorker {
     /// block the sink.
     async fn report_error(
         &self,
-        ctx: &mut ActorContext<SinkSubjectWorker>,
+        ctx: &ActorContext<Self>,
         subject_id: String,
         sn: u64,
         error: SinkError,
@@ -542,7 +542,7 @@ impl SinkSubjectWorker {
         subject_id: &str,
         from_sn: u64,
         batch_size: usize,
-        ctx: &mut ActorContext<SinkSubjectWorker>,
+        ctx: &ActorContext<Self>,
     ) -> Option<Vec<DataToSink>> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
@@ -594,14 +594,16 @@ impl SinkSubjectWorker {
                             return None;
                         }
                     };
-                if let Ok(crate::node::subject_manager::SubjectManagerResponse::Up) = subject_manager
-                    .ask(crate::node::subject_manager::SubjectManagerMessage::Up {
-                        subject_id: subject_id_digest,
-                        requester,
-                        create_ledger: None,
-                    })
-                    .await
-                {
+                if matches!(
+                    subject_manager
+                        .ask(crate::node::subject_manager::SubjectManagerMessage::Up {
+                            subject_id: subject_id_digest,
+                            requester,
+                            create_ledger: None,
+                        })
+                        .await,
+                    Ok(crate::node::subject_manager::SubjectManagerResponse::Up)
+                ) {
                     if let Ok(actor) = ctx.system().get_actor::<crate::tracker::Tracker>(&path).await {
                         match actor
                             .ask(crate::tracker::TrackerMessage::GetSinkEvents {
