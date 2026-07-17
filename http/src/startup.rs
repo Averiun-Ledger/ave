@@ -884,5 +884,32 @@ mod tests {
                 "sink api_key leaks in: {line}"
             );
         }
+
+        // Any leaf key whose name looks like a secret must be redacted (either
+        // by REDACTED_CONFIG_KEYS or by a custom Serialize such as
+        // `SinkAuthConfig.api_key`). This fails when a new sensitive field is
+        // added without redaction, even if its name is not in the list above.
+        let secret_words =
+            ["password", "secret", "token", "api_key", "credential"];
+        for line in &lines {
+            let Some((path, value)) = line.rsplit_once(": ") else {
+                continue;
+            };
+            let is_string_value =
+                value.starts_with('"') && value.ends_with('"') && value.len() >= 2;
+            if !is_string_value {
+                continue;
+            }
+            let is_redacted = value == "\"***\"";
+            let is_empty = value == "\"\"";
+            if is_redacted || is_empty {
+                continue;
+            }
+            let path_lower = path.to_lowercase();
+            assert!(
+                !secret_words.iter().any(|word| path_lower.contains(word)),
+                "config key '{path}' looks like a secret but is not redacted in the dump"
+            );
+        }
     }
 }

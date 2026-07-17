@@ -853,7 +853,8 @@ impl From<ave_bridge::ave_common::sink::HttpTlsVersion> for HttpTlsVersionHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Default)]
+#[serde(default)]
 pub struct HttpTlsConfigHttp {
     /// Path to an additional PEM-encoded root CA certificate to trust.
     pub ca_certificate: String,
@@ -866,7 +867,8 @@ pub struct HttpTlsConfigHttp {
     pub min_tls_version: Option<HttpTlsVersionHttp>,
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Default)]
+#[serde(default)]
 pub struct HttpProxyConfigHttp {
     /// Proxy URL (`http://` or `https://`), without embedded credentials.
     pub url: String,
@@ -910,6 +912,8 @@ pub struct HttpSinkConfigHttp {
     pub request_timeout_ms: u64,
     /// Maximum transient retries per delivery
     pub max_retries: usize,
+    /// Base delay between delivery retries, in milliseconds
+    pub retry_base_delay_ms: u64,
     /// TLS customization: additional root CA, mTLS identity, minimum version
     pub tls: Option<HttpTlsConfigHttp>,
     /// Whether deliveries are signed with the node identity
@@ -924,6 +928,10 @@ pub struct HttpSinkConfigHttp {
     pub batch_max_delay_ms: u64,
     /// Body compression for deliveries: `none` or `"gzip"`
     pub compression: HttpCompressionHttp,
+    /// Custom health-check URL; when absent the delivery URL is used
+    pub health_check_url: Option<String>,
+    /// Margin in seconds before token expiry to trigger a refresh
+    pub token_refresh_margin_secs: u64,
 }
 
 impl Default for HttpSinkConfigHttp {
@@ -934,6 +942,7 @@ impl Default for HttpSinkConfigHttp {
             connect_timeout_ms: 2_000,
             request_timeout_ms: 5_000,
             max_retries: 2,
+            retry_base_delay_ms: 500,
             tls: None,
             signature: false,
             proxy: None,
@@ -941,6 +950,8 @@ impl Default for HttpSinkConfigHttp {
             batch_delivery: false,
             batch_max_delay_ms: 100,
             compression: HttpCompressionHttp::None,
+            health_check_url: None,
+            token_refresh_margin_secs: 30,
         }
     }
 }
@@ -1107,6 +1118,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     connect_timeout_ms: http.connect_timeout_ms,
                     request_timeout_ms: http.request_timeout_ms,
                     max_retries: http.max_retries,
+                    retry_base_delay_ms: http.retry_base_delay_ms,
                     tls: http.tls.map(|t| HttpTlsConfigHttp {
                         ca_certificate: t.ca_certificate,
                         client_certificate: t.client_certificate,
@@ -1123,6 +1135,8 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     batch_delivery: http.batch_delivery,
                     batch_max_delay_ms: http.batch_max_delay_ms,
                     compression: http.compression.into(),
+                    health_check_url: http.health_check_url,
+                    token_refresh_margin_secs: http.token_refresh_margin_secs,
                 })
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
@@ -1225,5 +1239,58 @@ mod tests {
         };
         let auth = http.auth.expect("auth config should be present");
         assert!(auth.api_key.is_empty());
+    }
+
+    /// The HTTP mirror must expose every effective knob of the sink config:
+    /// `retry_base_delay_ms`, `health_check_url` and
+    /// `token_refresh_margin_secs` are carried over from the bridge config.
+    #[test]
+    fn sink_server_http_maps_http_tuning_fields() {
+        let server: ave_bridge::SinkServer = serde_json::from_value(json!({
+            "server": "tuning-sink",
+            "transport": {
+                "type": "http",
+                "url": "https://sink.example.com/events",
+                "retry_base_delay_ms": 250,
+                "health_check_url": "https://sink.example.com/health",
+                "token_refresh_margin_secs": 10
+            }
+        }))
+        .expect("sink server should deserialize");
+
+        let SinkTransportConfigHttp::Http(http) =
+            SinkServerHttp::from(server).transport
+        else {
+            panic!("expected HTTP transport");
+        };
+        assert_eq!(http.retry_base_delay_ms, 250);
+        assert_eq!(
+            http.health_check_url.as_deref(),
+            Some("https://sink.example.com/health")
+        );
+        assert_eq!(http.token_refresh_margin_secs, 10);
+    }
+
+    /// Nested mirror structs must accept partial JSON: any subset of fields
+    /// deserializes and the rest fall back to their defaults, matching the
+    /// behavior of the bridge config types.
+    #[test]
+    fn nested_mirror_structs_deserialize_partial_json() {
+        let tls: HttpTlsConfigHttp = serde_json::from_value(json!({
+            "ca_certificate": "/etc/ave/ca.pem"
+        }))
+        .expect("tls config should deserialize");
+        assert_eq!(tls.ca_certificate, "/etc/ave/ca.pem");
+        assert!(tls.client_certificate.is_empty());
+        assert!(tls.client_key.is_empty());
+        assert!(tls.min_tls_version.is_none());
+
+        let proxy: HttpProxyConfigHttp = serde_json::from_value(json!({
+            "url": "http://proxy.example.com:8080"
+        }))
+        .expect("proxy config should deserialize");
+        assert_eq!(proxy.url, "http://proxy.example.com:8080");
+        assert!(proxy.username.is_empty());
+        assert!(proxy.no_proxy.is_empty());
     }
 }
