@@ -13,7 +13,7 @@ rust-version.workspace = true
 
 [dependencies]
 ave-identity = { workspace = true, optional = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 borsh = { workspace = true }

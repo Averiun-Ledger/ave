@@ -39,27 +39,7 @@ use common::{
     },
 };
 use common::kafka_setup::{RedpandaEnv, RedpandaSaslEnv};
-
-/// Helper to set an environment variable for the duration of a test and clean
-/// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
-/// because concurrent mutation of the process environment is UB; tests that
-/// use distinct variable names and short-lived scopes are safe in practice.
-struct TempEnvVar {
-    name: &'static str,
-}
-
-impl TempEnvVar {
-    fn set(name: &'static str, value: &str) -> Self {
-        unsafe { std::env::set_var(name, value) };
-        Self { name }
-    }
-}
-
-impl Drop for TempEnvVar {
-    fn drop(&mut self) {
-        unsafe { std::env::remove_var(self.name) };
-    }
-}
+use common::TempEnvVar;
 
 const SUBJECT_ID: &str = "KAFKA-SUBJECT-ID";
 const SCHEMA_ID: &str = "Example";

@@ -1,6 +1,7 @@
 //! Sink payloads exported from ledger events.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -250,7 +251,11 @@ pub struct LightEvent {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(untagged)]
 pub enum IncomingSinkEvent {
-    Full(Box<DataToSink>),
+    /// `Arc` avoids cloning the full payload while events are buffered for
+    /// batch delivery. The OpenAPI schema still describes the underlying
+    /// `DataToSink` type.
+    #[cfg_attr(feature = "openapi", schema(value_type = DataToSink))]
+    Full(Arc<DataToSink>),
     Light(LightEvent),
 }
 

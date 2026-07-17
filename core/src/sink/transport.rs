@@ -32,7 +32,7 @@ pub trait SinkTransport: Send + Sync + std::fmt::Debug {
     ) -> Result<(), SinkError> {
         for event in events {
             match event {
-                IncomingSinkEvent::Full(data) => self.send((*data).into()).await?,
+                IncomingSinkEvent::Full(data) => self.send(data).await?,
                 IncomingSinkEvent::Light(light) => self.send_light(light).await?,
             }
         }

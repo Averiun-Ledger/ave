@@ -43,6 +43,27 @@ use tokio_util::sync::CancellationToken;
 pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Helper to set an environment variable for the duration of a test and clean
+/// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
+/// because concurrent mutation of the process environment is UB; tests that
+/// use distinct variable names and short-lived scopes are safe in practice.
+pub struct TempEnvVar {
+    name: &'static str,
+}
+
+impl TempEnvVar {
+    pub fn set(name: &'static str, value: &str) -> Self {
+        unsafe { std::env::set_var(name, value) };
+        Self { name }
+    }
+}
+
+impl Drop for TempEnvVar {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(self.name) };
+    }
+}
+
 #[allow(dead_code)]
 pub mod kafka_setup;
 pub mod sink_setup;

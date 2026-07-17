@@ -121,7 +121,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 }
 
                 if self.batch_delivery {
-                    self.pending.push(self.to_incoming_event(&data));
+                    self.pending.push(self.to_incoming_event(Arc::clone(&data)));
                     if self.pending.len() >= self.server.batch_size {
                         self.flush_pending(ctx, false).await;
                     } else if self.flush_timer.is_none() {
@@ -215,8 +215,8 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
 
                 if self.batch_delivery {
                     let incoming: Vec<IncomingSinkEvent> = events
-                        .iter()
-                        .map(|e| self.to_incoming_event(e))
+                        .into_iter()
+                        .map(|e| self.to_incoming_event(Arc::new(e)))
                         .collect();
                     // `events` is not empty (checked above).
                     let first_sn =
@@ -386,11 +386,11 @@ impl SinkSubjectWorker {
 
     /// Build the wire representation of an event, honoring the sink's
     /// `events` filter (full payload or light projection).
-    fn to_incoming_event(&self, data: &DataToSink) -> IncomingSinkEvent {
-        if self.sends_full(data) {
-            IncomingSinkEvent::Full(Box::new(data.clone()))
+    fn to_incoming_event(&self, data: Arc<DataToSink>) -> IncomingSinkEvent {
+        if self.sends_full(&data) {
+            IncomingSinkEvent::Full(data)
         } else {
-            IncomingSinkEvent::Light(LightEvent::from(data))
+            IncomingSinkEvent::Light(LightEvent::from(data.as_ref()))
         }
     }
 

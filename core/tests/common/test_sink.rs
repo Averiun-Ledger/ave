@@ -745,6 +745,13 @@ pub struct ProxiedRequest {
     pub proxy_authorization: Option<String>,
 }
 
+/// Shared state of [`TestProxy`]: the recorded requests plus a single
+/// forwarding client reused across requests.
+struct ProxyState {
+    requests: Mutex<Vec<ProxiedRequest>>,
+    client: reqwest::Client,
+}
+
 /// A minimal forward proxy used to test the sink `proxy` configuration.
 ///
 /// Requests arrive in the standard HTTP proxy absolute-URI form
@@ -752,7 +759,7 @@ pub struct ProxiedRequest {
 /// plain HTTP client. Every proxied request is recorded.
 pub struct TestProxy {
     addr: SocketAddr,
-    state: Arc<Mutex<Vec<ProxiedRequest>>>,
+    state: Arc<ProxyState>,
     #[allow(dead_code)]
     handle: JoinHandle<()>,
     #[allow(dead_code)]
@@ -762,11 +769,19 @@ pub struct TestProxy {
 impl TestProxy {
     /// Bind to `127.0.0.1:0` and start accepting requests.
     pub async fn start() -> Self {
-        let state: Arc<Mutex<Vec<ProxiedRequest>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        // One client for all forwarding: it does not honor system proxy env
+        // vars (which would break loopback forwarding) and avoids connection
+        // setup per request.
+        let state = Arc::new(ProxyState {
+            requests: Mutex::new(Vec::new()),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("test proxy client should build"),
+        });
         let app = Router::new()
             .fallback(Self::forward)
-            .with_state(state.clone());
+            .with_state(Arc::clone(&state));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -797,11 +812,11 @@ impl TestProxy {
 
     /// Requests proxied so far, in request order.
     pub async fn proxied_requests(&self) -> Vec<ProxiedRequest> {
-        self.state.lock().await.clone()
+        self.state.requests.lock().await.clone()
     }
 
     async fn forward(
-        State(state): State<Arc<Mutex<Vec<ProxiedRequest>>>>,
+        State(state): State<Arc<ProxyState>>,
         request: axum::extract::Request,
     ) -> Response {
         let uri = request.uri().clone();
@@ -835,12 +850,13 @@ impl TestProxy {
             .get(axum::http::header::PROXY_AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned());
-        state.lock().await.push(ProxiedRequest {
+        state.requests.lock().await.push(ProxiedRequest {
             request_line: format!("{} {}", method, target),
             proxy_authorization,
         });
 
-        let mut out = reqwest::Client::new()
+        let mut out = state
+            .client
             .request(method, &target)
             .body(body.to_vec());
         for (name, value) in headers.iter() {

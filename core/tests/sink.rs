@@ -27,10 +27,10 @@ use tracing_test::traced_test;
 
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
-    create_and_authorize_governance, create_node, create_nodes_and_connections,
-    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
-    emit_fact_viewpoints, emit_reject, emit_transfer, get_subject,
-    node_running,
+    TempEnvVar, create_and_authorize_governance, create_node,
+    create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
+    emit_eol, emit_fact, emit_fact_viewpoints, emit_reject, emit_transfer,
+    get_subject, node_running,
     sink_setup::{
         assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
@@ -871,6 +871,11 @@ async fn replay_filters_and_combinations() {
         .unwrap();
 
     emit_reject(&owner.api, subject_id.clone(), true)
+        .await
+        .unwrap();
+    // Ensure NewOwner has seen the reject (SN 6) before it issues the EOL
+    // (SN 7), otherwise it would build the EOL as a duplicate SN 6.
+    get_subject(&new_owner.api, subject_id.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -4149,6 +4154,9 @@ async fn sink_non_fact_event_types_and_fields() {
     )
     .await
     .unwrap();
+    get_subject(&new_owner.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // SN 2: transfer Owner -> NewOwner.
     let new_owner_pk = PublicKey::from_str(&new_owner_pk_str).unwrap();
@@ -4162,6 +4170,9 @@ async fn sink_non_fact_event_types_and_fields() {
 
     // SN 3: confirm transfer. For trackers, name_old_owner must be None.
     emit_confirm(&new_owner.api, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    get_subject(&owner.api, subject_id.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -4179,9 +4190,15 @@ async fn sink_non_fact_event_types_and_fields() {
     emit_reject(&owner.api, subject_id.clone(), true)
         .await
         .unwrap();
+    get_subject(&new_owner.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
 
     // SN 6: EOL by the current owner (NewOwner).
     emit_eol(&new_owner.api, subject_id.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&owner.api, subject_id.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -5887,12 +5904,10 @@ async fn sink_auth_token_refresh() {
     let oauth_sink = TestSink::start().await;
     let password = "oauth-password".to_owned();
     // Match the environment variable name built by sink_password_env_var.
-    let password_env = "AVE_SINK_PASSWORD_AUTH_SINK".to_owned();
-    unsafe {
-        std::env::set_var(&password_env, &password);
-    }
+    let password_env = "AVE_SINK_PASSWORD_AUTH_SINK";
+    let _password_guard = TempEnvVar::set(password_env, &password);
     assert_eq!(
-        std::env::var(&password_env).unwrap(),
+        std::env::var(password_env).unwrap(),
         password,
         "password env var should be set"
     );
@@ -6018,10 +6033,6 @@ async fn sink_auth_token_refresh() {
         1,
         "subject should only have the previously delivered SN 4 in the sink"
     );
-
-    unsafe {
-        std::env::remove_var(&password_env);
-    }
 }
 
 /// API key authentication through the `AVE_SINK_APIKEY_{{SERVER}}`
@@ -6080,9 +6091,7 @@ async fn sink_api_key_from_env_var() {
     let sink = TestSink::start().await;
     // The environment variable must win over the config value.
     let api_key_env = "AVE_SINK_APIKEY_ENVKEY_SINK";
-    unsafe {
-        std::env::set_var(api_key_env, "env-secret-key");
-    }
+    let _api_key_guard = TempEnvVar::set(api_key_env, "env-secret-key");
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, mut new_dirs) = create_node(restart_config(
@@ -6121,10 +6130,6 @@ async fn sink_api_key_from_env_var() {
         !headers.iter().flatten().any(|h| h == "Api-Key config-key"),
         "the config API key must not be used when the environment variable is set"
     );
-
-    unsafe {
-        std::env::remove_var(api_key_env);
-    }
 }
 
 /// Delivery signatures: every HTTP delivery of a sink with
@@ -8170,9 +8175,7 @@ async fn sink_proxy_delivery() {
 #[tokio::test]
 async fn sink_proxy_delivery_with_auth() {
     let proxy_password_env = "AVE_SINK_PROXY_PASSWORD_PROXY_AUTH_SINK";
-    unsafe {
-        std::env::set_var(proxy_password_env, "proxy-secret");
-    }
+    let _proxy_password_guard = TempEnvVar::set(proxy_password_env, "proxy-secret");
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -8246,10 +8249,6 @@ async fn sink_proxy_delivery_with_auth() {
         "the proxy must receive the basic auth header, got {:?}",
         proxied
     );
-
-    unsafe {
-        std::env::remove_var(proxy_password_env);
-    }
 }
 
 /// `Retry-After` handling: a 429 response with a `Retry-After` header must

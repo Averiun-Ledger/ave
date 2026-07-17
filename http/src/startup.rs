@@ -830,6 +830,33 @@ mod tests {
         }
     }
 
+    /// Assert that `lines` contains `expected`. On failure, print the whole
+    /// dump so the missing parameter is visible.
+    fn assert_dump_line(lines: &[&String], expected: &str) {
+        if !lines.iter().any(|line| line.as_str() == expected) {
+            let dump = lines
+                .iter()
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!("missing config line: {expected}\nfull dump:\n{dump}");
+        }
+    }
+
+    /// Critical dump paths that must always be present. This list breaks the
+    /// completeness tautology: if a new field is added but the dump or the
+    /// redaction misses it, the test fails even though the serialized config
+    /// contains it.
+    const CRITICAL_DUMP_PATHS: &[&str] = &[
+        "auth.superadmin: \"***\"",
+        "sinks[0].servers[0].transport.url: \"https://sink.example.com\"",
+        "sinks[0].servers[0].transport.auth.api_key: \"***\"",
+        "sinks[0].servers[0].transport.retry_base_delay_ms: 500",
+        "sinks[0].servers[0].transport.health_check_url: null",
+        "sinks[0].servers[0].transport.token_refresh_margin_secs: 30",
+        "sinks[1].servers[0].transport.bootstrap_servers: \"broker:9092\"",
+    ];
+
     /// Every configuration parameter must appear in the startup dump, and no
     /// secret value may leak into it.
     #[test]
@@ -867,10 +894,13 @@ mod tests {
             } else {
                 leaf.clone()
             };
-            assert!(
-                lines.contains(&&expected_line),
-                "missing config line: {expected_line}"
-            );
+            assert_dump_line(&lines, &expected_line);
+        }
+
+        // Critical parameters must be present, regardless of the serialized
+        // shape of the config.
+        for path in CRITICAL_DUMP_PATHS {
+            assert_dump_line(&lines, path);
         }
 
         // No secret value leaks into the dump.
@@ -885,10 +915,10 @@ mod tests {
             );
         }
 
-        // Any leaf key whose name looks like a secret must be redacted (either
-        // by REDACTED_CONFIG_KEYS or by a custom Serialize such as
-        // `SinkAuthConfig.api_key`). This fails when a new sensitive field is
-        // added without redaction, even if its name is not in the list above.
+        // Any leaf key whose final segment looks like a secret must be
+        // redacted (either by REDACTED_CONFIG_KEYS or by a custom Serialize
+        // such as `SinkAuthConfig.api_key`). Checking only the last segment
+        // avoids false positives on non-secret fields like `api_key.prefix`.
         let secret_words =
             ["password", "secret", "token", "api_key", "credential"];
         for line in &lines {
@@ -905,9 +935,12 @@ mod tests {
             if is_redacted || is_empty {
                 continue;
             }
-            let path_lower = path.to_lowercase();
+            let last_segment = path.rsplit('.').next().unwrap_or(path);
+            let segment_lower = last_segment.to_lowercase();
             assert!(
-                !secret_words.iter().any(|word| path_lower.contains(word)),
+                !secret_words
+                    .iter()
+                    .any(|word| segment_lower.contains(word)),
                 "config key '{path}' looks like a secret but is not redacted in the dump"
             );
         }

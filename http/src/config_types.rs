@@ -834,7 +834,7 @@ pub struct SinkAuthConfigHttp {
     pub api_key: String,
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 pub enum HttpTlsVersionHttp {
     /// TLS 1.2.
     #[serde(rename = "1.2")]
@@ -879,7 +879,7 @@ pub struct HttpProxyConfigHttp {
     pub no_proxy: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum HttpCompressionHttp {
     /// No compression.
@@ -956,7 +956,7 @@ impl Default for HttpSinkConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 pub enum KafkaSaslMechanismHttp {
     /// PLAIN username/password authentication.
     #[serde(rename = "PLAIN")]
@@ -1010,7 +1010,7 @@ pub enum KafkaSecurityConfigHttp {
     },
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 pub enum KafkaAcksHttp {
     /// No acknowledgement is required (fire and forget).
     #[serde(rename = "0")]
@@ -1033,7 +1033,7 @@ impl From<ave_bridge::ave_common::sink::KafkaAcks> for KafkaAcksHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum KafkaCompressionHttp {
     /// No compression.

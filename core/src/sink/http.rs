@@ -330,8 +330,13 @@ impl HttpTransport {
                 if let Some(metrics) = try_core_metrics() {
                     metrics.observe_sink_retry(sink_name);
                 }
-                let base_delay =
-                    self.config.retry_base_delay_ms * (1_u64 << (attempt - 1));
+                // Saturate the exponent so a large `max_retries` cannot
+                // overflow the shift (debug panic / masked shift in release).
+                let exp = (attempt - 1).min(63);
+                let base_delay = self
+                    .config
+                    .retry_base_delay_ms
+                    .saturating_mul(1_u64 << exp);
                 let mut delay = crate::sink::add_jitter(base_delay);
                 // Honor the server-provided Retry-After hint when it exceeds
                 // the computed backoff.
@@ -548,8 +553,13 @@ impl HttpTransport {
             let mut last_token_err = None;
             for attempt in 0..=2 {
                 if attempt > 0 {
-                    let base_delay = self.config.retry_base_delay_ms
-                        * (1_u64 << (attempt - 1));
+                    // Same saturation as the delivery backoff: avoid shift
+                    // overflow with a large configured base delay.
+                    let exp = (attempt - 1).min(63);
+                    let base_delay = self
+                        .config
+                        .retry_base_delay_ms
+                        .saturating_mul(1_u64 << exp);
                     let delay = crate::sink::add_jitter(base_delay);
                     tokio::time::sleep(std::time::Duration::from_millis(delay))
                         .await;
@@ -587,7 +597,9 @@ impl HttpTransport {
 
     /// Serialize and, when configured, compress the delivery body.
     /// Signing happens on the encoded bytes (the exact wire payload).
-    fn encode_body<T: serde::Serialize>(
+    /// Compression runs in `spawn_blocking` because `GzEncoder` is CPU-bound
+    /// and batches can be large.
+    async fn encode_body<T: serde::Serialize>(
         &self,
         body: &T,
     ) -> Result<Vec<u8>, SinkError> {
@@ -602,15 +614,23 @@ impl HttpTransport {
             return Ok(raw);
         }
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(&raw)
-            .and_then(|()| encoder.finish())
-            .map_err(|e| SinkError::Delivery {
-                message: format!("gzip compression failed: {}", e),
-                retryable: false,
-                retry_after_ms: None,
-            })
+        tokio::task::spawn_blocking(move || {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(&raw)
+                .and_then(|()| encoder.finish())
+                .map_err(|e| SinkError::Delivery {
+                    message: format!("gzip compression failed: {}", e),
+                    retryable: false,
+                    retry_after_ms: None,
+                })
+        })
+        .await
+        .map_err(|e| SinkError::Delivery {
+            message: format!("compression task failed: {}", e),
+            retryable: true,
+            retry_after_ms: None,
+        })?
     }
 }
 
@@ -621,7 +641,7 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded(&subject_id, &schema_id);
-        let payload = self.encode_body(data.as_ref())?;
+        let payload = self.encode_body(data.as_ref()).await?;
         let meta = DeliveryMeta {
             subject_id,
             sn: extract_sn(&data),
@@ -635,7 +655,7 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded(&light.subject_id, &light.schema_id);
-        let payload = self.encode_body(&light)?;
+        let payload = self.encode_body(&light).await?;
         let meta = DeliveryMeta {
             subject_id: light.subject_id.clone(),
             sn: light.sn,
@@ -724,7 +744,7 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded(first.subject_id(), &schema_id);
-        let payload = self.encode_body(&events)?;
+        let payload = self.encode_body(&events).await?;
 
         self.send_with_retry(&url, payload, None).await
     }
@@ -749,7 +769,7 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded(first.subject_id(), &schema_id);
-        let payload = self.encode_body(&events)?;
+        let payload = self.encode_body(&events).await?;
         let signature_headers = self.sign_payload(&payload).await?;
         self.timed_send_once(&url, &payload, &signature_headers, None)
             .await
@@ -1118,23 +1138,29 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
     }
 
-    #[test]
-    fn encode_body_plain_when_no_compression() {
+    #[tokio::test]
+    async fn encode_body_plain_when_no_compression() {
         let transport =
             HttpTransport::new("unit-plain".to_owned(), base_config(), None)
                 .unwrap();
-        let body = transport.encode_body(&serde_json::json!({"a": 1})).unwrap();
+        let body = transport
+            .encode_body(&serde_json::json!({"a": 1}))
+            .await
+            .unwrap();
         assert_eq!(body, br#"{"a":1}"#.to_vec());
     }
 
-    #[test]
-    fn encode_body_gzip_roundtrip() {
+    #[tokio::test]
+    async fn encode_body_gzip_roundtrip() {
         let mut config = base_config();
         config.compression = HttpCompression::Gzip;
         let transport =
             HttpTransport::new("unit-gzip".to_owned(), config, None).unwrap();
         let raw = serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap();
-        let body = transport.encode_body(&serde_json::json!({"a": 1})).unwrap();
+        let body = transport
+            .encode_body(&serde_json::json!({"a": 1}))
+            .await
+            .unwrap();
         assert_ne!(body, raw);
         let mut decoder = flate2::read::GzDecoder::new(body.as_slice());
         let mut decoded = Vec::new();
