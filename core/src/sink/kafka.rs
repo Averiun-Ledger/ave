@@ -46,10 +46,7 @@ impl KafkaTransport {
             .set("client.id", &config.client_id)
             .set("acks", config.acks.as_str())
             .set("compression.type", config.compression.as_str())
-            .set(
-                "message.timeout.ms",
-                config.request_timeout_ms.to_string(),
-            );
+            .set("message.timeout.ms", config.request_timeout_ms.to_string());
 
         // Idempotence requires `acks=all`; otherwise librdkafka rejects the
         // producer configuration. Keep it enabled only for the default acks.
@@ -69,14 +66,20 @@ impl KafkaTransport {
             KafkaSecurityConfig::Ssl => {
                 client_config.set("security.protocol", "ssl");
             }
-            KafkaSecurityConfig::SaslPlaintext { mechanism, username } => {
+            KafkaSecurityConfig::SaslPlaintext {
+                mechanism,
+                username,
+            } => {
                 client_config
                     .set("security.protocol", "sasl_plaintext")
                     .set("sasl.mechanism", mechanism.as_str())
                     .set("sasl.username", username)
                     .set("sasl.password", sasl_password(&sink_name)?);
             }
-            KafkaSecurityConfig::SaslSsl { mechanism, username } => {
+            KafkaSecurityConfig::SaslSsl {
+                mechanism,
+                username,
+            } => {
                 client_config
                     .set("security.protocol", "sasl_ssl")
                     .set("sasl.mechanism", mechanism.as_str())
@@ -85,9 +88,11 @@ impl KafkaTransport {
             }
         }
 
-        let producer = client_config
-            .create()
-            .map_err(|e| SinkError::ClientBuild(format!("failed to create kafka producer: {e}")))?;
+        let producer = client_config.create().map_err(|e| {
+            SinkError::ClientBuild(format!(
+                "failed to create kafka producer: {e}"
+            ))
+        })?;
 
         Ok(Self {
             sink_name,
@@ -105,7 +110,10 @@ impl KafkaTransport {
     ) -> Result<(), SinkError> {
         let record = FutureRecord::to(topic).key(key).payload(payload);
         self.producer
-            .send(record, Duration::from_millis(self.config.request_timeout_ms))
+            .send(
+                record,
+                Duration::from_millis(self.config.request_timeout_ms),
+            )
             .await
             .map(|delivery| {
                 debug!(
@@ -217,15 +225,15 @@ impl SinkTransport for KafkaTransport {
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
-        let topic =
-            self.topic_template.render(&light.subject_id, &light.schema_id);
-        let payload = serde_json::to_vec(&light).map_err(|e| {
-            SinkError::Delivery {
+        let topic = self
+            .topic_template
+            .render(&light.subject_id, &light.schema_id);
+        let payload =
+            serde_json::to_vec(&light).map_err(|e| SinkError::Delivery {
                 message: format!("JSON serialization failed: {e}"),
                 retryable: false,
                 retry_after_ms: None,
-            }
-        })?;
+            })?;
 
         self.produce(&topic, &light.subject_id, &payload).await
     }
@@ -265,9 +273,10 @@ mod tests {
             RDKafkaErrorCode::MessageBatchTooLarge,
             RDKafkaErrorCode::InvalidTopic,
         ] {
-            assert!(
-                matches!(map_produce_code(code), SinkError::Rejected { .. })
-            );
+            assert!(matches!(
+                map_produce_code(code),
+                SinkError::Rejected { .. }
+            ));
         }
     }
 
@@ -282,7 +291,10 @@ mod tests {
         ] {
             assert!(matches!(
                 map_produce_code(code),
-                SinkError::Delivery { retryable: true, .. }
+                SinkError::Delivery {
+                    retryable: true,
+                    ..
+                }
             ));
         }
     }

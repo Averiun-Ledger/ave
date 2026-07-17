@@ -6,10 +6,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ave_common::{
-    LightEvent, SinkTarget, SinkTypes,
+    LightEvent, SchemaType, SinkTarget, SinkTypes,
     identity::{PublicKey, keys::KeyPair},
     sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent},
-    SchemaType,
 };
 use ave_core::config::{
     KafkaAcks, KafkaCompression, KafkaSaslMechanism, KafkaSecurityConfig,
@@ -24,11 +23,13 @@ use serde_json::json;
 use std::str::FromStr;
 use tracing_test::traced_test;
 
+use common::TempEnvVar;
+use common::kafka_setup::{RedpandaEnv, RedpandaSaslEnv};
 use common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
-    create_subject, emit_confirm, emit_eol, emit_fact, emit_reject, emit_transfer,
-    get_subject, node_running,
+    create_subject, emit_confirm, emit_eol, emit_fact, emit_reject,
+    emit_transfer, get_subject, node_running,
     sink_setup::{
         assert_sink_contains_confirm, assert_sink_contains_create,
         assert_sink_contains_eol, assert_sink_contains_fact_full,
@@ -38,8 +39,6 @@ use common::{
         restart_config_with_peers, wait_for_sink_lagging_subjects,
     },
 };
-use common::kafka_setup::{RedpandaEnv, RedpandaSaslEnv};
-use common::TempEnvVar;
 
 const SUBJECT_ID: &str = "KAFKA-SUBJECT-ID";
 const SCHEMA_ID: &str = "Example";
@@ -141,7 +140,8 @@ async fn kafka_transport_happy_path() {
     assert_eq!(full["public_key"], "pk");
     assert_eq!(full["event_request_timestamp"], 1);
 
-    let light: serde_json::Value = serde_json::from_str(&messages[1].1).unwrap();
+    let light: serde_json::Value =
+        serde_json::from_str(&messages[1].1).unwrap();
     assert_eq!(light["subject_id"], SUBJECT_ID);
     assert_eq!(light["event_type"], "fact");
 
@@ -181,7 +181,8 @@ async fn kafka_transport_config_variants() {
             &format!("comp-{name}"),
             |cfg| cfg.compression = compression,
         );
-        let transport = KafkaTransport::new("test".to_string(), config).unwrap();
+        let transport =
+            KafkaTransport::new("test".to_string(), config).unwrap();
         transport
             .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
             .await
@@ -201,7 +202,8 @@ async fn kafka_transport_config_variants() {
             &format!("acks-{name}"),
             |cfg| cfg.acks = acks,
         );
-        let transport = KafkaTransport::new("test".to_string(), config).unwrap();
+        let transport =
+            KafkaTransport::new("test".to_string(), config).unwrap();
         transport
             .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
             .await
@@ -250,7 +252,13 @@ async fn kafka_transport_error_handling() {
     let transport = KafkaTransport::new("test".to_string(), config).unwrap();
     let err = transport.health_check().await.unwrap_err();
     assert!(
-        matches!(err, SinkError::Delivery { retryable: true, .. }),
+        matches!(
+            err,
+            SinkError::Delivery {
+                retryable: true,
+                ..
+            }
+        ),
         "expected retryable delivery error, got {err:?}"
     );
 
@@ -304,7 +312,8 @@ async fn kafka_transport_sasl() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].0, SUBJECT_ID);
 
-    let _bad_env = TempEnvVar::set("AVE_SINK_PASSWORD_SASL_BAD", "wrong-password");
+    let _bad_env =
+        TempEnvVar::set("AVE_SINK_PASSWORD_SASL_BAD", "wrong-password");
     let bad_config = KafkaSinkConfig {
         bootstrap_servers: env.bootstrap_servers.clone(),
         topic: "ave-sasl-bad".to_string(),
@@ -315,7 +324,8 @@ async fn kafka_transport_sasl() {
         request_timeout_ms: 30_000,
         ..KafkaSinkConfig::default()
     };
-    let transport = KafkaTransport::new("sasl-bad".to_string(), bad_config).unwrap();
+    let transport =
+        KafkaTransport::new("sasl-bad".to_string(), bad_config).unwrap();
     // Force an immediate connection attempt; librdkafka may report the bad
     // credentials as an auth error or, with some broker timings, as a
     // retryable connection timeout.
@@ -324,7 +334,11 @@ async fn kafka_transport_sasl() {
     assert!(
         matches!(
             err,
-            SinkError::Auth { .. } | SinkError::Delivery { retryable: true, .. }
+            SinkError::Auth { .. }
+                | SinkError::Delivery {
+                    retryable: true,
+                    ..
+                }
         ),
         "expected auth or retryable connection error, got {err:?}"
     );
@@ -369,16 +383,15 @@ async fn kafka_node_emits_all_event_types() {
     let env = RedpandaEnv::start().await;
     let topic = "ave-node-events";
 
-    let (mut nodes, mut dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             ephemeral: vec![],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
 
     let mut owner = nodes.remove(0);
     let mut new_owner = nodes.remove(0);
@@ -398,15 +411,10 @@ async fn kafka_node_emits_all_event_types() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &owner.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     // Restart owner with a Kafka sink configured for all event types.
     let owner_keys: KeyPair = owner.keys.clone();
@@ -447,18 +455,19 @@ async fn kafka_node_emits_all_event_types() {
     join_all(new_owner.handler.iter_mut()).await;
 
     let new_owner_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (new_owner, mut new_owner_dirs2) = create_node(restart_config_with_peers(
-        new_owner_keys,
-        new_owner_local_db,
-        new_owner_ext_db,
-        format!("/memory/{}", new_owner_port),
-        vec![ave_network::RoutingNode {
-            peer_id: owner_peer_id,
-            address: vec![owner_address],
-        }],
-        vec![],
-    ))
-    .await;
+    let (new_owner, mut new_owner_dirs2) =
+        create_node(restart_config_with_peers(
+            new_owner_keys,
+            new_owner_local_db,
+            new_owner_ext_db,
+            format!("/memory/{}", new_owner_port),
+            vec![ave_network::RoutingNode {
+                peer_id: owner_peer_id,
+                address: vec![owner_address],
+            }],
+            vec![],
+        ))
+        .await;
     new_owner_dirs.append(&mut new_owner_dirs2);
     node_running(&new_owner.api).await.unwrap();
 
@@ -585,15 +594,10 @@ async fn kafka_broker_down_and_catch_up() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &node.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     let subject_id_str = subject_id.to_string();
 
     for i in 1..=3 {
@@ -619,10 +623,7 @@ async fn kafka_broker_down_and_catch_up() {
         keys,
         local_db,
         ext_db,
-        format!(
-            "/memory/{}",
-            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
-        ),
+        format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
         vec![make_kafka_sink_entry(
             "kafka-down-sink",
             "127.0.0.1:1".to_string(),
@@ -648,10 +649,7 @@ async fn kafka_broker_down_and_catch_up() {
         keys,
         local_db,
         ext_db,
-        format!(
-            "/memory/{}",
-            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
-        ),
+        format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
         vec![make_kafka_sink_entry(
             "kafka-down-sink",
             env.bootstrap_servers.clone(),

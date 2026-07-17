@@ -615,7 +615,8 @@ impl HttpTransport {
         }
 
         tokio::task::spawn_blocking(move || {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            let mut encoder =
+                GzEncoder::new(Vec::new(), Compression::default());
             encoder
                 .write_all(&raw)
                 .and_then(|()| encoder.finish())

@@ -121,7 +121,8 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 }
 
                 if self.batch_delivery {
-                    self.pending.push(self.to_incoming_event(Arc::clone(&data)));
+                    self.pending
+                        .push(self.to_incoming_event(Arc::clone(&data)));
                     if self.pending.len() >= self.server.batch_size {
                         self.flush_pending(ctx, false).await;
                     } else if self.flush_timer.is_none() {
@@ -247,8 +248,10 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                             }
                         }
                         Err(e) => {
-                            self.report_error(ctx, subject_id, first_sn, e, true)
-                                .await;
+                            self.report_error(
+                                ctx, subject_id, first_sn, e, true,
+                            )
+                            .await;
                         }
                     }
                     return Ok(SinkSubjectWorkerResponse::Ok);
@@ -284,8 +287,14 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
 
                 match send_result {
                     Ok(()) => {
-                        self.report_success(ctx, subject_id.clone(), sn, true, 1)
-                            .await;
+                        self.report_success(
+                            ctx,
+                            subject_id.clone(),
+                            sn,
+                            true,
+                            1,
+                        )
+                        .await;
 
                         if !remaining.is_empty() {
                             let mut remaining = remaining;
@@ -432,8 +441,13 @@ impl SinkSubjectWorker {
             }
         } else {
             match self.client.send_batch(events).await {
-                Ok(()) => self.report_success(ctx, subject_id, last_sn, false, count).await,
-                Err(e) => self.report_error(ctx, subject_id, first_sn, e, false).await,
+                Ok(()) => {
+                    self.report_success(ctx, subject_id, last_sn, false, count)
+                        .await
+                }
+                Err(e) => {
+                    self.report_error(ctx, subject_id, first_sn, e, false).await
+                }
             }
         }
     }
@@ -496,14 +510,14 @@ impl SinkSubjectWorker {
                 error: e.to_string(),
                 from_catch_up,
             },
-            e @ SinkError::Delivery { retryable: true, .. } => {
-                SinkSubjectWorkerError::DeliveryFailed {
-                    subject_id,
-                    sn,
-                    reason: e.to_string(),
-                    from_catch_up,
-                }
-            }
+            e @ SinkError::Delivery {
+                retryable: true, ..
+            } => SinkSubjectWorkerError::DeliveryFailed {
+                subject_id,
+                sn,
+                reason: e.to_string(),
+                from_catch_up,
+            },
             // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
             e => SinkSubjectWorkerError::Blocked {
                 subject_id,

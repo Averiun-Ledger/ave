@@ -2,13 +2,13 @@
 use std::env;
 #[cfg(feature = "test")]
 use std::io::ErrorKind;
+use std::time::Instant;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
 };
-use std::time::Instant;
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
@@ -186,7 +186,8 @@ impl CompilerSupport {
         shared_target_dir: &Path,
         vendor_dir: Option<&Path>,
     ) -> String {
-        let mut config = ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
+        let mut config =
+            ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
         config = config
             .replace("{target_dir}", &shared_target_dir.to_string_lossy());
 
@@ -915,7 +916,8 @@ impl CompilerSupport {
         contract: &str,
         contract_path: &Path,
         initial_value: Value,
-    ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError> {
+    ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
+    {
         let started_at = Instant::now();
         let result = async {
             let contract_hash =
@@ -1283,7 +1285,9 @@ fn map_runtime_error_to_compiler_error(error: RuntimeError) -> CompilerError {
         RuntimeError::DeserializationFailed(details) => {
             CompilerError::WasmDeserializationFailed { details }
         }
-        RuntimeError::InvalidModule(kind) => CompilerError::InvalidModule { kind },
+        RuntimeError::InvalidModule(kind) => {
+            CompilerError::InvalidModule { kind }
+        }
         RuntimeError::EntryPointNotFound { function } => {
             CompilerError::EntryPointNotFound { function }
         }

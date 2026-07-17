@@ -78,9 +78,11 @@ pub async fn obtain_token(
     })?;
 
     let mut token: TokenResponse =
-        res.json::<TokenResponse>().await.map_err(|e| SinkError::Auth {
-            message: format!("failed to parse token response: {e}"),
-        })?;
+        res.json::<TokenResponse>()
+            .await
+            .map_err(|e| SinkError::Auth {
+                message: format!("failed to parse token response: {e}"),
+            })?;
 
     token.obtained_at = Some(std::time::Instant::now());
 

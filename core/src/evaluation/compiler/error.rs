@@ -70,4 +70,3 @@ pub enum CompilerError {
     #[error("contract check failed: {error}")]
     ContractCheckFailed { error: String },
 }
-

@@ -192,10 +192,7 @@ pub enum SinkWorkerError {
     /// The per-subject worker died unexpectedly and was recreated. The manager
     /// must reset its notification cursor so events lost in the dead worker
     /// are recovered by catch-up instead of skipped by the sequential gate.
-    SubjectWorkerRestarted {
-        sink: String,
-        subject_id: String,
-    },
+    SubjectWorkerRestarted { sink: String, subject_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -733,10 +730,7 @@ impl Handler<SinkManager> for SinkManager {
         }
 
         match error {
-            SinkWorkerError::SubjectWorkerRestarted {
-                sink,
-                subject_id,
-            } => {
+            SinkWorkerError::SubjectWorkerRestarted { sink, subject_id } => {
                 info!(
                     msg_type = "SubjectWorkerRestarted",
                     sink = %sink,
@@ -1416,8 +1410,10 @@ impl SinkManager {
                             .or_default()
                             .insert(subject_id.clone());
                     } else {
-                        self.last_notified
-                            .insert((sink_name.clone(), subject_id.clone()), sn);
+                        self.last_notified.insert(
+                            (sink_name.clone(), subject_id.clone()),
+                            sn,
+                        );
                     }
                 }
                 Err(e) => {

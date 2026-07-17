@@ -7931,7 +7931,10 @@ async fn sink_signature_reused_across_retries() {
     let payload_bytes = borsh::to_vec(&(&content, &timestamp)).unwrap();
     let hash = BLAKE3_HASHER.hash(&payload_bytes);
     let signer = PublicKey::from_str(
-        first.public_key.as_ref().expect("public key must be present"),
+        first
+            .public_key
+            .as_ref()
+            .expect("public key must be present"),
     )
     .unwrap();
     let signature = SignatureIdentifier::from_str(signature).unwrap();
@@ -7972,7 +7975,8 @@ async fn sink_idempotency_headers() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8080,7 +8084,8 @@ async fn sink_proxy_delivery() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8175,7 +8180,8 @@ async fn sink_proxy_delivery() {
 #[tokio::test]
 async fn sink_proxy_delivery_with_auth() {
     let proxy_password_env = "AVE_SINK_PROXY_PASSWORD_PROXY_AUTH_SINK";
-    let _proxy_password_guard = TempEnvVar::set(proxy_password_env, "proxy-secret");
+    let _proxy_password_guard =
+        TempEnvVar::set(proxy_password_env, "proxy-secret");
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
@@ -8187,7 +8193,8 @@ async fn sink_proxy_delivery_with_auth() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8242,10 +8249,8 @@ async fn sink_proxy_delivery_with_auth() {
     );
     let proxied = proxy.proxied_requests().await;
     assert!(
-        proxied
-            .iter()
-            .any(|r| r.proxy_authorization.as_deref()
-                == Some(expected_auth.as_str())),
+        proxied.iter().any(|r| r.proxy_authorization.as_deref()
+            == Some(expected_auth.as_str())),
         "the proxy must receive the basic auth header, got {:?}",
         proxied
     );
@@ -8277,7 +8282,8 @@ async fn sink_retry_after_respected() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8372,7 +8378,8 @@ async fn sink_retry_after_capped() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8465,7 +8472,8 @@ async fn sink_batch_delivery_catch_up() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8526,8 +8534,8 @@ async fn sink_batch_delivery_catch_up() {
         1,
         "the catch-up must be a single batch POST"
     );
-    let body: Vec<serde_json::Value> =
-        serde_json::from_slice(&raw_bodies[0]).expect("body must be a JSON array");
+    let body: Vec<serde_json::Value> = serde_json::from_slice(&raw_bodies[0])
+        .expect("body must be a JSON array");
     assert_eq!(body.len(), 4, "the batch must contain the four events");
 
     let batch_lens = sink.batch_lens().await;
@@ -8572,7 +8580,8 @@ async fn sink_batch_delivery_gzip() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8673,7 +8682,8 @@ async fn sink_batch_delivery_live() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8791,7 +8801,8 @@ async fn sink_batch_delivery_burst_single_post() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -8908,7 +8919,8 @@ async fn sink_live_burst_no_lagging() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -9012,7 +9024,8 @@ async fn sink_proxy_no_proxy_bypass() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -9093,7 +9106,8 @@ async fn sink_idempotency_key_stable_across_retries() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -9196,7 +9210,8 @@ async fn sink_batch_delivery_failure_retries_whole_batch() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,
@@ -9303,7 +9318,8 @@ async fn sink_batch_delivery_mixed_full_light() {
     .await;
     node_running(&node.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
 
     emit_fact(
         &node.api,

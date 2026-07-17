@@ -3144,8 +3144,11 @@ fn fetch_events_with_offset(
     let order_clause = if query.reverse { "sn DESC" } else { "sn ASC" };
     // The outer query joins `events e` with `page_keys k`, and both expose
     // `sn`: the column must be qualified with its alias there.
-    let outer_order_clause =
-        if query.reverse { "e.sn DESC" } else { "e.sn ASC" };
+    let outer_order_clause = if query.reverse {
+        "e.sn DESC"
+    } else {
+        "e.sn ASC"
+    };
 
     let sql = format!(
         r#"

@@ -1499,12 +1499,10 @@ fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
             operation: "set fuel",
             details,
         },
-        RuntimeError::InstantiationFailed(details) => {
-            RunnerError::WasmError {
-                operation: "instantiate",
-                details,
-            }
-        }
+        RuntimeError::InstantiationFailed(details) => RunnerError::WasmError {
+            operation: "instantiate",
+            details,
+        },
         RuntimeError::MemoryAllocationFailed(details) => {
             RunnerError::MemoryError {
                 operation: "contract memory operation",

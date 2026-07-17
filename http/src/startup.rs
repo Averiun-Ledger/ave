@@ -925,8 +925,9 @@ mod tests {
             let Some((path, value)) = line.rsplit_once(": ") else {
                 continue;
             };
-            let is_string_value =
-                value.starts_with('"') && value.ends_with('"') && value.len() >= 2;
+            let is_string_value = value.starts_with('"')
+                && value.ends_with('"')
+                && value.len() >= 2;
             if !is_string_value {
                 continue;
             }
@@ -938,9 +939,7 @@ mod tests {
             let last_segment = path.rsplit('.').next().unwrap_or(path);
             let segment_lower = last_segment.to_lowercase();
             assert!(
-                !secret_words
-                    .iter()
-                    .any(|word| segment_lower.contains(word)),
+                !secret_words.iter().any(|word| segment_lower.contains(word)),
                 "config key '{path}' looks like a secret but is not redacted in the dump"
             );
         }

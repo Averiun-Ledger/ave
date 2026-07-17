@@ -33,7 +33,9 @@ pub trait SinkTransport: Send + Sync + std::fmt::Debug {
         for event in events {
             match event {
                 IncomingSinkEvent::Full(data) => self.send(data).await?,
-                IncomingSinkEvent::Light(light) => self.send_light(light).await?,
+                IncomingSinkEvent::Light(light) => {
+                    self.send_light(light).await?
+                }
             }
         }
         Ok(())
@@ -109,8 +111,9 @@ pub fn build_transport(
             http.clone(),
             signer,
         )?)),
-        SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(
-            KafkaTransport::new(server.server.clone(), kafka.clone())?,
-        )),
+        SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(KafkaTransport::new(
+            server.server.clone(),
+            kafka.clone(),
+        )?)),
     }
 }

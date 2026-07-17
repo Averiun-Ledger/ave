@@ -855,10 +855,7 @@ impl TestProxy {
             proxy_authorization,
         });
 
-        let mut out = state
-            .client
-            .request(method, &target)
-            .body(body.to_vec());
+        let mut out = state.client.request(method, &target).body(body.to_vec());
         for (name, value) in headers.iter() {
             if name == axum::http::header::HOST
                 || name == axum::http::header::CONTENT_LENGTH
