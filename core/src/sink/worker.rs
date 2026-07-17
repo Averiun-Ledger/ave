@@ -271,11 +271,49 @@ impl Handler<SinkWorker> for SinkWorker {
 
                 let child_ref =
                     self.ensure_subject_worker(&subject_id, ctx).await?;
-                child_ref
+                if let Err(e) = child_ref
                     .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::DeliverEvent(
                         Arc::clone(&data),
                     ))
-                    .await?;
+                    .await
+                {
+                    // The subject worker died between ensure and tell; drop the
+                    // stale reference so the next event recreates it, and notify
+                    // the manager so it resets its notification cursor and
+                    // recovers any lost event via catch-up.
+                    self.active_subject_workers.remove(&subject_id);
+                    match ctx.get_parent::<SinkManager>().await {
+                        Ok(parent) => {
+                            if let Err(err) = parent
+                                .emit_error(
+                                    SinkWorkerError::SubjectWorkerRestarted {
+                                        sink: self.sink_name.clone(),
+                                        subject_id: subject_id.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                error!(
+                                    msg_type = "ReportSubjectWorkerRestarted",
+                                    sink = %self.sink_name,
+                                    subject_id = %subject_id,
+                                    error = %err,
+                                    "Failed to report subject worker restart"
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            error!(
+                                msg_type = "GetParent",
+                                sink = %self.sink_name,
+                                subject_id = %subject_id,
+                                error = %err,
+                                "Failed to get parent manager on subject worker restart"
+                            );
+                        }
+                    }
+                    return Err(e);
+                }
 
                 self.schedule_child_shutdown(ctx, subject_id.clone());
 

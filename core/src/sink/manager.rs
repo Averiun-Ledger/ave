@@ -188,6 +188,13 @@ pub enum SinkWorkerError {
         subject_id: String,
         sn: u64,
     },
+    /// The per-subject worker died unexpectedly and was recreated. The manager
+    /// must reset its notification cursor so events lost in the dead worker
+    /// are recovered by catch-up instead of skipped by the sequential gate.
+    SubjectWorkerRestarted {
+        sink: String,
+        subject_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +280,13 @@ pub struct SinkManager {
     /// while the first catch-up is still in flight.
     #[serde(skip)]
     catch_up_in_flight: HashSet<(String, String)>, // (sink, subject_id)
+    /// Highest SN already forwarded to a sink/subject worker. Used for the
+    /// sequential gate instead of the delivery cursor so that live batching
+    /// can accumulate events while earlier events are still buffered. Not
+    /// persisted: it is rebuilt from forwarded events and reset to the cursor
+    /// on worker restart/recovery.
+    #[serde(skip)]
+    last_notified: HashMap<(String, String), u64>, // (sink, subject_id) -> sn
 }
 
 impl std::fmt::Debug for SinkManager {
@@ -341,6 +355,7 @@ impl BorshDeserialize for SinkManager {
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashSet::new(),
+            last_notified: HashMap::new(),
         })
     }
 }
@@ -374,6 +389,7 @@ impl PersistentActor for SinkManager {
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashSet::new(),
+            last_notified: HashMap::new(),
         }
     }
 
@@ -454,6 +470,7 @@ impl PersistentActor for SinkManager {
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: self.catch_up_in_flight.clone(),
+            last_notified: self.last_notified.clone(),
         })
     }
 
@@ -704,10 +721,58 @@ impl Handler<SinkManager> for SinkManager {
                 SinkWorkerError::SubjectNotFound { sink, .. } => {
                     metrics.observe_sink_event(sink, "subject_not_found");
                 }
+                SinkWorkerError::SubjectWorkerRestarted { .. } => {
+                    // No metric: this is a lifecycle signal, not a delivery
+                    // outcome.
+                }
             }
         }
 
         match error {
+            SinkWorkerError::SubjectWorkerRestarted {
+                sink,
+                subject_id,
+            } => {
+                info!(
+                    msg_type = "SubjectWorkerRestarted",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    "Subject worker recreated; resetting notification state"
+                );
+                self.reset_last_notified_for_subject(&sink, &subject_id);
+
+                // If the cursor is behind last_seen, events were lost or the
+                // subject was lagging; ensure catch-up recovers them in order.
+                let cursor_sn = self
+                    .cursors
+                    .get(&(sink.clone(), subject_id.clone()))
+                    .copied();
+                let last_sn =
+                    self.last_seen.get(&subject_id).copied().unwrap_or(0);
+                let is_outdated = match cursor_sn {
+                    Some(sn) => sn < last_sn,
+                    None => last_sn > 0,
+                };
+                if is_outdated {
+                    self.try_insert_lagging(&sink, subject_id.clone());
+                    if let Err(e) = self
+                        .handle_request_catch_up(
+                            sink.clone(),
+                            vec![subject_id.clone()],
+                            ctx,
+                        )
+                        .await
+                    {
+                        error!(
+                            msg_type = "RestartCatchUp",
+                            sink = %sink,
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to trigger catch-up after subject worker restart"
+                        );
+                    }
+                }
+            }
             SinkWorkerError::DeliveryFailed {
                 sink,
                 subject_id,
@@ -865,6 +930,34 @@ impl SinkManager {
             let count =
                 self.lagging.get(sink).map(|s| s.len() as i64).unwrap_or(0);
             metrics.set_sink_lagging_subjects(sink, count);
+        }
+    }
+
+    /// Reset the notification cursor for a single subject to the delivery
+    /// cursor. Called when a worker is recreated or catch-up state changes, so
+    /// that events lost in a dead worker are not skipped by the sequential gate.
+    fn reset_last_notified_for_subject(
+        &mut self,
+        sink: &str,
+        subject_id: &str,
+    ) {
+        let key = (sink.to_string(), subject_id.to_string());
+        if let Some(cursor) = self.cursors.get(&key).copied() {
+            self.last_notified.insert(key, cursor);
+        } else {
+            self.last_notified.remove(&key);
+        }
+    }
+
+    /// Reset the notification cursor for every subject of a sink to its
+    /// delivery cursor. Used when a sink worker stops or is recreated.
+    fn reset_last_notified_for_sink(&mut self, sink: &str) {
+        self.last_notified.retain(|(s, _), _| s != sink);
+        for ((s, subject_id), cursor) in self.cursors.iter() {
+            if s == sink {
+                self.last_notified
+                    .insert((s.clone(), subject_id.clone()), *cursor);
+            }
         }
     }
 
@@ -1041,6 +1134,10 @@ impl SinkManager {
                 {
                     error!(msg_type = "WatchWorker", sink = %sink_name, error = %e, "Failed to watch sink worker");
                 }
+                // Reset notification cursors for this sink: any events notified
+                // to the previous worker but not yet delivered are lost, so they
+                // must be recovered by catch-up rather than skipped by the gate.
+                self.reset_last_notified_for_sink(sink_name);
                 Ok(worker_ref)
             }
         }
@@ -1122,6 +1219,9 @@ impl SinkManager {
         }
         // Any catch-up running in the dead worker is no longer running.
         self.catch_up_in_flight.retain(|(s, _)| s != &sink);
+        // Events notified to the dead worker but not yet delivered are lost;
+        // reset notification cursors so the gate does not skip them.
+        self.reset_last_notified_for_sink(&sink);
 
         let mut outdated = Vec::new();
         for (subject_id, &last_sn) in &self.last_seen {
@@ -1258,17 +1358,24 @@ impl SinkManager {
                 continue;
             }
 
-            // Sequential delivery check: the next event must be exactly cursor+1
-            // (or 0 if no cursor exists). If there's a gap, the subject must
-            // enter lagging so catch-up delivers missing events in order.
+            // Sequential delivery check: the next event must be exactly the
+            // last forwarded SN + 1 (or cursor+1 if nothing has been forwarded
+            // yet). Using `last_notified` instead of the delivery cursor lets
+            // batching workers buffer multiple live events while earlier events
+            // are still in flight. The cursor is only used as a fallback after
+            // a worker restart, so events lost in a dead worker are recovered
+            // by catch-up instead of skipped.
             let cursor_sn = self
                 .cursors
                 .get(&(sink_name.clone(), subject_id.clone()))
                 .copied();
-            let expected_sn = match cursor_sn {
-                Some(sn) => sn + 1,
-                None => 0,
-            };
+            let expected_sn = self
+                .last_notified
+                .get(&(sink_name.clone(), subject_id.clone()))
+                .copied()
+                .or(cursor_sn)
+                .map(|sn| sn + 1)
+                .unwrap_or(0);
             if sn != expected_sn {
                 warn!(
                     msg_type = "SequentialGap",
@@ -1303,6 +1410,9 @@ impl SinkManager {
                             .entry(sink_name.clone())
                             .or_default()
                             .insert(subject_id.clone());
+                    } else {
+                        self.last_notified
+                            .insert((sink_name.clone(), subject_id.clone()), sn);
                     }
                 }
                 Err(e) => {
@@ -1362,11 +1472,13 @@ impl SinkManager {
                     .unwrap_or(false);
                 if sn >= last_sn && is_lagging {
                     self.remove_lagging_subject(&sink, &subject_id);
+                    self.reset_last_notified_for_subject(&sink, &subject_id);
                 } else if is_lagging && sn < last_sn {
                     // The subject is lagging and a new event just advanced the
                     // cursor. Start catch-up from the next SN so any events
                     // emitted while a delivery was in flight are recovered in
                     // order without duplicating the SN that was in flight.
+                    self.reset_last_notified_for_subject(&sink, &subject_id);
                     if let Err(e) = self
                         .handle_request_catch_up(
                             sink.clone(),
@@ -1424,6 +1536,9 @@ impl SinkManager {
         let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
         self.catch_up_in_flight
             .remove(&(sink.clone(), subject_id.clone()));
+        // Reset notification cursor to the delivery cursor: from now on new live
+        // events will be gated against the delivered state.
+        self.reset_last_notified_for_subject(&sink, &subject_id);
 
         if cursor_sn.is_some_and(|cursor| cursor >= last_sn) {
             self.remove_lagging_subject(&sink, &subject_id);

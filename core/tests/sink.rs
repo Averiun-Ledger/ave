@@ -14,7 +14,7 @@ use ave_common::{
     },
     sink::{
         DataToSinkEvent, HttpCompression, HttpProxyConfig, HttpTlsConfig,
-        IncomingSinkEvent, SinkAuthConfig,
+        IncomingSinkEvent, SinkAuthConfig, SinkTransportConfig,
     },
 };
 use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
@@ -8763,6 +8763,230 @@ async fn sink_batch_delivery_live() {
             .all(|h| h.subject_id.is_none() && h.key.is_none()),
         "batch deliveries must not carry per-event idempotency headers"
     );
+}
+
+/// Batch delivery of a live burst: when several facts are emitted without
+/// awaiting each one, the manager must forward them all to the same worker so
+/// they are flushed as a single JSON-array POST, not diverted to catch-up.
+///
+/// **Flow:**
+/// 1. Create governance and schema; restart with a batch sink (`batch_size`
+///    equal to the total number of events, high `batch_max_delay_ms` so the
+///    timer does not interfere).
+/// 2. Create a subject and emit three facts asynchronously, then one final
+///    synchronous fact to flush the pipeline.
+///
+/// **Verifications:**
+/// - All five events (create + four facts) arrive in one single POST.
+/// - The sink never enters `lagging` state.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_burst_single_post() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let mut entry = make_sink_entry_batch(
+        "batch-burst-sink",
+        sink.url(),
+        Some(governance_id.to_string()),
+        BTreeSet::from([SinkTypes::All]),
+        HttpCompression::None,
+    );
+    // One batch for the whole burst; the timer must not fire during the test.
+    entry.servers[0].batch_size = 5;
+    if let SinkTransportConfig::Http(ref mut http) = entry.servers[0].transport
+    {
+        http.batch_max_delay_ms = 60_000;
+    }
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![entry],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Burst: three async facts followed by one sync fact that flushes the
+    // pipeline.
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 4}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_count(5, true).await;
+
+    // The whole burst must have been delivered as a single JSON-array POST.
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(
+        batch_lens,
+        vec![5],
+        "the burst must be delivered as one batch of five events"
+    );
+
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id.to_string())
+        .map(|e| e.sn())
+        .collect();
+    assert_eq!(sns, vec![0, 1, 2, 3, 4]);
+
+    // The sequential gate must not have diverted any event to lagging.
+    assert_sink_not_lagging(&node.api, "batch-burst-sink").await;
+}
+
+/// Live burst without batch delivery: events emitted in a burst must be
+/// delivered in order without entering `lagging`, even when earlier events
+/// are still in flight.
+///
+/// **Flow:**
+/// 1. Create governance and schema; restart with a regular (non-batch) sink.
+/// 2. Create a subject and emit four facts asynchronously, then one final
+///    synchronous fact to flush the pipeline.
+///
+/// **Verifications:**
+/// - All six events (create + five facts) arrive in SN order.
+/// - The sink never enters `lagging` state.
+#[traced_test]
+#[tokio::test]
+async fn sink_live_burst_no_lagging() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "live-burst-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Slow the sink down so the burst arrives while the first delivery is
+    // still in flight. Without the notification gate this forces a
+    // SequentialGap and the subject would enter lagging.
+    sink.set_mode(ResponseMode::Timeout(50)).await;
+
+    // Burst: four async facts followed by one sync fact that flushes the
+    // pipeline.
+    for i in 1..=4 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 5}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_count(6, true).await;
+
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id.to_string())
+        .map(|e| e.sn())
+        .collect();
+    assert_eq!(sns, vec![0, 1, 2, 3, 4, 5]);
+
+    // The sequential gate must not have diverted any event to lagging.
+    assert_sink_not_lagging(&node.api, "live-burst-sink").await;
 }
 
 /// Proxy `no_proxy` bypass: hosts listed in `proxy.no_proxy` must be
