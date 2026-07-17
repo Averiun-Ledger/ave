@@ -63,6 +63,7 @@ pub enum SinkManagerMessage {
         subject_id: String,
         sn: u64,
         result: SendResult,
+        count: u64,
     },
     SinkRecovered {
         sink: String,
@@ -634,9 +635,12 @@ impl Handler<SinkManager> for SinkManager {
                 subject_id,
                 sn,
                 result,
+                count,
             } => {
-                self.handle_update_progress(sink, subject_id, sn, result, ctx)
-                    .await?;
+                self.handle_update_progress(
+                    sink, subject_id, sn, result, count, ctx,
+                )
+                .await?;
             }
             SinkManagerMessage::SinkRecovered { sink } => {
                 self.handle_sink_recovered(sink, ctx).await?;
@@ -874,6 +878,7 @@ impl Handler<SinkManager> for SinkManager {
                         subject_id,
                         sn,
                         SendResult::SubjectNotFound,
+                        1,
                         ctx,
                     )
                     .await
@@ -1434,12 +1439,13 @@ impl SinkManager {
         subject_id: String,
         sn: u64,
         result: SendResult,
+        count: u64,
         ctx: &mut ActorContext<SinkManager>,
     ) -> Result<(), ActorError> {
         if let Some(metrics) = try_core_metrics() {
             match result {
                 SendResult::Success => {
-                    metrics.observe_sink_event(&sink, "success")
+                    metrics.observe_sink_event_n(&sink, "success", count)
                 }
                 SendResult::SubjectNotFound => {
                     metrics.observe_sink_event(&sink, "subject_not_found");

@@ -48,11 +48,13 @@ pub enum SinkWorkerMessage {
         subject_id: String,
         sn: u64,
         result: crate::sink::manager::SendResult,
+        count: u64,
     },
     CatchUpProgress {
         subject_id: String,
         sn: u64,
         result: crate::sink::manager::SendResult,
+        count: u64,
     },
     CatchUpCompleted {
         subject_id: String,
@@ -502,6 +504,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 subject_id,
                 sn,
                 result,
+                count,
             } => {
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
@@ -537,6 +540,7 @@ impl Handler<SinkWorker> for SinkWorker {
                                     subject_id: subject_id.clone(),
                                     sn,
                                     result: SendResult::Success,
+                                    count,
                                 })
                                 .await
                             {
@@ -555,6 +559,7 @@ impl Handler<SinkWorker> for SinkWorker {
                 subject_id,
                 sn,
                 result,
+                count,
             } => {
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
@@ -568,6 +573,7 @@ impl Handler<SinkWorker> for SinkWorker {
                                     subject_id: subject_id.clone(),
                                     sn,
                                     result: SendResult::Success,
+                                    count,
                                 })
                                 .await
                             {

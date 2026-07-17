@@ -38,6 +38,16 @@ pub trait SinkTransport: Send + Sync + std::fmt::Debug {
         }
         Ok(())
     }
+    /// Best-effort batch delivery: a single attempt, no retries. Used during
+    /// Pause/Stop teardown where blocking on retries would delay actor
+    /// shutdown; the cursor guarantees re-delivery via catch-up. The default
+    /// implementation delegates to `send_batch`.
+    async fn send_batch_best_effort(
+        &self,
+        events: Vec<IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        self.send_batch(events).await
+    }
     /// Health check of the endpoint.
     async fn health_check(&self) -> Result<(), SinkError>;
     /// Transport startup logic (HTTP: eager OAuth2 token fetch).

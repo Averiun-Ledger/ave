@@ -6,10 +6,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    NotPersistentActor, Response, TimerKey,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info_span};
+use tracing::{error, info_span, warn};
 
 use crate::config::{SinkServer, SinkTransportConfig};
 use crate::sink::SinkError;
@@ -71,8 +71,9 @@ pub struct SinkSubjectWorker {
     batch_max_delay_ms: u64,
     /// Live events buffered for the next batch flush.
     pending: Vec<IncomingSinkEvent>,
-    /// Whether a `FlushBatch` timer is already scheduled.
-    flush_scheduled: bool,
+    /// Active `FlushBatch` timer, if any. Stored so it can be cancelled when
+    /// the buffer is flushed inline, preventing stale timers from firing.
+    flush_timer: Option<TimerKey>,
 }
 
 impl std::fmt::Debug for SinkSubjectWorker {
@@ -122,16 +123,16 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 if self.batch_delivery {
                     self.pending.push(self.to_incoming_event(&data));
                     if self.pending.len() >= self.server.batch_size {
-                        self.flush_pending(ctx).await;
-                    } else if !self.flush_scheduled {
+                        self.flush_pending(ctx, false).await;
+                    } else if self.flush_timer.is_none() {
                         match ctx.schedule_once(
                             Duration::from_millis(self.batch_max_delay_ms),
                             SinkSubjectWorkerMessage::FlushBatch,
                         ) {
-                            Ok(_) => self.flush_scheduled = true,
+                            Ok(key) => self.flush_timer = Some(key),
                             Err(e) => {
                                 error!(msg_type = "ScheduleFlush", sink = %self.sink_name, error = %e, "Failed to schedule batch flush; flushing inline");
-                                self.flush_pending(ctx).await;
+                                self.flush_pending(ctx, false).await;
                             }
                         }
                     }
@@ -152,7 +153,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
 
                 match send_result {
                     Ok(()) => {
-                        self.report_success(ctx, subject_id, sn, false).await
+                        self.report_success(ctx, subject_id, sn, false, 1).await
                     }
                     Err(e) => {
                         self.report_error(ctx, subject_id, sn, e, false).await
@@ -222,6 +223,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                         incoming.first().map_or(from_sn, IncomingSinkEvent::sn);
                     let last_sn =
                         incoming.last().map_or(first_sn, IncomingSinkEvent::sn);
+                    let count = incoming.len() as u64;
 
                     match self.client.send_batch(incoming).await {
                         Ok(()) => {
@@ -230,6 +232,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                                 subject_id.clone(),
                                 last_sn,
                                 true,
+                                count,
                             )
                             .await;
                             let self_ref = ctx.reference().await?;
@@ -281,7 +284,7 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
 
                 match send_result {
                     Ok(()) => {
-                        self.report_success(ctx, subject_id.clone(), sn, true)
+                        self.report_success(ctx, subject_id.clone(), sn, true, 1)
                             .await;
 
                         if !remaining.is_empty() {
@@ -320,13 +323,14 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::FlushBatch => {
-                self.flush_pending(ctx).await;
+                self.flush_pending(ctx, false).await;
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Pause => {
-                // Flush first so buffered events are not held in memory (and
-                // possibly duplicated by a later catch-up) while paused.
-                self.flush_pending(ctx).await;
+                // Flush best-effort so buffered events are not held in memory
+                // while paused, without blocking on retries against a sink we
+                // already know is unhealthy.
+                self.flush_pending(ctx, true).await;
                 self.paused = true;
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
@@ -335,8 +339,10 @@ impl Handler<SinkSubjectWorker> for SinkSubjectWorker {
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Stop => {
-                // Best effort: do not lose buffered events on shutdown.
-                self.flush_pending(ctx).await;
+                // Best-effort flush: a single attempt during teardown. The
+                // cursor guarantees re-delivery via catch-up when the sink
+                // comes back; retries here would delay actor shutdown.
+                self.flush_pending(ctx, true).await;
                 ctx.stop(None).await;
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
@@ -366,7 +372,7 @@ impl SinkSubjectWorker {
             batch_delivery,
             batch_max_delay_ms,
             pending: Vec::new(),
-            flush_scheduled: false,
+            flush_timer: None,
         }
     }
 
@@ -390,8 +396,18 @@ impl SinkSubjectWorker {
 
     /// Send the buffered live events as a single batch delivery and report
     /// the outcome to the parent worker. No-op when the buffer is empty.
-    async fn flush_pending(&mut self, ctx: &mut ActorContext<SinkSubjectWorker>) {
-        self.flush_scheduled = false;
+    ///
+    /// When `best_effort` is `true` (Pause/Stop teardown), a single attempt is
+    /// made, failures are only logged, and success advances the cursor so the
+    /// subject does not pay catch-up for events already delivered.
+    async fn flush_pending(
+        &mut self,
+        ctx: &mut ActorContext<SinkSubjectWorker>,
+        best_effort: bool,
+    ) {
+        if let Some(key) = self.flush_timer.take() {
+            ctx.cancel_timer(key);
+        }
         let events = std::mem::take(&mut self.pending);
         let Some(first) = events.first() else {
             return;
@@ -399,33 +415,54 @@ impl SinkSubjectWorker {
         let subject_id = first.subject_id().to_owned();
         let first_sn = first.sn();
         let last_sn = events.last().map_or(first_sn, IncomingSinkEvent::sn);
+        let count = events.len() as u64;
 
-        match self.client.send_batch(events).await {
-            Ok(()) => self.report_success(ctx, subject_id, last_sn, false).await,
-            Err(e) => self.report_error(ctx, subject_id, first_sn, e, false).await,
+        if best_effort {
+            if let Err(e) = self.client.send_batch_best_effort(events).await {
+                warn!(
+                    msg_type = "FlushBestEffortFailed",
+                    sink = %self.sink_name,
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Best-effort flush failed during teardown; will recover via catch-up"
+                );
+            } else {
+                self.report_success(ctx, subject_id, last_sn, false, count)
+                    .await;
+            }
+        } else {
+            match self.client.send_batch(events).await {
+                Ok(()) => self.report_success(ctx, subject_id, last_sn, false, count).await,
+                Err(e) => self.report_error(ctx, subject_id, first_sn, e, false).await,
+            }
         }
     }
 
     /// Report a successful delivery to the parent worker: `DeliveryResult`
-    /// for live events, `CatchUpProgress` during catch-up.
+    /// for live events, `CatchUpProgress` during catch-up. `count` is the
+    /// number of events actually delivered (batch size for batch flushes, 1
+    /// for individual deliveries).
     async fn report_success(
         &self,
         ctx: &mut ActorContext<SinkSubjectWorker>,
         subject_id: String,
         sn: u64,
         from_catch_up: bool,
+        count: u64,
     ) {
         let message = if from_catch_up {
             SinkWorkerMessage::CatchUpProgress {
                 subject_id,
                 sn,
                 result: SendResult::Success,
+                count,
             }
         } else {
             SinkWorkerMessage::DeliveryResult {
                 subject_id,
                 sn,
                 result: SendResult::Success,
+                count,
             }
         };
         match ctx.get_parent::<SinkWorker>().await {

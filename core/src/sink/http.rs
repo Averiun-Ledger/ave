@@ -729,6 +729,32 @@ impl SinkTransport for HttpTransport {
         self.send_with_retry(&url, payload, None).await
     }
 
+    /// Best-effort batch delivery: a single attempt, no retries and no auth
+    /// refresh. Used during Pause/Stop teardown where blocking on retries
+    /// would delay actor shutdown; the cursor guarantees re-delivery via
+    /// catch-up.
+    async fn send_batch_best_effort(
+        &self,
+        events: Vec<IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        let Some(first) = events.first() else {
+            return Ok(());
+        };
+        let schema_id = match first {
+            IncomingSinkEvent::Full(data) => {
+                data.payload.get_subject_schema().1
+            }
+            IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+        };
+        let url = self
+            .url_template
+            .render_url_encoded(first.subject_id(), &schema_id);
+        let payload = self.encode_body(&events)?;
+        let signature_headers = self.sign_payload(&payload).await?;
+        self.timed_send_once(&url, &payload, &signature_headers, None)
+            .await
+    }
+
     /// If the sink has OAuth2 auth config, obtain a token eagerly on startup.
     async fn warm_up(&self) -> Result<(), SinkError> {
         if let Some(ref auth) = self.config.auth

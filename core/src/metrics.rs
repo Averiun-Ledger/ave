@@ -353,12 +353,21 @@ impl CoreMetrics {
     }
 
     pub fn observe_sink_event(&self, sink: &str, result: &'static str) {
+        self.observe_sink_event_n(sink, result, 1);
+    }
+
+    pub fn observe_sink_event_n(
+        &self,
+        sink: &str,
+        result: &'static str,
+        n: u64,
+    ) {
         self.sink_events
             .get_or_create(&SinkResultLabels {
                 sink: sink.to_owned(),
                 result,
             })
-            .inc();
+            .inc_by(n);
     }
 
     pub fn observe_sink_retry(&self, sink: &str) {
