@@ -970,6 +970,10 @@ pub struct HttpSinkConfigHttp {
     pub pool_idle_timeout_secs: u64,
     /// Maximum number of idle connections to keep open per host
     pub pool_max_idle_per_host: usize,
+    /// Custom static headers added to every delivery and health-check request.
+    /// Internal sink headers (Authorization, X-Ave-*, etc.) take precedence.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 impl Default for HttpSinkConfigHttp {
@@ -994,6 +998,7 @@ impl Default for HttpSinkConfigHttp {
             tcp_keepalive_secs: Some(60),
             pool_idle_timeout_secs: 90,
             pool_max_idle_per_host: 4,
+            headers: std::collections::HashMap::new(),
         }
     }
 }
@@ -1186,6 +1191,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     tcp_keepalive_secs: http.tcp_keepalive_secs,
                     pool_idle_timeout_secs: http.pool_idle_timeout_secs,
                     pool_max_idle_per_host: http.pool_max_idle_per_host,
+                    headers: http.headers,
                 }))
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {

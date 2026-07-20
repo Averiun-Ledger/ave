@@ -1,6 +1,6 @@
 mod common;
 
-use std::{collections::BTreeSet, sync::atomic::Ordering};
+use std::{collections::BTreeSet, collections::HashMap, sync::atomic::Ordering};
 
 use ave_common::{
     SinkTarget, SinkTypes,
@@ -52,6 +52,7 @@ use crate::common::{
         make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
         make_sink_entry_with_auth, make_sink_entry_with_concurrency,
         make_sink_entry_with_proxy, make_sink_entry_with_retry_policy,
+        make_sink_entry_with_headers,
         make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
         restart_config, restart_config_safe_mode, restart_config_with_peers,
@@ -123,6 +124,157 @@ async fn get_sinks_status_returns_configured_sinks() {
             .iter()
             .all(|s| s.transport.as_deref() == Some("http")),
         "sample sinks should report the http transport kind"
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn sink_custom_headers_are_delivered_and_internal_headers_override() {
+    let sink = TestSink::start().await;
+    let mut headers = HashMap::new();
+    headers.insert("X-Custom-Header".to_owned(), "custom-value".to_owned());
+    // Internal headers take precedence: the sink must still send JSON.
+    headers.insert("Content-Type".to_owned(), "text/plain".to_owned());
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_headers(
+            "example-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            headers,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    create_subject(&node.api, governance_id, "Example", "", true)
+        .await
+        .unwrap();
+
+    sink.wait_for_count(1, true).await;
+
+    assert_eq!(
+        sink.last_header("X-Custom-Header").await.as_deref(),
+        Some("custom-value")
+    );
+    assert_eq!(
+        sink.last_header("Content-Type").await.as_deref(),
+        Some("application/json")
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn sink_last_error_is_reported_after_delivery_failure() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+
+    sink.wait_for_count(1, true).await;
+
+    // Make the sink fail every delivery.
+    sink.set_mode(ResponseMode::ServerError).await;
+
+    emit_fact(&node.api, subject_id, json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+
+    // The worker schedules periodic healthchecks that may clear last_error on
+    // recovery; poll briefly to observe the error before any transient recovery.
+    let mut found = false;
+    for _ in 0..20 {
+        let statuses = node.api.get_sinks_status().await.unwrap();
+        if let Some(status) =
+            statuses.iter().find(|s| s.name == "example-sink")
+        {
+            if status.last_error.is_some() {
+                found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        found,
+        "last_error should be set after a delivery failure"
     );
 }
 

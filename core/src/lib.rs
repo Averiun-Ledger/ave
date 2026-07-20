@@ -1350,6 +1350,8 @@ impl Api {
                 lagging_subjects: sink_status
                     .map(|st| st.lagging_subjects)
                     .unwrap_or_default(),
+                last_error: sink_status
+                    .and_then(|st| st.last_error.clone()),
                 server,
             });
         }
@@ -1374,6 +1376,7 @@ impl Api {
                         running: false,
                         blocked: sink_status.blocked.clone(),
                         lagging_subjects: sink_status.lagging_subjects,
+                        last_error: sink_status.last_error.clone(),
                         server: None,
                     });
                 }
@@ -1406,6 +1409,7 @@ impl Api {
                     running: info.running,
                     blocked: info.blocked,
                     lagging_subjects: info.lagging_subjects,
+                    last_error: info.last_error,
                     transport: info
                         .server
                         .as_ref()
@@ -2327,6 +2331,7 @@ mod tests {
             running: true,
             blocked: None,
             lagging_subjects: 0,
+            last_error: None,
             server: None,
         };
         assert!(sink_info_matches_query(
@@ -2358,6 +2363,7 @@ mod tests {
             running: false,
             blocked: Some("boom".to_string()),
             lagging_subjects: 0,
+            last_error: None,
             server: None,
         };
         assert!(sink_info_matches_query(
@@ -2391,6 +2397,7 @@ mod tests {
             running: true,
             blocked: None,
             lagging_subjects: 0,
+            last_error: None,
             server: None,
         };
         assert!(sink_info_matches_query(

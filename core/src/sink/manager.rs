@@ -133,6 +133,7 @@ pub struct SinkStatus {
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
     pub active: bool,
+    pub last_error: Option<String>,
 }
 
 /// Detailed runtime + configuration snapshot of a sink manager.
@@ -285,6 +286,11 @@ pub struct SinkManager {
     /// on worker restart/recovery.
     #[serde(skip)]
     last_notified: HashMap<(String, String), u64>, // (sink, subject_id) -> sn
+    /// Last error reported by a sink worker for this sink. Kept in memory only:
+    /// it is cleared when the sink recovers, is unblocked, or has no lagging
+    /// subjects left.
+    #[serde(skip)]
+    last_errors: HashMap<String, String>, // sink_name -> last error message
 }
 
 impl std::fmt::Debug for SinkManager {
@@ -302,6 +308,10 @@ impl std::fmt::Debug for SinkManager {
             .field(
                 "blocked_sinks",
                 &self.blocked_sinks.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "last_errors",
+                &self.last_errors.keys().collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -354,6 +364,7 @@ impl BorshDeserialize for SinkManager {
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashSet::new(),
             last_notified: HashMap::new(),
+            last_errors: HashMap::new(),
         })
     }
 }
@@ -388,6 +399,7 @@ impl PersistentActor for SinkManager {
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashSet::new(),
             last_notified: HashMap::new(),
+            last_errors: HashMap::new(),
         }
     }
 
@@ -429,6 +441,7 @@ impl PersistentActor for SinkManager {
                 inner.cursors.retain(|(s, _), _| s != sink);
                 inner.lagging.remove(sink);
                 inner.blocked_sinks.remove(sink);
+                inner.last_errors.remove(sink);
             }
         }
 
@@ -469,6 +482,7 @@ impl PersistentActor for SinkManager {
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: self.catch_up_in_flight.clone(),
             last_notified: self.last_notified.clone(),
+            last_errors: self.last_errors.clone(),
         })
     }
 
@@ -776,6 +790,7 @@ impl Handler<Self> for SinkManager {
                 reason,
             } => {
                 error!(msg_type = "DeliveryFailed", sink = %sink, subject_id = %subject_id, sn = %sn, reason = %reason, "Sink delivery failed");
+                self.last_errors.insert(sink.clone(), reason.clone());
                 self.catch_up_in_flight
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
@@ -807,6 +822,7 @@ impl Handler<Self> for SinkManager {
                     error = %error,
                     "Auth failure; event kept in lagging for retry"
                 );
+                self.last_errors.insert(sink.clone(), error.clone());
                 self.catch_up_in_flight
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
@@ -904,6 +920,7 @@ impl SinkManager {
                     .map(|s| s.len())
                     .unwrap_or(0),
                 active: self.active_sinks.contains(sink_name),
+                last_error: self.last_errors.get(sink_name).cloned(),
             })
             .collect()
     }
@@ -921,6 +938,7 @@ impl SinkManager {
             set.remove(subject_id);
             if set.is_empty() {
                 self.lagging.remove(sink);
+                self.last_errors.remove(sink);
             }
         }
         if let Some(metrics) = try_core_metrics() {
@@ -997,6 +1015,12 @@ impl SinkManager {
                 metrics.set_sink_lagging_subjects(&sink_name, count);
             }
         }
+
+        // Drop stale last-error entries for sinks that no longer have lagging
+        // subjects. Errors for sinks that are still behind remain visible.
+        self.last_errors.retain(|sink, _| {
+            self.lagging.get(sink).map(|s| !s.is_empty()).unwrap_or(false)
+        });
     }
 
     /// Start workers for every configured sink and trigger catch-up for any
@@ -1823,6 +1847,7 @@ impl SinkManager {
         }
         info!(msg_type = "SinkRecovered", sink = %sink, "Sink recovered, triggering catch-up");
         self.active_sinks.insert(sink.clone());
+        self.last_errors.remove(&sink);
 
         // Cancel periodic healthcheck — the sink is healthy again.
         self.cancel_healthcheck(&sink);
@@ -1852,6 +1877,7 @@ impl SinkManager {
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             info!(msg_type = "SinkUnblocked", sink = %sink, "Sink manually unblocked by operator");
+            self.last_errors.remove(&sink);
             // Cancel any stale healthcheck timer before unblocking. A fresh
             // worker will be created below and will run its own healthchecks if
             // needed.

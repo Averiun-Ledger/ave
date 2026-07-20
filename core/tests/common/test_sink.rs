@@ -86,6 +86,8 @@ struct TestSinkState {
     signature_headers: Vec<SignatureHeaders>,
     idempotency_headers: Vec<IdempotencyHeaders>,
     content_encodings: Vec<Option<String>>,
+    /// All headers received on each `/events` request, in request order.
+    headers: Vec<HeaderMap>,
     raw_bodies: Vec<Vec<u8>>,
     received_at: Vec<std::time::Instant>,
     /// Number of events accepted per request (1 for individual deliveries,
@@ -242,6 +244,7 @@ impl TestSink {
             signature_headers: Vec::new(),
             idempotency_headers: Vec::new(),
             content_encodings: Vec::new(),
+            headers: Vec::new(),
             raw_bodies: Vec::new(),
             received_at: Vec::new(),
             batch_lens: Vec::new(),
@@ -553,6 +556,22 @@ impl TestSink {
         self.state.lock().await.content_encodings.clone()
     }
 
+    /// Return the value of `name` from the most recent `/events` request,
+    /// or `None` if the header was absent or there have been no requests.
+    pub async fn last_header(&self, name: &str) -> Option<String> {
+        self.state
+            .lock()
+            .await
+            .headers
+            .last()
+            .and_then(|headers| {
+                headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_owned())
+            })
+    }
+
     /// Return the instants at which each `/events` request was received,
     /// in request order.
     pub async fn received_at(&self) -> Vec<std::time::Instant> {
@@ -631,6 +650,7 @@ impl TestSink {
         guard.signature_headers.push(signature_headers);
         guard.idempotency_headers.push(idempotency_headers);
         guard.content_encodings.push(content_encoding);
+        guard.headers.push(headers);
         guard.raw_bodies.push(body.to_vec());
         guard.received_at.push(std::time::Instant::now());
 

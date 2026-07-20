@@ -1,6 +1,6 @@
 //! Sink payloads exported from ledger events.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -785,6 +785,36 @@ mod tests {
     }
 
     #[test]
+    fn test_http_sink_config_validate_allows_zero_max_retries() {
+        let mut cfg = valid_http_config();
+        cfg.max_retries = 0;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_rejects_too_many_max_retries() {
+        let mut cfg = valid_http_config();
+        cfg.max_retries = 101;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_headers_default_empty_and_serde() {
+        let cfg: HttpSinkConfig =
+            serde_json::from_str(r#"{"url": "https://example.com"}"#).unwrap();
+        assert!(cfg.headers.is_empty());
+
+        let cfg: HttpSinkConfig = serde_json::from_str(
+            r#"{"url": "https://example.com", "headers": {"X-Custom": "value"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.headers.get("X-Custom").map(String::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
     fn test_http_proxy_config_validate_ok() {
         let proxy = HttpProxyConfig {
             url: "http://proxy.local:3128".to_owned(),
@@ -1130,6 +1160,11 @@ pub struct HttpSinkConfig {
     /// Body compression for deliveries: `none` (default) or `gzip`
     /// (`Content-Encoding: gzip`).
     pub compression: HttpCompression,
+    /// Custom static headers added to every delivery and health-check request.
+    /// Applied before the sink's own headers (Authorization, X-Ave-*, etc.),
+    /// so internal headers take precedence and cannot be overridden.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     /// Maximum number of bytes to read from an error response body before
     /// truncating it. Prevents a misbehaving endpoint from exhausting memory
     /// with a huge error payload.
@@ -1162,6 +1197,7 @@ impl Default for HttpSinkConfig {
             batch_delivery: false,
             batch_max_delay_ms: 100,
             compression: HttpCompression::None,
+            headers: HashMap::new(),
             max_error_body_bytes: 4_096,
             tcp_keepalive_secs: Some(60),
             pool_idle_timeout_secs: 90,
@@ -1196,10 +1232,12 @@ impl HttpSinkConfig {
                 ),
             });
         }
-        require_positive_u64(
-            "HttpSinkConfig.max_retries",
-            self.max_retries as u64,
-        )?;
+        if self.max_retries > 100 {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpSinkConfig.max_retries".to_string(),
+                reason: "must be 100 or less".to_string(),
+            });
+        }
         require_positive_u64(
             "HttpSinkConfig.retry_base_delay_ms",
             self.retry_base_delay_ms,

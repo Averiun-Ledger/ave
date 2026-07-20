@@ -825,6 +825,7 @@ http:
                         tcp_keepalive_secs: Some(60),
                         pool_idle_timeout_secs: 90,
                         pool_max_idle_per_host: 4,
+                        ..HttpSinkConfig::default()
                     })),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
@@ -857,6 +858,7 @@ http:
                         tcp_keepalive_secs: Some(60),
                         pool_idle_timeout_secs: 90,
                         pool_max_idle_per_host: 4,
+                        ..HttpSinkConfig::default()
                     })),
                     batch_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,

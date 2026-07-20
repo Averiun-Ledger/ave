@@ -335,6 +335,9 @@ pub struct SinkInfo {
     pub running: bool,
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
+    /// Last transient error reported by the sink worker, if any. Cleared when
+    /// the sink recovers, is unblocked, or has no lagging subjects.
+    pub last_error: Option<String>,
     pub server: Option<SinkServer>,
 }
 
@@ -351,6 +354,9 @@ pub struct SinkStatusInfo {
     pub running: bool,
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
+    /// Last transient error reported by the sink worker, if any. Cleared when
+    /// the sink recovers, is unblocked, or has no lagging subjects.
+    pub last_error: Option<String>,
     /// Delivery transport kind (`"http"`, `"kafka"`). `None` when the sink
     /// is not present in the current configuration.
     pub transport: Option<String>,

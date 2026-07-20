@@ -450,6 +450,16 @@ impl HttpTransport {
         result
     }
 
+    fn apply_custom_headers(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &self.config.headers {
+            request = request.header(name, value);
+        }
+        request
+    }
+
     async fn send_once(
         &self,
         url: &str,
@@ -462,6 +472,8 @@ impl HttpTransport {
             .post(url)
             .header("Content-Type", "application/json")
             .body(payload.to_vec());
+
+        request = self.apply_custom_headers(request);
 
         if let Some(headers) = signature_headers {
             request = request
@@ -667,6 +679,7 @@ impl SinkTransport for HttpTransport {
             .unwrap_or_else(|| self.url_template.render_url_encoded("-", "-"));
 
         let mut request = self.client.get(&url);
+        request = self.apply_custom_headers(request);
 
         // Add auth header if available
         if self.config.auth.is_some() {
@@ -1344,5 +1357,33 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         unsafe {
             std::env::remove_var(env_var);
         }
+    }
+
+    #[tokio::test]
+    async fn custom_headers_are_applied_to_requests() {
+        let mut config = base_config();
+        config.headers.insert(
+            "X-Custom-Header".to_owned(),
+            "custom-value".to_owned(),
+        );
+        let transport = HttpTransport::new(
+            "unit-custom-headers".to_owned(),
+            config,
+            None,
+        )
+        .expect("transport should build");
+
+        let request = transport
+            .apply_custom_headers(transport.client.get("http://127.0.0.1/health"))
+            .build()
+            .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Custom-Header")
+                .and_then(|v| v.to_str().ok()),
+            Some("custom-value")
+        );
     }
 }
