@@ -557,9 +557,7 @@ mod tests {
         // All fields empty: the API key is injected through
         // `AVE_SINK_APIKEY_{{SERVER}}` at worker startup.
         let auth = SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
-            api_key: String::new(),
+            ..SinkAuthConfig::default()
         };
         assert!(auth.validate().is_ok());
     }
@@ -567,19 +565,17 @@ mod tests {
     #[test]
     fn test_sink_auth_config_validate_allows_api_key_only() {
         let auth = SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
             api_key: "secret".to_owned(),
+            ..SinkAuthConfig::default()
         };
         assert!(auth.validate().is_ok());
     }
 
     #[test]
-    fn test_sink_auth_config_validate_requires_url_and_username_together() {
+    fn test_sink_auth_config_validate_requires_url_and_username_together_for_password() {
         let mut auth = SinkAuthConfig {
             auth_url: "https://auth.example.com/token".to_owned(),
-            username: String::new(),
-            api_key: String::new(),
+            ..SinkAuthConfig::default()
         };
         assert!(auth.validate().is_err());
         auth.auth_url = String::new();
@@ -588,20 +584,60 @@ mod tests {
     }
 
     #[test]
+    fn test_sink_auth_config_validate_requires_url_and_client_id_together_for_client_credentials() {
+        let mut auth = SinkAuthConfig {
+            auth_url: "https://auth.example.com/token".to_owned(),
+            grant_type: OAuth2GrantType::ClientCredentials,
+            ..SinkAuthConfig::default()
+        };
+        assert!(auth.validate().is_err());
+        auth.auth_url = String::new();
+        auth.client_id = "ave-client".to_owned();
+        assert!(auth.validate().is_err());
+        auth.auth_url = "https://auth.example.com/token".to_owned();
+        assert!(auth.validate().is_ok());
+    }
+
+    #[test]
+    fn test_oauth2_grant_type_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&OAuth2GrantType::Password).unwrap(),
+            "\"password\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OAuth2GrantType::ClientCredentials).unwrap(),
+            "\"client_credentials\""
+        );
+        assert_eq!(
+            serde_json::from_str::<OAuth2GrantType>("\"client_credentials\"").unwrap(),
+            OAuth2GrantType::ClientCredentials
+        );
+    }
+
+    #[test]
+    fn test_sink_auth_config_serde_defaults_to_password_grant() {
+        let cfg: SinkAuthConfig = serde_json::from_str(
+            r#"{"auth_url": "https://auth.example.com/token", "username": "u"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.grant_type, OAuth2GrantType::Password);
+        assert!(cfg.client_id.is_empty());
+        assert!(cfg.scope.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
     fn test_sink_auth_config_api_key_serializes_redacted() {
         let auth = SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
             api_key: "super-secret".to_owned(),
+            ..SinkAuthConfig::default()
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(!json.contains("super-secret"));
         assert!(json.contains("***"));
         // Empty keys serialize as empty, not redacted.
         let empty = SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
-            api_key: String::new(),
+            ..SinkAuthConfig::default()
         };
         assert!(!serde_json::to_string(&empty).unwrap().contains("***"));
     }
@@ -807,6 +843,30 @@ mod tests {
     }
 }
 
+/// OAuth2 grant type used to obtain a token from the authentication endpoint.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OAuth2GrantType {
+    /// Resource Owner Password Credentials grant.
+    #[default]
+    Password,
+    /// Client Credentials grant (machine-to-machine / enterprise IdP).
+    ClientCredentials,
+}
+
+impl OAuth2GrantType {
+    /// Wire name of the grant type sent to the token endpoint.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::ClientCredentials => "client_credentials",
+        }
+    }
+}
+
 /// Per-sink authentication configuration.
 /// When present, the sink requires authentication for delivery and health-check.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -814,9 +874,10 @@ mod tests {
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SinkAuthConfig {
-    /// OAuth2 / token endpoint URL. Must be set together with `username`.
+    /// OAuth2 / token endpoint URL. Must be set together with `username` for
+    /// the `password` grant, or with `client_id` for `client_credentials`.
     pub auth_url: String,
-    /// Username for the token endpoint. Must be set together with `auth_url`.
+    /// Username for the token endpoint. Required for the `password` grant.
     pub username: String,
     /// API key for Api-Key header authentication (alternative to OAuth2).
     /// May be empty when the key is provided through the environment variable
@@ -824,6 +885,28 @@ pub struct SinkAuthConfig {
     /// takes precedence over this field. Always serialized redacted.
     #[serde(default)]
     pub api_key: String,
+    /// OAuth2 grant type. Defaults to `password` for backwards compatibility.
+    #[serde(default)]
+    pub grant_type: OAuth2GrantType,
+    /// Client identifier for the `client_credentials` grant.
+    #[serde(default)]
+    pub client_id: String,
+    /// Optional OAuth2 scope(s) requested when obtaining a token.
+    #[serde(default)]
+    pub scope: String,
+}
+
+impl Default for SinkAuthConfig {
+    fn default() -> Self {
+        Self {
+            auth_url: String::new(),
+            username: String::new(),
+            api_key: String::new(),
+            grant_type: OAuth2GrantType::default(),
+            client_id: String::new(),
+            scope: String::new(),
+        }
+    }
 }
 
 // Manual `Serialize` impl instead of `serialize_with`: ts-rs cannot parse
@@ -836,11 +919,14 @@ impl Serialize for SinkAuthConfig {
     ) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("SinkAuthConfig", 3)?;
+        let mut state = serializer.serialize_struct("SinkAuthConfig", 6)?;
         state.serialize_field("auth_url", &self.auth_url)?;
         state.serialize_field("username", &self.username)?;
         let api_key = if self.api_key.is_empty() { "" } else { "***" };
         state.serialize_field("api_key", api_key)?;
+        state.serialize_field("grant_type", &self.grant_type)?;
+        state.serialize_field("client_id", &self.client_id)?;
+        state.serialize_field("scope", &self.scope)?;
         state.end()
     }
 }
@@ -848,16 +934,30 @@ impl Serialize for SinkAuthConfig {
 impl SinkAuthConfig {
     pub fn validate(&self) -> Result<(), Error> {
         let url_set = !self.auth_url.is_empty();
-        let user_set = !self.username.is_empty();
         if url_set {
             validate_url("auth_url", &self.auth_url)?;
         }
-        if url_set != user_set {
-            return Err(Error::InvalidConfiguration {
-                component: "SinkAuthConfig".to_string(),
-                reason: "auth_url and username must be set together for OAuth2"
-                    .to_string(),
-            });
+        match self.grant_type {
+            OAuth2GrantType::Password => {
+                let user_set = !self.username.is_empty();
+                if url_set != user_set {
+                    return Err(Error::InvalidConfiguration {
+                        component: "SinkAuthConfig".to_string(),
+                        reason: "auth_url and username must be set together for the password grant"
+                            .to_string(),
+                    });
+                }
+            }
+            OAuth2GrantType::ClientCredentials => {
+                let client_id_set = !self.client_id.is_empty();
+                if url_set != client_id_set {
+                    return Err(Error::InvalidConfiguration {
+                        component: "SinkAuthConfig".to_string(),
+                        reason: "auth_url and client_id must be set together for the client_credentials grant"
+                            .to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }

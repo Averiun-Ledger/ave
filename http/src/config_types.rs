@@ -823,6 +823,30 @@ impl From<SinkConfigEntry> for SinkConfigEntryHttp {
     }
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuth2GrantTypeHttp {
+    /// Resource Owner Password Credentials grant.
+    Password,
+    /// Client Credentials grant (machine-to-machine / enterprise IdP).
+    ClientCredentials,
+}
+
+impl From<ave_bridge::ave_common::sink::OAuth2GrantType>
+    for OAuth2GrantTypeHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::OAuth2GrantType) -> Self {
+        match value {
+            ave_bridge::ave_common::sink::OAuth2GrantType::Password => {
+                Self::Password
+            }
+            ave_bridge::ave_common::sink::OAuth2GrantType::ClientCredentials => {
+                Self::ClientCredentials
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkAuthConfigHttp {
     /// OAuth2 / token endpoint URL
@@ -832,6 +856,12 @@ pub struct SinkAuthConfigHttp {
     /// API key for Api-Key header authentication. Always redacted (`"***"`)
     /// in API responses; the real value never leaves the node.
     pub api_key: String,
+    /// OAuth2 grant type
+    pub grant_type: OAuth2GrantTypeHttp,
+    /// Client identifier for the `client_credentials` grant
+    pub client_id: String,
+    /// Optional OAuth2 scope(s) requested when obtaining a token
+    pub scope: String,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
@@ -1126,6 +1156,9 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         } else {
                             "***".to_owned()
                         },
+                        grant_type: a.grant_type.into(),
+                        client_id: a.client_id,
+                        scope: a.scope,
                     }),
                     connect_timeout_ms: http.connect_timeout_ms,
                     request_timeout_ms: http.request_timeout_ms,

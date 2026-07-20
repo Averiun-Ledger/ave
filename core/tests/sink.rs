@@ -14,7 +14,7 @@ use ave_common::{
     },
     sink::{
         DataToSinkEvent, HttpCompression, HttpProxyConfig, HttpTlsConfig,
-        IncomingSinkEvent, SinkAuthConfig, SinkTransportConfig,
+        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig, SinkTransportConfig,
     },
 };
 use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
@@ -5817,9 +5817,8 @@ async fn sink_auth_token_refresh() {
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
             SinkAuthConfig {
-                auth_url: String::new(),
-                username: String::new(),
                 api_key: api_key.clone(),
+                ..SinkAuthConfig::default()
             },
         )],
     ))
@@ -5861,9 +5860,8 @@ async fn sink_auth_token_refresh() {
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
             SinkAuthConfig {
-                auth_url: String::new(),
-                username: String::new(),
                 api_key: api_key.clone(),
+                ..SinkAuthConfig::default()
             },
         )],
     ))
@@ -5932,7 +5930,7 @@ async fn sink_auth_token_refresh() {
             SinkAuthConfig {
                 auth_url: oauth_sink.auth_url(),
                 username: "test-user".to_owned(),
-                api_key: String::new(),
+                ..SinkAuthConfig::default()
             },
         )],
     ))
@@ -6105,9 +6103,8 @@ async fn sink_api_key_from_env_var() {
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
             SinkAuthConfig {
-                auth_url: String::new(),
-                username: String::new(),
                 api_key: "config-key".to_owned(),
+                ..SinkAuthConfig::default()
             },
         )],
     ))
@@ -9393,4 +9390,170 @@ async fn sink_batch_delivery_mixed_full_light() {
     );
     let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
     assert_eq!(sns, vec![0, 1, 2]);
+}
+
+/// Minimal OAuth2 token endpoint for `client_credentials` e2e tests.
+/// Captures the JSON body of the first token request and returns a fixed
+/// Bearer token. The captured body is read through the returned Arc<Mutex>.
+async fn start_client_credentials_auth_server() -> (
+    String,
+    std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+) {
+    use axum::{
+        Json, Router, extract::State, http::StatusCode, routing::post,
+    };
+
+    let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+    let app = Router::new()
+        .route(
+            "/token",
+            post(
+                |State(state): State<
+                    std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+                >,
+                 Json(body): Json<serde_json::Value>|
+                async move {
+                    *state.lock().await = Some(body);
+                    let token = serde_json::json!({
+                        "access_token": "cc-test-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                    });
+                    (StatusCode::OK, Json(token))
+                },
+            ),
+        )
+        .with_state(captured.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("auth server should bind");
+    let addr = listener
+        .local_addr()
+        .expect("auth server has local address");
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("http://{}/token", addr), captured)
+}
+
+/// Test 17: `sink_client_credentials_oauth2`.
+///
+/// **Case covered:** end-to-end delivery using OAuth2 `client_credentials`.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Start a `TestSink` for `/events` and a separate axum OAuth2 server for
+///   `/token` that records the token request body.
+/// - Restart the node with a sink configured with
+///   `grant_type: ClientCredentials`, `client_id` and the client secret read
+///   from `AVE_SINK_PASSWORD_CC_SINK`.
+///
+/// **Sequence:**
+/// 1. Emit a fact after the restart.
+/// 2. Wait for the event to be delivered.
+///
+/// **Verifications:**
+/// - The delivery carries `Authorization: Bearer cc-test-token`.
+/// - The token endpoint received `grant_type=client_credentials`, the
+///   configured `client_id`, and the secret from the environment variable.
+#[traced_test]
+#[tokio::test]
+async fn sink_client_credentials_oauth2() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (s1, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let sink = TestSink::start().await;
+    let (auth_url, captured_body) = start_client_credentials_auth_server().await;
+
+    let auth_env = "AVE_SINK_PASSWORD_CC_SINK";
+    unsafe {
+        std::env::set_var(auth_env, "cc-client-secret");
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "cc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthConfig {
+                auth_url,
+                grant_type: OAuth2GrantType::ClientCredentials,
+                client_id: "cc-client-id".to_owned(),
+                scope: "events:read".to_owned(),
+                ..SinkAuthConfig::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+
+    sink.wait_for_count(2, true).await;
+
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers
+            .iter()
+            .flatten()
+            .any(|h| h == "Bearer cc-test-token"),
+        "deliveries must carry the Bearer token obtained via client_credentials"
+    );
+
+    let body = captured_body
+        .lock()
+        .await
+        .clone()
+        .expect("auth server should have received a token request");
+    assert_eq!(body["grant_type"], "client_credentials");
+    assert_eq!(body["client_id"], "cc-client-id");
+    assert_eq!(body["client_secret"], "cc-client-secret");
+    assert_eq!(body["scope"], "events:read");
+
+    unsafe {
+        std::env::remove_var(auth_env);
+    }
 }

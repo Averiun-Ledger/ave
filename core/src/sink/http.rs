@@ -20,7 +20,10 @@ use crate::sink::SinkError;
 use crate::sink::extract_sn;
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
-use ave_common::{DataToSink, IncomingSinkEvent, LightEvent, SinkTypes};
+use ave_common::{
+    DataToSink, IncomingSinkEvent, LightEvent, SinkTypes,
+    sink::SinkAuthConfig,
+};
 
 /// Build the environment variable name for a sink's password.
 /// Format: `AVE_SINK_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
@@ -202,6 +205,18 @@ const EVENT_TYPE_HEADER: &str = "X-Ave-Event-Type";
 /// (`<subject_id>-<sn>`, following the Stripe convention).
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 
+/// Whether the authentication configuration has all required OAuth2 fields
+/// for the configured grant type. The config is assumed to have passed
+/// `SinkAuthConfig::validate`, so only the active grant's pair is checked.
+fn oauth2_credentials_ready(auth: &SinkAuthConfig) -> bool {
+    use ave_common::sink::OAuth2GrantType;
+    !auth.auth_url.is_empty()
+        && match auth.grant_type {
+            OAuth2GrantType::Password => !auth.username.is_empty(),
+            OAuth2GrantType::ClientCredentials => !auth.client_id.is_empty(),
+        }
+}
+
 /// Signature headers for one delivery, computed once per logical event and
 /// reused across retries of the same body.
 struct SignatureHeaders {
@@ -261,9 +276,7 @@ impl HttpTransport {
             .unwrap_or_default();
 
         if let Some(auth) = &config.auth {
-            let oauth2_configured =
-                !auth.auth_url.is_empty() && !auth.username.is_empty();
-            if oauth2_configured {
+            if oauth2_credentials_ready(auth) {
                 // If OAuth2 is configured, the password environment variable must exist.
                 if password.is_empty() {
                     return Err(SinkError::ClientBuild(format!(
@@ -547,10 +560,7 @@ impl HttpTransport {
             // Token is missing, expired or expiring soon; fall through to obtain new token
         }
 
-        if !auth.auth_url.is_empty()
-            && !auth.username.is_empty()
-            && !self.password.is_empty()
-        {
+        if oauth2_credentials_ready(auth) && !self.password.is_empty() {
             // Refresh the token outside the write lock so other deliveries are
             // not blocked while the auth endpoint is failing or slow.
             let token = crate::sink::obtain_token_with_retry(
@@ -759,8 +769,7 @@ impl SinkTransport for HttpTransport {
     /// If the sink has OAuth2 auth config, obtain a token eagerly on startup.
     async fn warm_up(&self) -> Result<(), SinkError> {
         if let Some(ref auth) = self.config.auth
-            && !auth.auth_url.is_empty()
-            && !auth.username.is_empty()
+            && oauth2_credentials_ready(auth)
             && !self.password.is_empty()
         {
             let token = crate::sink::obtain_token_with_retry(
@@ -996,9 +1005,8 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         }
         let mut config = base_config();
         config.auth = Some(SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
             api_key: "config-key".to_owned(),
+            ..SinkAuthConfig::default()
         });
         let transport =
             HttpTransport::new("unit-env-precedence".to_owned(), config, None)
@@ -1014,9 +1022,8 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     async fn api_key_from_config_when_env_not_set() {
         let mut config = base_config();
         config.auth = Some(SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
             api_key: "config-key".to_owned(),
+            ..SinkAuthConfig::default()
         });
         let transport =
             HttpTransport::new("unit-config-key".to_owned(), config, None)
@@ -1029,9 +1036,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     fn auth_without_any_credential_fails() {
         let mut config = base_config();
         config.auth = Some(SinkAuthConfig {
-            auth_url: String::new(),
-            username: String::new(),
-            api_key: String::new(),
+            ..SinkAuthConfig::default()
         });
         let err = client_build_error(HttpTransport::new(
             "unit-missing-key".to_owned(),
@@ -1271,7 +1276,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         config.auth = Some(SinkAuthConfig {
             auth_url,
             username: "unit-user".to_owned(),
-            api_key: String::new(),
+            ..SinkAuthConfig::default()
         });
 
         let transport =
@@ -1301,6 +1306,40 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             .expect("should return a header");
 
         assert_eq!(header, "Bearer fresh-token");
+
+        unsafe {
+            std::env::remove_var(env_var);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_auth_header_obtains_token_for_client_credentials() {
+        let env_var = "AVE_SINK_PASSWORD_UNIT_CLIENT_CREDENTIALS";
+        unsafe {
+            std::env::set_var(env_var, "client-secret");
+        }
+
+        let auth_url = start_oauth2_server("cc-token").await;
+
+        let mut config = base_config();
+        config.auth = Some(SinkAuthConfig {
+            auth_url,
+            grant_type: ave_common::sink::OAuth2GrantType::ClientCredentials,
+            client_id: "unit-client".to_owned(),
+            ..SinkAuthConfig::default()
+        });
+
+        let transport =
+            HttpTransport::new("unit-client-credentials".to_owned(), config, None)
+                .expect("transport should build");
+
+        let header = transport
+            .build_auth_header()
+            .await
+            .expect("should build auth header")
+            .expect("should return a header");
+
+        assert_eq!(header, "Bearer cc-token");
 
         unsafe {
             std::env::remove_var(env_var);

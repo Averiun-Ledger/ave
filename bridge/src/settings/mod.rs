@@ -806,7 +806,7 @@ http:
                         auth: Some(SinkAuthConfig {
                             auth_url: "https://auth.service".to_owned(),
                             username: "sink-user".to_owned(),
-                            api_key: String::new(),
+                            ..SinkAuthConfig::default()
                         }),
                         connect_timeout_ms: 5_000,
                         request_timeout_ms: 30_000,

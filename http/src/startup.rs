@@ -764,9 +764,8 @@ mod tests {
                     transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                         url: "https://sink.example.com".to_string(),
                         auth: Some(SinkAuthConfig {
-                            auth_url: String::new(),
-                            username: String::new(),
                             api_key: "top-secret-key".to_string(),
+                            ..SinkAuthConfig::default()
                         }),
                         ..HttpSinkConfig::default()
                     })),
