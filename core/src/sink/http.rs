@@ -551,54 +551,20 @@ impl HttpTransport {
             && !auth.username.is_empty()
             && !self.password.is_empty()
         {
-            // Double-check inside write lock to prevent parallel token refresh.
+            // Refresh the token outside the write lock so other deliveries are
+            // not blocked while the auth endpoint is failing or slow.
+            let token = crate::sink::obtain_token_with_retry(
+                &self.client,
+                auth,
+                &self.password,
+                self.config.retry_base_delay_ms,
+            )
+            .await?;
+
+            let header = format!("Bearer {}", token.access_token);
             let mut guard = self.cached_token.write().await;
-            if let Some(token) = guard.as_ref()
-                && !token.is_expired_or_expiring_soon(margin)
-            {
-                return Ok(Some(format!("Bearer {}", token.access_token)));
-            }
-            // Retry obtain_token with backoff to survive transient auth endpoint failures.
-            let mut last_token_err = None;
-            for attempt in 0..=2 {
-                if attempt > 0 {
-                    // Same saturation as the delivery backoff: avoid shift
-                    // overflow with a large configured base delay.
-                    let exp = (attempt - 1).min(63);
-                    let base_delay = self
-                        .config
-                        .retry_base_delay_ms
-                        .saturating_mul(1_u64 << exp);
-                    let delay = crate::sink::add_jitter(base_delay);
-                    tokio::time::sleep(std::time::Duration::from_millis(delay))
-                        .await;
-                }
-                match crate::sink::obtain_token(
-                    &auth.auth_url,
-                    &auth.username,
-                    &self.password,
-                )
-                .await
-                {
-                    Ok(token) => {
-                        let header = format!("Bearer {}", token.access_token);
-                        *guard = Some(token);
-                        return Ok(Some(header));
-                    }
-                    Err(e) if attempt < 2 => {
-                        last_token_err = Some(e);
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-            // Release the write lock before returning the error so other
-            // workers are not blocked behind a guard we no longer need.
-            drop(guard);
-            return Err(last_token_err.unwrap_or_else(|| SinkError::Auth {
-                message: "token refresh failed".to_owned(),
-            }));
+            *guard = Some(token);
+            return Ok(Some(header));
         }
 
         Err(SinkError::Auth {
@@ -797,10 +763,11 @@ impl SinkTransport for HttpTransport {
             && !auth.username.is_empty()
             && !self.password.is_empty()
         {
-            let token = crate::sink::obtain_token(
-                &auth.auth_url,
-                &auth.username,
+            let token = crate::sink::obtain_token_with_retry(
+                &self.client,
+                auth,
                 &self.password,
+                self.config.retry_base_delay_ms,
             )
             .await?;
             let mut guard = self.cached_token.write().await;
@@ -1228,18 +1195,16 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
     #[tokio::test]
     async fn read_limited_body_returns_small_body_intact() {
-        let stream = test_stream(vec![Ok(bytes::Bytes::from_static(
-            b"small error",
-        ))]);
+        let stream =
+            test_stream(vec![Ok(bytes::Bytes::from_static(b"small error"))]);
         let body = read_limited_body(stream, 100).await;
         assert_eq!(body, "small error");
     }
 
     #[tokio::test]
     async fn read_limited_body_truncates_large_body() {
-        let stream = test_stream(vec![Ok(bytes::Bytes::from_static(
-            b"0123456789",
-        ))]);
+        let stream =
+            test_stream(vec![Ok(bytes::Bytes::from_static(b"0123456789"))]);
         let body = read_limited_body(stream, 5).await;
         assert_eq!(body, "01234…(truncated)");
     }
@@ -1259,5 +1224,86 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         ]);
         let body = read_limited_body(stream, 100).await;
         assert_eq!(body, "partial");
+    }
+
+    /// Starts a minimal HTTP OAuth2 token endpoint that returns a single JSON
+    /// token response and then closes the connection.
+    async fn start_oauth2_server(access_token: &str) -> String {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let body = format!(
+            r#"{{"access_token":"{}","token_type":"Bearer","expires_in":3600}}"#,
+            access_token
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("test listener should accept");
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+
+        format!("http://{}/token", addr)
+    }
+
+    #[tokio::test]
+    async fn build_auth_header_refreshes_expired_token() {
+        let env_var = "AVE_SINK_PASSWORD_UNIT_REFRESH_EXPIRED";
+        unsafe {
+            std::env::set_var(env_var, "unit-secret");
+        }
+
+        let auth_url = start_oauth2_server("fresh-token").await;
+
+        let mut config = base_config();
+        config.auth = Some(SinkAuthConfig {
+            auth_url,
+            username: "unit-user".to_owned(),
+            api_key: String::new(),
+        });
+
+        let transport =
+            HttpTransport::new("unit-refresh-expired".to_owned(), config, None)
+                .expect("transport should build");
+
+        // Seed an expired token; the next call must obtain a fresh one.
+        let expired_token = TokenResponse {
+            access_token: "expired-token".to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_in: 1,
+            refresh_token: None,
+            scope: None,
+            obtained_at: Some(
+                std::time::Instant::now() - std::time::Duration::from_secs(2),
+            ),
+        };
+        {
+            let mut guard = transport.cached_token.write().await;
+            *guard = Some(expired_token);
+        }
+
+        let header = transport
+            .build_auth_header()
+            .await
+            .expect("should build auth header")
+            .expect("should return a header");
+
+        assert_eq!(header, "Bearer fresh-token");
+
+        unsafe {
+            std::env::remove_var(env_var);
+        }
     }
 }
