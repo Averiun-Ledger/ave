@@ -932,6 +932,14 @@ pub struct HttpSinkConfigHttp {
     pub health_check_url: Option<String>,
     /// Margin in seconds before token expiry to trigger a refresh
     pub token_refresh_margin_secs: u64,
+    /// Maximum number of bytes to read from an error response body
+    pub max_error_body_bytes: usize,
+    /// TCP keepalive interval in seconds; `None` disables keepalive
+    pub tcp_keepalive_secs: Option<u64>,
+    /// Maximum time a pooled idle connection remains open, in seconds
+    pub pool_idle_timeout_secs: u64,
+    /// Maximum number of idle connections to keep open per host
+    pub pool_max_idle_per_host: usize,
 }
 
 impl Default for HttpSinkConfigHttp {
@@ -952,6 +960,10 @@ impl Default for HttpSinkConfigHttp {
             compression: HttpCompressionHttp::None,
             health_check_url: None,
             token_refresh_margin_secs: 30,
+            max_error_body_bytes: 4_096,
+            tcp_keepalive_secs: Some(60),
+            pool_idle_timeout_secs: 90,
+            pool_max_idle_per_host: 4,
         }
     }
 }
@@ -1137,6 +1149,10 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     compression: http.compression.into(),
                     health_check_url: http.health_check_url,
                     token_refresh_margin_secs: http.token_refresh_margin_secs,
+                    max_error_body_bytes: http.max_error_body_bytes,
+                    tcp_keepalive_secs: http.tcp_keepalive_secs,
+                    pool_idle_timeout_secs: http.pool_idle_timeout_secs,
+                    pool_max_idle_per_host: http.pool_max_idle_per_host,
                 }))
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {

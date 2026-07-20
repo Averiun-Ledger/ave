@@ -87,7 +87,7 @@ tracing-appender = "0.2.5"
 file-rotate = "0.8"
 test-log = { version = "0.2.21", features = ["trace"] }
 ave-actors = { path = "../ave-actors", version = "0.13.0", default-features = false }
-reqwest = { version = "0.13.4", features = ["json"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
 config = { version = "0.15.25", features = ["json", "toml", "yaml"] }
 zeroize = "1.9"
 subtle = "2.6"

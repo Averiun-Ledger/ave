@@ -670,6 +670,10 @@ mod tests {
         assert!(!cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
         assert_eq!(cfg.compression, HttpCompression::None);
+        assert_eq!(cfg.max_error_body_bytes, 4_096);
+        assert_eq!(cfg.tcp_keepalive_secs, Some(60));
+        assert_eq!(cfg.pool_idle_timeout_secs, 90);
+        assert_eq!(cfg.pool_max_idle_per_host, 4);
         assert!(cfg.validate().is_ok());
     }
 
@@ -678,6 +682,37 @@ mod tests {
         let mut cfg = valid_http_config();
         cfg.retry_max_delay_ms = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_rejects_zero_pool_idle_timeout() {
+        let mut cfg = valid_http_config();
+        cfg.pool_idle_timeout_secs = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_rejects_zero_pool_max_idle() {
+        let mut cfg = valid_http_config();
+        cfg.pool_max_idle_per_host = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_validate_rejects_zero_keepalive() {
+        let mut cfg = valid_http_config();
+        cfg.tcp_keepalive_secs = Some(0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_sink_config_serde_allows_disabling_keepalive() {
+        let cfg: HttpSinkConfig = serde_json::from_str(
+            r#"{"url": "https://example.com", "tcp_keepalive_secs": null}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.tcp_keepalive_secs, None);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
@@ -995,6 +1030,18 @@ pub struct HttpSinkConfig {
     /// Body compression for deliveries: `none` (default) or `gzip`
     /// (`Content-Encoding: gzip`).
     pub compression: HttpCompression,
+    /// Maximum number of bytes to read from an error response body before
+    /// truncating it. Prevents a misbehaving endpoint from exhausting memory
+    /// with a huge error payload.
+    pub max_error_body_bytes: usize,
+    /// TCP keepalive interval for the HTTP connection pool. `None` disables
+    /// keepalive; most deployments should leave the default (60 s) to keep
+    /// connections alive through NATs and firewalls.
+    pub tcp_keepalive_secs: Option<u64>,
+    /// Maximum time a pooled idle connection remains open before being closed.
+    pub pool_idle_timeout_secs: u64,
+    /// Maximum number of idle connections to keep open per host.
+    pub pool_max_idle_per_host: usize,
 }
 
 impl Default for HttpSinkConfig {
@@ -1015,6 +1062,10 @@ impl Default for HttpSinkConfig {
             batch_delivery: false,
             batch_max_delay_ms: 100,
             compression: HttpCompression::None,
+            max_error_body_bytes: 4_096,
+            tcp_keepalive_secs: Some(60),
+            pool_idle_timeout_secs: 90,
+            pool_max_idle_per_host: 4,
         }
     }
 }
@@ -1081,6 +1132,28 @@ impl HttpSinkConfig {
                 "HttpSinkConfig.batch_max_delay_ms",
                 self.batch_max_delay_ms,
             )?;
+        }
+        if self.max_error_body_bytes == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpSinkConfig.max_error_body_bytes".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if let Some(secs) = self.tcp_keepalive_secs {
+            require_positive_u64(
+                "HttpSinkConfig.tcp_keepalive_secs",
+                secs,
+            )?;
+        }
+        require_positive_u64(
+            "HttpSinkConfig.pool_idle_timeout_secs",
+            self.pool_idle_timeout_secs,
+        )?;
+        if self.pool_max_idle_per_host == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpSinkConfig.pool_max_idle_per_host".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
         }
         Ok(())
     }

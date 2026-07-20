@@ -30,12 +30,18 @@ use std::time::Duration;
 use crate::config::TokenResponse;
 use ave_common::DataToSink;
 
-/// Add random jitter to a base delay value.
-/// Returns a value between `base` and `base * 1.25` (25% jitter).
+/// Add random symmetric jitter to a base delay value.
+/// Returns a value between `base * 0.75` and `base * 1.25` (±25% jitter),
+/// clamped to zero to avoid negative delays.
 pub fn add_jitter(base: u64) -> u64 {
-    const JITTER_PCT: f64 = 0.25;
-    let jitter = (base as f64 * JITTER_PCT * fastrand::f64()) as u64;
-    base + jitter
+    let jitter = base.saturating_div(4);
+    let sign = if fastrand::bool() { 1i128 } else { -1i128 };
+    let delta = (jitter as i128).saturating_mul(sign);
+    if delta < 0 {
+        base.saturating_sub((-delta) as u64)
+    } else {
+        base.saturating_add(delta as u64)
+    }
 }
 
 /// Extract the sequence number from a `DataToSink` event.
@@ -87,4 +93,29 @@ pub async fn obtain_token(
     token.obtained_at = Some(std::time::Instant::now());
 
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_jitter_stays_within_symmetric_25_percent_range() {
+        let base = 1_000_u64;
+        for _ in 0..1_000 {
+            let jittered = add_jitter(base);
+            assert!(
+                jittered >= 750 && jittered <= 1_250,
+                "jittered value {jittered} outside [750, 1250]"
+            );
+        }
+    }
+
+    #[test]
+    fn add_jitter_saturates_at_zero_and_does_not_panic() {
+        assert_eq!(add_jitter(0), 0);
+        // Extreme values must not panic and must stay within the contract.
+        let max = add_jitter(u64::MAX);
+        assert!(max >= u64::MAX - u64::MAX / 4);
+    }
 }

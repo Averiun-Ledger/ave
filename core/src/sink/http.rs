@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use futures::StreamExt;
 use reqwest::{Certificate, Client, Identity, tls::Version};
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -67,7 +68,13 @@ fn build_http_client(
 ) -> Result<Client, SinkError> {
     let mut builder = Client::builder()
         .timeout(Duration::from_millis(config.request_timeout_ms))
-        .connect_timeout(Duration::from_millis(config.connect_timeout_ms));
+        .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+        .pool_idle_timeout(Duration::from_secs(config.pool_idle_timeout_secs))
+        .pool_max_idle_per_host(config.pool_max_idle_per_host);
+
+    if let Some(secs) = config.tcp_keepalive_secs {
+        builder = builder.tcp_keepalive(Duration::from_secs(secs));
+    }
 
     if let Some(tls) = &config.tls {
         if !tls.ca_certificate.is_empty() {
@@ -489,10 +496,11 @@ impl HttpTransport {
             );
             Ok(())
         } else if status == 401 || status == 403 {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = read_limited_body(
+                response.bytes_stream(),
+                self.config.max_error_body_bytes,
+            )
+            .await;
             Err(SinkError::Auth {
                 message: format!("HTTP {}: {}", status, body),
             })
@@ -503,10 +511,11 @@ impl HttpTransport {
             } else {
                 None
             };
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = read_limited_body(
+                response.bytes_stream(),
+                self.config.max_error_body_bytes,
+            )
+            .await;
             Err(SinkError::Delivery {
                 message: format!("HTTP {}: {}", status, body),
                 retryable: status.is_server_error() || status == 429,
@@ -709,18 +718,20 @@ impl SinkTransport for HttpTransport {
             Ok(())
         } else if status == 401 || status == 403 {
             self.invalidate_cached_token().await;
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = read_limited_body(
+                response.bytes_stream(),
+                self.config.max_error_body_bytes,
+            )
+            .await;
             Err(SinkError::Auth {
                 message: format!("Health check returned {}: {}", status, body),
             })
         } else {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body = read_limited_body(
+                response.bytes_stream(),
+                self.config.max_error_body_bytes,
+            )
+            .await;
             Err(SinkError::Delivery {
                 message: format!("Health check returned {}: {}", status, body),
                 retryable: status.is_server_error() || status == 429,
@@ -823,6 +834,43 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let date = httpdate::parse_http_date(value).ok()?;
     let delay = date.duration_since(std::time::SystemTime::now()).ok()?;
     Some(delay.as_millis() as u64)
+}
+
+/// Read at most `limit` bytes from a byte stream, truncating the rest.
+/// Returns a lossy UTF-8 string with a `…(truncated)` marker when the body
+/// exceeds the limit. This prevents a misbehaving endpoint from causing an
+/// out-of-memory error by returning a multi-gigabyte error payload.
+async fn read_limited_body<S, E>(stream: S, limit: usize) -> String
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, E>>,
+{
+    let mut collected = Vec::with_capacity(limit.min(1024));
+    let mut stream = Box::pin(stream);
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                let remaining = limit.saturating_sub(collected.len());
+                if remaining == 0 {
+                    return format!(
+                        "{}…(truncated)",
+                        String::from_utf8_lossy(&collected)
+                    );
+                }
+                let take = bytes.len().min(remaining);
+                collected.extend_from_slice(&bytes[..take]);
+                if collected.len() >= limit {
+                    return format!(
+                        "{}…(truncated)",
+                        String::from_utf8_lossy(&collected)
+                    );
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    String::from_utf8_lossy(&collected).into_owned()
 }
 
 #[cfg(test)]
@@ -1170,5 +1218,46 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let mut decoded = Vec::new();
         std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    fn test_stream(
+        chunks: Vec<Result<bytes::Bytes, ()>>,
+    ) -> impl futures::Stream<Item = Result<bytes::Bytes, ()>> {
+        futures::stream::iter(chunks)
+    }
+
+    #[tokio::test]
+    async fn read_limited_body_returns_small_body_intact() {
+        let stream = test_stream(vec![Ok(bytes::Bytes::from_static(
+            b"small error",
+        ))]);
+        let body = read_limited_body(stream, 100).await;
+        assert_eq!(body, "small error");
+    }
+
+    #[tokio::test]
+    async fn read_limited_body_truncates_large_body() {
+        let stream = test_stream(vec![Ok(bytes::Bytes::from_static(
+            b"0123456789",
+        ))]);
+        let body = read_limited_body(stream, 5).await;
+        assert_eq!(body, "01234…(truncated)");
+    }
+
+    #[tokio::test]
+    async fn read_limited_body_empty_body() {
+        let stream = test_stream(vec![]);
+        let body = read_limited_body(stream, 100).await;
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_limited_body_ignores_chunk_errors() {
+        let stream = test_stream(vec![
+            Ok(bytes::Bytes::from_static(b"partial")),
+            Err(()),
+        ]);
+        let body = read_limited_body(stream, 100).await;
+        assert_eq!(body, "partial");
     }
 }
