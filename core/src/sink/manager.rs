@@ -532,6 +532,12 @@ impl Actor for SinkManager {
                     description: "SinkManager missing init params".to_owned(),
                 })?;
 
+        // `is_governance` is set by `create_initial` and survives recovery
+        // because `set_state` does not overwrite transient fields. Re-derive it
+        // from the init params here so the decision below is robust even if the
+        // recovery path changes in the future.
+        self.is_governance = params.is_governance;
+
         // Validate sink server name uniqueness.
         let mut seen = HashSet::new();
         for sink in &params.sinks {
@@ -751,6 +757,10 @@ impl Handler<Self> for SinkManager {
                     subject_id = %subject_id,
                     "Subject worker recreated; resetting notification state"
                 );
+                // Any catch-up that was in flight in the dead worker is lost;
+                // clear the flag so a fresh catch-up can be scheduled.
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id.clone()));
                 self.reset_last_notified_for_subject(&sink, &subject_id);
 
                 // If the cursor is behind last_seen, events were lost or the
@@ -1130,6 +1140,7 @@ impl SinkManager {
                     self.is_governance,
                     signer,
                 )
+                .await
                 .map_err(|e| ActorError::Functional {
                     description: format!(
                         "Failed to create sink worker for {}: {}",

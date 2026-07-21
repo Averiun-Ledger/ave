@@ -101,16 +101,15 @@ impl NodeSigner {
 }
 
 /// Build the transport for a sink server from its configuration.
-pub fn build_transport(
+pub async fn build_transport(
     server: &SinkServer,
     signer: Option<NodeSigner>,
 ) -> Result<Arc<dyn SinkTransport>, SinkError> {
     match &server.transport {
-        SinkTransportConfig::Http(http) => Ok(Arc::new(HttpTransport::new(
-            server.server.clone(),
-            *http.clone(),
-            signer,
-        )?)),
+        SinkTransportConfig::Http(http) => Ok(Arc::new(
+            HttpTransport::new(server.server.clone(), *http.clone(), signer)
+                .await?,
+        )),
         SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(KafkaTransport::new(
             server.server.clone(),
             kafka.clone(),

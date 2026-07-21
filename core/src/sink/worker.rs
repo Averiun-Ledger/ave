@@ -998,13 +998,13 @@ impl SinkWorker {
         }
     }
 
-    pub fn new(
+    pub async fn new(
         sink_name: String,
         server: SinkServer,
         is_governance: bool,
         signer: Option<NodeSigner>,
     ) -> Result<Self, SinkError> {
-        let client = crate::sink::build_transport(&server, signer)?;
+        let client = crate::sink::build_transport(&server, signer).await?;
         Ok(Self {
             sink_name,
             server,

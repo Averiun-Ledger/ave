@@ -65,7 +65,7 @@ fn sink_secret_env_var(prefix: &str, sink_name: &str) -> String {
 
 /// Build the reqwest client for a sink, applying the optional TLS
 /// customization: additional root CA, mTLS identity and minimum TLS version.
-fn build_http_client(
+async fn build_http_client(
     sink_name: &str,
     config: &HttpSinkConfig,
 ) -> Result<Client, SinkError> {
@@ -85,7 +85,8 @@ fn build_http_client(
                 sink_name,
                 "ca_certificate",
                 &tls.ca_certificate,
-            )?;
+            )
+            .await?;
             // With the rustls backend `Certificate::from_pem` defers parsing
             // and silently accepts a buffer without PEM sections, so parse
             // the bundle here and require at least one certificate.
@@ -111,8 +112,10 @@ fn build_http_client(
                 sink_name,
                 "client_certificate",
                 &tls.client_certificate,
-            )?;
-            let key = read_tls_file(sink_name, "client_key", &tls.client_key)?;
+            )
+            .await?;
+            let key = read_tls_file(sink_name, "client_key", &tls.client_key)
+                .await?;
             // rustls expects a single PEM buffer with the certificate chain
             // followed by the private key.
             pem.extend_from_slice(&key);
@@ -174,13 +177,15 @@ fn build_http_client(
     })
 }
 
-/// Read a PEM file referenced by the TLS configuration.
-fn read_tls_file(
+/// Read a PEM file referenced by the TLS configuration asynchronously.
+/// TLS files can be large and live on network filesystems, so this avoids
+/// blocking the async executor during client construction.
+async fn read_tls_file(
     sink_name: &str,
     field: &str,
     path: &str,
 ) -> Result<Vec<u8>, SinkError> {
-    std::fs::read(path).map_err(|e| {
+    tokio::fs::read(path).await.map_err(|e| {
         SinkError::ClientBuild(format!(
             "sink '{}': cannot read TLS {} file '{}': {}",
             sink_name, field, path, e
@@ -204,6 +209,29 @@ const EVENT_TYPE_HEADER: &str = "X-Ave-Event-Type";
 /// Header allowing the receiver to deduplicate deliveries
 /// (`<subject_id>-<sn>`, following the Stripe convention).
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
+
+/// Headers controlled by the sink itself. Custom values for these names are
+/// ignored because they would break the delivery contract or create duplicate
+/// headers on the wire. The comparison is case-insensitive.
+const RESERVED_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "authorization",
+    SIGNATURE_HEADER,
+    SIGNATURE_TIMESTAMP_HEADER,
+    SIGNATURE_PUBLIC_KEY_HEADER,
+    SUBJECT_ID_HEADER,
+    SN_HEADER,
+    EVENT_TYPE_HEADER,
+    IDEMPOTENCY_KEY_HEADER,
+];
+
+/// Whether `name` collides with a header reserved for internal sink use.
+fn is_reserved_header(name: &str) -> bool {
+    RESERVED_HEADERS
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
 
 /// Whether the authentication configuration has all required OAuth2 fields
 /// for the configured grant type. The config is assumed to have passed
@@ -252,12 +280,12 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
-    pub fn new(
+    pub async fn new(
         sink_name: String,
         config: HttpSinkConfig,
         signer: Option<NodeSigner>,
     ) -> Result<Self, SinkError> {
-        let client = build_http_client(&sink_name, &config)?;
+        let client = build_http_client(&sink_name, &config).await?;
 
         let password = std::env::var(sink_password_env_var(&sink_name))
             .unwrap_or_default();
@@ -455,6 +483,14 @@ impl HttpTransport {
         mut request: reqwest::RequestBuilder,
     ) -> reqwest::RequestBuilder {
         for (name, value) in &self.config.headers {
+            // Skip headers that the sink sets itself. reqwest appends values
+            // when `.header()` is called repeatedly, so letting a custom value
+            // through would produce duplicates and could cause the receiver to
+            // see the wrong value (e.g. a custom "Content-Type" shadowing the
+            // required "application/json").
+            if is_reserved_header(name) {
+                continue;
+            }
             request = request.header(name, value);
         }
         request
@@ -467,13 +503,14 @@ impl HttpTransport {
         signature_headers: &Option<SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
-        let mut request = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .body(payload.to_vec());
+        let mut request = self.client.post(url).body(payload.to_vec());
 
         request = self.apply_custom_headers(request);
+
+        // Internal headers are set after custom ones so they always take
+        // precedence (e.g. a custom "Content-Type" cannot break the JSON
+        // contract).
+        request = request.header("Content-Type", "application/json");
 
         if let Some(headers) = signature_headers {
             request = request
@@ -934,18 +971,17 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         }
     }
 
-    #[test]
-    fn build_client_rejects_missing_ca_file() {
+    #[tokio::test]
+    async fn build_client_rejects_missing_ca_file() {
         let mut config = base_config();
         config.tls = Some(HttpTlsConfig {
             ca_certificate: "/nonexistent/ave-test-ca.pem".to_owned(),
             ..HttpTlsConfig::default()
         });
-        let err = client_build_error(HttpTransport::new(
-            "unit-missing-ca".to_owned(),
-            config,
-            None,
-        ));
+        let err = client_build_error(
+            HttpTransport::new("unit-missing-ca".to_owned(), config, None)
+                .await,
+        );
         assert!(
             err.contains("cannot read TLS ca_certificate file"),
             "unexpected error: {}",
@@ -953,8 +989,8 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         );
     }
 
-    #[test]
-    fn build_client_rejects_invalid_ca_pem() {
+    #[tokio::test]
+    async fn build_client_rejects_invalid_ca_pem() {
         let dir = tempfile::tempdir().unwrap();
         let ca_path = dir.path().join("ca.pem");
         std::fs::write(&ca_path, "not a pem").unwrap();
@@ -963,11 +999,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             ca_certificate: ca_path.to_string_lossy().into_owned(),
             ..HttpTlsConfig::default()
         });
-        let err = client_build_error(HttpTransport::new(
-            "unit-bad-ca".to_owned(),
-            config,
-            None,
-        ));
+        let err = client_build_error(
+            HttpTransport::new("unit-bad-ca".to_owned(), config, None).await,
+        );
         assert!(
             err.contains("invalid CA certificate"),
             "unexpected error: {}",
@@ -975,8 +1009,8 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         );
     }
 
-    #[test]
-    fn build_client_accepts_valid_ca_pem() {
+    #[tokio::test]
+    async fn build_client_accepts_valid_ca_pem() {
         let dir = tempfile::tempdir().unwrap();
         let ca_path = dir.path().join("ca.pem");
         std::fs::write(&ca_path, TEST_CERT_PEM).unwrap();
@@ -987,12 +1021,13 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         });
         assert!(
             HttpTransport::new("unit-valid-ca".to_owned(), config, None)
+                .await
                 .is_ok()
         );
     }
 
-    #[test]
-    fn build_client_accepts_mtls_identity() {
+    #[tokio::test]
+    async fn build_client_accepts_mtls_identity() {
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("client.pem");
         let key_path = dir.path().join("client.key");
@@ -1006,7 +1041,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             ..HttpTlsConfig::default()
         });
         assert!(
-            HttpTransport::new("unit-mtls".to_owned(), config, None).is_ok()
+            HttpTransport::new("unit-mtls".to_owned(), config, None)
+                .await
+                .is_ok()
         );
     }
 
@@ -1023,6 +1060,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         });
         let transport =
             HttpTransport::new("unit-env-precedence".to_owned(), config, None)
+                .await
                 .unwrap();
         let header = transport.build_auth_header().await.unwrap();
         unsafe {
@@ -1040,22 +1078,22 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         });
         let transport =
             HttpTransport::new("unit-config-key".to_owned(), config, None)
+                .await
                 .unwrap();
         let header = transport.build_auth_header().await.unwrap();
         assert_eq!(header.as_deref(), Some("Api-Key config-key"));
     }
 
-    #[test]
-    fn auth_without_any_credential_fails() {
+    #[tokio::test]
+    async fn auth_without_any_credential_fails() {
         let mut config = base_config();
         config.auth = Some(SinkAuthConfig {
             ..SinkAuthConfig::default()
         });
-        let err = client_build_error(HttpTransport::new(
-            "unit-missing-key".to_owned(),
-            config,
-            None,
-        ));
+        let err = client_build_error(
+            HttpTransport::new("unit-missing-key".to_owned(), config, None)
+                .await,
+        );
         assert!(
             err.contains("AVE_SINK_APIKEY_UNIT_MISSING_KEY"),
             "unexpected error: {}",
@@ -1063,31 +1101,28 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         );
     }
 
-    #[test]
-    fn signature_without_signer_fails() {
+    #[tokio::test]
+    async fn signature_without_signer_fails() {
         let mut config = base_config();
         config.signature = true;
-        let err = client_build_error(HttpTransport::new(
-            "unit-signer".to_owned(),
-            config,
-            None,
-        ));
+        let err = client_build_error(
+            HttpTransport::new("unit-signer".to_owned(), config, None).await,
+        );
         assert!(err.contains("no node signer"), "unexpected error: {}", err);
     }
 
-    #[test]
-    fn proxy_without_password_env_fails() {
+    #[tokio::test]
+    async fn proxy_without_password_env_fails() {
         let mut config = base_config();
         config.proxy = Some(ave_common::sink::HttpProxyConfig {
             url: "http://proxy.local:3128".to_owned(),
             username: "ave".to_owned(),
             no_proxy: vec![],
         });
-        let err = client_build_error(HttpTransport::new(
-            "unit-proxy-nopass".to_owned(),
-            config,
-            None,
-        ));
+        let err = client_build_error(
+            HttpTransport::new("unit-proxy-nopass".to_owned(), config, None)
+                .await,
+        );
         assert!(
             err.contains("AVE_SINK_PROXY_PASSWORD_UNIT_PROXY_NOPASS"),
             "unexpected error: {}",
@@ -1095,19 +1130,18 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         );
     }
 
-    #[test]
-    fn proxy_with_invalid_url_fails() {
+    #[tokio::test]
+    async fn proxy_with_invalid_url_fails() {
         let mut config = base_config();
         config.proxy = Some(ave_common::sink::HttpProxyConfig {
             url: "not a url".to_owned(),
             username: String::new(),
             no_proxy: vec![],
         });
-        let err = client_build_error(HttpTransport::new(
-            "unit-proxy-badurl".to_owned(),
-            config,
-            None,
-        ));
+        let err = client_build_error(
+            HttpTransport::new("unit-proxy-badurl".to_owned(), config, None)
+                .await,
+        );
         assert!(
             err.contains("invalid proxy URL"),
             "unexpected error: {}",
@@ -1115,8 +1149,8 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         );
     }
 
-    #[test]
-    fn proxy_with_password_env_builds() {
+    #[tokio::test]
+    async fn proxy_with_password_env_builds() {
         let env_var = "AVE_SINK_PROXY_PASSWORD_UNIT_PROXY_OK";
         unsafe {
             std::env::set_var(env_var, "proxy-secret");
@@ -1128,7 +1162,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             no_proxy: vec!["localhost".to_owned()],
         });
         let result =
-            HttpTransport::new("unit-proxy-ok".to_owned(), config, None);
+            HttpTransport::new("unit-proxy-ok".to_owned(), config, None).await;
         unsafe {
             std::env::remove_var(env_var);
         }
@@ -1179,6 +1213,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     async fn encode_body_plain_when_no_compression() {
         let transport =
             HttpTransport::new("unit-plain".to_owned(), base_config(), None)
+                .await
                 .unwrap();
         let body = transport
             .encode_body(&serde_json::json!({"a": 1}))
@@ -1192,7 +1227,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let mut config = base_config();
         config.compression = HttpCompression::Gzip;
         let transport =
-            HttpTransport::new("unit-gzip".to_owned(), config, None).unwrap();
+            HttpTransport::new("unit-gzip".to_owned(), config, None)
+                .await
+                .unwrap();
         let raw = serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap();
         let body = transport
             .encode_body(&serde_json::json!({"a": 1}))
@@ -1294,6 +1331,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
         let transport =
             HttpTransport::new("unit-refresh-expired".to_owned(), config, None)
+                .await
                 .expect("transport should build");
 
         // Seed an expired token; the next call must obtain a fresh one.
@@ -1344,6 +1382,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
         let transport =
             HttpTransport::new("unit-client-credentials".to_owned(), config, None)
+                .await
                 .expect("transport should build");
 
         let header = transport
@@ -1371,6 +1410,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             config,
             None,
         )
+        .await
         .expect("transport should build");
 
         let request = transport

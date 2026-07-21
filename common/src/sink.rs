@@ -1161,8 +1161,9 @@ pub struct HttpSinkConfig {
     /// (`Content-Encoding: gzip`).
     pub compression: HttpCompression,
     /// Custom static headers added to every delivery and health-check request.
-    /// Applied before the sink's own headers (Authorization, X-Ave-*, etc.),
-    /// so internal headers take precedence and cannot be overridden.
+    /// Headers that collide with the sink's own headers (`Content-Type`,
+    /// `Content-Encoding`, `Authorization`, `X-Ave-*`, `Idempotency-Key`, etc.)
+    /// are ignored so the delivery contract is never broken.
     #[serde(default)]
     pub headers: HashMap<String, String>,
     /// Maximum number of bytes to read from an error response body before

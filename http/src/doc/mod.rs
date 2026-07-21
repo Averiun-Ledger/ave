@@ -30,6 +30,7 @@ use crate::{
         EndpointRateLimitHttp, GovernanceSyncConfigHttp, HashAlgorithmHttp,
         HttpCompressionHttp, HttpConfigHttp, HttpProxyConfigHttp,
         HttpSinkConfigHttp, HttpTlsConfigHttp, HttpTlsVersionHttp,
+        OAuth2GrantTypeHttp,
         KafkaAcksHttp, KafkaCompressionHttp, KafkaSaslMechanismHttp,
         KafkaSecurityConfigHttp, KafkaSinkConfigHttp, KeyPairAlgorithmHttp,
         LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, LoggingRotationHttp,
@@ -52,7 +53,7 @@ use ave_bridge::ave_common::{
             BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
             BridgeSignedEventRequest, BridgeTransferRequest, EventRequestType,
             EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery,
-            SubjectQuery, UpdateSubjectQuery,
+            SinkReplayItem, SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
         },
         signature::BridgeSignature,
     },
@@ -60,8 +61,9 @@ use ave_bridge::ave_common::{
         AbortDB, ApprovalEntry, ApprovalReq, EvalResDB, GovsData, LedgerDB,
         Paginator, PaginatorAborts, PaginatorEvents, RequestData,
         RequestEventDB, RequestInfo, RequestInfoExtend, RequestState,
-        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SubjectDB,
-        SubjsData, TimeRange, TransferSubject,
+        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SinkInfo,
+        SinkManagerTarget, SinkReplayError, SinkReplayResponse, SinkStatusInfo,
+        SubjectDB, SubjsData, TimeRange, TransferSubject,
     },
 };
 
@@ -336,6 +338,15 @@ impl Modify for SecurityAddon {
             TimeRange,
             EventRequestType,
 
+            // ── Sink response / request types ─────────────────────
+            SinkInfo,
+            SinkStatusInfo,
+            SinkManagerTarget,
+            SinkReplayRequest,
+            SinkReplayItem,
+            SinkReplayResponse,
+            SinkReplayError,
+
             // ── Configuration ───────────────────────────────────
             ConfigHttp,
             AveConfigHttp,
@@ -375,6 +386,7 @@ impl Modify for SecurityAddon {
             HttpCompressionHttp,
             HttpTlsConfigHttp,
             HttpTlsVersionHttp,
+            OAuth2GrantTypeHttp,
             KafkaAcksHttp,
             KafkaCompressionHttp,
             KafkaSaslMechanismHttp,

@@ -823,10 +823,11 @@ impl From<SinkConfigEntry> for SinkConfigEntryHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Default, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuth2GrantTypeHttp {
     /// Resource Owner Password Credentials grant.
+    #[default]
     Password,
     /// Client Credentials grant (machine-to-machine / enterprise IdP).
     ClientCredentials,
@@ -856,11 +857,14 @@ pub struct SinkAuthConfigHttp {
     /// API key for Api-Key header authentication. Always redacted (`"***"`)
     /// in API responses; the real value never leaves the node.
     pub api_key: String,
-    /// OAuth2 grant type
+    /// OAuth2 grant type. Defaults to `password` for backwards compatibility.
+    #[serde(default)]
     pub grant_type: OAuth2GrantTypeHttp,
     /// Client identifier for the `client_credentials` grant
+    #[serde(default)]
     pub client_id: String,
     /// Optional OAuth2 scope(s) requested when obtaining a token
+    #[serde(default)]
     pub scope: String,
 }
 
@@ -1136,7 +1140,14 @@ pub enum SinkTransportConfigHttp {
     Kafka(KafkaSinkConfigHttp),
 }
 
+impl Default for SinkTransportConfigHttp {
+    fn default() -> Self {
+        Self::Http(Box::new(HttpSinkConfigHttp::default()))
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(default)]
 pub struct SinkServerHttp {
     /// Server identifier
     pub server: String,
@@ -1144,6 +1155,37 @@ pub struct SinkServerHttp {
     pub events: Vec<String>,
     /// Delivery transport and its specific configuration
     pub transport: SinkTransportConfigHttp,
+    /// Number of events read from the ledger per catch-up batch
+    pub batch_size: usize,
+    /// Time a sink worker can be idle before the manager shuts it down
+    pub sink_worker_idle_timeout_ms: u64,
+    /// Backoff schedule for periodic healthchecks when the sink has lagging subjects
+    pub healthcheck_intervals_secs: Vec<u64>,
+    /// Maximum concurrent catch-up streams per sink worker
+    pub max_catch_up_concurrency: usize,
+    /// Time a per-subject worker can be idle before it is stopped
+    pub sink_subject_worker_idle_timeout_ms: u64,
+    /// Maximum recoveries after failure before the sink is considered flapping
+    pub max_recoveries_after_failure: u32,
+    /// Delay before the first healthcheck after worker startup
+    pub startup_healthcheck_delay_secs: u64,
+}
+
+impl Default for SinkServerHttp {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            events: Vec::new(),
+            transport: SinkTransportConfigHttp::default(),
+            batch_size: 100,
+            sink_worker_idle_timeout_ms: 10_000,
+            healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
+            max_catch_up_concurrency: 2,
+            sink_subject_worker_idle_timeout_ms: 2_000,
+            max_recoveries_after_failure: 5,
+            startup_healthcheck_delay_secs: 1,
+        }
+    }
 }
 
 impl From<ave_bridge::SinkServer> for SinkServerHttp {
@@ -1210,6 +1252,15 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             server: value.server,
             events: value.events.into_iter().map(|e| e.to_string()).collect(),
             transport,
+            batch_size: value.batch_size,
+            sink_worker_idle_timeout_ms: value.sink_worker_idle_timeout_ms,
+            healthcheck_intervals_secs: value.healthcheck_intervals_secs,
+            max_catch_up_concurrency: value.max_catch_up_concurrency,
+            sink_subject_worker_idle_timeout_ms: value
+                .sink_subject_worker_idle_timeout_ms,
+            max_recoveries_after_failure: value.max_recoveries_after_failure,
+            startup_healthcheck_delay_secs: value
+                .startup_healthcheck_delay_secs,
         }
     }
 }
