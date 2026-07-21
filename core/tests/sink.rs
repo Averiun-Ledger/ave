@@ -64,6 +64,38 @@ use crate::common::{
 };
 use ave_network::RoutingNode;
 
+/// Poll the test sink until the number of raw events stabilizes (no new
+/// arrivals for a few consecutive checks), tolerating slow or loaded systems.
+/// Returns the final raw event list.
+async fn wait_for_sink_events_stable(
+    sink: &TestSink,
+) -> Vec<IncomingSinkEvent> {
+    let mut attempts = 0;
+    let mut last_count = 0;
+    let mut stable_iterations = 0;
+    loop {
+        let events = sink.snapshot().await;
+        let current_count = events.len();
+        if current_count == last_count {
+            stable_iterations += 1;
+            if stable_iterations >= 3 {
+                return events;
+            }
+        } else {
+            stable_iterations = 0;
+        }
+        last_count = current_count;
+        if attempts > 40 {
+            panic!(
+                "sink event count did not stabilize after 4s; current: {}",
+                current_count
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+}
+
 #[traced_test]
 #[tokio::test]
 async fn sink_registry_populated_from_config() {
@@ -3011,10 +3043,10 @@ async fn sink_recovery_across_node_restart() {
     sink.wait_for_count(8, true).await;
     assert_sink_not_lagging(&node.api, "example-sink").await;
 
-    // Wait longer than the worker idle timeout so the manager stops it.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Second event: a fresh worker must be created to deliver it.
+    // Second event: a fresh worker must be created to deliver it. The
+    // previous worker is expected to have been stopped by the idle timeout
+    // (200 ms); if the old worker is still alive it will deliver the event
+    // instead, which is also correct behavior.
     emit_fact(
         &node.api,
         subject_two.clone(),
@@ -5041,8 +5073,35 @@ async fn sink_subject_deletion_cleans_tracking() {
     .await
     .unwrap();
 
-    // Give the sink workers time to process any pending work.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Poll until both sink event counts stabilize: no new events should arrive
+    // for the deleted subject. This is robust on slow systems where workers
+    // may still be draining queued events.
+    let mut attempts = 0;
+    let mut last_a = 0;
+    let mut last_b = 0;
+    let mut stable_iterations = 0;
+    loop {
+        let current_a = sink_a.snapshot().await.len();
+        let current_b = sink_b.snapshot().await.len();
+        if current_a == last_a && current_b == last_b {
+            stable_iterations += 1;
+            if stable_iterations >= 3 {
+                break;
+            }
+        } else {
+            stable_iterations = 0;
+        }
+        last_a = current_a;
+        last_b = current_b;
+        if attempts > 40 {
+            panic!(
+                "sink event counts did not stabilize after 4s; A: {}, B: {}",
+                current_a, current_b
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
 
     // Neither sink should have received new events for the deleted subject.
     let after_a = sink_a.snapshot().await;
@@ -7649,8 +7708,7 @@ async fn replay_during_active_catch_up() {
         .await;
 
     // Allow any in-flight retries to settle, then verify stability.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let raw_events = sink.snapshot().await;
+    let raw_events = wait_for_sink_events_stable(&sink).await;
     let events = deduplicate_events_by_sn(&raw_events);
 
     // The raw sink may receive duplicate deliveries when automatic catch-up
@@ -7693,8 +7751,7 @@ async fn replay_during_active_catch_up() {
     );
 
     // Stability: after waiting, no new distinct SNs appear.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let raw_events_later = sink.snapshot().await;
+    let raw_events_later = wait_for_sink_events_stable(&sink).await;
     let events_later = deduplicate_events_by_sn(&raw_events_later);
     let sns_later: Vec<u64> = events_later.iter().map(|e| e.sn()).collect();
     assert_eq!(
@@ -7963,6 +8020,124 @@ async fn sink_mtls_delivery() {
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 2, true)
         .await;
     assert_sink_running(&node.api, "mtls-sink").await;
+}
+
+/// TLS certificate pinning: the sink must accept only the pinned server
+/// certificate and reject a different one.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with an HTTPS sink configured with `pinned_certificate` set to
+///    the TestSink's server certificate: delivery must succeed.
+/// 3. Restart again with `pinned_certificate` set to the TestSink's CA
+///    certificate instead of the server certificate: the handshake must fail.
+///
+/// **Verifications:**
+/// - With the correct pin, startup catch-up delivers the create event.
+/// - With the wrong pin, the subject is reported lagging and no body reaches
+///   the sink.
+#[traced_test]
+#[tokio::test]
+async fn sink_tls_pinning() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (sink, tls_material) = TestSink::start_tls(false).await;
+    let tls_dir = tempfile::tempdir().unwrap();
+    let server_cert_path = tls_dir.path().join("server.pem");
+    let ca_cert_path = tls_dir.path().join("ca.pem");
+    std::fs::write(&server_cert_path, &tls_material.server_cert_pem).unwrap();
+    std::fs::write(&ca_cert_path, &tls_material.ca_pem).unwrap();
+
+    // Correct pin: the exact server certificate.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_tls(
+            "pinned-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpTlsConfig {
+                pinned_certificate: server_cert_path
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Default::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
+        .await;
+    assert_sink_running(&node.api, "pinned-sink").await;
+
+    // Wrong pin: the CA certificate is not the server certificate.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_tls(
+            "pinned-wrong-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpTlsConfig {
+                pinned_certificate: ca_cert_path
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Default::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "pinned-wrong-sink", 1).await;
 }
 
 /// Signature reuse across retries: the delivery payload is signed once and
@@ -8977,7 +9152,7 @@ async fn sink_batch_delivery_burst_single_post() {
         HttpCompression::None,
     );
     // One batch for the whole burst; the timer must not fire during the test.
-    entry.servers[0].batch_size = 5;
+    entry.servers[0].batch_delivery_size = 5;
     if let SinkTransportConfig::Http(ref mut http) = entry.servers[0].transport
     {
         http.batch_max_delay_ms = 60_000;

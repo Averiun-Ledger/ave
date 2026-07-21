@@ -190,6 +190,7 @@ fn map_produce_code(code: RDKafkaErrorCode) -> SinkError {
         | RDKafkaErrorCode::UnsupportedSASLMechanism
         | RDKafkaErrorCode::IllegalSASLState => SinkError::Auth {
             message: format!("kafka auth/authorization failed ({code})"),
+            retry_after_ms: None,
         },
         // Permanent payload/topic problems: retrying will never succeed, so
         // the sink is blocked until the configuration is fixed.

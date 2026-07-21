@@ -157,6 +157,10 @@ pub enum Error {
     #[error("Sink '{0}' not found")]
     SinkNotFound(String),
 
+    /// Non-persistent sink test delivery failed.
+    #[error("Sink test failed: {0}")]
+    SinkTestFailed(String),
+
     // ========================================
     // Validation Errors
     // ========================================

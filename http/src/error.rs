@@ -151,6 +151,7 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         | CoreError::ActorCommunication { .. }
         | CoreError::UnexpectedResponse { .. }
         | CoreError::ActorError(_)
+        | CoreError::SinkTestFailed(_)
         | CoreError::TransferFailed(_)
         | CoreError::DistributionFailed(_)
         | CoreError::UpdateFailed(_, _)

@@ -380,6 +380,18 @@ impl Bridge {
             .map_err(BridgeError::Core)
     }
 
+    pub async fn test_sink(
+        &self,
+        sink_name: String,
+    ) -> Result<(), BridgeError> {
+        Self::require_non_empty_str("sink_name", &sink_name)?;
+
+        self.api
+            .test_sink(sink_name)
+            .await
+            .map_err(BridgeError::Core)
+    }
+
     ///////// SubjectAccess
     ////////////////////////////
     pub async fn authorize_governance(

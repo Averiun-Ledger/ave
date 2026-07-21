@@ -52,6 +52,15 @@ pub trait SinkTransport: Send + Sync + std::fmt::Debug {
     }
     /// Health check of the endpoint.
     async fn health_check(&self) -> Result<(), SinkError>;
+    /// Non-persistent test delivery. Verifies that the endpoint is reachable
+    /// and accepts a payload using the same authentication, signature and
+    /// compression configuration as real deliveries, without advancing any
+    /// cursor or altering persisted state.
+    async fn test(&self) -> Result<(), SinkError> {
+        // Transports that do not implement a dedicated test path fall back to
+        // the health check. This is safe but may not exercise auth/signature.
+        self.health_check().await
+    }
     /// Transport startup logic (HTTP: eager OAuth2 token fetch).
     /// Default: no-op.
     async fn warm_up(&self) -> Result<(), SinkError> {

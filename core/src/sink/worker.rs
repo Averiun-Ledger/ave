@@ -492,7 +492,7 @@ impl Handler<Self> for SinkWorker {
                 child_ref
                     .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
                         from_sn,
-                        batch_size: self.server.batch_size,
+                        batch_size: self.server.catch_up_batch_size,
                     })
                     .await?;
 
@@ -940,7 +940,7 @@ impl SinkWorker {
                     if let Err(e) = child_ref
                         .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
                             from_sn,
-                            batch_size: self.server.batch_size,
+                            batch_size: self.server.catch_up_batch_size,
                         })
                         .await
                     {

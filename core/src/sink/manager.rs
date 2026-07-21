@@ -34,6 +34,7 @@ use crate::metrics::try_core_metrics;
 use crate::node::Node;
 use crate::sink::NodeSigner;
 use crate::sink::extract_sn;
+use crate::sink::transport::build_transport;
 use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
 use crate::system::ConfigHelper;
 
@@ -109,6 +110,11 @@ pub enum SinkManagerMessage {
     ReplayEvents {
         requests: Vec<SinkReplayItem>,
     },
+    /// Non-persistent end-to-end test of a sink: health check + test payload
+    /// delivery without advancing cursors.
+    TestSink {
+        sink: String,
+    },
     /// Node has finished starting all its children. Governance sinks can now
     /// start workers and catch-up because governance actors are guaranteed to
     /// be available.
@@ -123,6 +129,7 @@ pub enum SinkManagerResponse {
     Status(Vec<SinkStatus>),
     DetailedStatus(SinkManagerDetailedStatus),
     ReplayResult(SinkReplayResponse),
+    TestResult(Result<(), String>),
 }
 
 impl Response for SinkManagerResponse {}
@@ -458,6 +465,8 @@ impl PersistentActor for SinkManager {
                         SinkManagerEvent::SinkCursorsDeleted { .. }
                     ) {
                         metrics.set_sink_lagging_subjects(sink, 0);
+                        metrics.set_sink_lagging_events(sink, 0);
+                        metrics.set_sink_lag_max_distance(sink, 0);
                     }
                 }
                 _ => {}
@@ -716,6 +725,10 @@ impl Handler<Self> for SinkManager {
                 let response = self.handle_replay_events(requests, ctx).await?;
                 return Ok(SinkManagerResponse::ReplayResult(response));
             }
+            SinkManagerMessage::TestSink { sink } => {
+                let result = self.handle_test_sink(&sink, ctx).await;
+                return Ok(SinkManagerResponse::TestResult(result));
+            }
             SinkManagerMessage::StartupReady => {
                 self.handle_startup_ready(ctx).await?;
             }
@@ -935,12 +948,54 @@ impl SinkManager {
             .collect()
     }
 
+    /// Compute the SN distance between `last_seen` and the sink cursor for a
+    /// subject. A missing cursor means the subject is one event behind even if
+    /// `last_seen == 0`, matching the outdated logic in `rebuild_lagging`.
+    fn sink_lag_distance(&self, sink: &str, subject_id: &str) -> u64 {
+        let last_sn = self.last_seen.get(subject_id).copied().unwrap_or(0);
+        match self
+            .cursors
+            .get(&(sink.to_owned(), subject_id.to_owned()))
+            .copied()
+        {
+            Some(cursor) if cursor >= last_sn => 0,
+            Some(cursor) => last_sn - cursor,
+            None => last_sn + 1,
+        }
+    }
+
+    fn sink_lagging_totals(&self, sink: &str) -> (usize, u64, u64) {
+        let Some(subjects) = self.lagging.get(sink) else {
+            return (0, 0, 0);
+        };
+        let count = subjects.len();
+        if count == 0 {
+            return (0, 0, 0);
+        }
+        let mut total = 0u64;
+        let mut max = 0u64;
+        for subject_id in subjects {
+            let distance = self.sink_lag_distance(sink, subject_id);
+            total = total.saturating_add(distance);
+            max = max.max(distance);
+        }
+        (count, total, max)
+    }
+
+    fn update_sink_lag_metrics(&self, sink: &str) {
+        let Some(metrics) = try_core_metrics() else {
+            return;
+        };
+        let (count, total, max) = self.sink_lagging_totals(sink);
+        metrics.set_sink_lagging_subjects(sink, count as i64);
+        metrics.set_sink_lagging_events(sink, total as i64);
+        metrics.set_sink_lag_max_distance(sink, max as i64);
+    }
+
     fn try_insert_lagging(&mut self, sink: &str, subject_id: String) {
         let set = self.lagging.entry(sink.to_string()).or_default();
         set.insert(subject_id);
-        if let Some(metrics) = try_core_metrics() {
-            metrics.set_sink_lagging_subjects(sink, set.len() as i64);
-        }
+        self.update_sink_lag_metrics(sink);
     }
 
     fn remove_lagging_subject(&mut self, sink: &str, subject_id: &str) {
@@ -951,11 +1006,7 @@ impl SinkManager {
                 self.last_errors.remove(sink);
             }
         }
-        if let Some(metrics) = try_core_metrics() {
-            let count =
-                self.lagging.get(sink).map(|s| s.len() as i64).unwrap_or(0);
-            metrics.set_sink_lagging_subjects(sink, count);
-        }
+        self.update_sink_lag_metrics(sink);
     }
 
     /// Reset the notification cursor for a single subject to the delivery
@@ -1015,15 +1066,8 @@ impl SinkManager {
             }
         }
 
-        if let Some(metrics) = try_core_metrics() {
-            for sink_name in active_sinks {
-                let count = self
-                    .lagging
-                    .get(&sink_name)
-                    .map(|s| s.len() as i64)
-                    .unwrap_or(0);
-                metrics.set_sink_lagging_subjects(&sink_name, count);
-            }
+        for sink_name in &active_sinks {
+            self.update_sink_lag_metrics(sink_name);
         }
 
         // Drop stale last-error entries for sinks that no longer have lagging
@@ -1786,6 +1830,48 @@ impl SinkManager {
         Ok(SinkReplayResponse { processed, errors })
     }
 
+    async fn handle_test_sink(
+        &mut self,
+        sink_name: &str,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), String> {
+        let server = match self.sink_servers.get(sink_name) {
+            Some(server) => server.clone(),
+            None => {
+                return Err(format!("sink '{}' is not configured", sink_name));
+            }
+        };
+
+        let signer = match &server.transport {
+            SinkTransportConfig::Http(http) if http.signature => {
+                match ctx.system().get_actor::<Node>(&ActorPath::from("/user/node")).await {
+                    Ok(node) => Some(NodeSigner::new(node)),
+                    Err(e) => {
+                        return Err(format!(
+                            "failed to get node actor for sink test: {}",
+                            e
+                        ));
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        let transport = build_transport(&server, signer)
+            .await
+            .map_err(|e| format!("failed to build sink transport: {}", e))?;
+
+        transport.test().await.map_err(|e| {
+            warn!(
+                msg_type = "SinkTestFailed",
+                sink = %sink_name,
+                error = %e,
+                "Sink test delivery failed"
+            );
+            format!("sink test failed: {}", e)
+        })
+    }
+
     async fn handle_request_catch_up(
         &mut self,
         sink: String,
@@ -2053,5 +2139,91 @@ impl SinkManager {
         self.catch_up_in_flight.retain(|(_, sid)| sid != subject_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager_with_state(
+        cursors: BTreeMap<(String, String), u64>,
+        last_seen: BTreeMap<String, u64>,
+    ) -> SinkManager {
+        SinkManager {
+            cursors,
+            last_seen,
+            active_sinks: BTreeSet::new(),
+            version: 1,
+            sink_servers: BTreeMap::new(),
+            lagging: BTreeMap::new(),
+            store_params: None,
+            blocked_sinks: BTreeMap::new(),
+            is_governance: false,
+            pending_worker_shutdowns: HashMap::new(),
+            pending_healthchecks: HashMap::new(),
+            catch_up_in_flight: HashSet::new(),
+            last_notified: HashMap::new(),
+            last_errors: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sink_lag_distance_with_missing_cursor_counts_one_event() {
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 0);
+        let manager = manager_with_state(BTreeMap::new(), last_seen);
+
+        // No cursor at all means the Create event (sn 0) is still pending.
+        assert_eq!(manager.sink_lag_distance("sink", "sub"), 1);
+    }
+
+    #[test]
+    fn sink_lag_distance_with_cursor_behind_last_seen() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "sub".to_owned()), 2);
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 5);
+        let manager = manager_with_state(cursors, last_seen);
+
+        assert_eq!(manager.sink_lag_distance("sink", "sub"), 3);
+    }
+
+    #[test]
+    fn sink_lag_distance_zero_when_fully_caught_up() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "sub".to_owned()), 5);
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 5);
+        let manager = manager_with_state(cursors, last_seen);
+
+        assert_eq!(manager.sink_lag_distance("sink", "sub"), 0);
+    }
+
+    #[test]
+    fn sink_lagging_totals_aggregate_distances() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "a".to_owned()), 2); // lag 3
+        cursors.insert(("sink".to_owned(), "b".to_owned()), 4); // lag 1
+        // c is missing, last_seen 0 -> lag 1
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("a".to_owned(), 5);
+        last_seen.insert("b".to_owned(), 5);
+        last_seen.insert("c".to_owned(), 0);
+
+        let mut manager = manager_with_state(cursors, last_seen);
+        manager.lagging.insert(
+            "sink".to_owned(),
+            HashSet::from([
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+            ]),
+        );
+
+        let (count, total, max) = manager.sink_lagging_totals("sink");
+        assert_eq!(count, 3);
+        assert_eq!(total, 5); // 3 + 1 + 1
+        assert_eq!(max, 3);
     }
 }

@@ -1761,6 +1761,55 @@ impl Api {
         Ok(SinkReplayResponse { processed, errors })
     }
 
+    /// Run a non-persistent end-to-end test of a sink.
+    ///
+    /// Performs a health check and sends a test payload using the sink's real
+    /// configuration (auth, signature, compression). No cursor is advanced and
+    /// no state is persisted.
+    pub async fn test_sink(&self, sink_name: String) -> Result<(), Error> {
+        self.ensure_mutations_allowed()?;
+        require_non_empty_str("sink_name", &sink_name)?;
+
+        let registration = self.get_sink_registration(&sink_name).await?;
+        let target = manager_target_from_registration(&registration)?;
+        let path = manager_path(&target);
+        let manager = self
+            .system
+            .get_actor::<crate::sink::manager::SinkManager>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                actor_communication_error("sink_manager", e)
+            })?;
+
+        match manager
+            .ask(crate::sink::manager::SinkManagerMessage::TestSink {
+                sink: sink_name.clone(),
+            })
+            .await
+        {
+            Ok(crate::sink::manager::SinkManagerResponse::TestResult(
+                result,
+            )) => result.map_err(Error::SinkTestFailed),
+            Ok(other) => {
+                warn!(
+                    sink = %sink_name,
+                    response = ?other,
+                    "Unexpected response from sink manager for test"
+                );
+                Err(Error::UnexpectedResponse {
+                    actor: "sink_manager".to_string(),
+                    expected: "TestResult".to_string(),
+                    received: format!("{other:?}"),
+                })
+            }
+            Err(e) => {
+                warn!(error = %e, sink = %sink_name, "Failed to test sink");
+                Err(actor_communication_error("sink_manager", e))
+            }
+        }
+    }
+
     pub async fn delete_subject(
         &self,
         subject_id: DigestIdentifier,

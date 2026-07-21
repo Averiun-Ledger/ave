@@ -22,8 +22,14 @@ pub enum SinkError {
 
     /// Authentication/authorization failed. The worker treats it as
     /// AuthFailed (subject goes to lagging, retried via catch-up).
+    /// `retry_after_ms` carries a server-provided `Retry-After` hint (429 /
+    /// 503 responses from the token endpoint), in milliseconds from the moment
+    /// the error was raised.
     #[error("sink authentication failed: {message}")]
-    Auth { message: String },
+    Auth {
+        message: String,
+        retry_after_ms: Option<u64>,
+    },
 
     /// Permanent payload rejection (e.g. 422, flapping) → sink blocked.
     #[error("sink rejected data: {message}")]

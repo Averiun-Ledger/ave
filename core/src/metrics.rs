@@ -93,6 +93,8 @@ pub struct CoreMetrics {
         Family<SinkResultLabels, Histogram, fn() -> Histogram>,
     sink_blocked: Family<SinkNameLabels, Gauge>,
     sink_lagging_subjects: Family<SinkNameLabels, Gauge>,
+    sink_lagging_events: Family<SinkNameLabels, Gauge>,
+    sink_lag_max_distance: Family<SinkNameLabels, Gauge>,
     distribution_failures: Family<DistributionFailureLabels, Counter>,
     distribution_duration_seconds:
         Family<DistributionDurationLabels, Histogram, fn() -> Histogram>,
@@ -145,6 +147,8 @@ impl CoreMetrics {
             }),
             sink_blocked: Family::default(),
             sink_lagging_subjects: Family::default(),
+            sink_lagging_events: Family::default(),
+            sink_lag_max_distance: Family::default(),
             distribution_failures: Family::default(),
             distribution_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
@@ -230,6 +234,16 @@ impl CoreMetrics {
             "core_sink_lagging_subjects",
             "Number of subjects currently lagging behind for a sink.",
             self.sink_lagging_subjects.clone(),
+        );
+        registry.register(
+            "core_sink_lagging_events",
+            "Total event lag (sum of last_seen - cursor) across all lagging subjects of a sink.",
+            self.sink_lagging_events.clone(),
+        );
+        registry.register(
+            "core_sink_lag_max_distance",
+            "Maximum SN distance (last_seen - cursor) among lagging subjects of a sink.",
+            self.sink_lag_max_distance.clone(),
         );
         registry.register(
             "core_distribution_failures_total",
@@ -406,6 +420,22 @@ impl CoreMetrics {
                 sink: sink.to_owned(),
             })
             .set(count);
+    }
+
+    pub fn set_sink_lagging_events(&self, sink: &str, count: i64) {
+        self.sink_lagging_events
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(count);
+    }
+
+    pub fn set_sink_lag_max_distance(&self, sink: &str, distance: i64) {
+        self.sink_lag_max_distance
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(distance);
     }
 
     pub fn observe_distribution_failure(&self, reason: &'static str) {
@@ -601,6 +631,8 @@ mod tests {
 
         metrics.set_sink_blocked("schema-sink", true);
         metrics.set_sink_lagging_subjects("schema-sink", 3);
+        metrics.set_sink_lagging_events("schema-sink", 42);
+        metrics.set_sink_lag_max_distance("schema-sink", 17);
 
         let mut text = String::new();
         encode(&mut text, &registry).expect("encode metrics");
@@ -671,6 +703,20 @@ mod tests {
                 "core_sink_lagging_subjects{sink=\"schema-sink\"}"
             ),
             3.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_lagging_events{sink=\"schema-sink\"}"
+            ),
+            42.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_lag_max_distance{sink=\"schema-sink\"}"
+            ),
+            17.0
         );
     }
 }

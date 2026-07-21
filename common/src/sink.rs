@@ -648,6 +648,7 @@ mod tests {
             ca_certificate: "/etc/ssl/ca.pem".to_owned(),
             client_certificate: "/etc/ssl/client.pem".to_owned(),
             client_key: "/etc/ssl/client.key".to_owned(),
+            pinned_certificate: "/etc/ssl/pinned.pem".to_owned(),
             min_tls_version: Some(HttpTlsVersion::Tls12),
         };
         assert!(tls.validate().is_ok());
@@ -694,6 +695,22 @@ mod tests {
         HttpSinkConfig {
             url: "https://sink.example.com/{{subject-id}}".to_owned(),
             ..HttpSinkConfig::default()
+        }
+    }
+
+    fn valid_sink_server() -> SinkServer {
+        SinkServer {
+            server: "unit-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::Fact]),
+            transport: SinkTransportConfig::Http(Box::new(valid_http_config())),
+            catch_up_batch_size: 100,
+            batch_delivery_size: 100,
+            sink_worker_idle_timeout_ms: 10_000,
+            healthcheck_intervals_secs: vec![30, 60],
+            max_catch_up_concurrency: 2,
+            sink_subject_worker_idle_timeout_ms: 2_000,
+            max_recoveries_after_failure: 5,
+            startup_healthcheck_delay_secs: 1,
         }
     }
 
@@ -871,6 +888,21 @@ mod tests {
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("proxy"), "unexpected error: {err}");
     }
+
+    #[test]
+    fn test_batch_sizes_are_required() {
+        let mut server = valid_sink_server();
+        server.catch_up_batch_size = 7;
+        server.batch_delivery_size = 13;
+        assert!(server.validate().is_ok());
+
+        server.catch_up_batch_size = 0;
+        assert!(server.validate().is_err());
+
+        server.catch_up_batch_size = 100;
+        server.batch_delivery_size = 0;
+        assert!(server.validate().is_err());
+    }
 }
 
 /// OAuth2 grant type used to obtain a token from the authentication endpoint.
@@ -1026,6 +1058,9 @@ pub struct HttpTlsConfig {
     /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
     /// Must be set together with `client_certificate`.
     pub client_key: String,
+    /// Path to a PEM-encoded server certificate to pin. When set, the TLS
+    /// handshake succeeds only if the sink presents this exact certificate.
+    pub pinned_certificate: String,
     /// Minimum TLS version accepted (`"1.2"` or `"1.3"`); when unset, the
     /// TLS library default is used.
     pub min_tls_version: Option<HttpTlsVersion>,
@@ -1142,6 +1177,12 @@ pub struct HttpSinkConfig {
     /// Sign each delivery with the node's Ed25519 identity and send the
     /// signature in the `X-Ave-Signature*` headers.
     pub signature: bool,
+    /// Signature protocol version:
+    /// - `1`: sign the body only (current default, compatible with existing receivers).
+    /// - `2`: sign canonical headers (`Content-Type`, `Content-Encoding`,
+    ///   `Idempotency-Key`, `X-Ave-Subject-Id`, `X-Ave-SN`, `X-Ave-Event-Type`)
+    ///   followed by the body.
+    pub signature_version: u8,
     /// Outbound proxy for this sink's requests.
     pub proxy: Option<HttpProxyConfig>,
     /// Upper bound for any delivery retry delay, including server-provided
@@ -1178,6 +1219,10 @@ pub struct HttpSinkConfig {
     pub pool_idle_timeout_secs: u64,
     /// Maximum number of idle connections to keep open per host.
     pub pool_max_idle_per_host: usize,
+    /// Maximum number of HTTP redirects the sink client will follow. `0`
+    /// disables redirects entirely, which is the recommended default for
+    /// webhooks to avoid SSRF / open-redirect attacks.
+    pub max_redirects: usize,
 }
 
 impl Default for HttpSinkConfig {
@@ -1193,6 +1238,7 @@ impl Default for HttpSinkConfig {
             token_refresh_margin_secs: 30,
             tls: None,
             signature: false,
+            signature_version: 1,
             proxy: None,
             retry_max_delay_ms: 30_000,
             batch_delivery: false,
@@ -1203,6 +1249,7 @@ impl Default for HttpSinkConfig {
             tcp_keepalive_secs: Some(60),
             pool_idle_timeout_secs: 90,
             pool_max_idle_per_host: 4,
+            max_redirects: 0,
         }
     }
 }
@@ -1292,6 +1339,20 @@ impl HttpSinkConfig {
             return Err(Error::InvalidConfiguration {
                 component: "HttpSinkConfig.pool_max_idle_per_host".to_string(),
                 reason: "must be greater than zero".to_string(),
+            });
+        }
+        // max_redirects is allowed to be 0 (disabled). Cap it to a sane upper
+        // bound to prevent accidental misconfiguration from consuming resources.
+        if self.max_redirects > 32 {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpSinkConfig.max_redirects".to_string(),
+                reason: "must be 32 or less".to_string(),
+            });
+        }
+        if self.signature_version != 1 && self.signature_version != 2 {
+            return Err(Error::InvalidConfiguration {
+                component: "HttpSinkConfig.signature_version".to_string(),
+                reason: "must be 1 or 2".to_string(),
             });
         }
         Ok(())
@@ -1659,7 +1720,10 @@ pub struct SinkServer {
     pub events: BTreeSet<SinkTypes>,
     /// Delivery transport and its specific configuration.
     pub transport: SinkTransportConfig,
-    pub batch_size: usize,
+    /// Number of events read from the ledger per catch-up batch.
+    pub catch_up_batch_size: usize,
+    /// Maximum number of live events to buffer before flushing a batch delivery.
+    pub batch_delivery_size: usize,
     pub sink_worker_idle_timeout_ms: u64,
     pub healthcheck_intervals_secs: Vec<u64>,
     pub max_catch_up_concurrency: usize,
@@ -1677,7 +1741,8 @@ impl Default for SinkServer {
             server: String::new(),
             events: BTreeSet::new(),
             transport: SinkTransportConfig::default(),
-            batch_size: 100,
+            catch_up_batch_size: 100,
+            batch_delivery_size: 100,
             sink_worker_idle_timeout_ms: 10_000,
             healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
             max_catch_up_concurrency: 2,
@@ -1703,7 +1768,14 @@ impl SinkServer {
             });
         }
         self.transport.validate()?;
-        require_positive_u64("SinkServer.batch_size", self.batch_size as u64)?;
+        require_positive_u64(
+            "SinkServer.catch_up_batch_size",
+            self.catch_up_batch_size as u64,
+        )?;
+        require_positive_u64(
+            "SinkServer.batch_delivery_size",
+            self.batch_delivery_size as u64,
+        )?;
         require_positive_u64(
             "SinkServer.sink_worker_idle_timeout_ms",
             self.sink_worker_idle_timeout_ms,

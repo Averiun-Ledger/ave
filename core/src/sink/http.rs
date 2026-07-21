@@ -12,6 +12,13 @@ use reqwest::{Certificate, Client, Identity, tls::Version};
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+
 use crate::config::{
     HttpCompression, HttpSinkConfig, HttpTlsVersion, TokenResponse,
 };
@@ -63,8 +70,219 @@ fn sink_secret_env_var(prefix: &str, sink_name: &str) -> String {
     format!("{}{}", prefix, normalized)
 }
 
+/// TLS certificate pinning verifier. Pinning **replaces** normal CA / WebPKI
+/// verification: the operator explicitly trusts this exact certificate, so
+/// chain building, hostname verification and expiry are intentionally ignored.
+/// The inner verifier is only used to verify handshake signature schemes.
+struct PinnedCertificateVerifier {
+    pinned: CertificateDer<'static>,
+    inner: std::sync::Arc<dyn ServerCertVerifier>,
+}
+
+impl std::fmt::Debug for PinnedCertificateVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedCertificateVerifier")
+            .field("pinned_len", &self.pinned.len())
+            .finish()
+    }
+}
+
+impl ServerCertVerifier for PinnedCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // Pinning replaces CA validation: the operator explicitly trusts this
+        // exact certificate, so any chain or expiry is intentionally ignored.
+        if end_entity.as_ref() != self.pinned.as_ref() {
+            return Err(RustlsError::General(
+                "server certificate does not match pinned certificate".to_owned(),
+            ));
+        }
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+/// Build a rustls `ClientConfig` that wraps the default WebPKI verification
+/// with certificate pinning. The config includes native roots, the optional
+/// custom CA and mTLS identity from the sink config.
+async fn build_pinned_tls_config(
+    sink_name: &str,
+    config: &HttpSinkConfig,
+) -> Result<rustls::ClientConfig, SinkError> {
+    let tls = config.tls.as_ref().ok_or_else(|| {
+        SinkError::ClientBuild(format!(
+            "sink '{}': pinned_certificate requires a tls section",
+            sink_name
+        ))
+    })?;
+
+    let pinned_pem = read_tls_file(sink_name, "pinned_certificate", &tls.pinned_certificate)
+        .await?;
+    let pinned = CertificateDer::from_pem_slice(&pinned_pem).map_err(|e| {
+        SinkError::ClientBuild(format!(
+            "sink '{}': invalid pinned certificate '{}': {}",
+            sink_name, tls.pinned_certificate, e
+        ))
+    })?;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    let native_certs = rustls_native_certs::load_native_certs();
+    for cert in native_certs.certs {
+        root_store.add(cert).map_err(|e| {
+            SinkError::ClientBuild(format!(
+                "sink '{}': failed to add native root certificate: {}",
+                sink_name, e
+            ))
+        })?;
+    }
+
+    if !tls.ca_certificate.is_empty() {
+        let pem = read_tls_file(sink_name, "ca_certificate", &tls.ca_certificate)
+            .await?;
+        let mut found = false;
+        for item in CertificateDer::pem_slice_iter(&pem) {
+            let cert = item.map_err(|e| {
+                SinkError::ClientBuild(format!(
+                    "sink '{}': invalid CA certificate '{}': {}",
+                    sink_name, tls.ca_certificate, e
+                ))
+            })?;
+            root_store.add(cert).map_err(|e| {
+                SinkError::ClientBuild(format!(
+                    "sink '{}': failed to add CA certificate '{}': {}",
+                    sink_name, tls.ca_certificate, e
+                ))
+            })?;
+            found = true;
+        }
+        if !found {
+            return Err(SinkError::ClientBuild(format!(
+                "sink '{}': invalid CA certificate '{}': no PEM certificates found",
+                sink_name, tls.ca_certificate
+            )));
+        }
+    }
+
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(root_store),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|e| {
+        SinkError::ClientBuild(format!(
+            "sink '{}': failed to build TLS verifier: {}",
+            sink_name, e
+        ))
+    })?;
+
+    let pinned_verifier = PinnedCertificateVerifier {
+        pinned: pinned.into_owned(),
+        inner: verifier,
+    };
+
+    let versions: &[&'static rustls::SupportedProtocolVersion] = match &tls.min_tls_version {
+        Some(HttpTlsVersion::Tls12) => &[&rustls::version::TLS12],
+        Some(HttpTlsVersion::Tls13) => &[&rustls::version::TLS13],
+        None => &[&rustls::version::TLS12, &rustls::version::TLS13],
+    };
+
+    let config_builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(versions)
+        .map_err(|e| {
+            SinkError::ClientBuild(format!(
+                "sink '{}': invalid TLS protocol versions: {}",
+                sink_name, e
+            ))
+        })?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(pinned_verifier));
+
+    let mut client_config = if !tls.client_certificate.is_empty() {
+        let cert_pem = read_tls_file(
+            sink_name,
+            "client_certificate",
+            &tls.client_certificate,
+        )
+        .await?;
+        let key_pem = read_tls_file(sink_name, "client_key", &tls.client_key).await?;
+
+        let cert_chain: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_slice_iter(&cert_pem)
+                .map(|item| item.map(|c| c.into_owned()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| {
+                    SinkError::ClientBuild(format!(
+                        "sink '{}': invalid mTLS client certificate '{}': {}",
+                        sink_name, tls.client_certificate, e
+                    ))
+                })?;
+        if cert_chain.is_empty() {
+            return Err(SinkError::ClientBuild(format!(
+                "sink '{}': invalid mTLS client certificate '{}': no PEM certificates found",
+                sink_name, tls.client_certificate
+            )));
+        }
+
+        let private_key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+            .map_err(|e| {
+                SinkError::ClientBuild(format!(
+                    "sink '{}': invalid mTLS client key '{}': {}",
+                    sink_name, tls.client_key, e
+                ))
+            })?;
+
+        config_builder.with_client_auth_cert(cert_chain, private_key)
+            .map_err(|e| {
+                SinkError::ClientBuild(format!(
+                    "sink '{}': failed to configure mTLS identity: {}",
+                    sink_name, e
+                ))
+            })?
+    } else {
+        config_builder.with_no_client_auth()
+    };
+
+    client_config.enable_sni = true;
+    client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    Ok(client_config)
+}
+
 /// Build the reqwest client for a sink, applying the optional TLS
-/// customization: additional root CA, mTLS identity and minimum TLS version.
+/// customization: additional root CA, mTLS identity, minimum TLS version and
+/// certificate pinning.
 async fn build_http_client(
     sink_name: &str,
     config: &HttpSinkConfig,
@@ -73,13 +291,29 @@ async fn build_http_client(
         .timeout(Duration::from_millis(config.request_timeout_ms))
         .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
         .pool_idle_timeout(Duration::from_secs(config.pool_idle_timeout_secs))
-        .pool_max_idle_per_host(config.pool_max_idle_per_host);
+        .pool_max_idle_per_host(config.pool_max_idle_per_host)
+        .redirect(if config.max_redirects == 0 {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::limited(config.max_redirects)
+        });
 
     if let Some(secs) = config.tcp_keepalive_secs {
         builder = builder.tcp_keepalive(Duration::from_secs(secs));
     }
 
-    if let Some(tls) = &config.tls {
+    let pinned = config
+        .tls
+        .as_ref()
+        .is_some_and(|t| !t.pinned_certificate.is_empty());
+
+    if pinned {
+        // When certificate pinning is enabled, the whole TLS stack must be
+        // built with a custom verifier; reqwest does not allow swapping the
+        // verifier on a partially configured builder.
+        let tls_config = build_pinned_tls_config(sink_name, config).await?;
+        builder = builder.use_preconfigured_tls(tls_config);
+    } else if let Some(tls) = &config.tls {
         if !tls.ca_certificate.is_empty() {
             let pem = read_tls_file(
                 sink_name,
@@ -209,6 +443,11 @@ const EVENT_TYPE_HEADER: &str = "X-Ave-Event-Type";
 /// Header allowing the receiver to deduplicate deliveries
 /// (`<subject_id>-<sn>`, following the Stripe convention).
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
+/// Header carrying a unique identifier for this delivery attempt, useful for
+/// correlating logs between the node and the receiver.
+const REQUEST_ID_HEADER: &str = "X-Ave-Request-Id";
+/// Header marking a request as a non-persistent sink test delivery.
+const TEST_HEADER: &str = "X-Ave-Test";
 
 /// Headers controlled by the sink itself. Custom values for these names are
 /// ignored because they would break the delivery contract or create duplicate
@@ -224,7 +463,40 @@ const RESERVED_HEADERS: &[&str] = &[
     SN_HEADER,
     EVENT_TYPE_HEADER,
     IDEMPOTENCY_KEY_HEADER,
+    REQUEST_ID_HEADER,
+    TEST_HEADER,
 ];
+
+/// Headers that must never be sent on a health check GET because they describe
+/// a delivery payload that does not exist or would duplicate internally-set
+/// headers. Unlike [`RESERVED_HEADERS`], this list is smaller: it keeps generic
+/// custom headers but explicitly drops any header tied to body encoding,
+/// per-event metadata or internal request tracking.
+const HEALTHCHECK_EXCLUDED_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "authorization",
+    SUBJECT_ID_HEADER,
+    SN_HEADER,
+    EVENT_TYPE_HEADER,
+    IDEMPOTENCY_KEY_HEADER,
+    REQUEST_ID_HEADER,
+    SIGNATURE_HEADER,
+    SIGNATURE_TIMESTAMP_HEADER,
+    SIGNATURE_PUBLIC_KEY_HEADER,
+    TEST_HEADER,
+];
+
+/// Generate a unique request id for a single delivery attempt.
+/// Combines a nanosecond timestamp with a random suffix so collisions are
+/// practically impossible without adding a new dependency.
+fn generate_request_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{:016x}", nanos, fastrand::u64(..))
+}
 
 /// Whether `name` collides with a header reserved for internal sink use.
 fn is_reserved_header(name: &str) -> bool {
@@ -341,16 +613,56 @@ impl HttpTransport {
         })
     }
 
+    /// Build the canonical payload to sign. Version 1 signs the body only;
+    /// version 2 prefixes the body with the critical delivery headers in
+    /// lexicographic order so that tampering with them invalidates the
+    /// signature.
+    fn canonical_payload(
+        &self,
+        payload: &[u8],
+        meta: Option<&DeliveryMeta>,
+    ) -> Vec<u8> {
+        if self.config.signature_version != 2 {
+            return payload.to_vec();
+        }
+
+        let mut headers: Vec<(&str, String)> = Vec::with_capacity(6);
+        headers.push(("content-type", "application/json".to_owned()));
+        if let Some(encoding) = self.config.compression.content_encoding() {
+            headers.push(("content-encoding", encoding.to_owned()));
+        }
+        if let Some(meta) = meta {
+            headers.push((IDEMPOTENCY_KEY_HEADER, format!("{}-{}", meta.subject_id, meta.sn)));
+            headers.push((EVENT_TYPE_HEADER, meta.event_type.as_str().to_owned()));
+            headers.push((SN_HEADER, meta.sn.to_string()));
+            headers.push((SUBJECT_ID_HEADER, meta.subject_id.clone()));
+        }
+
+        headers.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+        let mut out = Vec::with_capacity(payload.len() + 256);
+        for (name, value) in headers {
+            out.extend_from_slice(name.to_lowercase().as_bytes());
+            out.push(b':');
+            out.extend_from_slice(value.as_bytes());
+            out.push(b'\n');
+        }
+        out.extend_from_slice(payload);
+        out
+    }
+
     /// Sign the delivery body with the node identity when signature is
     /// enabled. Returns `None` headers when no signer is configured.
     async fn sign_payload(
         &self,
         payload: &[u8],
+        meta: Option<&DeliveryMeta>,
     ) -> Result<Option<SignatureHeaders>, SinkError> {
         let Some(signer) = &self.signer else {
             return Ok(None);
         };
-        let signature = signer.sign(payload.to_vec()).await?;
+        let canonical = self.canonical_payload(payload, meta);
+        let signature = signer.sign(canonical).await?;
         Ok(Some(SignatureHeaders {
             signature: signature.value.to_string(),
             timestamp: signature.timestamp.to_string(),
@@ -371,7 +683,7 @@ impl HttpTransport {
     ) -> Result<(), SinkError> {
         let mut last_err = None;
         let sink_name = &self.sink_name;
-        let signature_headers = self.sign_payload(&payload).await?;
+        let signature_headers = self.sign_payload(&payload, meta).await?;
 
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
@@ -496,6 +808,24 @@ impl HttpTransport {
         request
     }
 
+    fn apply_healthcheck_headers(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &self.config.headers {
+            // A GET health check has no body and no event context; do not let
+            // custom headers pretend otherwise.
+            if HEALTHCHECK_EXCLUDED_HEADERS
+                .iter()
+                .any(|excluded| name.eq_ignore_ascii_case(excluded))
+            {
+                continue;
+            }
+            request = request.header(name, value);
+        }
+        request
+    }
+
     async fn send_once(
         &self,
         url: &str,
@@ -503,6 +833,7 @@ impl HttpTransport {
         signature_headers: &Option<SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
+        let request_id = generate_request_id();
         let mut request = self.client.post(url).body(payload.to_vec());
 
         request = self.apply_custom_headers(request);
@@ -510,7 +841,9 @@ impl HttpTransport {
         // Internal headers are set after custom ones so they always take
         // precedence (e.g. a custom "Content-Type" cannot break the JSON
         // contract).
-        request = request.header("Content-Type", "application/json");
+        request = request
+            .header("Content-Type", "application/json")
+            .header(REQUEST_ID_HEADER, &request_id);
 
         if let Some(headers) = signature_headers {
             request = request
@@ -542,7 +875,10 @@ impl HttpTransport {
 
         let response =
             request.send().await.map_err(|e| SinkError::Delivery {
-                message: format!("HTTP request failed: {}", e),
+                message: format!(
+                    "HTTP request failed ({}): {}",
+                    request_id, e
+                ),
                 retryable: true,
                 retry_after_ms: None,
             })?;
@@ -554,6 +890,7 @@ impl HttpTransport {
                 sink = %self.sink_name,
                 url = %url,
                 status = %status,
+                request_id = %request_id,
                 "Sink delivery succeeded"
             );
             Ok(())
@@ -564,12 +901,16 @@ impl HttpTransport {
             )
             .await;
             Err(SinkError::Auth {
-                message: format!("HTTP {}: {}", status, body),
+                message: format!(
+                    "HTTP {} ({}): {}",
+                    status, request_id, body
+                ),
+                retry_after_ms: None,
             })
         } else {
             // Read the Retry-After hint before consuming the body.
             let retry_after_ms = if status == 429 || status.is_server_error() {
-                parse_retry_after(response.headers())
+                crate::sink::parse_retry_after(response.headers())
             } else {
                 None
             };
@@ -579,7 +920,10 @@ impl HttpTransport {
             )
             .await;
             Err(SinkError::Delivery {
-                message: format!("HTTP {}: {}", status, body),
+                message: format!(
+                    "HTTP {} ({}): {}",
+                    status, request_id, body
+                ),
                 retryable: status.is_server_error() || status == 429,
                 retry_after_ms,
             })
@@ -629,6 +973,7 @@ impl HttpTransport {
         Err(SinkError::Auth {
             message: "auth configured but no API key and incomplete OAuth2 credentials"
                 .to_owned(),
+            retry_after_ms: None,
         })
     }
 
@@ -715,8 +1060,10 @@ impl SinkTransport for HttpTransport {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| self.url_template.render_url_encoded("-", "-"));
 
+        let request_id = generate_request_id();
         let mut request = self.client.get(&url);
-        request = self.apply_custom_headers(request);
+        request = self.apply_healthcheck_headers(request);
+        request = request.header(REQUEST_ID_HEADER, &request_id);
 
         // Add auth header if available
         if self.config.auth.is_some() {
@@ -734,7 +1081,10 @@ impl SinkTransport for HttpTransport {
 
         let response =
             request.send().await.map_err(|e| SinkError::Delivery {
-                message: format!("Health check request failed: {}", e),
+                message: format!(
+                    "Health check request failed ({}): {}",
+                    request_id, e
+                ),
                 retryable: true,
                 retry_after_ms: None,
             })?;
@@ -750,7 +1100,11 @@ impl SinkTransport for HttpTransport {
             )
             .await;
             Err(SinkError::Auth {
-                message: format!("Health check returned {}: {}", status, body),
+                message: format!(
+                    "Health check returned {} ({}): {}",
+                    status, request_id, body
+                ),
+                retry_after_ms: None,
             })
         } else {
             let body = read_limited_body(
@@ -759,9 +1113,97 @@ impl SinkTransport for HttpTransport {
             )
             .await;
             Err(SinkError::Delivery {
-                message: format!("Health check returned {}: {}", status, body),
+                message: format!(
+                    "Health check returned {} ({}): {}",
+                    status, request_id, body
+                ),
                 retryable: status.is_server_error() || status == 429,
                 retry_after_ms: None,
+            })
+        }
+    }
+
+    /// Run a non-persistent end-to-end test of the sink. Performs a health
+    /// check followed by a single POST of a test payload, using the same
+    /// authentication, signature and compression paths as real deliveries. No
+    /// cursor is advanced and nothing is persisted.
+    async fn test(&self) -> Result<(), SinkError> {
+        self.health_check().await?;
+
+        let url = self.url_template.render_url_encoded("-", "-");
+        let payload =
+            self.encode_body(&serde_json::json!({"test": true})).await?;
+        let request_id = generate_request_id();
+
+        let mut request = self.client.post(&url).body(payload.clone());
+        request = self.apply_custom_headers(request);
+        request = request
+            .header("Content-Type", "application/json")
+            .header(REQUEST_ID_HEADER, &request_id)
+            .header(TEST_HEADER, "true");
+
+        if let Some(headers) = self.sign_payload(&payload, None).await? {
+            request = request
+                .header(SIGNATURE_HEADER, &headers.signature)
+                .header(SIGNATURE_TIMESTAMP_HEADER, &headers.timestamp)
+                .header(SIGNATURE_PUBLIC_KEY_HEADER, &headers.public_key);
+        }
+
+        if let Some(encoding) = self.config.compression.content_encoding() {
+            request = request.header("Content-Encoding", encoding);
+        }
+
+        if self.config.auth.is_some()
+            && let Some(header) = self.build_auth_header().await?
+        {
+            request = request.header("Authorization", header);
+        }
+
+        let response =
+            request.send().await.map_err(|e| SinkError::Delivery {
+                message: format!(
+                    "Sink test request failed ({}): {}",
+                    request_id, e
+                ),
+                retryable: true,
+                retry_after_ms: None,
+            })?;
+
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else if status == 401 || status == 403 {
+            self.invalidate_cached_token().await;
+            let body = read_limited_body(
+                response.bytes_stream(),
+                self.config.max_error_body_bytes,
+            )
+            .await;
+            Err(SinkError::Auth {
+                message: format!(
+                    "Sink test returned {} ({}): {}",
+                    status, request_id, body
+                ),
+                retry_after_ms: None,
+            })
+        } else {
+            let retry_after_ms = if status == 429 || status.is_server_error() {
+                crate::sink::parse_retry_after(response.headers())
+            } else {
+                None
+            };
+            let body = read_limited_body(
+                response.bytes_stream(),
+                self.config.max_error_body_bytes,
+            )
+            .await;
+            Err(SinkError::Delivery {
+                message: format!(
+                    "Sink test returned {} ({}): {}",
+                    status, request_id, body
+                ),
+                retryable: status.is_server_error() || status == 429,
+                retry_after_ms,
             })
         }
     }
@@ -811,7 +1253,7 @@ impl SinkTransport for HttpTransport {
             .url_template
             .render_url_encoded(first.subject_id(), &schema_id);
         let payload = self.encode_body(&events).await?;
-        let signature_headers = self.sign_payload(&payload).await?;
+        let signature_headers = self.sign_payload(&payload, None).await?;
         self.timed_send_once(&url, &payload, &signature_headers, None)
             .await
     }
@@ -842,24 +1284,6 @@ const fn retry_after_of(err: &SinkError) -> Option<u64> {
         SinkError::Delivery { retry_after_ms, .. } => *retry_after_ms,
         _ => None,
     }
-}
-
-/// Parse the `Retry-After` header of a 429 / 5xx response. The value may be
-/// a number of seconds or an HTTP-date; the result is milliseconds from now.
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim();
-
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(seconds.saturating_mul(1_000));
-    }
-
-    let date = httpdate::parse_http_date(value).ok()?;
-    let delay = date.duration_since(std::time::SystemTime::now()).ok()?;
-    Some(delay.as_millis() as u64)
 }
 
 /// Read at most `limit` bytes from a byte stream, truncating the rest.
@@ -901,8 +1325,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+    use crate::sink::parse_retry_after;
+
     use super::*;
     use ave_common::sink::{HttpTlsConfig, SinkAuthConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
 
     // Throwaway self-signed certificate and key generated ad hoc for these
     // tests; they do not protect anything real.
@@ -1424,6 +1859,432 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                 .get("X-Custom-Header")
                 .and_then(|v| v.to_str().ok()),
             Some("custom-value")
+        );
+    }
+
+    /// Parse a raw HTTP request buffer into a map of lowercase header names to
+    /// values. Only the headers are extracted; the body is ignored.
+    fn parse_request_headers(buf: &[u8]) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let text = String::from_utf8_lossy(buf);
+        for line in text.lines().skip(1) {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(": ") {
+                map.insert(name.to_ascii_lowercase(), value.to_owned());
+            }
+        }
+        map
+    }
+
+    /// Start a minimal HTTP server that records the headers of every request it
+    /// receives and returns HTTP 200. Returns the base URL and a shared vector
+    /// of captured header maps.
+    async fn start_header_capture_server() -> (
+        String,
+        Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_server = Arc::clone(&captured);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = stream.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                captured_server
+                    .lock()
+                    .await
+                    .push(parse_request_headers(&buf));
+
+                let response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        (format!("http://{}/events", addr), captured)
+    }
+
+    #[tokio::test]
+    async fn health_check_sends_request_id_header() {
+        let (url, captured) = start_header_capture_server().await;
+
+        let mut config = base_config();
+        config.url = url;
+        let transport = HttpTransport::new(
+            "unit-request-id".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        transport.health_check().await.expect("health check should succeed");
+
+        let headers = captured.lock().await;
+        assert_eq!(headers.len(), 1);
+        let request_id = headers[0]
+            .get("x-ave-request-id")
+            .expect("X-Ave-Request-Id header should be present");
+        assert!(!request_id.is_empty(), "request id should not be empty");
+    }
+
+    #[tokio::test]
+    async fn request_id_changes_between_attempts() {
+        let (url, captured) = start_header_capture_server().await;
+
+        let mut config = base_config();
+        config.url = url;
+        let transport = HttpTransport::new(
+            "unit-request-id-unique".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        transport.health_check().await.expect("first health check should succeed");
+        transport.health_check().await.expect("second health check should succeed");
+
+        let headers = captured.lock().await;
+        assert_eq!(headers.len(), 2);
+        let first = headers[0].get("x-ave-request-id").unwrap();
+        let second = headers[1].get("x-ave-request-id").unwrap();
+        assert_ne!(
+            first, second,
+            "each delivery attempt must carry a unique request id"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_check_omits_content_type_and_event_headers() {
+        let (url, captured) = start_header_capture_server().await;
+
+        let mut config = base_config();
+        config.url = url;
+        config.headers.insert(
+            "Content-Type".to_owned(),
+            "text/plain".to_owned(),
+        );
+        config.headers.insert(
+            "Content-Encoding".to_owned(),
+            "gzip".to_owned(),
+        );
+        config.headers.insert(
+            "X-Ave-Event-Type".to_owned(),
+            "create".to_owned(),
+        );
+        config.headers.insert(
+            "X-Custom-Health-Header".to_owned(),
+            "custom-value".to_owned(),
+        );
+
+        let transport = HttpTransport::new(
+            "unit-healthcheck-headers".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        transport.health_check().await.expect("health check should succeed");
+
+        let headers = &captured.lock().await[0];
+        assert!(
+            headers.get("content-type").is_none(),
+            "GET health check must not send Content-Type"
+        );
+        assert!(
+            headers.get("content-encoding").is_none(),
+            "GET health check must not send Content-Encoding"
+        );
+        assert!(
+            headers.get("x-ave-event-type").is_none(),
+            "GET health check must not send event headers"
+        );
+        assert_eq!(
+            headers.get("x-custom-health-header"),
+            Some(&"custom-value".to_owned()),
+            "non-body custom headers should still reach the health endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn sink_test_sends_health_check_and_test_payload() {
+        let (url, captured) = start_header_capture_server().await;
+
+        let mut config = base_config();
+        config.url = url;
+        let transport = HttpTransport::new(
+            "unit-test-delivery".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        transport.test().await.expect("sink test should succeed");
+
+        let requests = captured.lock().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "sink test must perform a health check and a test POST"
+        );
+
+        // First request is the health check GET.
+        assert!(
+            requests[0].get("x-ave-test").is_none(),
+            "health check should not carry X-Ave-Test"
+        );
+
+        // Second request is the test POST.
+        assert_eq!(
+            requests[1].get("x-ave-test"),
+            Some(&"true".to_owned()),
+            "test POST must carry X-Ave-Test: true"
+        );
+        assert_eq!(
+            requests[1].get("content-type"),
+            Some(&"application/json".to_owned()),
+            "test POST must set Content-Type to application/json"
+        );
+    }
+
+    /// Start a minimal HTTP server that returns a redirect on the first request
+    /// and HTTP 200 on subsequent requests. Returns the base URL and an atomic
+    /// request counter.
+    async fn start_redirect_server() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_server = Arc::clone(&count);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let n = count_server.fetch_add(1, Ordering::SeqCst);
+                let response = if n == 0 {
+                    "HTTP/1.1 302 Found\r\nLocation: /ok\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                };
+                // Drain enough of the request to avoid RST on some platforms.
+                let mut tmp = [0u8; 1024];
+                let _ = stream.read(&mut tmp).await;
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        (format!("http://{}/events", addr), count)
+    }
+
+    #[tokio::test]
+    async fn max_redirects_zero_rejects_redirect() {
+        let (url, count) = start_redirect_server().await;
+
+        let mut config = base_config();
+        config.url = url;
+        config.max_redirects = 0;
+        let transport = HttpTransport::new(
+            "unit-redirect-disabled".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        let result = transport.health_check().await;
+        assert!(
+            result.is_err(),
+            "health check should fail when redirects are disabled"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "only the initial request should have been sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_redirects_one_follows_single_redirect() {
+        let (url, count) = start_redirect_server().await;
+
+        let mut config = base_config();
+        config.url = url;
+        config.max_redirects = 1;
+        let transport = HttpTransport::new(
+            "unit-redirect-one".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        transport
+            .health_check()
+            .await
+            .expect("health check should follow the redirect and succeed");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "initial request plus the followed redirect"
+        );
+    }
+
+    /// Generate a self-signed test certificate and return its DER.
+    fn test_cert_der(common_name: &str) -> CertificateDer<'static> {
+        let cert = rcgen::generate_simple_self_signed(vec![common_name.to_owned()])
+            .expect("test cert should generate");
+        CertificateDer::from(cert.cert.der().to_vec())
+    }
+
+    #[derive(Debug)]
+    struct NoopVerifier;
+
+    impl ServerCertVerifier for NoopVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, RustlsError> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, RustlsError> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, RustlsError> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn pinned_certificate_verifier_accepts_matching_cert() {
+        let pinned = test_cert_der("sink.example.com");
+        let verifier = PinnedCertificateVerifier {
+            pinned: pinned.clone(),
+            inner: Arc::new(NoopVerifier),
+        };
+
+        let result = verifier.verify_server_cert(
+            &pinned,
+            &[],
+            &ServerName::try_from("sink.example.com").expect("server name"),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_ok(), "matching pinned certificate must be accepted");
+    }
+
+    #[test]
+    fn pinned_certificate_verifier_rejects_different_cert() {
+        let pinned = test_cert_der("sink.example.com");
+        let other = test_cert_der("other.example.com");
+        let verifier = PinnedCertificateVerifier {
+            pinned,
+            inner: Arc::new(NoopVerifier),
+        };
+
+        let result = verifier.verify_server_cert(
+            &other,
+            &[],
+            &ServerName::try_from("other.example.com").expect("server name"),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_err(), "different certificate must be rejected");
+    }
+
+    #[tokio::test]
+    async fn canonical_payload_version_1_returns_body_only() {
+        let config = base_config();
+        let transport = HttpTransport::new(
+            "unit-canonical-v1".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        let payload = b"test body";
+        assert_eq!(transport.canonical_payload(payload, None), payload);
+    }
+
+    #[tokio::test]
+    async fn canonical_payload_version_2_includes_headers_in_lexicographic_order() {
+        let mut config = base_config();
+        config.signature_version = 2;
+        config.compression = HttpCompression::Gzip;
+        let transport = HttpTransport::new(
+            "unit-canonical-v2".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        let payload = b"test body";
+        let meta = DeliveryMeta {
+            subject_id: "subject-1".to_owned(),
+            sn: 42,
+            event_type: SinkTypes::Create,
+        };
+
+        let canonical = transport.canonical_payload(payload, Some(&meta));
+        let text = String::from_utf8_lossy(&canonical);
+
+        let expected_prefix = "content-encoding:gzip\ncontent-type:application/json\nidempotency-key:subject-1-42\nx-ave-event-type:create\nx-ave-sn:42\nx-ave-subject-id:subject-1\n";
+        assert!(
+            text.starts_with(expected_prefix),
+            "canonical payload must start with sorted headers, got: {}",
+            text
+        );
+        assert!(
+            text.ends_with("test body"),
+            "canonical payload must end with the body"
         );
     }
 }

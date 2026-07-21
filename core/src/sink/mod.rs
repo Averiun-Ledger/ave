@@ -30,6 +30,24 @@ use std::time::Duration;
 use crate::config::TokenResponse;
 use ave_common::{DataToSink, sink::{OAuth2GrantType, SinkAuthConfig}};
 
+/// Parse the `Retry-After` header of a 429 / 5xx response. The value may be
+/// a number of seconds or an HTTP-date; the result is milliseconds from now.
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+
+    let date = httpdate::parse_http_date(value).ok()?;
+    let delay = date.duration_since(std::time::SystemTime::now()).ok()?;
+    Some(delay.as_millis() as u64)
+}
+
 /// Add random symmetric jitter to a base delay value.
 /// Returns a value between `base * 0.75` and `base * 1.25` (±25% jitter),
 /// clamped to zero to avoid negative delays.
@@ -95,17 +113,32 @@ pub async fn obtain_token(
         .await
         .map_err(|e| SinkError::Auth {
             message: format!("failed to send auth request: {e}"),
+            retry_after_ms: None,
         })?;
 
-    let res = res.error_for_status().map_err(|e| SinkError::Auth {
-        message: format!("auth endpoint error: {e}"),
-    })?;
+    let status = res.status();
+    if status.is_client_error() || status.is_server_error() {
+        let retry_after_ms = if status == 429 || status.is_server_error() {
+            crate::sink::parse_retry_after(res.headers())
+        } else {
+            None
+        };
+        let body = res
+            .text()
+            .await
+            .unwrap_or_else(|_| "could not read auth error body".to_owned());
+        return Err(SinkError::Auth {
+            message: format!("auth endpoint returned {}: {}", status, body),
+            retry_after_ms,
+        });
+    }
 
     let mut token: TokenResponse =
         res.json::<TokenResponse>()
             .await
             .map_err(|e| SinkError::Auth {
                 message: format!("failed to parse token response: {e}"),
+                retry_after_ms: None,
             })?;
 
     token.obtained_at = Some(std::time::Instant::now());
@@ -129,7 +162,14 @@ pub async fn obtain_token_with_retry(
             // with a large configured base delay.
             let exp = (attempt - 1).min(63);
             let base_delay = retry_base_delay_ms.saturating_mul(1_u64 << exp);
-            let delay = add_jitter(base_delay);
+            let mut delay = add_jitter(base_delay);
+            // Honor a server-provided Retry-After hint when it exceeds the
+            // computed backoff.
+            if let Some(SinkError::Auth { retry_after_ms, .. }) = &last_err {
+                if let Some(hint) = retry_after_ms {
+                    delay = delay.max(*hint);
+                }
+            }
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
         match obtain_token(client, auth, password_or_secret).await {
@@ -142,6 +182,7 @@ pub async fn obtain_token_with_retry(
         Some(e) => e,
         None => SinkError::Auth {
             message: "token refresh failed".to_owned(),
+            retry_after_ms: None,
         },
     })
 }
@@ -223,6 +264,70 @@ mod tests {
             request_count.load(Ordering::SeqCst),
             3,
             "should retry twice before succeeding on the third attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn obtain_token_with_retry_honors_retry_after_hint() {
+        use tokio::io::AsyncWriteExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_server = Arc::clone(&request_count);
+
+        tokio::spawn(async move {
+            let ok_body = r#"{"access_token":"ok-token","token_type":"Bearer","expires_in":3600}"#;
+            loop {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("test listener should accept");
+                let count =
+                    request_count_server.fetch_add(1, Ordering::SeqCst);
+                let response = if count == 0 {
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n".to_owned()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        ok_body.len(),
+                        ok_body
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let auth = SinkAuthConfig {
+            auth_url: format!("http://{}/token", addr),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        };
+
+        let start = Instant::now();
+        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10)
+            .await
+            .expect("token should be obtained after retry");
+        let elapsed = start.elapsed();
+
+        assert_eq!(token.access_token, "ok-token");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(900),
+            "Retry-After hint of 1s must be honored; elapsed: {:?}",
+            elapsed
+        );
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            2,
+            "should retry once before succeeding"
         );
     }
 

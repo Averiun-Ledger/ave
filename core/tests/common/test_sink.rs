@@ -167,7 +167,9 @@ pub struct TestTlsMaterial {
     /// Client private key in PEM; configure it as `tls.client_key` for mTLS.
     pub client_key_pem: String,
     ca_der: CertificateDer<'static>,
-    server_cert_pem: String,
+    /// Server certificate in PEM; configure it as `tls.pinned_certificate`
+    /// to pin the sink's certificate.
+    pub server_cert_pem: String,
     server_key_pem: String,
     server_cert_der: CertificateDer<'static>,
     server_key_der: Vec<u8>,
@@ -330,12 +332,26 @@ impl TestSink {
                 vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             RustlsConfig::from_config(Arc::new(server_config))
         } else {
-            RustlsConfig::from_pem(
-                material.server_cert_pem.clone().into_bytes(),
-                material.server_key_pem.clone().into_bytes(),
+            // Build the server config manually with an explicit crypto provider
+            // so the test does not depend on the process-level default, which
+            // may be unset when multiple rustls crypto backends are linked.
+            let provider = rustls::crypto::aws_lc_rs::default_provider();
+            let mut server_config = RustlsServerConfig::builder_with_provider(
+                Arc::new(provider),
             )
-            .await
-            .expect("PEM should build rustls config")
+            .with_safe_default_protocol_versions()
+            .expect("default TLS versions should be valid")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![material.server_cert_der.clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                    material.server_key_der.clone(),
+                )),
+            )
+            .expect("server cert/key should be valid");
+            server_config.alpn_protocols =
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            RustlsConfig::from_config(Arc::new(server_config))
         };
 
         let cancel = CancellationToken::new();

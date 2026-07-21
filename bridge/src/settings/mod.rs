@@ -827,7 +827,8 @@ http:
                         pool_max_idle_per_host: 4,
                         ..HttpSinkConfig::default()
                     })),
-                    batch_size: 100,
+                    catch_up_batch_size: 100,
+                    batch_delivery_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
                     max_catch_up_concurrency: 2,
@@ -860,7 +861,8 @@ http:
                         pool_max_idle_per_host: 4,
                         ..HttpSinkConfig::default()
                     })),
-                    batch_size: 100,
+                    catch_up_batch_size: 100,
+                    batch_delivery_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
                     max_catch_up_concurrency: 2,

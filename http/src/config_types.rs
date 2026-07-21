@@ -896,6 +896,8 @@ pub struct HttpTlsConfigHttp {
     pub client_certificate: String,
     /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
     pub client_key: String,
+    /// Path to a PEM-encoded server certificate to pin.
+    pub pinned_certificate: String,
     /// Minimum TLS version accepted (`"1.2"` or `"1.3"`); absent uses the
     /// TLS library default.
     pub min_tls_version: Option<HttpTlsVersionHttp>,
@@ -952,6 +954,8 @@ pub struct HttpSinkConfigHttp {
     pub tls: Option<HttpTlsConfigHttp>,
     /// Whether deliveries are signed with the node identity
     pub signature: bool,
+    /// Signature protocol version (`1` = body only, `2` = canonical headers + body)
+    pub signature_version: u8,
     /// Outbound proxy for this sink's requests
     pub proxy: Option<HttpProxyConfigHttp>,
     /// Upper bound for any delivery retry delay, in milliseconds
@@ -974,6 +978,9 @@ pub struct HttpSinkConfigHttp {
     pub pool_idle_timeout_secs: u64,
     /// Maximum number of idle connections to keep open per host
     pub pool_max_idle_per_host: usize,
+    /// Maximum number of HTTP redirects the sink client will follow. `0`
+    /// disables redirects (recommended for webhooks).
+    pub max_redirects: usize,
     /// Custom static headers added to every delivery and health-check request.
     /// Internal sink headers (Authorization, X-Ave-*, etc.) take precedence.
     #[serde(default)]
@@ -991,6 +998,7 @@ impl Default for HttpSinkConfigHttp {
             retry_base_delay_ms: 500,
             tls: None,
             signature: false,
+            signature_version: 1,
             proxy: None,
             retry_max_delay_ms: 30_000,
             batch_delivery: false,
@@ -1002,6 +1010,7 @@ impl Default for HttpSinkConfigHttp {
             tcp_keepalive_secs: Some(60),
             pool_idle_timeout_secs: 90,
             pool_max_idle_per_host: 4,
+            max_redirects: 0,
             headers: std::collections::HashMap::new(),
         }
     }
@@ -1155,8 +1164,10 @@ pub struct SinkServerHttp {
     pub events: Vec<String>,
     /// Delivery transport and its specific configuration
     pub transport: SinkTransportConfigHttp,
-    /// Number of events read from the ledger per catch-up batch
-    pub batch_size: usize,
+    /// Number of events read from the ledger per catch-up batch.
+    pub catch_up_batch_size: usize,
+    /// Maximum number of live events to buffer before flushing a batch delivery.
+    pub batch_delivery_size: usize,
     /// Time a sink worker can be idle before the manager shuts it down
     pub sink_worker_idle_timeout_ms: u64,
     /// Backoff schedule for periodic healthchecks when the sink has lagging subjects
@@ -1177,7 +1188,8 @@ impl Default for SinkServerHttp {
             server: String::new(),
             events: Vec::new(),
             transport: SinkTransportConfigHttp::default(),
-            batch_size: 100,
+            catch_up_batch_size: 100,
+            batch_delivery_size: 100,
             sink_worker_idle_timeout_ms: 10_000,
             healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
             max_catch_up_concurrency: 2,
@@ -1215,9 +1227,11 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         ca_certificate: t.ca_certificate,
                         client_certificate: t.client_certificate,
                         client_key: t.client_key,
+                        pinned_certificate: t.pinned_certificate,
                         min_tls_version: t.min_tls_version.map(Into::into),
                     }),
                     signature: http.signature,
+                    signature_version: http.signature_version,
                     proxy: http.proxy.map(|p| HttpProxyConfigHttp {
                         url: p.url,
                         username: p.username,
@@ -1233,6 +1247,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     tcp_keepalive_secs: http.tcp_keepalive_secs,
                     pool_idle_timeout_secs: http.pool_idle_timeout_secs,
                     pool_max_idle_per_host: http.pool_max_idle_per_host,
+                    max_redirects: http.max_redirects,
                     headers: http.headers,
                 }))
             }
@@ -1252,7 +1267,8 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             server: value.server,
             events: value.events.into_iter().map(|e| e.to_string()).collect(),
             transport,
-            batch_size: value.batch_size,
+            catch_up_batch_size: value.catch_up_batch_size,
+            batch_delivery_size: value.batch_delivery_size,
             sink_worker_idle_timeout_ms: value.sink_worker_idle_timeout_ms,
             healthcheck_intervals_secs: value.healthcheck_intervals_secs,
             max_catch_up_concurrency: value.max_catch_up_concurrency,

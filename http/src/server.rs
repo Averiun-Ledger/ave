@@ -546,6 +546,37 @@ pub async fn unblock_sink(
     Ok(StatusCode::OK)
 }
 
+/// Test a sink
+///
+/// Performs a non-persistent end-to-end test of the sink: a health check
+/// followed by a test payload delivery using the sink's configured
+/// authentication, signature and compression. No cursor is advanced and no
+/// state is persisted.
+#[utoipa::path(
+    post,
+    path = "/sinks/{sink_name}/test",
+    operation_id = "testSink",
+    tag = "Sink",
+    params(
+        ("sink_name" = String, Path, description = "Sink name")
+    ),
+    responses(
+        (status = 200, description = "Sink test succeeded"),
+        (status = 400, description = "Invalid request or safe mode enabled", body = ErrorResponse),
+        (status = 404, description = "Sink not found in registry", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn test_sink(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(sink_name): Path<String>,
+) -> Result<StatusCode, HttpError> {
+    bridge.test_sink(sink_name).await?;
+    Ok(StatusCode::OK)
+}
+
 /// Delete a sink's persisted cursors
 ///
 /// Removes all cursors, lagging tracking and blocked state for the given sink.
@@ -1402,6 +1433,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/sinks", get_sinks, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
+        $callback!($($args)*, post, "/sinks/{sink_name}/test", test_sink, require NodeSink Post);
         $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);
         $callback!($($args)*, post, "/sinks/replay", replay_sink_events, require NodeSink Post);
         $callback!($($args)*, put, "/governances/{subject_id}/authorize", authorize_governance, require NodeSubject Put);

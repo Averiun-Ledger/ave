@@ -123,7 +123,7 @@ impl Handler<Self> for SinkSubjectWorker {
                 if self.batch_delivery {
                     self.pending
                         .push(self.to_incoming_event(Arc::clone(&data)));
-                    if self.pending.len() >= self.server.batch_size {
+                    if self.pending.len() >= self.server.batch_delivery_size {
                         self.flush_pending(ctx, false).await;
                     } else if self.flush_timer.is_none() {
                         match ctx.schedule_once(
@@ -240,7 +240,7 @@ impl Handler<Self> for SinkSubjectWorker {
                             if let Err(e) = self_ref
                                 .tell(SinkSubjectWorkerMessage::CatchUpBatch {
                                     from_sn: last_sn + 1,
-                                    batch_size: self.server.batch_size,
+                                    batch_size: self.server.catch_up_batch_size,
                                 })
                                 .await
                             {
@@ -314,7 +314,7 @@ impl Handler<Self> for SinkSubjectWorker {
                             if let Err(e) = self_ref
                                 .tell(SinkSubjectWorkerMessage::CatchUpBatch {
                                     from_sn: sn + 1,
-                                    batch_size: self.server.batch_size,
+                                    batch_size: self.server.catch_up_batch_size,
                                 })
                                 .await
                             {
