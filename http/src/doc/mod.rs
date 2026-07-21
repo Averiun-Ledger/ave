@@ -219,6 +219,14 @@ impl Modify for SecurityAddon {
         system_handlers::list_system_config,
         system_handlers::update_system_config,
 
+        // ── Sink ──────────────────────────────────────────────
+        server::get_sinks,
+        server::get_sinks_status,
+        server::unblock_sink,
+        server::test_sink,
+        server::delete_sink_cursors,
+        server::replay_sink_events,
+
         // ── Observability ───────────────────────────────────────
         server::get_metrics,
     ),
@@ -415,6 +423,7 @@ impl Modify for SecurityAddon {
         (name = "My Account", description = "Self-service endpoints for the authenticated user."),
         (name = "System", description = "System resources, actions, and configuration (admin only)."),
         (name = "Audit Logs", description = "Query and analyze audit log entries (admin only)."),
+        (name = "Sink", description = "Manage and inspect external sinks (HTTP, Kafka)."),
     )
 )]
 pub struct ApiDoc;

@@ -1138,6 +1138,7 @@ async fn test_manager_role_endpoints_access() {
         ("get", "/sinks/status", false),
         ("get", "/sink-events/{subject_id}", false),
         ("post", "/sinks/{sink_name}/unblock", false),
+        ("post", "/sinks/{sink_name}/test", false),
         ("delete", "/sinks/{sink_name}", false),
         ("post", "/sinks/replay", false),
         ("delete", "/maintenance/subjects/{subject_id}", false),
