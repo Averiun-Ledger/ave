@@ -477,6 +477,48 @@ mod tests {
     }
 
     #[test]
+    fn test_kafka_sink_config_validate_rejects_too_many_max_retries() {
+        let mut cfg = valid_kafka_config();
+        cfg.max_retries = 101;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_zero_retry_base_delay() {
+        let mut cfg = valid_kafka_config();
+        cfg.retry_base_delay_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_zero_retry_max_delay() {
+        let mut cfg = valid_kafka_config();
+        cfg.retry_max_delay_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_zero_socket_timeout() {
+        let mut cfg = valid_kafka_config();
+        cfg.socket_timeout_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_zero_connections_max_idle() {
+        let mut cfg = valid_kafka_config();
+        cfg.connections_max_idle_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_zero_metadata_max_age() {
+        let mut cfg = valid_kafka_config();
+        cfg.metadata_max_age_ms = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn test_kafka_security_serde_rejects_invalid_mechanism() {
         // Unknown SASL mechanisms are rejected at deserialization time.
         let json = r#"{
@@ -1603,6 +1645,20 @@ pub struct KafkaSinkConfig {
     pub compression: KafkaCompression,
     /// Per-message produce timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Maximum transient retries per delivery.
+    pub max_retries: usize,
+    /// Base delay between delivery retries, in milliseconds.
+    pub retry_base_delay_ms: u64,
+    /// Upper bound for any delivery retry delay, in milliseconds.
+    pub retry_max_delay_ms: u64,
+    /// Default timeout for network requests, in milliseconds.
+    pub socket_timeout_ms: u64,
+    /// Enable TCP keep-alives on broker sockets.
+    pub socket_keepalive: bool,
+    /// Close broker connections after this inactivity, in milliseconds.
+    pub connections_max_idle_ms: u64,
+    /// Metadata cache max age, in milliseconds.
+    pub metadata_max_age_ms: u64,
 }
 
 impl Default for KafkaSinkConfig {
@@ -1616,6 +1672,13 @@ impl Default for KafkaSinkConfig {
             acks: KafkaAcks::default(),
             compression: KafkaCompression::default(),
             request_timeout_ms: 5_000,
+            max_retries: 2,
+            retry_base_delay_ms: 500,
+            retry_max_delay_ms: 30_000,
+            socket_timeout_ms: 60_000,
+            socket_keepalive: true,
+            connections_max_idle_ms: 300_000,
+            metadata_max_age_ms: 900_000,
         }
     }
 }
@@ -1649,6 +1712,32 @@ impl KafkaSinkConfig {
         require_positive_u64(
             "KafkaSinkConfig.request_timeout_ms",
             self.request_timeout_ms,
+        )?;
+        if self.max_retries > 100 {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.max_retries".to_string(),
+                reason: "must be 100 or less".to_string(),
+            });
+        }
+        require_positive_u64(
+            "KafkaSinkConfig.retry_base_delay_ms",
+            self.retry_base_delay_ms,
+        )?;
+        require_positive_u64(
+            "KafkaSinkConfig.retry_max_delay_ms",
+            self.retry_max_delay_ms,
+        )?;
+        require_positive_u64(
+            "KafkaSinkConfig.socket_timeout_ms",
+            self.socket_timeout_ms,
+        )?;
+        require_positive_u64(
+            "KafkaSinkConfig.connections_max_idle_ms",
+            self.connections_max_idle_ms,
+        )?;
+        require_positive_u64(
+            "KafkaSinkConfig.metadata_max_age_ms",
+            self.metadata_max_age_ms,
         )?;
         Ok(())
     }

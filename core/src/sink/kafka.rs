@@ -13,6 +13,7 @@ use tracing::debug;
 use ave_common::{DataToSink, LightEvent};
 
 use crate::config::{KafkaAcks, KafkaSecurityConfig, KafkaSinkConfig};
+use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
 use crate::sink::http::sink_password_env_var;
 use crate::sink::template::CompiledTemplate;
@@ -132,7 +133,15 @@ impl KafkaTransport {
             .set("client.id", &config.client_id)
             .set("acks", config.acks.as_str())
             .set("compression.type", config.compression.as_str())
-            .set("message.timeout.ms", config.request_timeout_ms.to_string());
+            .set("message.timeout.ms", config.request_timeout_ms.to_string())
+            // Idempotence requires retries >= 1; we set 1 so librdkafka retries
+            // once internally (required for idempotence) and `produce` manages
+            // the rest of the backoff logic.
+            .set("retries", "1")
+            .set("socket.timeout.ms", config.socket_timeout_ms.to_string())
+            .set("socket.keepalive.enable", config.socket_keepalive.to_string())
+            .set("connections.max.idle.ms", config.connections_max_idle_ms.to_string())
+            .set("metadata.max.age.ms", config.metadata_max_age_ms.to_string());
 
         // Idempotence requires `acks=all`; otherwise librdkafka rejects the
         // producer configuration. Keep it enabled only for the default acks.
@@ -204,12 +213,13 @@ impl KafkaTransport {
         })
     }
 
-    async fn produce(
+    async fn produce_once(
         &self,
         topic: &str,
         key: &str,
         payload: &[u8],
         headers: Option<OwnedHeaders>,
+        request_id: &str,
     ) -> Result<(), SinkError> {
         let mut record = FutureRecord::to(topic).key(key).payload(payload);
         if let Some(headers) = headers {
@@ -228,10 +238,71 @@ impl KafkaTransport {
                     topic = %topic,
                     partition = delivery.partition,
                     offset = delivery.offset,
+                    request_id = %request_id,
                     "Sink delivery succeeded"
                 );
             })
             .map_err(|(err, _message)| map_produce_error(err))
+    }
+
+    fn retry_delay(&self, attempt: usize) -> u64 {
+        // Saturate the exponent so a large `max_retries` cannot overflow the
+        // shift (debug panic / masked shift in release).
+        let exp = (attempt - 1).min(63);
+        let base_delay = self
+            .config
+            .retry_base_delay_ms
+            .saturating_mul(1_u64 << exp);
+        let delay = crate::sink::add_jitter(base_delay);
+        delay.min(self.config.retry_max_delay_ms)
+    }
+
+    async fn produce(
+        &self,
+        topic: &str,
+        key: &str,
+        payload: &[u8],
+        headers: Option<OwnedHeaders>,
+        request_id: &str,
+    ) -> Result<(), SinkError> {
+        let mut last_err = None;
+
+        for attempt in 0..=self.config.max_retries {
+            if attempt > 0 {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_sink_retry(&self.sink_name);
+                }
+                let delay = self.retry_delay(attempt);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+
+            match self
+                .produce_once(topic, key, payload, headers.clone(), request_id)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(
+                    e @ (SinkError::Delivery {
+                        retryable: false, ..
+                    }
+                    | SinkError::ClientBuild(_)
+                    | SinkError::Rejected { .. }
+                    | SinkError::Shutdown),
+                ) => {
+                    // Permanent error: no retries.
+                    return Err(e);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| SinkError::Delivery {
+            message: "Max retries exceeded".to_owned(),
+            retryable: false,
+            retry_after_ms: None,
+        }))
     }
 
     fn fetch_metadata(&self) -> Result<(), SinkError> {
@@ -338,7 +409,8 @@ impl SinkTransport for KafkaTransport {
         };
         let headers = build_headers(&meta, &request_id);
 
-        self.produce(&topic, &subject_id, &payload, Some(headers)).await
+        self.produce(&topic, &subject_id, &payload, Some(headers), &request_id)
+            .await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
@@ -360,7 +432,7 @@ impl SinkTransport for KafkaTransport {
         };
         let headers = build_headers(&meta, &request_id);
 
-        self.produce(&topic, &light.subject_id, &payload, Some(headers))
+        self.produce(&topic, &light.subject_id, &payload, Some(headers), &request_id)
             .await
     }
 
@@ -378,7 +450,8 @@ impl SinkTransport for KafkaTransport {
         let topic = self.topic_template.render("-", "-");
         let request_id = generate_request_id();
         let (key, payload, headers) = build_test_delivery(&request_id)?;
-        self.produce(&topic, &key, &payload, Some(headers)).await
+        self.produce(&topic, &key, &payload, Some(headers), &request_id)
+            .await
     }
 
     async fn warm_up(&self) -> Result<(), SinkError> {

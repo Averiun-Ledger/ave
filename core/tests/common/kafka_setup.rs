@@ -43,11 +43,11 @@ fn redpanda_start_cmd(host_port: u16) -> Vec<String> {
     vec![
         "redpanda".to_string(),
         "start".to_string(),
+        "--mode".to_string(),
+        "dev-container".to_string(),
         "--smp=1".to_string(),
         "--memory=1G".to_string(),
-        "--overprovisioned".to_string(),
         "--node-id=0".to_string(),
-        "--check=false".to_string(),
         "--kafka-addr=0.0.0.0:9092".to_string(),
         format!("--advertise-kafka-addr=127.0.0.1:{host_port}"),
     ]

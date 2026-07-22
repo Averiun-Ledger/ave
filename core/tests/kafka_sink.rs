@@ -263,6 +263,114 @@ async fn kafka_transport_test_sends_test_message() {
     assert!(!request_id.is_empty());
 }
 
+/// Request ID in logs and headers: the same `request_id` appears in the
+/// delivery log and in the message headers, so node and receiver logs can be
+/// correlated.
+#[tokio::test]
+#[traced_test]
+async fn kafka_transport_logs_request_id() {
+    let env = RedpandaEnv::start().await;
+    let transport = KafkaTransport::new(
+        "test-logs".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "logs-{{schema-id}}"),
+    )
+    .unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env
+        .consume_with_headers("logs-Example", 1, TIMEOUT)
+        .await;
+    let (_, _, headers) = &messages[0];
+    let header_request_id = headers
+        .iter()
+        .find(|(k, _)| k == "x-ave-request-id")
+        .map(|(_, v)| v.as_str())
+        .expect("request id header");
+
+    logs_assert(|lines: &[&str]| {
+        let sink_send = lines
+            .iter()
+            .find(|line| line.contains("Sink delivery succeeded"))
+            .expect("SinkSend log not found");
+        assert!(
+            sink_send.contains(header_request_id),
+            "log must contain the same request_id as the header: {}",
+            sink_send
+        );
+        Ok(())
+    });
+}
+
+/// Retry with a real broker: when the topic does not exist yet, the first
+/// attempt fails with `UnknownTopicOrPartition` (retryable) and the retry
+/// succeeds once Redpanda auto-creates the topic.
+#[tokio::test]
+async fn kafka_transport_retries_on_unknown_topic() {
+    let env = RedpandaEnv::start().await;
+    let topic = "retry-unknown-topic";
+
+    // The topic does not exist yet; the first attempt will fail with
+    // UnknownTopicOrPartition (retryable) and the retry will succeed once
+    // Redpanda auto-creates it.
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        topic,
+        |cfg| {
+            cfg.max_retries = 2;
+            cfg.retry_base_delay_ms = 100;
+            cfg.retry_max_delay_ms = 500;
+        },
+    );
+    let transport = KafkaTransport::new("test-retry".to_string(), config).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string(topic, 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, SUBJECT_ID);
+}
+
+/// Retry exhaustion with a real unreachable broker: after `max_retries` the
+/// transport returns a retryable error, not a permanent one.
+#[tokio::test]
+async fn kafka_transport_retry_exhaustion_returns_retryable_error() {
+    // Point to a non-existent broker to force a transient error on every
+    // attempt; the producer will retry until max_retries and then fail.
+    let config = kafka_sink_config_with(
+        "127.0.0.1:1", // unreachable
+        "retry-exhaustion-test",
+        |cfg| {
+            cfg.max_retries = 1;
+            cfg.retry_base_delay_ms = 50;
+            cfg.retry_max_delay_ms = 100;
+        },
+    );
+    let transport = KafkaTransport::new("test-retry-fail".to_string(), config).unwrap();
+
+    let result = transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await;
+    assert!(
+        result.is_err(),
+        "unreachable broker must fail after max_retries"
+    );
+
+    // The error must be retryable (transient), not permanent.
+    match result.unwrap_err() {
+        SinkError::Delivery { retryable, .. } => {
+            assert!(retryable, "broker unavailable must be retryable");
+        }
+        other => panic!("expected Delivery error, got {:?}", other),
+    }
+}
+
 /// TLS with a custom CA: the node must deliver to a TLS-enabled Redpanda
 /// whose server certificate chains to a CA configured via `tls.ca_certificate`.
 ///

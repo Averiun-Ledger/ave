@@ -1153,6 +1153,20 @@ pub struct KafkaSinkConfigHttp {
     pub compression: KafkaCompressionHttp,
     /// Per-message produce timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Maximum transient retries per delivery.
+    pub max_retries: usize,
+    /// Base delay between delivery retries, in milliseconds.
+    pub retry_base_delay_ms: u64,
+    /// Upper bound for any delivery retry delay, in milliseconds.
+    pub retry_max_delay_ms: u64,
+    /// Default timeout for network requests, in milliseconds.
+    pub socket_timeout_ms: u64,
+    /// Enable TCP keep-alives on broker sockets.
+    pub socket_keepalive: bool,
+    /// Close broker connections after this inactivity, in milliseconds.
+    pub connections_max_idle_ms: u64,
+    /// Metadata cache max age, in milliseconds.
+    pub metadata_max_age_ms: u64,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1278,6 +1292,13 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     acks: kafka.acks.into(),
                     compression: kafka.compression.into(),
                     request_timeout_ms: kafka.request_timeout_ms,
+                    max_retries: kafka.max_retries,
+                    retry_base_delay_ms: kafka.retry_base_delay_ms,
+                    retry_max_delay_ms: kafka.retry_max_delay_ms,
+                    socket_timeout_ms: kafka.socket_timeout_ms,
+                    socket_keepalive: kafka.socket_keepalive,
+                    connections_max_idle_ms: kafka.connections_max_idle_ms,
+                    metadata_max_age_ms: kafka.metadata_max_age_ms,
                 })
             }
         };
