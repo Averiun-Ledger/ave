@@ -157,6 +157,7 @@ impl SignatureHeaders {
 
 /// TLS material of an HTTPS test sink: a throwaway CA, a server certificate
 /// valid for `127.0.0.1` and a client certificate, both signed by that CA.
+#[derive(Clone, Debug)]
 pub struct TestTlsMaterial {
     /// CA certificate in PEM; configure it as `tls.ca_certificate` so the
     /// node trusts the sink.
@@ -170,7 +171,9 @@ pub struct TestTlsMaterial {
     /// Server certificate in PEM; configure it as `tls.pinned_certificate`
     /// to pin the sink's certificate.
     pub server_cert_pem: String,
-    server_key_pem: String,
+    /// Server private key in PEM; configure it as the TLS key of a test
+    /// server (e.g. Redpanda with TLS).
+    pub server_key_pem: String,
     server_cert_der: CertificateDer<'static>,
     server_key_der: Vec<u8>,
 }

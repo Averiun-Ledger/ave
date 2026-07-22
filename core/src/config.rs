@@ -12,6 +12,7 @@ use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 pub use ave_common::sink::{
     HttpCompression, HttpSinkConfig, HttpTlsVersion, KafkaAcks,
     KafkaCompression, KafkaSaslMechanism, KafkaSecurityConfig, KafkaSinkConfig,
+    KafkaTlsConfig,
     SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
 };
 use ave_network::Config as NetworkConfig;

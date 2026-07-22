@@ -12,7 +12,8 @@ use ave_common::{
 };
 use ave_core::config::{
     KafkaAcks, KafkaCompression, KafkaSaslMechanism, KafkaSecurityConfig,
-    KafkaSinkConfig, SinkConfigEntry, SinkServer, SinkTransportConfig,
+    KafkaSinkConfig, KafkaTlsConfig, SinkConfigEntry, SinkServer,
+    SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
 use ave_core::sink::SinkTransport;
@@ -24,7 +25,7 @@ use std::str::FromStr;
 use tracing_test::traced_test;
 
 use common::TempEnvVar;
-use common::kafka_setup::{RedpandaEnv, RedpandaSaslEnv};
+use common::kafka_setup::{RedpandaEnv, RedpandaSaslEnv, RedpandaTlsEnv};
 use common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
@@ -160,6 +161,168 @@ async fn kafka_transport_happy_path() {
     let messages = env.consume_string(template_subject, 1, TIMEOUT).await;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].0, template_subject);
+}
+
+/// Delivery headers: every event carries subject_id, sn, event_type,
+/// idempotency-key and a unique request-id.
+#[tokio::test]
+async fn kafka_transport_sends_delivery_headers() {
+    let env = RedpandaEnv::start().await;
+    let transport = KafkaTransport::new(
+        "test-headers".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "headers-{{schema-id}}"),
+    )
+    .unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env
+        .consume_with_headers("headers-Example", 2, TIMEOUT)
+        .await;
+    assert_eq!(messages.len(), 2);
+
+    fn get<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    // First delivery.
+    let (_, _, headers) = &messages[0];
+    assert_eq!(get(headers, "x-ave-subject-id"), Some(SUBJECT_ID));
+    assert_eq!(get(headers, "x-ave-sn"), Some("0"));
+    assert_eq!(get(headers, "x-ave-event-type"), Some("create"));
+    assert_eq!(
+        get(headers, "idempotency-key"),
+        Some(format!("{}-0", SUBJECT_ID).as_str())
+    );
+    let first_request_id =
+        get(headers, "x-ave-request-id").expect("request id header");
+    assert!(!first_request_id.is_empty());
+
+    // Second delivery: same idempotency key (retry-deduplication) but a
+    // different request id.
+    let (_, _, headers) = &messages[1];
+    let second_request_id =
+        get(headers, "x-ave-request-id").expect("request id header");
+    assert_ne!(
+        first_request_id, second_request_id,
+        "each delivery attempt must carry a unique request id"
+    );
+    assert_eq!(
+        get(headers, "idempotency-key"),
+        Some(format!("{}-0", SUBJECT_ID).as_str())
+    );
+}
+
+/// Test endpoint: `test()` performs a health check and sends a test message
+/// marked with `x-ave-test: true` and a test-specific key.
+#[tokio::test]
+async fn kafka_transport_test_sends_test_message() {
+    let env = RedpandaEnv::start().await;
+    let transport = KafkaTransport::new(
+        "test-endpoint".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "test-topic"),
+    )
+    .unwrap();
+
+    transport.test().await.unwrap();
+
+    let messages = env
+        .consume_with_headers("test-topic", 1, TIMEOUT)
+        .await;
+    assert_eq!(messages.len(), 1);
+    let (key, payload, headers) = &messages[0];
+
+    assert!(
+        key.starts_with("__ave-test-"),
+        "test message key must start with __ave-test-, got {}",
+        key
+    );
+
+    let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+    assert_eq!(payload["test"], true);
+
+    let get = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    assert_eq!(get("x-ave-test"), Some("true"));
+    let request_id = get("x-ave-request-id").expect("request id header");
+    assert!(!request_id.is_empty());
+}
+
+/// TLS with a custom CA: the node must deliver to a TLS-enabled Redpanda
+/// whose server certificate chains to a CA configured via `tls.ca_certificate`.
+///
+/// **Flow:**
+/// 1. Start a TLS Redpanda with a throwaway CA.
+/// 2. Build a transport with `security: Ssl` and `tls.ca_certificate` pointing
+///    to the generated CA.
+/// 3. Send a full event; verify it arrives over TLS.
+#[tokio::test]
+async fn kafka_transport_tls_custom_ca() {
+    let env = RedpandaTlsEnv::start().await;
+
+    let ca_path = std::env::temp_dir().join("ave-kafka-test-ca.pem");
+    std::fs::write(&ca_path, &env.ca_pem).unwrap();
+
+    let config = KafkaSinkConfig {
+        bootstrap_servers: env.bootstrap_servers.clone(),
+        topic: "tls-{{schema-id}}".to_owned(),
+        security: KafkaSecurityConfig::Ssl,
+        tls: Some(KafkaTlsConfig {
+            ca_certificate: ca_path.to_string_lossy().into_owned(),
+            ..KafkaTlsConfig::default()
+        }),
+        ..KafkaSinkConfig::default()
+    };
+    let transport = KafkaTransport::new("test-tls".to_string(), config).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("tls-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, SUBJECT_ID);
+}
+
+/// TLS without the CA: delivery to a TLS-enabled Redpanda must fail when the
+/// node does not trust the sink's CA (no `tls.ca_certificate` configured).
+#[tokio::test]
+async fn kafka_transport_tls_missing_ca_fails() {
+    let env = RedpandaTlsEnv::start().await;
+
+    let config = KafkaSinkConfig {
+        bootstrap_servers: env.bootstrap_servers.clone(),
+        topic: "tls-missing-ca".to_owned(),
+        security: KafkaSecurityConfig::Ssl,
+        tls: None,
+        ..KafkaSinkConfig::default()
+    };
+    let transport =
+        KafkaTransport::new("test-tls-fail".to_string(), config).unwrap();
+
+    let result = transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await;
+    assert!(
+        result.is_err(),
+        "delivery must fail when the CA is not trusted"
+    );
 }
 
 /// Configuration variants: all supported compression codecs and acks levels

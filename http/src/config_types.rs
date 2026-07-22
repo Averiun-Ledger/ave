@@ -1124,6 +1124,17 @@ impl From<ave_bridge::ave_common::sink::KafkaCompression>
     }
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Default)]
+#[serde(default)]
+pub struct KafkaTlsConfigHttp {
+    /// Path to an additional PEM-encoded root CA certificate to trust.
+    pub ca_certificate: String,
+    /// Path to the PEM-encoded client certificate chain used for mTLS.
+    pub client_certificate: String,
+    /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
+    pub client_key: String,
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct KafkaSinkConfigHttp {
     /// Comma-separated list of `host:port` bootstrap brokers.
@@ -1134,6 +1145,8 @@ pub struct KafkaSinkConfigHttp {
     pub client_id: String,
     /// Security configuration for the brokers.
     pub security: KafkaSecurityConfigHttp,
+    /// TLS customization: additional root CA, mTLS identity, minimum version.
+    pub tls: Option<KafkaTlsConfigHttp>,
     /// Required acknowledgements.
     pub acks: KafkaAcksHttp,
     /// Compression codec.
@@ -1257,6 +1270,11 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     topic: kafka.topic,
                     client_id: kafka.client_id,
                     security: kafka_security_to_http(kafka.security),
+                    tls: kafka.tls.map(|t| KafkaTlsConfigHttp {
+                        ca_certificate: t.ca_certificate,
+                        client_certificate: t.client_certificate,
+                        client_key: t.client_key,
+                    }),
                     acks: kafka.acks.into(),
                     compression: kafka.compression.into(),
                     request_timeout_ms: kafka.request_timeout_ms,

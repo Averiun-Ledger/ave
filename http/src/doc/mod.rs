@@ -32,7 +32,8 @@ use crate::{
         HttpSinkConfigHttp, HttpTlsConfigHttp, HttpTlsVersionHttp,
         OAuth2GrantTypeHttp,
         KafkaAcksHttp, KafkaCompressionHttp, KafkaSaslMechanismHttp,
-        KafkaSecurityConfigHttp, KafkaSinkConfigHttp, KeyPairAlgorithmHttp,
+        KafkaSecurityConfigHttp, KafkaSinkConfigHttp, KafkaTlsConfigHttp,
+        KeyPairAlgorithmHttp,
         LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, LoggingRotationHttp,
         MemoryLimitsConfigHttp, NetworkConfigHttp, NodeTypeHttp,
         ProxyConfigHttp, RateLimitConfigHttp, RebootSyncConfigHttp,
@@ -400,6 +401,7 @@ impl Modify for SecurityAddon {
             KafkaSaslMechanismHttp,
             KafkaSecurityConfigHttp,
             KafkaSinkConfigHttp,
+            KafkaTlsConfigHttp,
             SinkAuthConfigHttp,
             AveStoreConfigHttp,
             MachineSpecHttp

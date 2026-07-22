@@ -670,6 +670,31 @@ mod tests {
     }
 
     #[test]
+    fn test_kafka_tls_config_validate_ok() {
+        let tls = KafkaTlsConfig {
+            ca_certificate: "/etc/ssl/ca.pem".to_owned(),
+            client_certificate: "/etc/ssl/client.pem".to_owned(),
+            client_key: "/etc/ssl/client.key".to_owned(),
+        };
+        assert!(tls.validate().is_ok());
+        assert!(KafkaTlsConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_kafka_tls_config_validate_requires_cert_and_key_together() {
+        let tls = KafkaTlsConfig {
+            client_certificate: "/etc/ssl/client.pem".to_owned(),
+            ..KafkaTlsConfig::default()
+        };
+        assert!(tls.validate().is_err());
+        let tls = KafkaTlsConfig {
+            client_key: "/etc/ssl/client.key".to_owned(),
+            ..KafkaTlsConfig::default()
+        };
+        assert!(tls.validate().is_err());
+    }
+
+    #[test]
     fn test_http_tls_version_serde() {
         let tls: HttpTlsConfig =
             serde_json::from_str(r#"{"min_tls_version": "1.3"}"#).unwrap();
@@ -1393,6 +1418,42 @@ impl std::fmt::Display for KafkaSaslMechanism {
     }
 }
 
+/// TLS customization for the Kafka transport: additional root CA and mTLS
+/// identity. librdkafka does not expose a minimum-TLS-version knob; the TLS
+/// version is negotiated by OpenSSL defaults.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct KafkaTlsConfig {
+    /// Path to an additional PEM-encoded root CA certificate to trust
+    /// (e.g. a corporate CA doing TLS inspection).
+    pub ca_certificate: String,
+    /// Path to the PEM-encoded client certificate chain used for mTLS.
+    /// Must be set together with `client_key`.
+    pub client_certificate: String,
+    /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
+    /// Must be set together with `client_certificate`.
+    pub client_key: String,
+}
+
+impl KafkaTlsConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        let cert_set = !self.client_certificate.is_empty();
+        let key_set = !self.client_key.is_empty();
+        if cert_set != key_set {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaTlsConfig".to_string(),
+                reason:
+                    "client_certificate and client_key must be set together (mTLS)"
+                        .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Security protocol for the Kafka transport.
 ///
 /// SASL passwords are never stored in the configuration: they are read from
@@ -1534,6 +1595,8 @@ pub struct KafkaSinkConfig {
     pub client_id: String,
     /// Security configuration for the brokers.
     pub security: KafkaSecurityConfig,
+    /// TLS customization: additional root CA, mTLS identity, minimum version.
+    pub tls: Option<KafkaTlsConfig>,
     /// Required acknowledgements.
     pub acks: KafkaAcks,
     /// Compression codec.
@@ -1549,6 +1612,7 @@ impl Default for KafkaSinkConfig {
             topic: String::new(),
             client_id: "ave-sink".to_string(),
             security: KafkaSecurityConfig::default(),
+            tls: None,
             acks: KafkaAcks::default(),
             compression: KafkaCompression::default(),
             request_timeout_ms: 5_000,
@@ -1576,6 +1640,12 @@ impl KafkaSinkConfig {
                 component: "KafkaSinkConfig.security".to_string(),
                 reason: e.to_string(),
             })?;
+        if let Some(tls) = &self.tls {
+            tls.validate().map_err(|e| Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.tls".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
         require_positive_u64(
             "KafkaSinkConfig.request_timeout_ms",
             self.request_timeout_ms,

@@ -12,6 +12,8 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, Image, ImageExt};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
+use super::test_sink::TestTlsMaterial;
+
 const IMAGE_NAME: &str = "redpandadata/redpanda";
 const IMAGE_TAG: &str = "v24.2.7";
 const KAFKA_PORT: u16 = 9092;
@@ -92,6 +94,24 @@ impl RedpandaEnv {
         timeout: Duration,
     ) -> Vec<(String, String)> {
         consume_string_with_config(
+            &self.bootstrap_servers,
+            topic,
+            expected_count,
+            timeout,
+            ConsumerAuth::None,
+        )
+        .await
+    }
+
+    /// Consume `expected_count` messages from `topic` and return
+    /// `(key, payload, headers)` triples. Headers are decoded as UTF-8 strings.
+    pub async fn consume_with_headers(
+        &self,
+        topic: &str,
+        expected_count: usize,
+        timeout: Duration,
+    ) -> Vec<(String, String, Vec<(String, String)>)> {
+        consume_with_headers_config(
             &self.bootstrap_servers,
             topic,
             expected_count,
@@ -291,6 +311,173 @@ impl Image for RedpandaSasl {
     }
 }
 
+/// Redpanda single-node image bootstrapped with TLS (server certificate).
+/// The client must trust the CA and can optionally present a client cert.
+#[derive(Debug, Clone)]
+pub struct RedpandaTls {
+    host_port: u16,
+    config_copy: CopyToContainer,
+    ca_copy: CopyToContainer,
+    cert_copy: CopyToContainer,
+    key_copy: CopyToContainer,
+}
+
+impl RedpandaTls {
+    pub fn new(host_port: u16, material: &TestTlsMaterial) -> Self {
+        let config_yaml = Self::tls_bootstrap_yaml(host_port);
+        let config_copy = CopyToContainer::new(
+            CopyDataSource::Data(config_yaml),
+            "/tmp/redpanda.yaml",
+        );
+        let ca_copy = CopyToContainer::new(
+            CopyDataSource::Data(material.ca_pem.clone().into()),
+            "/tmp/ca.crt",
+        );
+        let cert_copy = CopyToContainer::new(
+            CopyDataSource::Data(material.server_cert_pem.clone().into()),
+            "/tmp/server.crt",
+        );
+        let key_copy = CopyToContainer::new(
+            CopyDataSource::Data(material.server_key_pem.clone().into()),
+            "/tmp/server.key",
+        );
+        Self {
+            host_port,
+            config_copy,
+            ca_copy,
+            cert_copy,
+            key_copy,
+        }
+    }
+
+    fn tls_bootstrap_yaml(host_port: u16) -> Vec<u8> {
+        format!(
+            r#"redpanda:
+    data_directory: /var/lib/redpanda/data
+    node_id: 0
+    kafka_api:
+        - address: 0.0.0.0
+          port: 9092
+          name: tls_listener
+    kafka_api_tls:
+        - name: tls_listener
+          key_file: /tmp/server.key
+          cert_file: /tmp/server.crt
+          truststore_file: /tmp/ca.crt
+          enabled: true
+    advertised_kafka_api:
+        - address: 127.0.0.1
+          port: {host_port}
+          name: tls_listener
+    developer_mode: true
+    auto_create_topics_enabled: true
+"#
+        )
+        .into_bytes()
+    }
+}
+
+impl Image for RedpandaTls {
+    fn name(&self) -> &str {
+        IMAGE_NAME
+    }
+
+    fn tag(&self) -> &str {
+        IMAGE_TAG
+    }
+
+    fn ready_conditions(&self) -> Vec<WaitFor> {
+        redpanda_ready_conditions()
+    }
+
+    fn entrypoint(&self) -> Option<&str> {
+        Some("redpanda")
+    }
+
+    fn cmd(
+        &self,
+    ) -> impl IntoIterator<Item = impl Into<std::borrow::Cow<'_, str>>> {
+        vec![
+            "--redpanda-cfg".to_string(),
+            "/tmp/redpanda.yaml".to_string(),
+            "-c".to_string(),
+            "1".to_string(),
+            "-m".to_string(),
+            "1G".to_string(),
+        ]
+    }
+
+    fn expose_ports(&self) -> &[ContainerPort] {
+        &[
+            ContainerPort::Tcp(KAFKA_PORT),
+            ContainerPort::Tcp(ADMIN_API_PORT),
+        ]
+    }
+
+    fn copy_to_sources(&self) -> impl IntoIterator<Item = &CopyToContainer> {
+        [
+            &self.config_copy,
+            &self.ca_copy,
+            &self.cert_copy,
+            &self.key_copy,
+        ]
+    }
+}
+
+/// A running Redpanda container configured with TLS. The client must trust
+/// the generated CA.
+pub struct RedpandaTlsEnv {
+    #[allow(dead_code)]
+    container: ContainerAsync<RedpandaTls>,
+    pub bootstrap_servers: String,
+    /// CA certificate in PEM; the client must trust it.
+    pub ca_pem: String,
+    /// Client certificate in PEM; for mTLS tests.
+    pub client_cert_pem: String,
+    /// Client private key in PEM; for mTLS tests.
+    pub client_key_pem: String,
+    _slot: SemaphorePermit<'static>,
+}
+
+impl RedpandaTlsEnv {
+    pub async fn start() -> Self {
+        let slot = REDPANDA_SLOTS
+            .acquire()
+            .await
+            .expect("redpanda semaphore is never closed");
+        let host_port = free_local_port();
+        let material = TestTlsMaterial::generate();
+        let image = RedpandaTls::new(host_port, &material)
+            .with_mapped_port(host_port, ContainerPort::Tcp(KAFKA_PORT));
+        let container = image.start().await.expect("start redpanda tls container");
+        Self {
+            container,
+            bootstrap_servers: format!("127.0.0.1:{host_port}"),
+            ca_pem: material.ca_pem,
+            client_cert_pem: material.client_cert_pem,
+            client_key_pem: material.client_key_pem,
+            _slot: slot,
+        }
+    }
+
+    /// Consume `expected_count` messages from `topic` over TLS.
+    pub async fn consume_string(
+        &self,
+        topic: &str,
+        expected_count: usize,
+        timeout: Duration,
+    ) -> Vec<(String, String)> {
+        consume_string_tls(
+            &self.bootstrap_servers,
+            topic,
+            expected_count,
+            timeout,
+            &self.ca_pem,
+        )
+        .await
+    }
+}
+
 enum ConsumerAuth<'a> {
     None,
     Sasl {
@@ -321,6 +508,64 @@ fn consumer_config(
     cfg
 }
 
+/// Consume the next message from `stream`, polling with short per-attempt
+/// timeouts instead of a single long timeout. Returns as soon as a message
+/// arrives; fails only after many attempts, so slow systems have ample time.
+/// Returns owned strings to avoid lifetime issues with the borrowed message.
+async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
+    stream: &mut rdkafka::consumer::MessageStream<'_, C>,
+    timeout: Duration,
+) -> (String, String, Vec<(String, String)>) {
+    use rdkafka::message::Headers as _;
+
+    let per_attempt = Duration::from_millis(100);
+    let max_attempts = timeout.as_millis() / per_attempt.as_millis();
+    let mut attempts = 0;
+    loop {
+        match tokio::time::timeout(per_attempt, stream.next()).await {
+            Ok(Some(msg)) => {
+                let msg = msg.expect("consumer message error");
+                let key = msg
+                    .key()
+                    .map(|k| String::from_utf8_lossy(k).to_string())
+                    .unwrap_or_default();
+                let payload = msg
+                    .payload()
+                    .map(|p| String::from_utf8_lossy(p).to_string())
+                    .unwrap_or_default();
+                let headers = msg
+                    .headers()
+                    .map(|h| {
+                        (0..h.count())
+                            .map(|i| {
+                                let header = h.get(i);
+                                (
+                                    header.key.to_owned(),
+                                    header
+                                        .value
+                                        .map(|v| String::from_utf8_lossy(v).into_owned())
+                                        .unwrap_or_default(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return (key, payload, headers);
+            }
+            Ok(None) => panic!("consumer stream ended"),
+            Err(_) => {
+                if attempts >= max_attempts {
+                    panic!(
+                        "consume timed out after {:?} ({} attempts)",
+                        timeout, attempts
+                    );
+                }
+                attempts += 1;
+            }
+        }
+    }
+}
+
 async fn consume_string_with_config(
     bootstrap_servers: &str,
     topic: &str,
@@ -340,19 +585,69 @@ async fn consume_string_with_config(
     let mut stream = consumer.stream();
     let mut out = Vec::with_capacity(expected_count);
     for _ in 0..expected_count {
-        let msg = tokio::time::timeout(timeout, stream.next())
-            .await
-            .expect("consume timed out")
-            .expect("consumer stream ended")
-            .expect("consumer message error");
-        let key = msg
-            .key()
-            .map(|k| String::from_utf8_lossy(k).to_string())
-            .unwrap_or_default();
-        let payload = msg
-            .payload()
-            .map(|p| String::from_utf8_lossy(p).to_string())
-            .unwrap_or_default();
+        let (key, payload, _headers) = consume_next(&mut stream, timeout).await;
+        out.push((key, payload));
+    }
+    out
+}
+
+async fn consume_with_headers_config(
+    bootstrap_servers: &str,
+    topic: &str,
+    expected_count: usize,
+    timeout: Duration,
+    auth: ConsumerAuth<'_>,
+) -> Vec<(String, String, Vec<(String, String)>)> {
+    let group_id = format!("test-group-headers-{topic}");
+    let consumer: StreamConsumer =
+        consumer_config(bootstrap_servers, &group_id, auth)
+            .create()
+            .expect("create stream consumer");
+    consumer.subscribe(&[topic]).expect("subscribe to topic");
+
+    let mut stream = consumer.stream();
+    let mut out = Vec::with_capacity(expected_count);
+    for _ in 0..expected_count {
+        let (key, payload, headers) = consume_next(&mut stream, timeout).await;
+        out.push((key, payload, headers));
+    }
+    out
+}
+
+fn consumer_config_tls(
+    bootstrap_servers: &str,
+    group_id: &str,
+    ca_pem: &str,
+) -> ClientConfig {
+    let mut cfg = ClientConfig::new();
+    cfg.set("group.id", group_id)
+        .set("bootstrap.servers", bootstrap_servers)
+        .set("session.timeout.ms", "6000")
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "earliest")
+        .set("security.protocol", "ssl")
+        .set("ssl.ca.pem", ca_pem);
+    cfg
+}
+
+async fn consume_string_tls(
+    bootstrap_servers: &str,
+    topic: &str,
+    expected_count: usize,
+    timeout: Duration,
+    ca_pem: &str,
+) -> Vec<(String, String)> {
+    let group_id = format!("test-group-tls-{topic}");
+    let consumer: StreamConsumer =
+        consumer_config_tls(bootstrap_servers, &group_id, ca_pem)
+            .create()
+            .expect("create tls stream consumer");
+    consumer.subscribe(&[topic]).expect("subscribe to topic");
+
+    let mut stream = consumer.stream();
+    let mut out = Vec::with_capacity(expected_count);
+    for _ in 0..expected_count {
+        let (key, payload, _headers) = consume_next(&mut stream, timeout).await;
         out.push((key, payload));
     }
     out
