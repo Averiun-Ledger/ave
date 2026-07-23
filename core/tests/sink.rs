@@ -217,6 +217,7 @@ async fn sink_custom_headers_are_delivered_and_internal_headers_override() {
         .await
         .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(1, true).await;
 
     assert_eq!(
@@ -450,6 +451,7 @@ async fn replay_single_subject_after_sink_loss() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(6, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 6);
@@ -495,6 +497,7 @@ async fn replay_single_subject_after_sink_loss() {
     // Bring the sink back online. The worker should automatically catch up.
     sink.set_mode(ResponseMode::Accept).await;
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     let recovered = sink.snapshot().await;
     assert_eq!(recovered.len(), 8);
@@ -537,6 +540,7 @@ async fn replay_single_subject_after_sink_loss() {
     assert_eq!(processed.subject_id, subject_id.to_string());
     assert_eq!(processed.from_sn, 5);
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     let replayed = sink.snapshot().await;
     assert_eq!(replayed.len(), 8);
@@ -670,6 +674,7 @@ async fn replay_multiple_subjects_and_sinks() {
     let s1_str = s1.to_string();
     let s2_str = s2.to_string();
 
+    wait_for_sink_caught_up(&node.api, "example-sink-all").await;
     sink_all.wait_for_count(6, true).await;
     let all_events = sink_all.snapshot().await;
     assert_eq!(all_events.len(), 6);
@@ -781,6 +786,7 @@ async fn replay_multiple_subjects_and_sinks() {
         .collect();
     assert_eq!(actual_items, expected_items);
 
+    wait_for_sink_caught_up(&node.api, "example-sink-all").await;
     sink_all.wait_for_count(8, true).await;
     let all_after = sink_all.snapshot().await;
     assert_eq!(all_after.len(), 8);
@@ -1108,6 +1114,7 @@ async fn replay_filters_and_combinations() {
     assert_eq!(reject_events.len(), 1);
     assert_sink_contains_reject(&reject_events, &subject_id_str, 6);
 
+    wait_for_sink_caught_up(&owner.api, "sink-all").await;
     sinks[5].wait_for_count(8, true).await;
     let all_events = sinks[5].snapshot().await;
     assert_eq!(all_events.len(), 8);
@@ -1203,6 +1210,7 @@ async fn replay_filters_and_combinations() {
     assert_eq!(reject_after.len(), 1);
     assert_event_is_reject(&reject_after[0], &subject_id_str, 6);
 
+    wait_for_sink_caught_up(&owner.api, "sink-all").await;
     sinks[5].wait_for_count(8, true).await;
     let all_after = sinks[5].snapshot().await;
     assert_eq!(all_after.len(), 8);
@@ -1689,6 +1697,7 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
         .unwrap();
 
     // Automatic catch-up should deliver Create + 3 facts.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -1745,6 +1754,7 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
     assert_eq!(processed.subject_id, subject_id_str);
     assert_eq!(processed.from_sn, 2);
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -1910,6 +1920,7 @@ async fn replay_after_sink_returns_bad_data() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 3);
@@ -1964,6 +1975,7 @@ async fn replay_after_sink_returns_bad_data() {
         .await
         .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -2020,6 +2032,7 @@ async fn replay_after_sink_returns_bad_data() {
     assert_eq!(processed.subject_id, subject_id_str);
     assert_eq!(processed.from_sn, 2);
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -2160,6 +2173,7 @@ async fn replay_endpoint_response_shape() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 8);
@@ -2263,6 +2277,7 @@ async fn replay_endpoint_response_shape() {
     );
 
     // The valid replay re-sends S1 facts from SN 1 to SN 3.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(11, true).await;
     let after = sink.snapshot().await;
     assert_eq!(after.len(), 11);
@@ -2832,6 +2847,7 @@ async fn sink_recovery_across_node_restart() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 3);
@@ -2896,6 +2912,7 @@ async fn sink_recovery_across_node_restart() {
     // The restart must have auto-unblocked the sink.
     assert_sink_unblocked(&node.api, "example-sink").await;
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -2974,6 +2991,7 @@ async fn sink_recovery_across_node_restart() {
     node_running(&node.api).await.unwrap();
 
     // Total stored events: 4 from S1 + Create + 2 facts from S2 = 7.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(7, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 7);
@@ -3040,6 +3058,7 @@ async fn sink_recovery_across_node_restart() {
     )
     .await
     .unwrap();
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     assert_sink_not_lagging(&node.api, "example-sink").await;
 
@@ -3055,6 +3074,7 @@ async fn sink_recovery_across_node_restart() {
     )
     .await
     .unwrap();
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(9, true).await;
 
     let events = sink.snapshot().await;
@@ -3225,6 +3245,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
 
     // Part A — normal delivery with partial filters. The create-only sinks must
     // receive Create events as full payloads and facts as lightweight events.
+    wait_for_sink_caught_up(&node.api, "create-only").await;
     create_only_sink.wait_for_count(6, true).await;
     let create_only_events = create_only_sink.snapshot().await;
     assert_eq!(create_only_events.len(), 6);
@@ -3264,6 +3285,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_no_fact_full_events(&create_only_events);
 
     // The conc2 sink must behave identically during normal delivery.
+    wait_for_sink_caught_up(&node.api, "create-only-conc2").await;
     create_only_conc2_sink.wait_for_count(6, true).await;
     let conc2_initial = create_only_conc2_sink.snapshot().await;
     assert_eq!(conc2_initial.len(), 6);
@@ -3303,6 +3325,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_no_fact_full_events(&conc2_initial);
 
     // The all-events sink receives everything as full payloads.
+    wait_for_sink_caught_up(&node.api, "all").await;
     all_sink.wait_for_count(6, true).await;
     let all_events = all_sink.snapshot().await;
     assert_eq!(all_events.len(), 6);
@@ -3364,6 +3387,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     wait_for_sink_lagging_subjects(&node.api, "create-only-conc2", 2).await;
 
     create_only_sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "create-only").await;
     create_only_sink.wait_for_count(8, true).await;
     let caught_up = create_only_sink.snapshot().await;
     assert_eq!(caught_up.len(), 8, "catch-up must not deliver duplicates");
@@ -3389,6 +3413,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
 
     // The all-events sink kept receiving events while the create-only sinks
     // were failing; verify it has SN 3 for both subjects.
+    wait_for_sink_caught_up(&node.api, "all").await;
     all_sink.wait_for_count(8, true).await;
     let all_after_b = all_sink.snapshot().await;
     assert_eq!(all_after_b.len(), 8);
@@ -3436,6 +3461,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_eq!(response.processed.len(), 2);
     assert!(response.errors.is_empty());
 
+    wait_for_sink_caught_up(&node.api, "create-only").await;
     create_only_sink.wait_for_count(8, true).await;
     let replayed = create_only_sink.snapshot().await;
     assert_eq!(replayed.len(), 8);
@@ -3495,6 +3521,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     // both subjects in parallel, but it must still deliver each event exactly
     // once and preserve per-subject ordering.
     create_only_conc2_sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "create-only-conc2").await;
     create_only_conc2_sink.wait_for_count(8, true).await;
     let conc2_events = create_only_conc2_sink.snapshot().await;
     assert_eq!(conc2_events.len(), 8, "conc2 sink must receive all events");
@@ -3571,6 +3598,7 @@ async fn replay_governance_sink() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "gov-sink").await;
     sink.wait_for_count(2, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 2);
@@ -3605,6 +3633,7 @@ async fn replay_governance_sink() {
     assert_eq!(processed.subject_id, gov_id_str);
     assert_eq!(processed.from_sn, 0);
 
+    wait_for_sink_caught_up(&node.api, "gov-sink").await;
     sink.wait_for_count(2, true).await;
     let replayed = sink.snapshot().await;
     assert_eq!(replayed.len(), 2);
@@ -3835,7 +3864,9 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     .unwrap();
 
     // Wait for all events on both sinks.
+    wait_for_sink_caught_up(&owner.api, "full-sink").await;
     owner_sink.wait_for_count(4, true).await;
+    wait_for_sink_caught_up(&witness.api, "opaque-sink").await;
     witness_sink.wait_for_count(4, true).await;
 
     let full_events = owner_sink.snapshot().await;
@@ -4386,7 +4417,18 @@ async fn sink_non_fact_event_types_and_fields() {
         .await
         .unwrap();
 
-    // Wait for all events on both sinks.
+    // Wait for both delivery pipelines to drain: once the sink reports the
+    // subject as caught up, the cursor is at the final SN and every HTTP
+    // response (including the one we need to count) has been processed, so
+    // the TestSink has already recorded the event. This is the only
+    // synchronization that holds under suite load; `get_subject` only proves
+    // the ledger state is current, not that the delivery pipeline finished.
+    wait_for_sink_caught_up(&owner.api, "owner-sink").await;
+    wait_for_sink_caught_up(&new_owner.api, "new-owner-sink").await;
+
+    // The pipelines are idle, so the receiver has everything. A small
+    // poll guards against the async gap between cursor update and event
+    // record visibility.
     owner_sink.wait_for_count(7, true).await;
     new_owner_sink.wait_for_count(7, true).await;
 
@@ -4938,7 +4980,9 @@ async fn sink_subject_deletion_cleans_tracking() {
     }
 
     // Both sinks must receive the initial Create + 2 facts.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink_a.wait_for_count(3, true).await;
+    wait_for_sink_caught_up(&node.api, "example-sink-2").await;
     sink_b.wait_for_count(3, true).await;
     let initial_a = sink_a.snapshot().await;
     let initial_b = sink_b.snapshot().await;
@@ -5262,6 +5306,7 @@ async fn sink_transient_errors_and_fast_events() {
             .unwrap();
     let s1_str = s1.to_string();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(1, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 1);
@@ -5285,6 +5330,7 @@ async fn sink_transient_errors_and_fast_events() {
     );
 
     sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(2, true).await;
     let recovered = sink.snapshot().await;
     assert_eq!(recovered.len(), 2);
@@ -5317,6 +5363,7 @@ async fn sink_transient_errors_and_fast_events() {
     // Allow enough time for ordered delivery of the 4 new facts. The fast async
     // emissions produced a sequential gap (logged as SequentialGap) that must be
     // resolved by ordered catch-up.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(6, true).await;
     let fast = sink.snapshot().await;
     assert_eq!(fast.len(), 6);
@@ -5541,6 +5588,7 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     node_running(&node.api).await.unwrap();
 
     // new-sink must catch up Create + 3 facts automatically.
+    wait_for_sink_caught_up(&node.api, "new-sink").await;
     new_sink.wait_for_count(4, true).await;
     let new_events = new_sink.snapshot().await;
     assert_eq!(new_events.len(), 4);
@@ -5867,6 +5915,7 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 
     // new-sink must replay all S1 events from SN 0 because its cursors were
     // deleted in safe mode.
+    wait_for_sink_caught_up(&node.api, "new-sink").await;
     new_sink.wait_for_count(4, true).await;
     let s1_events: Vec<_> = new_sink
         .snapshot()
@@ -6324,6 +6373,7 @@ async fn sink_api_key_from_env_var() {
     node_running(&node.api).await.unwrap();
 
     // Startup catch-up delivers the subject's create event.
+    wait_for_sink_caught_up(&node.api, "envkey-sink").await;
     sink.wait_for_count(1, true).await;
 
     let headers = sink.authorization_headers().await;
@@ -6431,6 +6481,7 @@ async fn sink_signature_headers_verify() {
 
     // Startup catch-up delivers the create event (SN 0, full) plus the two
     // facts as lightweight events.
+    wait_for_sink_caught_up(&node.api, "signed-sink").await;
     sink.wait_for_count(3, true).await;
 
     let events = sink.snapshot().await;
@@ -6594,6 +6645,7 @@ async fn sink_worker_idle_shutdown_and_recreate() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(2, true).await;
     let events_after_first = sink.full_snapshot().await;
     assert_eq!(
@@ -6651,6 +6703,7 @@ async fn sink_worker_idle_shutdown_and_recreate() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let events_after_second = sink.full_snapshot().await;
     assert_eq!(
@@ -6808,6 +6861,7 @@ async fn sink_eol_keeps_cursor_and_stops_delivery() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let events_before_eol = sink.full_snapshot().await;
     assert_eq!(
@@ -6820,6 +6874,7 @@ async fn sink_eol_keeps_cursor_and_stops_delivery() {
     // Emit EOL and verify it is delivered as the next event.
     emit_eol(&node.api, subject_id.clone(), true).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events_after_eol = sink.full_snapshot().await;
     assert_eq!(events_after_eol.len(), 4, "EOL should be delivered");
@@ -7083,7 +7138,9 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
     .unwrap();
 
     // Wait for all events on both sinks.
+    wait_for_sink_caught_up(&owner.api, "owner-sink").await;
     owner_sink.wait_for_count(7, true).await;
+    wait_for_sink_caught_up(&new_owner.api, "new-owner-sink").await;
     new_owner_sink.wait_for_count(7, true).await;
 
     let owner_events = owner_sink.snapshot().await;
@@ -7704,6 +7761,7 @@ async fn replay_during_active_catch_up() {
     // Step 6: wait until the sink has received at least the 4 distinct SNs for
     // this subject, tolerating duplicate HTTP deliveries caused by overlapping
     // catch-up and replay.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id_str, 4, true)
         .await;
 
@@ -7844,6 +7902,7 @@ async fn sink_tls_custom_ca_delivery() {
     node_running(&node.api).await.unwrap();
 
     // Startup catch-up delivers the create event (SN 0) and the fact (SN 1).
+    wait_for_sink_caught_up(&node.api, "tls-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 2, true)
         .await;
     assert_sink_running(&node.api, "tls-sink").await;
@@ -8017,6 +8076,7 @@ async fn sink_mtls_delivery() {
     node_running(&node.api).await.unwrap();
 
     // Startup catch-up delivers the create event (SN 0) and the fact (SN 1).
+    wait_for_sink_caught_up(&node.api, "mtls-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 2, true)
         .await;
     assert_sink_running(&node.api, "mtls-sink").await;
@@ -8103,6 +8163,7 @@ async fn sink_tls_pinning() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "pinned-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
         .await;
     assert_sink_running(&node.api, "pinned-sink").await;
@@ -8268,6 +8329,7 @@ async fn sink_signature_reused_across_retries() {
 
     // When the sink accepts again, the worker catches up.
     sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "signed-retry-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
         .await;
 }
@@ -8353,6 +8415,7 @@ async fn sink_idempotency_headers() {
 
     // Startup catch-up delivers the create event (SN 0, full) plus the two
     // facts as lightweight events.
+    wait_for_sink_caught_up(&node.api, "idem-sink").await;
     sink.wait_for_count(3, true).await;
 
     let events = sink.snapshot().await;
@@ -8464,6 +8527,7 @@ async fn sink_proxy_delivery() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "proxy-sink").await;
     sink.wait_for_count(2, true).await;
 
     let proxied = proxy.proxied_requests().await;
@@ -8564,6 +8628,7 @@ async fn sink_proxy_delivery_with_auth() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "proxy-auth-sink").await;
     sink.wait_for_count(1, true).await;
 
     use base64::Engine as _;
@@ -8849,6 +8914,7 @@ async fn sink_batch_delivery_catch_up() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "batch-sink").await;
     sink.wait_for_count(4, true).await;
 
     // A single POST delivered the whole catch-up batch.
@@ -8957,6 +9023,7 @@ async fn sink_batch_delivery_gzip() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "batch-gzip-sink").await;
     sink.wait_for_count(4, true).await;
 
     let content_encodings = sink.content_encodings().await;
@@ -9060,6 +9127,7 @@ async fn sink_batch_delivery_live() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "batch-live-sink").await;
     sink.wait_for_count(4, true).await;
 
     // Every raw delivery is a JSON array; together they carry the 4 events.
@@ -9196,6 +9264,7 @@ async fn sink_batch_delivery_burst_single_post() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "batch-burst-sink").await;
     sink.wait_for_count(5, true).await;
 
     // The whole burst must have been delivered as a single JSON-array POST.
@@ -9310,6 +9379,7 @@ async fn sink_live_burst_no_lagging() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "live-burst-sink").await;
     sink.wait_for_count(6, true).await;
 
     let events = sink.snapshot().await;
@@ -9395,6 +9465,7 @@ async fn sink_proxy_no_proxy_bypass() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "proxy-bypass-sink").await;
     sink.wait_for_count(1, true).await;
 
     assert!(
@@ -9503,6 +9574,7 @@ async fn sink_idempotency_key_stable_across_retries() {
 
     // When the sink accepts again, the worker catches up.
     sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "idem-retry-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
         .await;
 }
@@ -9695,6 +9767,7 @@ async fn sink_batch_delivery_mixed_full_light() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "batch-mixed-sink").await;
     sink.wait_for_count(3, true).await;
 
     let batch_lens = sink.batch_lens().await;

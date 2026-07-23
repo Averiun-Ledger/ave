@@ -370,7 +370,9 @@ impl SinkSubjectWorker {
             SinkTransportConfig::Http(http) => {
                 (http.batch_delivery, http.batch_max_delay_ms)
             }
-            SinkTransportConfig::Kafka(_) => (false, 0),
+            SinkTransportConfig::Kafka(kafka) => {
+                (kafka.batch_delivery, kafka.batch_max_delay_ms)
+            }
         };
         Self {
             sink_name,

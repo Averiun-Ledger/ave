@@ -1639,12 +1639,27 @@ pub struct KafkaSinkConfig {
     pub security: KafkaSecurityConfig,
     /// TLS customization: additional root CA, mTLS identity, minimum version.
     pub tls: Option<KafkaTlsConfig>,
+    /// Sign each delivery with the node's Ed25519 identity and send the
+    /// signature in the `x-ave-signature*` headers.
+    pub signature: bool,
+    /// Signature protocol version:
+    /// - `1`: sign the body only (current default, compatible with existing receivers).
+    /// - `2`: sign canonical headers (`content-type`, `content-encoding`,
+    ///   `idempotency-key`, `x-ave-subject-id`, `x-ave-sn`, `x-ave-event-type`)
+    ///   followed by the body.
+    pub signature_version: u8,
     /// Required acknowledgements.
     pub acks: KafkaAcks,
     /// Compression codec.
     pub compression: KafkaCompression,
     /// Per-message produce timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Whether events are delivered in batches (single message with a JSON array)
+    /// instead of one message per event.
+    pub batch_delivery: bool,
+    /// Maximum time a live event waits for a batch to fill before it is
+    /// flushed. Only used when `batch_delivery` is enabled.
+    pub batch_max_delay_ms: u64,
     /// Maximum transient retries per delivery.
     pub max_retries: usize,
     /// Base delay between delivery retries, in milliseconds.
@@ -1669,9 +1684,13 @@ impl Default for KafkaSinkConfig {
             client_id: "ave-sink".to_string(),
             security: KafkaSecurityConfig::default(),
             tls: None,
+            signature: false,
+            signature_version: 1,
             acks: KafkaAcks::default(),
             compression: KafkaCompression::default(),
             request_timeout_ms: 5_000,
+            batch_delivery: false,
+            batch_max_delay_ms: 100,
             max_retries: 2,
             retry_base_delay_ms: 500,
             retry_max_delay_ms: 30_000,
@@ -1709,10 +1728,22 @@ impl KafkaSinkConfig {
                 reason: e.to_string(),
             })?;
         }
+        if self.signature_version != 1 && self.signature_version != 2 {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.signature_version".to_string(),
+                reason: "must be 1 or 2".to_string(),
+            });
+        }
         require_positive_u64(
             "KafkaSinkConfig.request_timeout_ms",
             self.request_timeout_ms,
         )?;
+        if self.batch_delivery {
+            require_positive_u64(
+                "KafkaSinkConfig.batch_max_delay_ms",
+                self.batch_max_delay_ms,
+            )?;
+        }
         if self.max_retries > 100 {
             return Err(Error::InvalidConfiguration {
                 component: "KafkaSinkConfig.max_retries".to_string(),

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{ClientConfig, Message};
 use testcontainers::core::{
     CmdWaitFor, ContainerPort, CopyDataSource, CopyToContainer, ExecCommand,
@@ -45,6 +46,14 @@ fn redpanda_start_cmd(host_port: u16) -> Vec<String> {
         "start".to_string(),
         "--mode".to_string(),
         "dev-container".to_string(),
+        // `--overprovisioned` tells seastar to size its reactor queues for
+        // constrained/containerized environments, which reduces the AIO event
+        // request per container from ~10000 to ~5000. The host kernel limit
+        // (`/proc/sys/fs/aio-max-nr`, typically 65_536) is shared across
+        // processes, so under `cargo test` (which runs multiple test
+        // binaries in parallel, each starting its own Redpanda containers)
+        // this keeps the cumulative AIO budget within range.
+        "--overprovisioned".to_string(),
         "--smp=1".to_string(),
         "--memory=1G".to_string(),
         "--node-id=0".to_string(),
@@ -512,6 +521,11 @@ fn consumer_config(
 /// timeouts instead of a single long timeout. Returns as soon as a message
 /// arrives; fails only after many attempts, so slow systems have ample time.
 /// Returns owned strings to avoid lifetime issues with the borrowed message.
+///
+/// `UnknownTopicOrPartition` / `UnknownTopic` are treated as "topic not yet
+/// auto-created": the consumer keeps polling until the sink's first produce
+/// creates the topic or the overall timeout elapses. Any other consumer
+/// error is fatal.
 async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
     stream: &mut rdkafka::consumer::MessageStream<'_, C>,
     timeout: Duration,
@@ -523,8 +537,7 @@ async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
     let mut attempts = 0;
     loop {
         match tokio::time::timeout(per_attempt, stream.next()).await {
-            Ok(Some(msg)) => {
-                let msg = msg.expect("consumer message error");
+            Ok(Some(Ok(msg))) => {
                 let key = msg
                     .key()
                     .map(|k| String::from_utf8_lossy(k).to_string())
@@ -552,6 +565,19 @@ async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
                     .unwrap_or_default();
                 return (key, payload, headers);
             }
+            Ok(Some(Err(e))) => {
+                if is_topic_not_found(&e) {
+                    if attempts >= max_attempts {
+                        panic!(
+                            "consume timed out after {:?} ({} attempts) waiting for topic to be created",
+                            timeout, attempts
+                        );
+                    }
+                    attempts += 1;
+                    continue;
+                }
+                panic!("consumer message error: {e}");
+            }
             Ok(None) => panic!("consumer stream ended"),
             Err(_) => {
                 if attempts >= max_attempts {
@@ -564,6 +590,19 @@ async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
             }
         }
     }
+}
+
+/// Whether the error means the consumer subscribed to a topic the broker does
+/// not know about yet. Kafka/Redpanda create topics on the first produce, so
+/// a test that consumes before the sink's first produce sees this and must
+/// keep polling rather than failing.
+fn is_topic_not_found(err: &KafkaError) -> bool {
+    matches!(
+        err,
+        KafkaError::MessageConsumption(
+            RDKafkaErrorCode::UnknownTopicOrPartition | RDKafkaErrorCode::UnknownTopic,
+        )
+    )
 }
 
 async fn consume_string_with_config(

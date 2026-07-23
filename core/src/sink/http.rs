@@ -24,6 +24,12 @@ use crate::config::{
 };
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
+use crate::sink::delivery::{
+    DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
+    SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id, sign_delivery,
+    sink_password_env_var,
+};
 use crate::sink::extract_sn;
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
@@ -31,13 +37,6 @@ use ave_common::{
     DataToSink, IncomingSinkEvent, LightEvent, SinkTypes,
     sink::SinkAuthConfig,
 };
-
-/// Build the environment variable name for a sink's password.
-/// Format: `AVE_SINK_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
-/// chars are replaced by `_`.
-pub fn sink_password_env_var(sink_name: &str) -> String {
-    sink_secret_env_var("AVE_SINK_PASSWORD_", sink_name)
-}
 
 /// Build the environment variable name for a sink's API key.
 /// Format: `AVE_SINK_APIKEY_{{SERVER_UPPER}}` where non-alphanumeric
@@ -427,28 +426,6 @@ async fn read_tls_file(
     })
 }
 
-/// Header carrying the Ed25519 signature of the delivery body.
-const SIGNATURE_HEADER: &str = "X-Ave-Signature";
-/// Header carrying the signature timestamp (nanoseconds since Unix epoch).
-const SIGNATURE_TIMESTAMP_HEADER: &str = "X-Ave-Signature-Timestamp";
-/// Header carrying the signer's public key.
-const SIGNATURE_PUBLIC_KEY_HEADER: &str = "X-Ave-Public-Key";
-
-/// Header carrying the subject identifier of the delivered event.
-const SUBJECT_ID_HEADER: &str = "X-Ave-Subject-Id";
-/// Header carrying the sequence number of the delivered event.
-const SN_HEADER: &str = "X-Ave-SN";
-/// Header carrying the delivered event type (`create`, `fact`, ...).
-const EVENT_TYPE_HEADER: &str = "X-Ave-Event-Type";
-/// Header allowing the receiver to deduplicate deliveries
-/// (`<subject_id>-<sn>`, following the Stripe convention).
-const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
-/// Header carrying a unique identifier for this delivery attempt, useful for
-/// correlating logs between the node and the receiver.
-const REQUEST_ID_HEADER: &str = "X-Ave-Request-Id";
-/// Header marking a request as a non-persistent sink test delivery.
-const TEST_HEADER: &str = "X-Ave-Test";
-
 /// Headers controlled by the sink itself. Custom values for these names are
 /// ignored because they would break the delivery contract or create duplicate
 /// headers on the wire. The comparison is case-insensitive.
@@ -487,17 +464,6 @@ const HEALTHCHECK_EXCLUDED_HEADERS: &[&str] = &[
     TEST_HEADER,
 ];
 
-/// Generate a unique request id for a single delivery attempt.
-/// Combines a nanosecond timestamp with a random suffix so collisions are
-/// practically impossible without adding a new dependency.
-fn generate_request_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}-{:016x}", nanos, fastrand::u64(..))
-}
-
 /// Whether `name` collides with a header reserved for internal sink use.
 fn is_reserved_header(name: &str) -> bool {
     RESERVED_HEADERS
@@ -515,23 +481,6 @@ fn oauth2_credentials_ready(auth: &SinkAuthConfig) -> bool {
             OAuth2GrantType::Password => !auth.username.is_empty(),
             OAuth2GrantType::ClientCredentials => !auth.client_id.is_empty(),
         }
-}
-
-/// Signature headers for one delivery, computed once per logical event and
-/// reused across retries of the same body.
-struct SignatureHeaders {
-    signature: String,
-    timestamp: String,
-    public_key: String,
-}
-
-/// Idempotency metadata of a single-event delivery, sent as headers so the
-/// receiver can deduplicate without parsing the body. Not sent on batch
-/// deliveries, where each array element already carries this data.
-struct DeliveryMeta {
-    subject_id: String,
-    sn: u64,
-    event_type: SinkTypes,
 }
 
 /// HTTP transport for a single sink server.
@@ -613,61 +562,25 @@ impl HttpTransport {
         })
     }
 
-    /// Build the canonical payload to sign. Version 1 signs the body only;
-    /// version 2 prefixes the body with the critical delivery headers in
-    /// lexicographic order so that tampering with them invalidates the
-    /// signature.
-    fn canonical_payload(
-        &self,
-        payload: &[u8],
-        meta: Option<&DeliveryMeta>,
-    ) -> Vec<u8> {
-        if self.config.signature_version != 2 {
-            return payload.to_vec();
-        }
-
-        let mut headers: Vec<(&str, String)> = Vec::with_capacity(6);
-        headers.push(("content-type", "application/json".to_owned()));
-        if let Some(encoding) = self.config.compression.content_encoding() {
-            headers.push(("content-encoding", encoding.to_owned()));
-        }
-        if let Some(meta) = meta {
-            headers.push((IDEMPOTENCY_KEY_HEADER, format!("{}-{}", meta.subject_id, meta.sn)));
-            headers.push((EVENT_TYPE_HEADER, meta.event_type.as_str().to_owned()));
-            headers.push((SN_HEADER, meta.sn.to_string()));
-            headers.push((SUBJECT_ID_HEADER, meta.subject_id.clone()));
-        }
-
-        headers.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-
-        let mut out = Vec::with_capacity(payload.len() + 256);
-        for (name, value) in headers {
-            out.extend_from_slice(name.to_lowercase().as_bytes());
-            out.push(b':');
-            out.extend_from_slice(value.as_bytes());
-            out.push(b'\n');
-        }
-        out.extend_from_slice(payload);
-        out
-    }
-
     /// Sign the delivery body with the node identity when signature is
     /// enabled. Returns `None` headers when no signer is configured.
     async fn sign_payload(
         &self,
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
-    ) -> Result<Option<SignatureHeaders>, SinkError> {
-        let Some(signer) = &self.signer else {
-            return Ok(None);
+    ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError> {
+        let extra: &[(&str, &str)] = match self.config.compression.content_encoding() {
+            Some(encoding) => &[("content-encoding", encoding)],
+            None => &[],
         };
-        let canonical = self.canonical_payload(payload, meta);
-        let signature = signer.sign(canonical).await?;
-        Ok(Some(SignatureHeaders {
-            signature: signature.value.to_string(),
-            timestamp: signature.timestamp.to_string(),
-            public_key: signature.signer.to_string(),
-        }))
+        sign_delivery(
+            self.signer.as_ref(),
+            payload,
+            self.config.signature_version,
+            extra,
+            meta,
+        )
+        .await
     }
 
     async fn invalidate_cached_token(&self) {
@@ -762,7 +675,7 @@ impl HttpTransport {
         &self,
         url: &str,
         payload: &[u8],
-        signature_headers: &Option<SignatureHeaders>,
+        signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
         let start = Instant::now();
@@ -830,7 +743,7 @@ impl HttpTransport {
         &self,
         url: &str,
         payload: &[u8],
-        signature_headers: &Option<SignatureHeaders>,
+        signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
         let request_id = generate_request_id();
@@ -1028,7 +941,7 @@ impl SinkTransport for HttpTransport {
         let meta = DeliveryMeta {
             subject_id,
             sn: extract_sn(&data),
-            event_type: SinkTypes::from(data.as_ref()),
+            event_type: SinkTypes::from(data.as_ref()).as_str().to_owned(),
         };
 
         self.send_with_retry(&url, payload, Some(&meta)).await
@@ -1042,7 +955,7 @@ impl SinkTransport for HttpTransport {
         let meta = DeliveryMeta {
             subject_id: light.subject_id.clone(),
             sn: light.sn,
-            event_type: light.event_type.clone(),
+            event_type: light.event_type.as_str().to_owned(),
         };
 
         self.send_with_retry(&url, payload, Some(&meta)).await
@@ -2236,55 +2149,5 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             UnixTime::now(),
         );
         assert!(result.is_err(), "different certificate must be rejected");
-    }
-
-    #[tokio::test]
-    async fn canonical_payload_version_1_returns_body_only() {
-        let config = base_config();
-        let transport = HttpTransport::new(
-            "unit-canonical-v1".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
-
-        let payload = b"test body";
-        assert_eq!(transport.canonical_payload(payload, None), payload);
-    }
-
-    #[tokio::test]
-    async fn canonical_payload_version_2_includes_headers_in_lexicographic_order() {
-        let mut config = base_config();
-        config.signature_version = 2;
-        config.compression = HttpCompression::Gzip;
-        let transport = HttpTransport::new(
-            "unit-canonical-v2".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
-
-        let payload = b"test body";
-        let meta = DeliveryMeta {
-            subject_id: "subject-1".to_owned(),
-            sn: 42,
-            event_type: SinkTypes::Create,
-        };
-
-        let canonical = transport.canonical_payload(payload, Some(&meta));
-        let text = String::from_utf8_lossy(&canonical);
-
-        let expected_prefix = "content-encoding:gzip\ncontent-type:application/json\nidempotency-key:subject-1-42\nx-ave-event-type:create\nx-ave-sn:42\nx-ave-subject-id:subject-1\n";
-        assert!(
-            text.starts_with(expected_prefix),
-            "canonical payload must start with sorted headers, got: {}",
-            text
-        );
-        assert!(
-            text.ends_with("test body"),
-            "canonical payload must end with the body"
-        );
     }
 }

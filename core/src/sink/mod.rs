@@ -1,5 +1,6 @@
 //! Reliable sink managers and workers.
 
+pub mod delivery;
 pub mod error;
 pub mod http;
 pub mod kafka;

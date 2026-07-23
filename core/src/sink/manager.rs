@@ -1166,10 +1166,17 @@ impl SinkManager {
                             ),
                         }
                     })?;
-                // Only HTTP sinks with signature enabled need the node
-                // identity to sign deliveries.
+                // Only sinks with signature enabled need the node identity to
+                // sign deliveries.
                 let signer = match &server.transport {
                     SinkTransportConfig::Http(http) if http.signature => {
+                        let node = ctx
+                            .system()
+                            .get_actor::<Node>(&ActorPath::from("/user/node"))
+                            .await?;
+                        Some(NodeSigner::new(node))
+                    }
+                    SinkTransportConfig::Kafka(kafka) if kafka.signature => {
                         let node = ctx
                             .system()
                             .get_actor::<Node>(&ActorPath::from("/user/node"))

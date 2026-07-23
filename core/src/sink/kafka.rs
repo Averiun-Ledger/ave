@@ -6,53 +6,23 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rdkafka::ClientConfig;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-use rdkafka::message::{Header, OwnedHeaders};
+use rdkafka::message::{Header, Headers, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tracing::debug;
 
-use ave_common::{DataToSink, LightEvent};
+use ave_common::{DataToSink, IncomingSinkEvent, LightEvent};
 
 use crate::config::{KafkaAcks, KafkaSecurityConfig, KafkaSinkConfig};
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
-use crate::sink::http::sink_password_env_var;
+use crate::sink::delivery::{
+    DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
+    SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id, sign_delivery,
+    sink_password_env_var,
+};
 use crate::sink::template::CompiledTemplate;
-use crate::sink::transport::SinkTransport;
-
-/// Header carrying the subject identifier of the delivered event.
-const SUBJECT_ID_HEADER: &str = "x-ave-subject-id";
-/// Header carrying the sequence number of the delivered event.
-const SN_HEADER: &str = "x-ave-sn";
-/// Header carrying the delivered event type (`create`, `fact`, ...).
-const EVENT_TYPE_HEADER: &str = "x-ave-event-type";
-/// Header allowing the receiver to deduplicate deliveries
-/// (`<subject_id>-<sn>`, following the Stripe convention).
-const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
-/// Header carrying a unique identifier for this delivery attempt, useful for
-/// correlating logs between the node and the receiver.
-const REQUEST_ID_HEADER: &str = "x-ave-request-id";
-/// Header marking a request as a non-persistent sink test delivery.
-const TEST_HEADER: &str = "x-ave-test";
-
-/// Generate a unique request id for a single delivery attempt.
-/// Combines a nanosecond timestamp with a random suffix so collisions are
-/// practically impossible without adding a new dependency.
-fn generate_request_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}-{:016x}", nanos, fastrand::u64(..))
-}
-
-/// Idempotency metadata of a single-event delivery, sent as headers so the
-/// receiver can deduplicate without parsing the body. Not sent on batch
-/// deliveries, where each array element already carries this data.
-struct DeliveryMeta {
-    subject_id: String,
-    sn: u64,
-    event_type: String,
-}
+use crate::sink::transport::{NodeSigner, SinkTransport};
 
 /// Build the key, payload and headers for a non-persistent test delivery.
 /// Extracted into a helper so unit tests can verify the wire format without a
@@ -110,6 +80,8 @@ pub struct KafkaTransport {
     config: KafkaSinkConfig,
     producer: FutureProducer,
     topic_template: CompiledTemplate,
+    /// Node identity signer; required when `config.signature` is enabled.
+    signer: Option<NodeSigner>,
 }
 
 impl std::fmt::Debug for KafkaTransport {
@@ -118,6 +90,7 @@ impl std::fmt::Debug for KafkaTransport {
             .field("sink_name", &self.sink_name)
             .field("config", &self.config)
             .field("topic_template", &self.topic_template)
+            .field("has_signer", &self.signer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -126,6 +99,7 @@ impl KafkaTransport {
     pub fn new(
         sink_name: String,
         config: KafkaSinkConfig,
+        signer: Option<NodeSigner>,
     ) -> Result<Self, SinkError> {
         let mut client_config = ClientConfig::new();
         client_config
@@ -199,6 +173,13 @@ impl KafkaTransport {
             }
         }
 
+        if config.signature && signer.is_none() {
+            return Err(SinkError::ClientBuild(format!(
+                "signature enabled for sink '{}' but no node signer is available",
+                sink_name
+            )));
+        }
+
         let producer = client_config.create().map_err(|e| {
             SinkError::ClientBuild(format!(
                 "failed to create kafka producer: {e}"
@@ -210,39 +191,8 @@ impl KafkaTransport {
             topic_template: CompiledTemplate::new(&config.topic),
             producer,
             config,
+            signer,
         })
-    }
-
-    async fn produce_once(
-        &self,
-        topic: &str,
-        key: &str,
-        payload: &[u8],
-        headers: Option<OwnedHeaders>,
-        request_id: &str,
-    ) -> Result<(), SinkError> {
-        let mut record = FutureRecord::to(topic).key(key).payload(payload);
-        if let Some(headers) = headers {
-            record = record.headers(headers);
-        }
-        self.producer
-            .send(
-                record,
-                Duration::from_millis(self.config.request_timeout_ms),
-            )
-            .await
-            .map(|delivery| {
-                debug!(
-                    msg_type = "SinkSend",
-                    sink = %self.sink_name,
-                    topic = %topic,
-                    partition = delivery.partition,
-                    offset = delivery.offset,
-                    request_id = %request_id,
-                    "Sink delivery succeeded"
-                );
-            })
-            .map_err(|(err, _message)| map_produce_error(err))
     }
 
     fn retry_delay(&self, attempt: usize) -> u64 {
@@ -257,15 +207,35 @@ impl KafkaTransport {
         delay.min(self.config.retry_max_delay_ms)
     }
 
+    /// Sign the delivery body with the node identity. Uses the shared
+    /// canonical payload contract so every transport produces signatures
+    /// verifiable against the same byte sequence.
+    async fn sign_payload(
+        &self,
+        payload: &[u8],
+        meta: Option<&DeliveryMeta>,
+    ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError> {
+        sign_delivery(
+            self.signer.as_ref(),
+            payload,
+            self.config.signature_version,
+            &[],
+            meta,
+        )
+        .await
+    }
+
     async fn produce(
         &self,
         topic: &str,
         key: &str,
         payload: &[u8],
-        headers: Option<OwnedHeaders>,
+        meta: Option<&DeliveryMeta>,
+        additional_headers: Option<OwnedHeaders>,
         request_id: &str,
     ) -> Result<(), SinkError> {
         let mut last_err = None;
+        let signature_headers = self.sign_payload(payload, meta).await?;
 
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
@@ -276,24 +246,78 @@ impl KafkaTransport {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
 
+            // `FutureRecord::headers` replaces the whole header set, so all
+            // headers (meta, additional and signature) are composed into a
+            // single `OwnedHeaders` before attaching them.
+            let mut headers = match meta {
+                Some(meta) => build_headers(meta, request_id),
+                None => OwnedHeaders::new(),
+            };
+            if let Some(extra) = &additional_headers {
+                for header in extra.as_borrowed().iter() {
+                    headers = headers.insert(Header {
+                        key: header.key,
+                        value: header.value,
+                    });
+                }
+            }
+            if let Some(sig) = &signature_headers {
+                headers = headers
+                    .insert(Header {
+                        key: SIGNATURE_HEADER,
+                        value: Some(&sig.signature),
+                    })
+                    .insert(Header {
+                        key: SIGNATURE_TIMESTAMP_HEADER,
+                        value: Some(&sig.timestamp),
+                    })
+                    .insert(Header {
+                        key: SIGNATURE_PUBLIC_KEY_HEADER,
+                        value: Some(&sig.public_key),
+                    });
+            }
+
+            let record = FutureRecord::to(topic)
+                .key(key)
+                .payload(payload)
+                .headers(headers);
+
             match self
-                .produce_once(topic, key, payload, headers.clone(), request_id)
+                .producer
+                .send(
+                    record,
+                    Duration::from_millis(self.config.request_timeout_ms),
+                )
                 .await
             {
-                Ok(()) => return Ok(()),
-                Err(
-                    e @ (SinkError::Delivery {
-                        retryable: false, ..
-                    }
-                    | SinkError::ClientBuild(_)
-                    | SinkError::Rejected { .. }
-                    | SinkError::Shutdown),
-                ) => {
-                    // Permanent error: no retries.
-                    return Err(e);
+                Ok(delivery) => {
+                    debug!(
+                        msg_type = "SinkSend",
+                        sink = %self.sink_name,
+                        topic = %topic,
+                        partition = delivery.partition,
+                        offset = delivery.offset,
+                        request_id = %request_id,
+                        "Sink delivery succeeded"
+                    );
+                    return Ok(());
                 }
-                Err(e) => {
-                    last_err = Some(e);
+                Err((err, _message)) => {
+                    let e = map_produce_error(err);
+                    match e {
+                        SinkError::Delivery {
+                            retryable: false, ..
+                        }
+                        | SinkError::ClientBuild(_)
+                        | SinkError::Rejected { .. }
+                        | SinkError::Shutdown => {
+                            // Permanent error: no retries.
+                            return Err(e);
+                        }
+                        _ => {
+                            last_err = Some(e);
+                        }
+                    }
                 }
             }
         }
@@ -390,7 +414,12 @@ fn map_produce_code(code: RDKafkaErrorCode) -> SinkError {
 impl SinkTransport for KafkaTransport {
     async fn send(&self, data: Arc<DataToSink>) -> Result<(), SinkError> {
         let (subject_id, schema_id) = data.payload.get_subject_schema();
-        let topic = self.topic_template.render(&subject_id, &schema_id);
+        let event_type = ave_common::sink::SinkTypes::from(data.as_ref());
+        let topic = self.topic_template.render_with_event_type(
+            &subject_id,
+            &schema_id,
+            event_type.as_str(),
+        );
         let payload = serde_json::to_vec(data.as_ref()).map_err(|e| {
             SinkError::Delivery {
                 message: format!("JSON serialization failed: {e}"),
@@ -403,20 +432,19 @@ impl SinkTransport for KafkaTransport {
         let meta = DeliveryMeta {
             subject_id: subject_id.clone(),
             sn: crate::sink::extract_sn(&data),
-            event_type: ave_common::sink::SinkTypes::from(data.as_ref())
-                .as_str()
-                .to_owned(),
+            event_type: event_type.as_str().to_owned(),
         };
-        let headers = build_headers(&meta, &request_id);
 
-        self.produce(&topic, &subject_id, &payload, Some(headers), &request_id)
+        self.produce(&topic, &subject_id, &payload, Some(&meta), None, &request_id)
             .await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
-        let topic = self
-            .topic_template
-            .render(&light.subject_id, &light.schema_id);
+        let topic = self.topic_template.render_with_event_type(
+            &light.subject_id,
+            &light.schema_id,
+            light.event_type.as_str(),
+        );
         let payload =
             serde_json::to_vec(&light).map_err(|e| SinkError::Delivery {
                 message: format!("JSON serialization failed: {e}"),
@@ -430,10 +458,85 @@ impl SinkTransport for KafkaTransport {
             sn: light.sn,
             event_type: light.event_type.as_str().to_owned(),
         };
-        let headers = build_headers(&meta, &request_id);
 
-        self.produce(&topic, &light.subject_id, &payload, Some(headers), &request_id)
+        self.produce(&topic, &light.subject_id, &payload, Some(&meta), None, &request_id)
             .await
+    }
+
+    /// Deliver a batch of events as JSON array messages. When the topic
+    /// template routes by event type (`{{event-type}}`), events are grouped
+    /// by type (preserving the relative order inside each group) and one
+    /// array message is produced per group, so every type lands in its own
+    /// topic; otherwise the whole batch is delivered as a single array
+    /// message, like the HTTP sink does. Per-event idempotency headers are
+    /// not sent: every array element already carries `subject_id`, `sn` and
+    /// the event type.
+    ///
+    /// A failure mid-batch fails the whole call: the worker retries the full
+    /// batch later, so already-produced groups may be delivered twice
+    /// (at-least-once semantics, as with any other delivery).
+    async fn send_batch(
+        &self,
+        events: Vec<IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        let Some(first_event) = events.first() else {
+            return Ok(());
+        };
+
+        // Group by event type only when the template routes by type;
+        // otherwise one message carries the whole batch. Group order follows
+        // first appearance so a homogeneous batch produces one message.
+        let mut groups: Vec<(String, Vec<IncomingSinkEvent>)> = Vec::new();
+        if self.topic_template.has_event_type() {
+            for event in events {
+                let event_type = event.event_type().as_str().to_owned();
+                match groups.iter_mut().find(|(t, _)| *t == event_type) {
+                    Some((_, group)) => group.push(event),
+                    None => groups.push((event_type, vec![event])),
+                }
+            }
+        } else {
+            let event_type = first_event.event_type().as_str().to_owned();
+            groups.push((event_type, events));
+        }
+
+        for (event_type, group) in groups {
+            // `group` is never empty: it is created with its first element.
+            let Some(first) = group.first() else {
+                continue;
+            };
+            let schema_id = match first {
+                IncomingSinkEvent::Full(data) => {
+                    data.payload.get_subject_schema().1
+                }
+                IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+            };
+            let topic = self.topic_template.render_with_event_type(
+                first.subject_id(),
+                &schema_id,
+                &event_type,
+            );
+            let payload = serde_json::to_vec(&group).map_err(|e| {
+                SinkError::Delivery {
+                    message: format!("JSON serialization failed: {e}"),
+                    retryable: false,
+                    retry_after_ms: None,
+                }
+            })?;
+
+            let request_id = generate_request_id();
+            self.produce(
+                &topic,
+                first.subject_id(),
+                &payload,
+                None,
+                None,
+                &request_id,
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     async fn health_check(&self) -> Result<(), SinkError> {
@@ -447,10 +550,10 @@ impl SinkTransport for KafkaTransport {
     async fn test(&self) -> Result<(), SinkError> {
         self.health_check().await?;
 
-        let topic = self.topic_template.render("-", "-");
+        let topic = self.topic_template.render_with_event_type("-", "-", "test");
         let request_id = generate_request_id();
         let (key, payload, headers) = build_test_delivery(&request_id)?;
-        self.produce(&topic, &key, &payload, Some(headers), &request_id)
+        self.produce(&topic, &key, &payload, None, Some(headers), &request_id)
             .await
     }
 

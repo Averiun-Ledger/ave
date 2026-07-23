@@ -1147,12 +1147,22 @@ pub struct KafkaSinkConfigHttp {
     pub security: KafkaSecurityConfigHttp,
     /// TLS customization: additional root CA, mTLS identity, minimum version.
     pub tls: Option<KafkaTlsConfigHttp>,
+    /// Whether deliveries are signed with the node identity
+    pub signature: bool,
+    /// Signature protocol version (`1` = body only, `2` = canonical headers + body)
+    pub signature_version: u8,
     /// Required acknowledgements.
     pub acks: KafkaAcksHttp,
     /// Compression codec.
     pub compression: KafkaCompressionHttp,
     /// Per-message produce timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Whether events are delivered in batches (single message with a JSON array)
+    /// instead of one message per event.
+    pub batch_delivery: bool,
+    /// Maximum time a live event waits for a batch to fill before it is
+    /// flushed. Only used when `batch_delivery` is enabled.
+    pub batch_max_delay_ms: u64,
     /// Maximum transient retries per delivery.
     pub max_retries: usize,
     /// Base delay between delivery retries, in milliseconds.
@@ -1289,9 +1299,13 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         client_certificate: t.client_certificate,
                         client_key: t.client_key,
                     }),
+                    signature: kafka.signature,
+                    signature_version: kafka.signature_version,
                     acks: kafka.acks.into(),
                     compression: kafka.compression.into(),
                     request_timeout_ms: kafka.request_timeout_ms,
+                    batch_delivery: kafka.batch_delivery,
+                    batch_max_delay_ms: kafka.batch_max_delay_ms,
                     max_retries: kafka.max_retries,
                     retry_base_delay_ms: kafka.retry_base_delay_ms,
                     retry_max_delay_ms: kafka.retry_max_delay_ms,
