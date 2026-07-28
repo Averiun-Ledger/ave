@@ -1955,6 +1955,55 @@ async fn kafka_transport_tuning_delivers() {
     assert_eq!(messages.len(), 1);
 }
 
+/// Point 13: the producer statistics callback must fire and expose the
+/// queue-size metric for the sink. Uses a low `statistics_interval_ms` and
+/// polls the registry instead of sleeping a fixed amount of time.
+#[tokio::test]
+async fn kafka_transport_exposes_producer_stats() {
+    let env = RedpandaEnv::start().await;
+
+    // Initialize the core metrics global (idempotent via `OnceLock`) and keep
+    // a registry that shares the underlying metric storage, so updates made
+    // by the stats callback become visible here.
+    let mut registry = prometheus_client::registry::Registry::default();
+    ave_core::metrics::register(&mut registry);
+
+    let sink_name = "test-stats";
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "stats-{{schema-id}}",
+        |cfg| {
+            cfg.statistics_interval_ms = 100;
+        },
+    );
+    let transport =
+        KafkaTransport::new(sink_name.to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let expected =
+        format!("core_kafka_producer_queue_size{{sink=\"{sink_name}\"}}");
+    let mut attempts = 0;
+    loop {
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, &registry)
+            .unwrap();
+        if text.contains(&expected) {
+            return;
+        }
+        if attempts > 100 {
+            panic!(
+                "timeout waiting for kafka producer stats metric {expected}\n{text}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+}
+
 /// `send_light` path with `SubjectId` key strategy: a light (filtered)
 /// delivery still uses compute_key and the key reaches the broker.
 #[tokio::test]

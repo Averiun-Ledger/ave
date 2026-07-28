@@ -1,6 +1,6 @@
 //! Kafka delivery logic for a single external sink.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -76,11 +76,31 @@ fn build_headers(meta: &DeliveryMeta, request_id: &str) -> OwnedHeaders {
         })
 }
 
+/// Producer context that forwards librdkafka statistics to the core metrics.
+/// `last_tx_errors` holds the absolute error total of the previous report,
+/// because librdkafka reports cumulative values (point 13).
+struct KafkaStatsContext {
+    sink_name: String,
+    last_tx_errors: AtomicU64,
+}
+
+impl rdkafka::ClientContext for KafkaStatsContext {
+    fn stats(&self, statistics: rdkafka::Statistics) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_kafka_producer_stats(
+                &self.sink_name,
+                &statistics,
+                &self.last_tx_errors,
+            );
+        }
+    }
+}
+
 /// Kafka transport for a single sink server.
 pub struct KafkaTransport {
     sink_name: String,
     config: KafkaSinkConfig,
-    producer: FutureProducer,
+    producer: FutureProducer<KafkaStatsContext>,
     topic_template: CompiledTemplate,
     /// Compiled template for the `Template` key strategy. `None` for every
     /// other strategy.
@@ -136,6 +156,11 @@ impl KafkaTransport {
             .set(
                 "queue.buffering.max.messages",
                 config.queue_buffering_max_messages.to_string(),
+            )
+            // Producer metrics (point 13); `0` disables the stats callback.
+            .set(
+                "statistics.interval.ms",
+                config.statistics_interval_ms.to_string(),
             );
 
         let key_template = match &config.key_strategy {
@@ -218,11 +243,16 @@ impl KafkaTransport {
             )));
         }
 
-        let producer: FutureProducer = client_config.create().map_err(|e| {
-            SinkError::ClientBuild(format!(
-                "failed to create kafka producer: {e}"
-            ))
-        })?;
+        let producer: FutureProducer<KafkaStatsContext> = client_config
+            .create_with_context(KafkaStatsContext {
+                sink_name: sink_name.clone(),
+                last_tx_errors: AtomicU64::new(0),
+            })
+            .map_err(|e| {
+                SinkError::ClientBuild(format!(
+                    "failed to create kafka producer: {e}"
+                ))
+            })?;
 
         // For transactional producers, ask the broker to fence zombies and
         // establish the producer epoch before the first delivery. This is a

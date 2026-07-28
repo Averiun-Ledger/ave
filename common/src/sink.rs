@@ -1012,6 +1012,23 @@ mod tests {
         cfg.queue_buffering_max_messages = 0;
         assert_rejects(&cfg, "KafkaSinkConfig.queue_buffering_max_messages");
     }
+
+    #[test]
+    fn test_kafka_sink_config_statistics_interval_ms() {
+        let mut cfg = KafkaSinkConfig::default();
+        assert_eq!(cfg.statistics_interval_ms, 1_000);
+        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
+        cfg.topic = "test-topic".to_string();
+        assert!(cfg.validate().is_ok(), "default interval must validate");
+
+        // `0` disables the producer statistics callback; it is a valid value
+        // and must not be rejected like the rest of the tuning knobs.
+        cfg.statistics_interval_ms = 0;
+        assert!(
+            cfg.validate().is_ok(),
+            "0 disables the stats callback and must validate"
+        );
+    }
 }
 
 /// OAuth2 grant type used to obtain a token from the authentication endpoint.
@@ -1754,6 +1771,9 @@ pub struct KafkaSinkConfig {
     pub batch_size_bytes: usize,
     /// Producer queue capacity in number of messages.
     pub queue_buffering_max_messages: usize,
+    /// Interval in milliseconds between librdkafka producer statistics
+    /// reports, used to expose producer metrics. `0` disables them.
+    pub statistics_interval_ms: u64,
 }
 
 impl Default for KafkaSinkConfig {
@@ -1784,6 +1804,7 @@ impl Default for KafkaSinkConfig {
             linger_ms: 5,
             batch_size_bytes: 1_000_000,
             queue_buffering_max_messages: 100_000,
+            statistics_interval_ms: 1_000,
         }
     }
 }

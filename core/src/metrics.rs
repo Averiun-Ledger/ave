@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -95,6 +96,10 @@ pub struct CoreMetrics {
     sink_lagging_subjects: Family<SinkNameLabels, Gauge>,
     sink_lagging_events: Family<SinkNameLabels, Gauge>,
     sink_lag_max_distance: Family<SinkNameLabels, Gauge>,
+    kafka_producer_queue_size: Family<SinkNameLabels, Gauge>,
+    kafka_producer_tx_errors: Family<SinkNameLabels, Counter>,
+    kafka_producer_rtt_seconds:
+        Family<SinkNameLabels, Histogram, fn() -> Histogram>,
     distribution_failures: Family<DistributionFailureLabels, Counter>,
     distribution_duration_seconds:
         Family<DistributionDurationLabels, Histogram, fn() -> Histogram>,
@@ -149,6 +154,14 @@ impl CoreMetrics {
             sink_lagging_subjects: Family::default(),
             sink_lagging_events: Family::default(),
             sink_lag_max_distance: Family::default(),
+            kafka_producer_queue_size: Family::default(),
+            kafka_producer_tx_errors: Family::default(),
+            kafka_producer_rtt_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                    0.5, 1.0,
+                ])
+            }),
             distribution_failures: Family::default(),
             distribution_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
@@ -244,6 +257,21 @@ impl CoreMetrics {
             "core_sink_lag_max_distance",
             "Maximum SN distance (last_seen - cursor) among lagging subjects of a sink.",
             self.sink_lag_max_distance.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_queue_size",
+            "Current number of messages in the Kafka producer queue, labeled by sink.",
+            self.kafka_producer_queue_size.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_tx_errors",
+            "Total Kafka producer transmission errors and request timeouts, labeled by sink.",
+            self.kafka_producer_tx_errors.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_rtt_seconds",
+            "Kafka broker round-trip time reported by producer statistics, labeled by sink.",
+            self.kafka_producer_rtt_seconds.clone(),
         );
         registry.register(
             "core_distribution_failures_total",
@@ -436,6 +464,49 @@ impl CoreMetrics {
                 sink: sink.to_owned(),
             })
             .set(distance);
+    }
+
+    /// Forwards a librdkafka producer statistics report to the Kafka
+    /// producer metrics. `last_tx_errors` holds the absolute error total of
+    /// the previous report (librdkafka reports cumulative values) so the
+    /// counter only advances by the delta.
+    pub fn observe_kafka_producer_stats(
+        &self,
+        sink: &str,
+        stats: &rdkafka::Statistics,
+        last_tx_errors: &AtomicU64,
+    ) {
+        self.kafka_producer_queue_size
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(stats.msg_cnt as i64);
+
+        let tx_errors: u64 = stats
+            .brokers
+            .values()
+            .map(|broker| broker.txerrs + broker.req_timeouts)
+            .sum();
+        let previous = last_tx_errors.swap(tx_errors, Ordering::Relaxed);
+        if tx_errors > previous {
+            self.kafka_producer_tx_errors
+                .get_or_create(&SinkNameLabels {
+                    sink: sink.to_owned(),
+                })
+                .inc_by(tx_errors - previous);
+        }
+
+        for broker in stats.brokers.values() {
+            if let Some(rtt) = &broker.rtt
+                && rtt.avg > 0
+            {
+                self.kafka_producer_rtt_seconds
+                    .get_or_create(&SinkNameLabels {
+                        sink: sink.to_owned(),
+                    })
+                    .observe(rtt.avg as f64 / 1_000_000.0);
+            }
+        }
     }
 
     pub fn observe_distribution_failure(&self, reason: &'static str) {
@@ -717,6 +788,72 @@ mod tests {
                 "core_sink_lag_max_distance{sink=\"schema-sink\"}"
             ),
             17.0
+        );
+    }
+
+    #[test]
+    fn kafka_producer_stats_expose_queue_errors_and_rtt() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        let last_tx_errors = AtomicU64::new(0);
+        let mut stats = rdkafka::Statistics::default();
+        stats.msg_cnt = 7;
+        let mut broker = rdkafka::statistics::Broker::default();
+        broker.txerrs = 3;
+        broker.req_timeouts = 1;
+        broker.rtt = Some(rdkafka::statistics::Window {
+            avg: 1_500,
+            ..Default::default()
+        });
+        stats.brokers.insert("broker:9092/1".to_owned(), broker);
+
+        metrics.observe_kafka_producer_stats(
+            "unit-kafka-sink",
+            &stats,
+            &last_tx_errors,
+        );
+
+        // librdkafka reports cumulative values: the second report must only
+        // advance the error counter by the delta (6 - 4 = 2).
+        let mut stats = stats;
+        stats.msg_cnt = 0;
+        let mut broker = stats
+            .brokers
+            .remove("broker:9092/1")
+            .expect("broker present in stats");
+        broker.txerrs = 5;
+        stats.brokers.insert("broker:9092/1".to_owned(), broker);
+        metrics.observe_kafka_producer_stats(
+            "unit-kafka-sink",
+            &stats,
+            &last_tx_errors,
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_kafka_producer_queue_size{sink=\"unit-kafka-sink\"}"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_kafka_producer_tx_errors_total{sink=\"unit-kafka-sink\"}"
+            ),
+            6.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_kafka_producer_rtt_seconds_count{sink=\"unit-kafka-sink\"}"
+            ),
+            2.0
         );
     }
 }

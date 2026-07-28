@@ -1218,6 +1218,9 @@ pub struct KafkaSinkConfigHttp {
     pub batch_size_bytes: usize,
     /// Producer queue capacity in number of messages.
     pub queue_buffering_max_messages: usize,
+    /// Interval in milliseconds between librdkafka producer statistics
+    /// reports, used to expose producer metrics. `0` disables them.
+    pub statistics_interval_ms: u64,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1361,6 +1364,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     batch_size_bytes: kafka.batch_size_bytes,
                     queue_buffering_max_messages: kafka
                         .queue_buffering_max_messages,
+                    statistics_interval_ms: kafka.statistics_interval_ms,
                 })
             }
         };
