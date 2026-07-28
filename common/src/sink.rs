@@ -614,7 +614,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sink_auth_config_validate_requires_url_and_username_together_for_password() {
+    fn test_sink_auth_config_validate_requires_url_and_username_together_for_password()
+     {
         let mut auth = SinkAuthConfig {
             auth_url: "https://auth.example.com/token".to_owned(),
             ..SinkAuthConfig::default()
@@ -626,7 +627,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sink_auth_config_validate_requires_url_and_client_id_together_for_client_credentials() {
+    fn test_sink_auth_config_validate_requires_url_and_client_id_together_for_client_credentials()
+     {
         let mut auth = SinkAuthConfig {
             auth_url: "https://auth.example.com/token".to_owned(),
             grant_type: OAuth2GrantType::ClientCredentials,
@@ -651,7 +653,8 @@ mod tests {
             "\"client_credentials\""
         );
         assert_eq!(
-            serde_json::from_str::<OAuth2GrantType>("\"client_credentials\"").unwrap(),
+            serde_json::from_str::<OAuth2GrantType>("\"client_credentials\"")
+                .unwrap(),
             OAuth2GrantType::ClientCredentials
         );
     }
@@ -976,8 +979,9 @@ mod tests {
         let mut cfg = KafkaSinkConfig::default();
         cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
         cfg.topic = "test-topic".to_string();
-        cfg.validate()
-            .expect("tuning defaults must validate when required fields are set");
+        cfg.validate().expect(
+            "tuning defaults must validate when required fields are set",
+        );
     }
 
     #[test]
@@ -1006,10 +1010,7 @@ mod tests {
         cfg.batch_size_bytes = 1_000_000;
 
         cfg.queue_buffering_max_messages = 0;
-        assert_rejects(
-            &cfg,
-            "KafkaSinkConfig.queue_buffering_max_messages",
-        );
+        assert_rejects(&cfg, "KafkaSinkConfig.queue_buffering_max_messages");
     }
 }
 
@@ -1434,10 +1435,7 @@ impl HttpSinkConfig {
             });
         }
         if let Some(secs) = self.tcp_keepalive_secs {
-            require_positive_u64(
-                "HttpSinkConfig.tcp_keepalive_secs",
-                secs,
-            )?;
+            require_positive_u64("HttpSinkConfig.tcp_keepalive_secs", secs)?;
         }
         require_positive_u64(
             "HttpSinkConfig.pool_idle_timeout_secs",
@@ -1873,10 +1871,7 @@ impl KafkaSinkConfig {
             });
         }
         if self.transactional
-            && self
-                .transactional_id
-                .as_deref()
-                .is_some_and(str::is_empty)
+            && self.transactional_id.as_deref().is_some_and(str::is_empty)
         {
             return Err(Error::InvalidConfiguration {
                 component: "KafkaSinkConfig.transactional_id".to_string(),

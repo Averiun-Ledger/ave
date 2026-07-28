@@ -458,7 +458,8 @@ impl RedpandaTlsEnv {
         let material = TestTlsMaterial::generate();
         let image = RedpandaTls::new(host_port, &material)
             .with_mapped_port(host_port, ContainerPort::Tcp(KAFKA_PORT));
-        let container = image.start().await.expect("start redpanda tls container");
+        let container =
+            image.start().await.expect("start redpanda tls container");
         Self {
             container,
             bootstrap_servers: format!("127.0.0.1:{host_port}"),
@@ -556,7 +557,10 @@ async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
                                     header.key.to_owned(),
                                     header
                                         .value
-                                        .map(|v| String::from_utf8_lossy(v).into_owned())
+                                        .map(|v| {
+                                            String::from_utf8_lossy(v)
+                                                .into_owned()
+                                        })
                                         .unwrap_or_default(),
                                 )
                             })
@@ -600,7 +604,8 @@ fn is_topic_not_found(err: &KafkaError) -> bool {
     matches!(
         err,
         KafkaError::MessageConsumption(
-            RDKafkaErrorCode::UnknownTopicOrPartition | RDKafkaErrorCode::UnknownTopic,
+            RDKafkaErrorCode::UnknownTopicOrPartition
+                | RDKafkaErrorCode::UnknownTopic,
         )
     )
 }

@@ -188,10 +188,7 @@ mod tests {
     #[test]
     fn canonical_payload_v1_returns_body_verbatim() {
         let payload = b"plain body";
-        assert_eq!(
-            canonical_payload(payload, 1, &[], None),
-            payload.to_vec()
-        );
+        assert_eq!(canonical_payload(payload, 1, &[], None), payload.to_vec());
     }
 
     #[test]
@@ -224,8 +221,9 @@ mod tests {
     #[test]
     fn canonical_payload_v2_without_meta_omits_event_headers() {
         let payload = b"x";
-        let text = String::from_utf8_lossy(&canonical_payload(payload, 2, &[], None))
-            .into_owned();
+        let text =
+            String::from_utf8_lossy(&canonical_payload(payload, 2, &[], None))
+                .into_owned();
         assert_eq!(text, "content-type:application/json\nx");
     }
 
@@ -254,4 +252,3 @@ mod tests {
         );
     }
 }
-

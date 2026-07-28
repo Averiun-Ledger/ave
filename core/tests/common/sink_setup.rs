@@ -1030,10 +1030,12 @@ pub fn sample_sinks() -> Vec<SinkConfigEntry> {
             },
             servers: vec![SinkServer {
                 server: "gov-sink".to_owned(),
-                transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
-                    url: "http://localhost:9000".to_owned(),
-                    ..Default::default()
-                })),
+                transport: SinkTransportConfig::Http(Box::new(
+                    HttpSinkConfig {
+                        url: "http://localhost:9000".to_owned(),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             }],
         },
@@ -1044,10 +1046,12 @@ pub fn sample_sinks() -> Vec<SinkConfigEntry> {
             },
             servers: vec![SinkServer {
                 server: "schema-sink".to_owned(),
-                transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
-                    url: "http://localhost:9001".to_owned(),
-                    ..Default::default()
-                })),
+                transport: SinkTransportConfig::Http(Box::new(
+                    HttpSinkConfig {
+                        url: "http://localhost:9001".to_owned(),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             }],
         },

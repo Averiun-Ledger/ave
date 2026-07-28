@@ -1350,8 +1350,7 @@ impl Api {
                 lagging_subjects: sink_status
                     .map(|st| st.lagging_subjects)
                     .unwrap_or_default(),
-                last_error: sink_status
-                    .and_then(|st| st.last_error.clone()),
+                last_error: sink_status.and_then(|st| st.last_error.clone()),
                 server,
             });
         }

@@ -204,7 +204,11 @@ impl Handler<Self> for SinkSubjectWorker {
                     .await?;
                 Ok(SinkSubjectWorkerResponse::Ok)
             }
-            SinkSubjectWorkerMessage::ProcessNextEvent { data, remaining, generation } => {
+            SinkSubjectWorkerMessage::ProcessNextEvent {
+                data,
+                remaining,
+                generation,
+            } => {
                 let (subject_id, _schema_id) =
                     data.payload.get_subject_schema();
                 let sn = extract_sn(&data);
@@ -248,11 +252,15 @@ impl Handler<Self> for SinkSubjectWorker {
                         } else {
                             let self_ref = ctx.reference().await?;
                             if let Err(e) = self_ref
-                                .tell(SinkSubjectWorkerMessage::ContinueCatchUp {
-                                    from_sn: sn + 1,
-                                    batch_size: self.server.catch_up_batch_size,
-                                    generation,
-                                })
+                                .tell(
+                                    SinkSubjectWorkerMessage::ContinueCatchUp {
+                                        from_sn: sn + 1,
+                                        batch_size: self
+                                            .server
+                                            .catch_up_batch_size,
+                                        generation,
+                                    },
+                                )
                                 .await
                             {
                                 error!(msg_type = "ContinueCatchUp", sink = %self.sink_name, error = %e, "Failed to send ContinueCatchUp to self");
@@ -345,11 +353,13 @@ impl SinkSubjectWorker {
                 match ctx.get_parent::<SinkWorker>().await {
                     Ok(parent) => {
                         if let Err(e) = parent
-                            .emit_error(SinkSubjectWorkerError::SubjectNotFound {
-                                subject_id,
-                                sn: 0,
-                                from_catch_up: true,
-                            })
+                            .emit_error(
+                                SinkSubjectWorkerError::SubjectNotFound {
+                                    subject_id,
+                                    sn: 0,
+                                    from_catch_up: true,
+                                },
+                            )
                             .await
                         {
                             error!(msg_type = "ReportSubjectNotFound", sink = %self.sink_name, error = %e, "Failed to report subject not found");
@@ -417,8 +427,7 @@ impl SinkSubjectWorker {
                     }
                 }
                 Err(e) => {
-                    self.report_error(ctx, subject_id, first_sn, e, true)
-                        .await;
+                    self.report_error(ctx, subject_id, first_sn, e, true).await;
                 }
             }
             return Ok(());

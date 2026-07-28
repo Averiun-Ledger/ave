@@ -339,19 +339,18 @@ impl TestSink {
             // so the test does not depend on the process-level default, which
             // may be unset when multiple rustls crypto backends are linked.
             let provider = rustls::crypto::aws_lc_rs::default_provider();
-            let mut server_config = RustlsServerConfig::builder_with_provider(
-                Arc::new(provider),
-            )
-            .with_safe_default_protocol_versions()
-            .expect("default TLS versions should be valid")
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![material.server_cert_der.clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                    material.server_key_der.clone(),
-                )),
-            )
-            .expect("server cert/key should be valid");
+            let mut server_config =
+                RustlsServerConfig::builder_with_provider(Arc::new(provider))
+                    .with_safe_default_protocol_versions()
+                    .expect("default TLS versions should be valid")
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![material.server_cert_der.clone()],
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                            material.server_key_der.clone(),
+                        )),
+                    )
+                    .expect("server cert/key should be valid");
             server_config.alpn_protocols =
                 vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             RustlsConfig::from_config(Arc::new(server_config))
@@ -578,17 +577,12 @@ impl TestSink {
     /// Return the value of `name` from the most recent `/events` request,
     /// or `None` if the header was absent or there have been no requests.
     pub async fn last_header(&self, name: &str) -> Option<String> {
-        self.state
-            .lock()
-            .await
-            .headers
-            .last()
-            .and_then(|headers| {
-                headers
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_owned())
-            })
+        self.state.lock().await.headers.last().and_then(|headers| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_owned())
+        })
     }
 
     /// Return the instants at which each `/events` request was received,

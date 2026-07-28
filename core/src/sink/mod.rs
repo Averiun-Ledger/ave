@@ -29,7 +29,10 @@ pub use worker::{SinkWorker, SinkWorkerMessage, SinkWorkerResponse};
 use std::time::Duration;
 
 use crate::config::TokenResponse;
-use ave_common::{DataToSink, sink::{OAuth2GrantType, SinkAuthConfig}};
+use ave_common::{
+    DataToSink,
+    sink::{OAuth2GrantType, SinkAuthConfig},
+};
 
 /// Parse the `Retry-After` header of a 429 / 5xx response. The value may be
 /// a number of seconds or an HTTP-date; the result is milliseconds from now.
@@ -214,9 +217,9 @@ mod tests {
 
     #[tokio::test]
     async fn obtain_token_with_retry_retries_then_succeeds() {
-        use tokio::io::AsyncWriteExt;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -233,8 +236,7 @@ mod tests {
                     .accept()
                     .await
                     .expect("test listener should accept");
-                let count =
-                    request_count_server.fetch_add(1, Ordering::SeqCst);
+                let count = request_count_server.fetch_add(1, Ordering::SeqCst);
                 let response = if count < 2 {
                     "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_owned()
                 } else {
@@ -270,10 +272,10 @@ mod tests {
 
     #[tokio::test]
     async fn obtain_token_with_retry_honors_retry_after_hint() {
-        use tokio::io::AsyncWriteExt;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Instant;
+        use tokio::io::AsyncWriteExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -290,8 +292,7 @@ mod tests {
                     .accept()
                     .await
                     .expect("test listener should accept");
-                let count =
-                    request_count_server.fetch_add(1, Ordering::SeqCst);
+                let count = request_count_server.fetch_add(1, Ordering::SeqCst);
                 let response = if count == 0 {
                     "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n".to_owned()
                 } else {
@@ -486,6 +487,11 @@ mod tests {
 
         let body = body_rx.await.expect("server should send captured body");
         assert_eq!(body["grant_type"], "password");
-        assert!(!body.as_object().expect("body is object").contains_key("scope"));
+        assert!(
+            !body
+                .as_object()
+                .expect("body is object")
+                .contains_key("scope")
+        );
     }
 }

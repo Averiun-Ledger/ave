@@ -244,9 +244,7 @@ async fn kafka_transport_test_sends_test_message() {
 
     transport.test().await.unwrap();
 
-    let messages = env
-        .consume_with_headers("test-topic", 1, TIMEOUT)
-        .await;
+    let messages = env.consume_with_headers("test-topic", 1, TIMEOUT).await;
     assert_eq!(messages.len(), 1);
     let (key, payload, headers) = &messages[0];
 
@@ -322,9 +320,7 @@ async fn kafka_transport_logs_request_id() {
         .await
         .unwrap();
 
-    let messages = env
-        .consume_with_headers("logs-Example", 1, TIMEOUT)
-        .await;
+    let messages = env.consume_with_headers("logs-Example", 1, TIMEOUT).await;
     let (_, _, headers) = &messages[0];
     let header_request_id = headers
         .iter()
@@ -357,16 +353,13 @@ async fn kafka_transport_retries_on_unknown_topic() {
     // The topic does not exist yet; the first attempt will fail with
     // UnknownTopicOrPartition (retryable) and the retry will succeed once
     // Redpanda auto-creates it.
-    let config = kafka_sink_config_with(
-        &env.bootstrap_servers,
-        topic,
-        |cfg| {
-            cfg.max_retries = 2;
-            cfg.retry_base_delay_ms = 100;
-            cfg.retry_max_delay_ms = 500;
-        },
-    );
-    let transport = KafkaTransport::new("test-retry".to_string(), config, None).unwrap();
+    let config = kafka_sink_config_with(&env.bootstrap_servers, topic, |cfg| {
+        cfg.max_retries = 2;
+        cfg.retry_base_delay_ms = 100;
+        cfg.retry_max_delay_ms = 500;
+    });
+    let transport =
+        KafkaTransport::new("test-retry".to_string(), config, None).unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -393,7 +386,9 @@ async fn kafka_transport_retry_exhaustion_returns_retryable_error() {
             cfg.retry_max_delay_ms = 100;
         },
     );
-    let transport = KafkaTransport::new("test-retry-fail".to_string(), config, None).unwrap();
+    let transport =
+        KafkaTransport::new("test-retry-fail".to_string(), config, None)
+            .unwrap();
 
     let result = transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -437,7 +432,8 @@ async fn kafka_transport_tls_custom_ca() {
         }),
         ..KafkaSinkConfig::default()
     };
-    let transport = KafkaTransport::new("test-tls".to_string(), config, None).unwrap();
+    let transport =
+        KafkaTransport::new("test-tls".to_string(), config, None).unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -543,7 +539,8 @@ async fn kafka_transport_error_handling() {
         },
         ..KafkaSinkConfig::default()
     };
-    let err = KafkaTransport::new("test".to_string(), config, None).unwrap_err();
+    let err =
+        KafkaTransport::new("test".to_string(), config, None).unwrap_err();
     assert!(matches!(err, SinkError::ClientBuild(_)));
 
     // Invalid acks values are rejected at deserialization time.
@@ -561,7 +558,8 @@ async fn kafka_transport_error_handling() {
         request_timeout_ms: 500,
         ..KafkaSinkConfig::default()
     };
-    let transport = KafkaTransport::new("test".to_string(), config, None).unwrap();
+    let transport =
+        KafkaTransport::new("test".to_string(), config, None).unwrap();
     let err = transport.health_check().await.unwrap_err();
     assert!(
         matches!(
@@ -886,10 +884,13 @@ async fn kafka_transport_batch_delivery() {
         "batch-{{schema-id}}",
         |cfg| cfg.batch_delivery = true,
     );
-    let transport = KafkaTransport::new("test-batch".to_string(), config, None).unwrap();
+    let transport =
+        KafkaTransport::new("test-batch".to_string(), config, None).unwrap();
 
     let events: Vec<IncomingSinkEvent> = vec![
-        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID))),
+        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+            SUBJECT_ID, SCHEMA_ID,
+        ))),
         IncomingSinkEvent::Light(example_light_event(SUBJECT_ID, SCHEMA_ID)),
     ];
 
@@ -1002,11 +1003,13 @@ async fn kafka_transport_topic_template_with_event_type() {
         .await
         .unwrap();
 
-    let create_messages = env.consume_string("ave-Example-create", 1, TIMEOUT).await;
+    let create_messages =
+        env.consume_string("ave-Example-create", 1, TIMEOUT).await;
     assert_eq!(create_messages.len(), 1);
     assert_eq!(create_messages[0].0, SUBJECT_ID);
 
-    let fact_messages = env.consume_string("ave-Example-fact", 1, TIMEOUT).await;
+    let fact_messages =
+        env.consume_string("ave-Example-fact", 1, TIMEOUT).await;
     assert_eq!(fact_messages.len(), 1);
     assert_eq!(fact_messages[0].0, SUBJECT_ID);
 }
@@ -1133,8 +1136,8 @@ async fn kafka_node_signature_headers() {
         };
 
         let signature = get("x-ave-signature").expect("signature header");
-        let timestamp = get("x-ave-signature-timestamp")
-            .expect("timestamp header");
+        let timestamp =
+            get("x-ave-signature-timestamp").expect("timestamp header");
         let signer_key = get("x-ave-public-key").expect("public key header");
 
         // The signer must be the node identity.
@@ -1558,7 +1561,9 @@ async fn kafka_node_signature_v2_binds_headers() {
                 .1
                 .clone()
         };
-        let sn = sn_override.map(str::to_owned).unwrap_or_else(|| get("x-ave-sn"));
+        let sn = sn_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| get("x-ave-sn"));
         let mut lines = vec![
             ("content-type", "application/json".to_owned()),
             ("idempotency-key", get("idempotency-key")),
@@ -1588,8 +1593,8 @@ async fn kafka_node_signature_v2_binds_headers() {
         };
 
         let signature = get("x-ave-signature").expect("signature header");
-        let timestamp = get("x-ave-signature-timestamp")
-            .expect("timestamp header");
+        let timestamp =
+            get("x-ave-signature-timestamp").expect("timestamp header");
         let signer_key = get("x-ave-public-key").expect("public key header");
         assert_eq!(signer_key, node_public_key);
 
@@ -1761,11 +1766,16 @@ async fn kafka_broker_down_and_catch_up() {
 #[tokio::test]
 async fn kafka_transport_key_strategy_subject_id() {
     let env = RedpandaEnv::start().await;
-    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-subject-{{schema-id}}", |cfg| {
-        cfg.key_strategy = KafkaKeyStrategy::SubjectId;
-    });
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "key-subject-{{schema-id}}",
+        |cfg| {
+            cfg.key_strategy = KafkaKeyStrategy::SubjectId;
+        },
+    );
     let transport =
-        KafkaTransport::new("test-key-subject".to_string(), config, None).unwrap();
+        KafkaTransport::new("test-key-subject".to_string(), config, None)
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1782,9 +1792,13 @@ async fn kafka_transport_key_strategy_subject_id() {
 #[tokio::test]
 async fn kafka_transport_key_strategy_none() {
     let env = RedpandaEnv::start().await;
-    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-none-{{schema-id}}", |cfg| {
-        cfg.key_strategy = KafkaKeyStrategy::None;
-    });
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "key-none-{{schema-id}}",
+        |cfg| {
+            cfg.key_strategy = KafkaKeyStrategy::None;
+        },
+    );
     let transport =
         KafkaTransport::new("test-key-none".to_string(), config, None).unwrap();
 
@@ -1807,11 +1821,16 @@ async fn kafka_transport_key_strategy_none() {
 async fn kafka_transport_key_strategy_static() {
     let env = RedpandaEnv::start().await;
     let fixed_key = "global-partition".to_owned();
-    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-static-{{schema-id}}", |cfg| {
-        cfg.key_strategy = KafkaKeyStrategy::Static(fixed_key.clone());
-    });
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "key-static-{{schema-id}}",
+        |cfg| {
+            cfg.key_strategy = KafkaKeyStrategy::Static(fixed_key.clone());
+        },
+    );
     let transport =
-        KafkaTransport::new("test-key-static".to_string(), config, None).unwrap();
+        KafkaTransport::new("test-key-static".to_string(), config, None)
+            .unwrap();
 
     // Two deliveries from two different subjects must share the same key.
     transport
@@ -1835,13 +1854,18 @@ async fn kafka_transport_key_strategy_static() {
 #[tokio::test]
 async fn kafka_transport_key_strategy_template() {
     let env = RedpandaEnv::start().await;
-    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-template-{{schema-id}}", |cfg| {
-        cfg.key_strategy = KafkaKeyStrategy::Template(
-            "ave/{{schema-id}}/{{subject-id}}".to_owned(),
-        );
-    });
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "key-template-{{schema-id}}",
+        |cfg| {
+            cfg.key_strategy = KafkaKeyStrategy::Template(
+                "ave/{{schema-id}}/{{subject-id}}".to_owned(),
+            );
+        },
+    );
     let transport =
-        KafkaTransport::new("test-key-template".to_string(), config, None).unwrap();
+        KafkaTransport::new("test-key-template".to_string(), config, None)
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1866,7 +1890,8 @@ async fn kafka_transport_transactional_delivers() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tx-default".to_string(), config, None).unwrap();
+        KafkaTransport::new("test-tx-default".to_string(), config, None)
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1892,7 +1917,8 @@ async fn kafka_transport_transactional_with_explicit_id() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tx-explicit".to_string(), config, None).unwrap();
+        KafkaTransport::new("test-tx-explicit".to_string(), config, None)
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1908,11 +1934,15 @@ async fn kafka_transport_transactional_with_explicit_id() {
 #[tokio::test]
 async fn kafka_transport_tuning_delivers() {
     let env = RedpandaEnv::start().await;
-    let config = kafka_sink_config_with(&env.bootstrap_servers, "tune-{{schema-id}}", |cfg| {
-        cfg.linger_ms = 50;
-        cfg.batch_size_bytes = 65_536;
-        cfg.queue_buffering_max_messages = 10_000;
-    });
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "tune-{{schema-id}}",
+        |cfg| {
+            cfg.linger_ms = 50;
+            cfg.batch_size_bytes = 65_536;
+            cfg.queue_buffering_max_messages = 10_000;
+        },
+    );
     let transport =
         KafkaTransport::new("test-tune".to_string(), config, None).unwrap();
 
@@ -1930,11 +1960,16 @@ async fn kafka_transport_tuning_delivers() {
 #[tokio::test]
 async fn kafka_transport_key_strategy_send_light() {
     let env = RedpandaEnv::start().await;
-    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-light-{{schema-id}}", |cfg| {
-        cfg.key_strategy = KafkaKeyStrategy::SubjectId;
-    });
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "key-light-{{schema-id}}",
+        |cfg| {
+            cfg.key_strategy = KafkaKeyStrategy::SubjectId;
+        },
+    );
     let transport =
-        KafkaTransport::new("test-key-light".to_string(), config, None).unwrap();
+        KafkaTransport::new("test-key-light".to_string(), config, None)
+            .unwrap();
 
     transport
         .send_light(example_light_event(SUBJECT_ID, SCHEMA_ID))
@@ -1974,23 +2009,27 @@ async fn kafka_transport_transactional_batch() {
         success: true,
     };
     let events = vec![
-        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID))),
+        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+            SUBJECT_ID, SCHEMA_ID,
+        ))),
         IncomingSinkEvent::Light(light(1)),
         IncomingSinkEvent::Light(light(2)),
     ];
 
     transport.send_batch(events).await.unwrap();
 
-    let create_messages =
-        env.consume_string("tx-batch-Example-create", 1, TIMEOUT).await;
+    let create_messages = env
+        .consume_string("tx-batch-Example-create", 1, TIMEOUT)
+        .await;
     assert_eq!(create_messages.len(), 1);
     let creates: Vec<IncomingSinkEvent> =
         serde_json::from_str(&create_messages[0].1).unwrap();
     assert_eq!(creates.len(), 1);
     assert_eq!(creates[0].event_type(), SinkTypes::Create);
 
-    let fact_messages =
-        env.consume_string("tx-batch-Example-fact", 1, TIMEOUT).await;
+    let fact_messages = env
+        .consume_string("tx-batch-Example-fact", 1, TIMEOUT)
+        .await;
     assert_eq!(fact_messages.len(), 1);
     let facts: Vec<IncomingSinkEvent> =
         serde_json::from_str(&fact_messages[0].1).unwrap();
@@ -2008,14 +2047,15 @@ async fn kafka_node_key_strategy_static() {
     let env = RedpandaEnv::start().await;
     let topic = "ave-node-key-static";
 
-    let (mut nodes, mut dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-        bootstrap: vec![vec![]],
-        addressable: vec![vec![0]],
-        ephemeral: vec![],
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let mut owner = nodes.remove(0);
     let mut owner_dirs: Vec<_> = dirs.drain(0..2).collect();
 
@@ -2106,14 +2146,15 @@ async fn kafka_node_transactional_delivers() {
     let env = RedpandaEnv::start().await;
     let topic = "ave-node-tx";
 
-    let (mut nodes, mut dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-        bootstrap: vec![vec![]],
-        addressable: vec![vec![0]],
-        ephemeral: vec![],
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let mut owner = nodes.remove(0);
     let mut owner_dirs: Vec<_> = dirs.drain(0..2).collect();
 

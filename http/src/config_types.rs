@@ -823,7 +823,9 @@ impl From<SinkConfigEntry> for SinkConfigEntryHttp {
     }
 }
 
-#[derive(Debug, Default, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+#[derive(
+    Debug, Default, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuth2GrantTypeHttp {
     /// Resource Owner Password Credentials grant.
@@ -1137,7 +1139,9 @@ pub enum KafkaKeyStrategyHttp {
     Template(String),
 }
 
-impl From<ave_bridge::ave_common::sink::KafkaKeyStrategy> for KafkaKeyStrategyHttp {
+impl From<ave_bridge::ave_common::sink::KafkaKeyStrategy>
+    for KafkaKeyStrategyHttp
+{
     fn from(value: ave_bridge::ave_common::sink::KafkaKeyStrategy) -> Self {
         use ave_bridge::ave_common::sink::KafkaKeyStrategy;
         match value {
@@ -1355,7 +1359,8 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     transactional_id: kafka.transactional_id,
                     linger_ms: kafka.linger_ms,
                     batch_size_bytes: kafka.batch_size_bytes,
-                    queue_buffering_max_messages: kafka.queue_buffering_max_messages,
+                    queue_buffering_max_messages: kafka
+                        .queue_buffering_max_messages,
                 })
             }
         };

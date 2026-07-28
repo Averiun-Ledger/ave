@@ -293,13 +293,13 @@ impl GovernanceVersionSync {
             }
         }
 
-        if self.pending_peers.is_empty() 
-            && let Some(metrics) = try_core_metrics() {
-                metrics.observe_governance_version_sync_failure(
-                    "all_peers_unreachable",
-                );
-            }
-        
+        if self.pending_peers.is_empty()
+            && let Some(metrics) = try_core_metrics()
+        {
+            metrics.observe_governance_version_sync_failure(
+                "all_peers_unreachable",
+            );
+        }
 
         debug!(
             governance_id = %self.governance_id,

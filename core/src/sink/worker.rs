@@ -470,8 +470,7 @@ impl Handler<Self> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                if let Some(&current_from) = self.in_catch_up.get(&subject_id)
-                {
+                if let Some(&current_from) = self.in_catch_up.get(&subject_id) {
                     if from_sn < current_from {
                         // A lower from_sn (e.g. a replay that rewound the
                         // cursor mid-flight) restarts the catch-up: the
@@ -479,9 +478,9 @@ impl Handler<Self> for SinkWorker {
                         // stale delivery chain, and re-delivers from from_sn
                         // so events keep their order.
                         self.in_catch_up.insert(subject_id.clone(), from_sn);
-                        let child_ref =
-                            self.ensure_subject_worker(&subject_id, ctx)
-                                .await?;
+                        let child_ref = self
+                            .ensure_subject_worker(&subject_id, ctx)
+                            .await?;
                         child_ref
                             .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
                                 from_sn,

@@ -322,11 +322,12 @@ impl EndpointRateLimit {
             });
         }
         if let Some(window) = self.window_seconds
-            && window <= 0 {
-                return Err(Error::InvalidConfiguration {
-                    component: "EndpointRateLimit.window_seconds".to_string(),
-                    reason: "must be greater than zero when set".to_string(),
-                });
+            && window <= 0
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "EndpointRateLimit.window_seconds".to_string(),
+                reason: "must be greater than zero when set".to_string(),
+            });
         }
         Ok(())
     }

@@ -353,10 +353,7 @@ impl std::fmt::Debug for SinkManager {
                 "blocked_sinks",
                 &self.blocked_sinks.keys().collect::<Vec<_>>(),
             )
-            .field(
-                "last_errors",
-                &self.last_errors.keys().collect::<Vec<_>>(),
-            )
+            .field("last_errors", &self.last_errors.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -1202,7 +1199,10 @@ impl SinkManager {
         // Drop stale last-error entries for sinks that no longer have lagging
         // subjects. Errors for sinks that are still behind remain visible.
         self.last_errors.retain(|sink, _| {
-            self.lagging.get(sink).map(|s| !s.is_empty()).unwrap_or(false)
+            self.lagging
+                .get(sink)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
         });
     }
 
@@ -1800,7 +1800,9 @@ impl SinkManager {
         let replay_covered = self
             .replay_floors
             .get(&(sink.clone(), subject_id.clone()))
-            .is_some_and(|floor| finished_from.is_some_and(|from| from <= *floor));
+            .is_some_and(|floor| {
+                finished_from.is_some_and(|from| from <= *floor)
+            });
         if replay_covered {
             self.persist(
                 SinkManagerEvent::ReplayCompleted {
@@ -1838,7 +1840,12 @@ impl SinkManager {
                     "Launching catch-up requested while another was in flight"
                 );
                 if let Err(e) = self
-                    .send_catch_up(sink.clone(), subject_id.clone(), from_sn, ctx)
+                    .send_catch_up(
+                        sink.clone(),
+                        subject_id.clone(),
+                        from_sn,
+                        ctx,
+                    )
                     .await
                 {
                     error!(
@@ -2091,7 +2098,11 @@ impl SinkManager {
 
         let signer = match &server.transport {
             SinkTransportConfig::Http(http) if http.signature => {
-                match ctx.system().get_actor::<Node>(&ActorPath::from("/user/node")).await {
+                match ctx
+                    .system()
+                    .get_actor::<Node>(&ActorPath::from("/user/node"))
+                    .await
+                {
                     Ok(node) => Some(NodeSigner::new(node)),
                     Err(e) => {
                         return Err(format!(
@@ -2153,12 +2164,7 @@ impl SinkManager {
                 // by the in-flight catch-up.
                 if from_sn < in_flight_from {
                     if let Err(e) = self
-                        .send_catch_up(
-                            sink.clone(),
-                            subject_id,
-                            from_sn,
-                            ctx,
-                        )
+                        .send_catch_up(sink.clone(), subject_id, from_sn, ctx)
                         .await
                     {
                         error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up restart to worker");
@@ -2229,7 +2235,12 @@ impl SinkManager {
             }
             self.pending_catch_ups.remove(&key);
             if let Err(e) = self
-                .send_catch_up(sink.to_string(), subject_id.clone(), from_sn, ctx)
+                .send_catch_up(
+                    sink.to_string(),
+                    subject_id.clone(),
+                    from_sn,
+                    ctx,
+                )
                 .await
             {
                 error!(
@@ -2321,8 +2332,7 @@ impl SinkManager {
                         .cursors
                         .get(&(sink.clone(), subject_id.clone()))
                         .copied();
-                    let is_outdated =
-                        cursor_sn.is_none_or(|sn| sn < last_sn);
+                    let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
                     if is_outdated {
                         Some(subject_id.clone())
                     } else {
@@ -2336,12 +2346,8 @@ impl SinkManager {
             if let Some(subjects) = self.lagging.get(&sink).cloned() {
                 let subjects: Vec<String> = subjects.into_iter().collect();
                 if !subjects.is_empty() {
-                    self.handle_request_catch_up(
-                        sink.clone(),
-                        subjects,
-                        ctx,
-                    )
-                    .await?;
+                    self.handle_request_catch_up(sink.clone(), subjects, ctx)
+                        .await?;
                 }
             }
             // Launch any catch-ups queued while the sink was blocked.
@@ -2457,8 +2463,10 @@ impl SinkManager {
 
         // Clear any in-flight catch-up for the deleted subject so it does not
         // block future catch-ups for other subjects.
-        self.catch_up_in_flight.retain(|(_, sid), _| sid != subject_id);
-        self.pending_catch_ups.retain(|(_, sid), _| sid != subject_id);
+        self.catch_up_in_flight
+            .retain(|(_, sid), _| sid != subject_id);
+        self.pending_catch_ups
+            .retain(|(_, sid), _| sid != subject_id);
 
         // Complete any pending replay for the deleted subject so a restart
         // does not resume a replay for a subject that no longer exists.
@@ -2557,11 +2565,7 @@ mod tests {
         let mut manager = manager_with_state(cursors, last_seen);
         manager.lagging.insert(
             "sink".to_owned(),
-            HashSet::from([
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned(),
-            ]),
+            HashSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()]),
         );
 
         let (count, total, max) = manager.sink_lagging_totals("sink");

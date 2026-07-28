@@ -27,15 +27,14 @@ use crate::sink::SinkError;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id, sign_delivery,
-    sink_password_env_var,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id,
+    sign_delivery, sink_password_env_var,
 };
 use crate::sink::extract_sn;
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
 use ave_common::{
-    DataToSink, IncomingSinkEvent, LightEvent, SinkTypes,
-    sink::SinkAuthConfig,
+    DataToSink, IncomingSinkEvent, LightEvent, SinkTypes, sink::SinkAuthConfig,
 };
 
 /// Build the environment variable name for a sink's API key.
@@ -99,7 +98,8 @@ impl ServerCertVerifier for PinnedCertificateVerifier {
         // exact certificate, so any chain or expiry is intentionally ignored.
         if end_entity.as_ref() != self.pinned.as_ref() {
             return Err(RustlsError::General(
-                "server certificate does not match pinned certificate".to_owned(),
+                "server certificate does not match pinned certificate"
+                    .to_owned(),
             ));
         }
 
@@ -143,8 +143,9 @@ async fn build_pinned_tls_config(
         ))
     })?;
 
-    let pinned_pem = read_tls_file(sink_name, "pinned_certificate", &tls.pinned_certificate)
-        .await?;
+    let pinned_pem =
+        read_tls_file(sink_name, "pinned_certificate", &tls.pinned_certificate)
+            .await?;
     let pinned = CertificateDer::from_pem_slice(&pinned_pem).map_err(|e| {
         SinkError::ClientBuild(format!(
             "sink '{}': invalid pinned certificate '{}': {}",
@@ -164,8 +165,9 @@ async fn build_pinned_tls_config(
     }
 
     if !tls.ca_certificate.is_empty() {
-        let pem = read_tls_file(sink_name, "ca_certificate", &tls.ca_certificate)
-            .await?;
+        let pem =
+            read_tls_file(sink_name, "ca_certificate", &tls.ca_certificate)
+                .await?;
         let mut found = false;
         for item in CertificateDer::pem_slice_iter(&pem) {
             let cert = item.map_err(|e| {
@@ -192,7 +194,9 @@ async fn build_pinned_tls_config(
 
     let provider = rustls::crypto::CryptoProvider::get_default()
         .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+        .unwrap_or_else(|| {
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+        });
 
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
         Arc::new(root_store),
@@ -211,11 +215,12 @@ async fn build_pinned_tls_config(
         inner: verifier,
     };
 
-    let versions: &[&'static rustls::SupportedProtocolVersion] = match &tls.min_tls_version {
-        Some(HttpTlsVersion::Tls12) => &[&rustls::version::TLS12],
-        Some(HttpTlsVersion::Tls13) => &[&rustls::version::TLS13],
-        None => &[&rustls::version::TLS12, &rustls::version::TLS13],
-    };
+    let versions: &[&'static rustls::SupportedProtocolVersion] =
+        match &tls.min_tls_version {
+            Some(HttpTlsVersion::Tls12) => &[&rustls::version::TLS12],
+            Some(HttpTlsVersion::Tls13) => &[&rustls::version::TLS13],
+            None => &[&rustls::version::TLS12, &rustls::version::TLS13],
+        };
 
     let config_builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(versions)
@@ -235,7 +240,8 @@ async fn build_pinned_tls_config(
             &tls.client_certificate,
         )
         .await?;
-        let key_pem = read_tls_file(sink_name, "client_key", &tls.client_key).await?;
+        let key_pem =
+            read_tls_file(sink_name, "client_key", &tls.client_key).await?;
 
         let cert_chain: Vec<CertificateDer<'static>> =
             CertificateDer::pem_slice_iter(&cert_pem)
@@ -254,15 +260,17 @@ async fn build_pinned_tls_config(
             )));
         }
 
-        let private_key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
-            .map_err(|e| {
-                SinkError::ClientBuild(format!(
-                    "sink '{}': invalid mTLS client key '{}': {}",
-                    sink_name, tls.client_key, e
-                ))
-            })?;
+        let private_key =
+            rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+                .map_err(|e| {
+                    SinkError::ClientBuild(format!(
+                        "sink '{}': invalid mTLS client key '{}': {}",
+                        sink_name, tls.client_key, e
+                    ))
+                })?;
 
-        config_builder.with_client_auth_cert(cert_chain, private_key)
+        config_builder
+            .with_client_auth_cert(cert_chain, private_key)
             .map_err(|e| {
                 SinkError::ClientBuild(format!(
                     "sink '{}': failed to configure mTLS identity: {}",
@@ -314,12 +322,9 @@ async fn build_http_client(
         builder = builder.use_preconfigured_tls(tls_config);
     } else if let Some(tls) = &config.tls {
         if !tls.ca_certificate.is_empty() {
-            let pem = read_tls_file(
-                sink_name,
-                "ca_certificate",
-                &tls.ca_certificate,
-            )
-            .await?;
+            let pem =
+                read_tls_file(sink_name, "ca_certificate", &tls.ca_certificate)
+                    .await?;
             // With the rustls backend `Certificate::from_pem` defers parsing
             // and silently accepts a buffer without PEM sections, so parse
             // the bundle here and require at least one certificate.
@@ -347,8 +352,8 @@ async fn build_http_client(
                 &tls.client_certificate,
             )
             .await?;
-            let key = read_tls_file(sink_name, "client_key", &tls.client_key)
-                .await?;
+            let key =
+                read_tls_file(sink_name, "client_key", &tls.client_key).await?;
             // rustls expects a single PEM buffer with the certificate chain
             // followed by the private key.
             pem.extend_from_slice(&key);
@@ -568,11 +573,13 @@ impl HttpTransport {
         &self,
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
-    ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError> {
-        let extra: &[(&str, &str)] = match self.config.compression.content_encoding() {
-            Some(encoding) => &[("content-encoding", encoding)],
-            None => &[],
-        };
+    ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError>
+    {
+        let extra: &[(&str, &str)] =
+            match self.config.compression.content_encoding() {
+                Some(encoding) => &[("content-encoding", encoding)],
+                None => &[],
+            };
         sign_delivery(
             self.signer.as_ref(),
             payload,
@@ -788,10 +795,7 @@ impl HttpTransport {
 
         let response =
             request.send().await.map_err(|e| SinkError::Delivery {
-                message: format!(
-                    "HTTP request failed ({}): {}",
-                    request_id, e
-                ),
+                message: format!("HTTP request failed ({}): {}", request_id, e),
                 retryable: true,
                 retry_after_ms: None,
             })?;
@@ -814,10 +818,7 @@ impl HttpTransport {
             )
             .await;
             Err(SinkError::Auth {
-                message: format!(
-                    "HTTP {} ({}): {}",
-                    status, request_id, body
-                ),
+                message: format!("HTTP {} ({}): {}", status, request_id, body),
                 retry_after_ms: None,
             })
         } else {
@@ -833,10 +834,7 @@ impl HttpTransport {
             )
             .await;
             Err(SinkError::Delivery {
-                message: format!(
-                    "HTTP {} ({}): {}",
-                    status, request_id, body
-                ),
+                message: format!("HTTP {} ({}): {}", status, request_id, body),
                 retryable: status.is_server_error() || status == 429,
                 retry_after_ms,
             })
@@ -1238,8 +1236,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -1728,10 +1726,13 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             ..SinkAuthConfig::default()
         });
 
-        let transport =
-            HttpTransport::new("unit-client-credentials".to_owned(), config, None)
-                .await
-                .expect("transport should build");
+        let transport = HttpTransport::new(
+            "unit-client-credentials".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
 
         let header = transport
             .build_auth_header()
@@ -1749,20 +1750,18 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     #[tokio::test]
     async fn custom_headers_are_applied_to_requests() {
         let mut config = base_config();
-        config.headers.insert(
-            "X-Custom-Header".to_owned(),
-            "custom-value".to_owned(),
-        );
-        let transport = HttpTransport::new(
-            "unit-custom-headers".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
+        config
+            .headers
+            .insert("X-Custom-Header".to_owned(), "custom-value".to_owned());
+        let transport =
+            HttpTransport::new("unit-custom-headers".to_owned(), config, None)
+                .await
+                .expect("transport should build");
 
         let request = transport
-            .apply_custom_headers(transport.client.get("http://127.0.0.1/health"))
+            .apply_custom_headers(
+                transport.client.get("http://127.0.0.1/health"),
+            )
             .build()
             .expect("request should build");
 
@@ -1777,7 +1776,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
     /// Parse a raw HTTP request buffer into a map of lowercase header names to
     /// values. Only the headers are extracted; the body is ignored.
-    fn parse_request_headers(buf: &[u8]) -> std::collections::HashMap<String, String> {
+    fn parse_request_headers(
+        buf: &[u8],
+    ) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         let text = String::from_utf8_lossy(buf);
         for line in text.lines().skip(1) {
@@ -1827,8 +1828,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                     .await
                     .push(parse_request_headers(&buf));
 
-                let response =
-                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.shutdown().await;
             }
@@ -1843,15 +1843,15 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
         let mut config = base_config();
         config.url = url;
-        let transport = HttpTransport::new(
-            "unit-request-id".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
+        let transport =
+            HttpTransport::new("unit-request-id".to_owned(), config, None)
+                .await
+                .expect("transport should build");
 
-        transport.health_check().await.expect("health check should succeed");
+        transport
+            .health_check()
+            .await
+            .expect("health check should succeed");
 
         let headers = captured.lock().await;
         assert_eq!(headers.len(), 1);
@@ -1875,8 +1875,14 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         .await
         .expect("transport should build");
 
-        transport.health_check().await.expect("first health check should succeed");
-        transport.health_check().await.expect("second health check should succeed");
+        transport
+            .health_check()
+            .await
+            .expect("first health check should succeed");
+        transport
+            .health_check()
+            .await
+            .expect("second health check should succeed");
 
         let headers = captured.lock().await;
         assert_eq!(headers.len(), 2);
@@ -1894,18 +1900,15 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
         let mut config = base_config();
         config.url = url;
-        config.headers.insert(
-            "Content-Type".to_owned(),
-            "text/plain".to_owned(),
-        );
-        config.headers.insert(
-            "Content-Encoding".to_owned(),
-            "gzip".to_owned(),
-        );
-        config.headers.insert(
-            "X-Ave-Event-Type".to_owned(),
-            "create".to_owned(),
-        );
+        config
+            .headers
+            .insert("Content-Type".to_owned(), "text/plain".to_owned());
+        config
+            .headers
+            .insert("Content-Encoding".to_owned(), "gzip".to_owned());
+        config
+            .headers
+            .insert("X-Ave-Event-Type".to_owned(), "create".to_owned());
         config.headers.insert(
             "X-Custom-Health-Header".to_owned(),
             "custom-value".to_owned(),
@@ -1919,7 +1922,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         .await
         .expect("transport should build");
 
-        transport.health_check().await.expect("health check should succeed");
+        transport
+            .health_check()
+            .await
+            .expect("health check should succeed");
 
         let headers = &captured.lock().await[0];
         assert!(
@@ -1947,13 +1953,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
         let mut config = base_config();
         config.url = url;
-        let transport = HttpTransport::new(
-            "unit-test-delivery".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
+        let transport =
+            HttpTransport::new("unit-test-delivery".to_owned(), config, None)
+                .await
+                .expect("transport should build");
 
         transport.test().await.expect("sink test should succeed");
 
@@ -2050,13 +2053,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let mut config = base_config();
         config.url = url;
         config.max_redirects = 1;
-        let transport = HttpTransport::new(
-            "unit-redirect-one".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
+        let transport =
+            HttpTransport::new("unit-redirect-one".to_owned(), config, None)
+                .await
+                .expect("transport should build");
 
         transport
             .health_check()
@@ -2071,8 +2071,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
     /// Generate a self-signed test certificate and return its DER.
     fn test_cert_der(common_name: &str) -> CertificateDer<'static> {
-        let cert = rcgen::generate_simple_self_signed(vec![common_name.to_owned()])
-            .expect("test cert should generate");
+        let cert =
+            rcgen::generate_simple_self_signed(vec![common_name.to_owned()])
+                .expect("test cert should generate");
         CertificateDer::from(cert.cert.der().to_vec())
     }
 
@@ -2129,7 +2130,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             &[],
             UnixTime::now(),
         );
-        assert!(result.is_ok(), "matching pinned certificate must be accepted");
+        assert!(
+            result.is_ok(),
+            "matching pinned certificate must be accepted"
+        );
     }
 
     #[test]

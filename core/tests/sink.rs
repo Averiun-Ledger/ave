@@ -1,6 +1,8 @@
 mod common;
 
-use std::{collections::BTreeSet, collections::HashMap, sync::atomic::Ordering};
+use std::{
+    collections::BTreeSet, collections::HashMap, sync::atomic::Ordering,
+};
 
 use ave_common::{
     SinkTarget, SinkTypes,
@@ -14,7 +16,8 @@ use ave_common::{
     },
     sink::{
         DataToSinkEvent, HttpCompression, HttpProxyConfig, HttpTlsConfig,
-        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig, SinkTransportConfig,
+        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig,
+        SinkTransportConfig,
     },
 };
 use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
@@ -51,9 +54,8 @@ use crate::common::{
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
         make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
         make_sink_entry_with_auth, make_sink_entry_with_concurrency,
-        make_sink_entry_with_proxy, make_sink_entry_with_retry_policy,
-        make_sink_entry_with_headers,
-        make_sink_entry_with_signature,
+        make_sink_entry_with_headers, make_sink_entry_with_proxy,
+        make_sink_entry_with_retry_policy, make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
         restart_config, restart_config_safe_mode, restart_config_with_peers,
         sample_sinks, short_idle_sink_config, transient_error_sink_config,
@@ -295,8 +297,7 @@ async fn sink_last_error_is_reported_after_delivery_failure() {
     let mut found = false;
     for _ in 0..20 {
         let statuses = node.api.get_sinks_status().await.unwrap();
-        if let Some(status) =
-            statuses.iter().find(|s| s.name == "example-sink")
+        if let Some(status) = statuses.iter().find(|s| s.name == "example-sink")
         {
             if status.last_error.is_some() {
                 found = true;
@@ -305,10 +306,7 @@ async fn sink_last_error_is_reported_after_delivery_failure() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(
-        found,
-        "last_error should be set after a delivery failure"
-    );
+    assert!(found, "last_error should be set after a delivery failure");
 }
 
 #[traced_test]
@@ -8194,9 +8192,7 @@ async fn sink_tls_pinning() {
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
             HttpTlsConfig {
-                pinned_certificate: ca_cert_path
-                    .to_string_lossy()
-                    .into_owned(),
+                pinned_certificate: ca_cert_path.to_string_lossy().into_owned(),
                 ..Default::default()
             },
         )],
@@ -9806,9 +9802,7 @@ async fn start_client_credentials_auth_server() -> (
     String,
     std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
 ) {
-    use axum::{
-        Json, Router, extract::State, http::StatusCode, routing::post,
-    };
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 
     let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
@@ -9817,10 +9811,11 @@ async fn start_client_credentials_auth_server() -> (
             "/token",
             post(
                 |State(state): State<
-                    std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+                    std::sync::Arc<
+                        tokio::sync::Mutex<Option<serde_json::Value>>,
+                    >,
                 >,
-                 Json(body): Json<serde_json::Value>|
-                async move {
+                 Json(body): Json<serde_json::Value>| async move {
                     *state.lock().await = Some(body);
                     let token = serde_json::json!({
                         "access_token": "cc-test-token",
@@ -9898,7 +9893,8 @@ async fn sink_client_credentials_oauth2() {
             .unwrap();
 
     let sink = TestSink::start().await;
-    let (auth_url, captured_body) = start_client_credentials_auth_server().await;
+    let (auth_url, captured_body) =
+        start_client_credentials_auth_server().await;
 
     let auth_env = "AVE_SINK_PASSWORD_CC_SINK";
     unsafe {
@@ -9964,7 +9960,6 @@ async fn sink_client_credentials_oauth2() {
         std::env::remove_var(auth_env);
     }
 }
-
 
 /// Test: `replay_restarts_inflight_catch_up_preserving_order`.
 ///

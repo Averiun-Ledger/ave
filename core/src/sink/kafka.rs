@@ -12,14 +12,16 @@ use tracing::debug;
 
 use ave_common::{DataToSink, IncomingSinkEvent, LightEvent};
 
-use crate::config::{KafkaAcks, KafkaKeyStrategy, KafkaSecurityConfig, KafkaSinkConfig};
+use crate::config::{
+    KafkaAcks, KafkaKeyStrategy, KafkaSecurityConfig, KafkaSinkConfig,
+};
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id, sign_delivery,
-    sink_password_env_var,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id,
+    sign_delivery, sink_password_env_var,
 };
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
@@ -116,14 +118,25 @@ impl KafkaTransport {
             // the rest of the backoff logic.
             .set("retries", "1")
             .set("socket.timeout.ms", config.socket_timeout_ms.to_string())
-            .set("socket.keepalive.enable", config.socket_keepalive.to_string())
-            .set("connections.max.idle.ms", config.connections_max_idle_ms.to_string())
-            .set("metadata.max.age.ms", config.metadata_max_age_ms.to_string())
+            .set(
+                "socket.keepalive.enable",
+                config.socket_keepalive.to_string(),
+            )
+            .set(
+                "connections.max.idle.ms",
+                config.connections_max_idle_ms.to_string(),
+            )
+            .set(
+                "metadata.max.age.ms",
+                config.metadata_max_age_ms.to_string(),
+            )
             // Producer batch tuning (point 12).
             .set("linger.ms", config.linger_ms.to_string())
             .set("batch.size", config.batch_size_bytes.to_string())
-            .set("queue.buffering.max.messages",
-                config.queue_buffering_max_messages.to_string());
+            .set(
+                "queue.buffering.max.messages",
+                config.queue_buffering_max_messages.to_string(),
+            );
 
         let key_template = match &config.key_strategy {
             KafkaKeyStrategy::Template(template) => {
@@ -242,10 +255,8 @@ impl KafkaTransport {
         // Saturate the exponent so a large `max_retries` cannot overflow the
         // shift (debug panic / masked shift in release).
         let exp = (attempt - 1).min(63);
-        let base_delay = self
-            .config
-            .retry_base_delay_ms
-            .saturating_mul(1_u64 << exp);
+        let base_delay =
+            self.config.retry_base_delay_ms.saturating_mul(1_u64 << exp);
         let delay = crate::sink::add_jitter(base_delay);
         delay.min(self.config.retry_max_delay_ms)
     }
@@ -257,7 +268,8 @@ impl KafkaTransport {
         &self,
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
-    ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError> {
+    ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError>
+    {
         sign_delivery(
             self.signer.as_ref(),
             payload,
@@ -271,11 +283,7 @@ impl KafkaTransport {
     /// Derive the Kafka message key from the configured strategy for a
     /// delivery to `subject_id` under `schema_id`. `None` means the message
     /// is sent without a key (round-robin partition).
-    fn compute_key(
-        &self,
-        subject_id: &str,
-        schema_id: &str,
-    ) -> Option<String> {
+    fn compute_key(&self, subject_id: &str, schema_id: &str) -> Option<String> {
         match &self.config.key_strategy {
             KafkaKeyStrategy::SubjectId => Some(subject_id.to_owned()),
             KafkaKeyStrategy::None => None,
@@ -357,9 +365,8 @@ impl KafkaTransport {
                     });
             }
 
-            let mut record = FutureRecord::to(topic)
-                .payload(payload)
-                .headers(headers);
+            let mut record =
+                FutureRecord::to(topic).payload(payload).headers(headers);
             if let Some(key) = key {
                 record = record.key(key);
             }
@@ -376,7 +383,9 @@ impl KafkaTransport {
                 Ok(delivery) => {
                     if transactional {
                         if let Err(e) = self.producer.commit_transaction(
-                            Duration::from_millis(self.config.request_timeout_ms),
+                            Duration::from_millis(
+                                self.config.request_timeout_ms,
+                            ),
                         ) {
                             // The message reached the broker but the commit
                             // failed: abort so the receiver does not see a
@@ -408,7 +417,9 @@ impl KafkaTransport {
                 Err((err, _message)) => {
                     if transactional {
                         let _ = self.producer.abort_transaction(
-                            Duration::from_millis(self.config.request_timeout_ms),
+                            Duration::from_millis(
+                                self.config.request_timeout_ms,
+                            ),
                         );
                     }
                     let e = map_produce_error(err);
@@ -675,11 +686,19 @@ impl SinkTransport for KafkaTransport {
     async fn test(&self) -> Result<(), SinkError> {
         self.health_check().await?;
 
-        let topic = self.topic_template.render_with_event_type("-", "-", "test");
+        let topic =
+            self.topic_template.render_with_event_type("-", "-", "test");
         let request_id = generate_request_id();
         let (key, payload, headers) = build_test_delivery(&request_id)?;
-        self.produce(&topic, Some(&key), &payload, None, Some(headers), &request_id)
-            .await
+        self.produce(
+            &topic,
+            Some(&key),
+            &payload,
+            None,
+            Some(headers),
+            &request_id,
+        )
+        .await
     }
 
     async fn warm_up(&self) -> Result<(), SinkError> {
