@@ -11,7 +11,7 @@
 //! Anything in this module is part of the public sink contract — adding a new
 //! transport means reusing these names and helpers, not redefining them.
 
-use ave_common::IncomingSinkEvent;
+use ave_common::{DataToSink, IncomingSinkEvent, LightEvent, SinkTypes};
 
 use crate::sink::SinkError;
 use crate::sink::transport::NodeSigner;
@@ -62,6 +62,32 @@ pub struct DeliveryMeta {
     pub event_type: String,
 }
 
+impl DeliveryMeta {
+    /// Build the delivery metadata of a full event.
+    pub fn from_data(data: &DataToSink) -> Self {
+        Self {
+            subject_id: data.payload.get_subject_schema().0,
+            sn: crate::sink::extract_sn(data),
+            event_type: SinkTypes::from(data).as_str().to_owned(),
+        }
+    }
+
+    /// Build the delivery metadata of a light event.
+    pub fn from_light(light: &LightEvent) -> Self {
+        Self {
+            subject_id: light.subject_id.clone(),
+            sn: light.sn,
+            event_type: light.event_type.as_str().to_owned(),
+        }
+    }
+
+    /// Idempotency key of the delivery: `<subject_id>-<sn>` (the value of
+    /// the [`IDEMPOTENCY_KEY_HEADER`] header).
+    pub fn idempotency_key(&self) -> String {
+        format!("{}-{}", self.subject_id, self.sn)
+    }
+}
+
 /// Signature headers for one delivery, computed once per logical event and
 /// reused across retries of the same body.
 #[derive(Debug, Clone)]
@@ -107,10 +133,7 @@ pub fn canonical_payload(
         headers.push((*name, (*value).to_owned()));
     }
     if let Some(meta) = meta {
-        headers.push((
-            IDEMPOTENCY_KEY_HEADER,
-            format!("{}-{}", meta.subject_id, meta.sn),
-        ));
+        headers.push((IDEMPOTENCY_KEY_HEADER, meta.idempotency_key()));
         headers.push((EVENT_TYPE_HEADER, meta.event_type.clone()));
         headers.push((SN_HEADER, meta.sn.to_string()));
         headers.push((SUBJECT_ID_HEADER, meta.subject_id.clone()));
@@ -164,12 +187,61 @@ pub fn sink_password_env_var(sink_name: &str) -> String {
     sink_secret_env_var("AVE_SINK_PASSWORD_", sink_name)
 }
 
+/// Format the environment variable name for a sink's API key.
+/// Format: `AVE_SINK_APIKEY_{{SERVER_UPPER}}`.
+pub fn sink_apikey_env_var(sink_name: &str) -> String {
+    sink_secret_env_var("AVE_SINK_APIKEY_", sink_name)
+}
+
+/// Format the environment variable name for a sink's proxy password.
+/// Format: `AVE_SINK_PROXY_PASSWORD_{{SERVER_UPPER}}`.
+pub fn sink_proxy_password_env_var(sink_name: &str) -> String {
+    sink_secret_env_var("AVE_SINK_PROXY_PASSWORD_", sink_name)
+}
+
+/// Load a required secret from an environment variable, failing with a
+/// uniform `ClientBuild` error when it is unset or empty. `purpose` is the
+/// feature that needs the secret (`"SASL"`, `"OAuth2"`, ...).
+pub fn load_required_secret(
+    sink_name: &str,
+    env_var: &str,
+    purpose: &str,
+) -> Result<String, SinkError> {
+    let secret = std::env::var(env_var).unwrap_or_default();
+    if secret.is_empty() {
+        return Err(SinkError::ClientBuild(format!(
+            "{purpose} configured for sink '{sink_name}' but password environment variable {env_var} is not set"
+        )));
+    }
+    Ok(secret)
+}
+
+/// The non-persistent test payload sent by `SinkTransport::test` on every
+/// transport, so receivers can recognize sink checks by content as well as
+/// by the [`TEST_HEADER`] header.
+pub fn test_delivery_payload() -> serde_json::Value {
+    serde_json::json!({"test": true})
+}
+
 /// Whether `name` collides with a header reserved for internal sink use
 /// (case-insensitive comparison against [`SINK_RESERVED_HEADERS`]).
 pub fn is_sink_reserved_header(name: &str) -> bool {
     SINK_RESERVED_HEADERS
         .iter()
         .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+/// Serialize a delivery payload to JSON, mapping a failure to a permanent
+/// (non-retryable) `SinkError::Delivery`. Shared by every transport so the
+/// error contract is identical.
+pub fn serialize_json_payload<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> Result<Vec<u8>, SinkError> {
+    serde_json::to_vec(value).map_err(|e| SinkError::Delivery {
+        message: format!("JSON serialization failed: {e}"),
+        retryable: false,
+        retry_after_ms: None,
+    })
 }
 
 /// Map the result of a single delivery attempt to the result label of the
@@ -185,6 +257,30 @@ pub fn sink_result_label(result: &Result<(), SinkError>) -> &'static str {
         Err(SinkError::Shutdown) => "shutdown",
         Err(_) => "permanent",
     }
+}
+
+/// Run a single delivery attempt recording its duration in the shared
+/// `core_sink_request_duration_seconds` metric, labeled with
+/// [`sink_result_label`]. Every transport times its attempts through this
+/// wrapper so the metric cannot diverge (or be forgotten).
+pub async fn timed_sink_request<F, Fut>(
+    sink_name: &str,
+    attempt: F,
+) -> Result<(), SinkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), SinkError>>,
+{
+    let start = std::time::Instant::now();
+    let result = attempt().await;
+    if let Some(metrics) = crate::metrics::try_core_metrics() {
+        metrics.observe_sink_request_duration(
+            sink_name,
+            sink_result_label(&result),
+            start.elapsed(),
+        );
+    }
+    result
 }
 
 /// Group a batch of events by event type when the transport's address
@@ -213,6 +309,16 @@ pub fn group_events_by_type(
     groups
 }
 
+/// Schema id of the first event of a batch group. Every event of a group
+/// shares the schema (they come from the same subject), so the first one
+/// defines it.
+pub fn batch_group_schema_id(first: &IncomingSinkEvent) -> String {
+    match first {
+        IncomingSinkEvent::Full(data) => data.payload.get_subject_schema().1,
+        IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+    }
+}
+
 fn sink_secret_env_var(prefix: &str, sink_name: &str) -> String {
     format!(
         "{prefix}{}",
@@ -234,6 +340,45 @@ mod tests {
             sn: 42,
             event_type: "create".to_owned(),
         }
+    }
+
+    #[test]
+    fn delivery_meta_constructors_and_idempotency_key() {
+        let data = DataToSink {
+            payload: ave_common::DataToSinkEvent::Create {
+                governance_id: None,
+                subject_id: "subject-9".to_owned(),
+                owner: "owner".to_owned(),
+                schema_id: ave_common::SchemaType::Type("schema".to_owned()),
+                namespace: String::new(),
+                sn: 7,
+                gov_version: 1,
+                state: serde_json::json!({}),
+            },
+            public_key: "pk".to_owned(),
+            event_request_timestamp: 1,
+            event_ledger_timestamp: 2,
+            sink_timestamp: 3,
+        };
+        let meta = DeliveryMeta::from_data(&data);
+        assert_eq!(meta.subject_id, "subject-9");
+        assert_eq!(meta.sn, 7);
+        assert_eq!(meta.event_type, "create");
+        assert_eq!(meta.idempotency_key(), "subject-9-7");
+
+        let light = LightEvent {
+            subject_id: "subject-3".to_owned(),
+            schema_id: "schema".to_owned(),
+            governance_id: None,
+            sn: 5,
+            event_type: SinkTypes::Fact,
+            success: true,
+        };
+        let meta = DeliveryMeta::from_light(&light);
+        assert_eq!(meta.subject_id, "subject-3");
+        assert_eq!(meta.sn, 5);
+        assert_eq!(meta.event_type, "fact");
+        assert_eq!(meta.idempotency_key(), "subject-3-5");
     }
 
     #[test]
@@ -370,6 +515,116 @@ mod tests {
     fn group_events_by_type_empty_batch_produces_no_groups() {
         assert!(group_events_by_type(Vec::new(), false).is_empty());
         assert!(group_events_by_type(Vec::new(), true).is_empty());
+    }
+
+    #[test]
+    fn env_var_helpers_normalize_the_sink_name() {
+        assert_eq!(
+            sink_password_env_var("my-sink.1"),
+            "AVE_SINK_PASSWORD_MY_SINK_1"
+        );
+        assert_eq!(
+            sink_apikey_env_var("my-sink.1"),
+            "AVE_SINK_APIKEY_MY_SINK_1"
+        );
+        assert_eq!(
+            sink_proxy_password_env_var("My Sink"),
+            "AVE_SINK_PROXY_PASSWORD_MY_SINK"
+        );
+    }
+
+    #[test]
+    fn load_required_secret_fails_with_uniform_message_when_unset() {
+        // Guaranteed-unset variable: the success path is covered end-to-end
+        // by the SASL / proxy / OAuth2 integration tests.
+        let env_var = format!("AVE_TEST_UNSET_{:016x}", fastrand::u64(..));
+        let Err(err) = load_required_secret("my-sink", &env_var, "SASL")
+        else {
+            panic!("an unset secret must fail");
+        };
+        let SinkError::ClientBuild(message) = err else {
+            panic!("expected ClientBuild error");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "SASL configured for sink 'my-sink' but password environment variable {env_var} is not set"
+            )
+        );
+    }
+
+    #[test]
+    fn test_delivery_payload_is_the_shared_contract() {
+        assert_eq!(test_delivery_payload(), serde_json::json!({"test": true}));
+    }
+
+    #[test]
+    fn batch_group_schema_id_reads_full_and_light_events() {
+        let data = DataToSink {
+            payload: ave_common::DataToSinkEvent::Create {
+                governance_id: None,
+                subject_id: "subject-9".to_owned(),
+                owner: "owner".to_owned(),
+                schema_id: ave_common::SchemaType::Type("full-schema".to_owned()),
+                namespace: String::new(),
+                sn: 0,
+                gov_version: 1,
+                state: serde_json::json!({}),
+            },
+            public_key: "pk".to_owned(),
+            event_request_timestamp: 1,
+            event_ledger_timestamp: 2,
+            sink_timestamp: 3,
+        };
+        let full = IncomingSinkEvent::Full(std::sync::Arc::new(data));
+        assert_eq!(batch_group_schema_id(&full), "full-schema");
+
+        let light = IncomingSinkEvent::Light(LightEvent {
+            subject_id: "subject-3".to_owned(),
+            schema_id: "light-schema".to_owned(),
+            governance_id: None,
+            sn: 1,
+            event_type: SinkTypes::Fact,
+            success: true,
+        });
+        assert_eq!(batch_group_schema_id(&light), "light-schema");
+    }
+
+    #[tokio::test]
+    async fn timed_sink_request_propagates_the_result_intact() {
+        let ok = timed_sink_request("unit-sink", || async { Ok(()) }).await;
+        assert!(ok.is_ok());
+
+        let err = timed_sink_request("unit-sink", || async {
+            Err(SinkError::Rejected {
+                message: "boom".to_owned(),
+            })
+        })
+        .await;
+        assert!(matches!(err, Err(SinkError::Rejected { .. })));
+    }
+
+    #[test]
+    fn serialize_json_payload_success_and_permanent_error() {        let payload =
+            serialize_json_payload(&serde_json::json!({"a": 1})).expect("payload serializes");
+        assert_eq!(payload, br#"{"a":1}"#.to_vec());
+
+        // Maps with non-string keys cannot be serialized to JSON.
+        let mut invalid = std::collections::HashMap::new();
+        invalid.insert(vec![1_u8, 2], 3_i32);
+        let Err(err) = serialize_json_payload(&invalid) else {
+            panic!("non-string keys must fail to serialize");
+        };
+        assert!(
+            matches!(
+                err,
+                SinkError::Delivery {
+                    retryable: false,
+                    ..
+                }
+            ),
+            "serialization failure must be a permanent delivery error: {err:?}"
+        );
     }
 
     #[test]

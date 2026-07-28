@@ -1,7 +1,7 @@
 //! Kafka delivery logic for a single external sink.
 
 use std::sync::{Arc, atomic::AtomicU64};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rdkafka::ClientConfig;
@@ -20,9 +20,10 @@ use crate::sink::SinkError;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id,
-    group_events_by_type, is_sink_reserved_header, sign_delivery,
-    sink_password_env_var, sink_result_label,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, batch_group_schema_id,
+    generate_request_id, group_events_by_type, is_sink_reserved_header,
+    load_required_secret, serialize_json_payload, sign_delivery,
+    sink_password_env_var, test_delivery_payload, timed_sink_request,
 };
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
@@ -34,12 +35,7 @@ fn build_test_delivery(
     request_id: &str,
 ) -> Result<(String, Vec<u8>, OwnedHeaders), SinkError> {
     let key = format!("__ave-test-{}", request_id);
-    let payload = serde_json::to_vec(&serde_json::json!({"test": true}))
-        .map_err(|e| SinkError::Delivery {
-            message: format!("JSON serialization failed: {e}"),
-            retryable: false,
-            retry_after_ms: None,
-        })?;
+    let payload = serialize_json_payload(&test_delivery_payload())?;
     let headers = OwnedHeaders::new()
         .insert(Header {
             key: TEST_HEADER,
@@ -69,7 +65,7 @@ fn build_headers(meta: &DeliveryMeta, request_id: &str) -> OwnedHeaders {
         })
         .insert(Header {
             key: IDEMPOTENCY_KEY_HEADER,
-            value: Some(&format!("{}-{}", meta.subject_id, meta.sn)),
+            value: Some(&meta.idempotency_key()),
         })
         .insert(Header {
             key: REQUEST_ID_HEADER,
@@ -312,16 +308,6 @@ impl KafkaTransport {
         })
     }
 
-    fn retry_delay(&self, attempt: usize) -> u64 {
-        // Saturate the exponent so a large `max_retries` cannot overflow the
-        // shift (debug panic / masked shift in release).
-        let exp = (attempt - 1).min(63);
-        let base_delay =
-            self.config.retry_base_delay_ms.saturating_mul(1_u64 << exp);
-        let delay = crate::sink::add_jitter(base_delay);
-        delay.min(self.config.retry_max_delay_ms)
-    }
-
     /// Sign the delivery body with the node identity. Uses the shared
     /// canonical payload contract so every transport produces signatures
     /// verifiable against the same byte sequence.
@@ -365,7 +351,12 @@ impl KafkaTransport {
                 if let Some(metrics) = try_core_metrics() {
                     metrics.observe_sink_retry(&self.sink_name);
                 }
-                let delay = self.retry_delay(attempt);
+                let delay = crate::sink::retry_delay_ms(
+                    self.config.retry_base_delay_ms,
+                    self.config.retry_max_delay_ms,
+                    attempt,
+                    None,
+                );
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
 
@@ -382,14 +373,7 @@ impl KafkaTransport {
                 .await
             {
                 Ok(()) => return Ok(()),
-                Err(
-                    e @ (SinkError::Delivery {
-                        retryable: false, ..
-                    }
-                    | SinkError::ClientBuild(_)
-                    | SinkError::Rejected { .. }
-                    | SinkError::Shutdown),
-                ) => {
+                Err(e) if crate::sink::is_permanent_error(&e) => {
                     // Permanent error: no retries.
                     return Err(e);
                 }
@@ -399,11 +383,7 @@ impl KafkaTransport {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| SinkError::Delivery {
-            message: "Max retries exceeded".to_owned(),
-            retryable: false,
-            retry_after_ms: None,
-        }))
+        Err(last_err.unwrap_or_else(crate::sink::max_retries_exceeded_error))
     }
 
     /// One produce attempt with request-duration metrics, so every transport
@@ -420,9 +400,8 @@ impl KafkaTransport {
         signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
         request_id: &str,
     ) -> Result<(), SinkError> {
-        let start = Instant::now();
-        let result = self
-            .produce_attempt(
+        timed_sink_request(&self.sink_name, || {
+            self.produce_attempt(
                 topic,
                 key,
                 payload,
@@ -431,15 +410,8 @@ impl KafkaTransport {
                 signature_headers,
                 request_id,
             )
-            .await;
-        if let Some(metrics) = try_core_metrics() {
-            metrics.observe_sink_request_duration(
-                &self.sink_name,
-                sink_result_label(&result),
-                start.elapsed(),
-            );
-        }
-        result
+        })
+        .await
     }
 
     /// A single produce attempt: optional transaction, one send, optional
@@ -587,24 +559,13 @@ impl KafkaTransport {
         let Some(first) = group.first() else {
             return Ok(None);
         };
-        let schema_id = match first {
-            IncomingSinkEvent::Full(data) => {
-                data.payload.get_subject_schema().1
-            }
-            IncomingSinkEvent::Light(light) => light.schema_id.clone(),
-        };
+        let schema_id = batch_group_schema_id(first);
         let topic = self.topic_template.render_with_event_type(
             first.subject_id(),
             &schema_id,
             event_type,
         );
-        let payload = serde_json::to_vec(group).map_err(|e| {
-            SinkError::Delivery {
-                message: format!("JSON serialization failed: {e}"),
-                retryable: false,
-                retry_after_ms: None,
-            }
-        })?;
+        let payload = serialize_json_payload(group)?;
         let request_id = generate_request_id();
         let key = self.compute_key(first.subject_id(), &schema_id);
         Ok(Some((topic, key, payload, request_id)))
@@ -638,14 +599,7 @@ impl KafkaTransport {
 
 /// Load the SASL password from the environment, failing if it is not set.
 fn sasl_password(sink_name: &str) -> Result<String, SinkError> {
-    let env_var = sink_password_env_var(sink_name);
-    let password = std::env::var(&env_var).unwrap_or_default();
-    if password.is_empty() {
-        return Err(SinkError::ClientBuild(format!(
-            "SASL configured for sink '{sink_name}' but password environment variable {env_var} is not set"
-        )));
-    }
-    Ok(password)
+    load_required_secret(sink_name, &sink_password_env_var(sink_name), "SASL")
 }
 
 /// Map a produce error to the sink error taxonomy.
@@ -701,20 +655,10 @@ impl SinkTransport for KafkaTransport {
             &schema_id,
             event_type.as_str(),
         );
-        let payload = serde_json::to_vec(data.as_ref()).map_err(|e| {
-            SinkError::Delivery {
-                message: format!("JSON serialization failed: {e}"),
-                retryable: false,
-                retry_after_ms: None,
-            }
-        })?;
+        let payload = serialize_json_payload(data.as_ref())?;
 
         let request_id = generate_request_id();
-        let meta = DeliveryMeta {
-            subject_id: subject_id.clone(),
-            sn: crate::sink::extract_sn(&data),
-            event_type: event_type.as_str().to_owned(),
-        };
+        let meta = DeliveryMeta::from_data(&data);
 
         let key = self.compute_key(&subject_id, &schema_id);
         self.produce(
@@ -734,19 +678,10 @@ impl SinkTransport for KafkaTransport {
             &light.schema_id,
             light.event_type.as_str(),
         );
-        let payload =
-            serde_json::to_vec(&light).map_err(|e| SinkError::Delivery {
-                message: format!("JSON serialization failed: {e}"),
-                retryable: false,
-                retry_after_ms: None,
-            })?;
+        let payload = serialize_json_payload(&light)?;
 
         let request_id = generate_request_id();
-        let meta = DeliveryMeta {
-            subject_id: light.subject_id.clone(),
-            sn: light.sn,
-            event_type: light.event_type.as_str().to_owned(),
-        };
+        let meta = DeliveryMeta::from_light(&light);
 
         let key = self.compute_key(&light.subject_id, &light.schema_id);
         self.produce(

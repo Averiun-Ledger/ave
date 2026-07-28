@@ -66,6 +66,49 @@ pub fn add_jitter(base: u64) -> u64 {
     }
 }
 
+/// Compute the backoff delay for a delivery retry `attempt` (1-based: it is
+/// only called after the first failure). Saturates the exponent so a large
+/// `max_retries` cannot overflow the shift, applies ±25% jitter, honors the
+/// optional server-provided `retry_after_hint` when it exceeds the computed
+/// backoff and caps the result at `max_ms`. Shared by every transport so
+/// the retry policy cannot diverge.
+pub fn retry_delay_ms(
+    base_ms: u64,
+    max_ms: u64,
+    attempt: usize,
+    retry_after_hint: Option<u64>,
+) -> u64 {
+    let exp = attempt.saturating_sub(1).min(63);
+    let base_delay = base_ms.saturating_mul(1_u64 << exp);
+    let mut delay = add_jitter(base_delay);
+    if let Some(hint) = retry_after_hint {
+        delay = delay.max(hint);
+    }
+    delay.min(max_ms)
+}
+
+/// Whether a delivery error is permanent and must not be retried.
+pub const fn is_permanent_error(err: &SinkError) -> bool {
+    matches!(
+        err,
+        SinkError::Delivery {
+            retryable: false,
+            ..
+        } | SinkError::ClientBuild(_)
+            | SinkError::Rejected { .. }
+            | SinkError::Shutdown
+    )
+}
+
+/// The terminal error returned when every retry attempt failed.
+pub fn max_retries_exceeded_error() -> SinkError {
+    SinkError::Delivery {
+        message: "Max retries exceeded".to_owned(),
+        retryable: false,
+        retry_after_ms: None,
+    }
+}
+
 /// Extract the sequence number from a `DataToSink` event.
 pub const fn extract_sn(data: &DataToSink) -> u64 {
     match &data.payload {
@@ -205,6 +248,54 @@ mod tests {
                 "jittered value {jittered} outside [750, 1250]"
             );
         }
+    }
+
+    #[test]
+    fn retry_delay_ms_caps_at_max_and_honors_hint() {
+        // Backoff grows with the attempt but never exceeds max_ms.
+        for attempt in 1..10 {
+            let delay = retry_delay_ms(500, 1_000, attempt, None);
+            assert!(delay <= 1_000, "delay {delay} must be capped at max_ms");
+        }
+        // A hint above the backoff wins, but is still capped at max_ms.
+        assert_eq!(retry_delay_ms(100, 30_000, 1, Some(5_000)), 5_000);
+        assert_eq!(retry_delay_ms(100, 10_000, 1, Some(60_000)), 10_000);
+    }
+
+    #[test]
+    fn retry_delay_ms_saturates_the_exponent() {
+        // A huge attempt count must not overflow the shift nor panic; the
+        // result is always capped at max_ms.
+        let delay = retry_delay_ms(u64::MAX / 2, 30_000, usize::MAX, None);
+        assert_eq!(delay, 30_000);
+    }
+
+    #[test]
+    fn is_permanent_error_covers_the_taxonomy() {
+        assert!(is_permanent_error(&SinkError::Delivery {
+            message: String::new(),
+            retryable: false,
+            retry_after_ms: None,
+        }));
+        assert!(is_permanent_error(&SinkError::ClientBuild(String::new())));
+        assert!(is_permanent_error(&SinkError::Rejected {
+            message: String::new(),
+        }));
+        assert!(is_permanent_error(&SinkError::Shutdown));
+        assert!(!is_permanent_error(&SinkError::Delivery {
+            message: String::new(),
+            retryable: true,
+            retry_after_ms: None,
+        }));
+        assert!(!is_permanent_error(&SinkError::Auth {
+            message: String::new(),
+            retry_after_ms: None,
+        }));
+    }
+
+    #[test]
+    fn max_retries_exceeded_error_is_permanent() {
+        assert!(is_permanent_error(&max_retries_exceeded_error()));
     }
 
     #[test]

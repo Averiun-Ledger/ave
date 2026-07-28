@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -27,47 +27,17 @@ use crate::sink::SinkError;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id,
-    group_events_by_type, sign_delivery, sink_password_env_var,
-    sink_result_label,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, batch_group_schema_id,
+    generate_request_id, group_events_by_type, is_sink_reserved_header,
+    load_required_secret, serialize_json_payload, sign_delivery,
+    sink_apikey_env_var, sink_password_env_var, sink_proxy_password_env_var,
+    test_delivery_payload, timed_sink_request,
 };
-use crate::sink::extract_sn;
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
 use ave_common::{
     DataToSink, IncomingSinkEvent, LightEvent, SinkTypes, sink::SinkAuthConfig,
 };
-
-/// Build the environment variable name for a sink's API key.
-/// Format: `AVE_SINK_APIKEY_{{SERVER_UPPER}}` where non-alphanumeric
-/// chars are replaced by `_`.
-pub fn sink_apikey_env_var(sink_name: &str) -> String {
-    sink_secret_env_var("AVE_SINK_APIKEY_", sink_name)
-}
-
-/// Build the environment variable name for a sink's proxy password.
-/// Format: `AVE_SINK_PROXY_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
-/// chars are replaced by `_`.
-pub fn sink_proxy_password_env_var(sink_name: &str) -> String {
-    sink_secret_env_var("AVE_SINK_PROXY_PASSWORD_", sink_name)
-}
-
-/// Build the environment variable name for a sink secret with the given
-/// prefix, normalizing the sink name to upper-case with non-alphanumeric
-/// chars replaced by `_`.
-fn sink_secret_env_var(prefix: &str, sink_name: &str) -> String {
-    let normalized: String = sink_name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("{}{}", prefix, normalized)
-}
 
 /// TLS certificate pinning verifier. Pinning **replaces** normal CA / WebPKI
 /// verification: the operator explicitly trusts this exact certificate, so
@@ -386,14 +356,11 @@ async fn build_http_client(
             })?;
 
         if !proxy_config.username.is_empty() {
-            let env_var = sink_proxy_password_env_var(sink_name);
-            let password = std::env::var(&env_var).unwrap_or_default();
-            if password.is_empty() {
-                return Err(SinkError::ClientBuild(format!(
-                    "proxy authentication configured for sink '{}' but password environment variable {} is not set",
-                    sink_name, env_var
-                )));
-            }
+            let password = load_required_secret(
+                sink_name,
+                &sink_proxy_password_env_var(sink_name),
+                "proxy authentication",
+            )?;
             proxy = proxy.basic_auth(&proxy_config.username, &password);
         }
 
@@ -432,49 +399,23 @@ async fn read_tls_file(
     })
 }
 
-/// Headers controlled by the sink itself. Custom values for these names are
-/// ignored because they would break the delivery contract or create duplicate
-/// headers on the wire. The comparison is case-insensitive.
-const RESERVED_HEADERS: &[&str] = &[
-    "content-type",
-    "content-encoding",
-    "authorization",
-    SIGNATURE_HEADER,
-    SIGNATURE_TIMESTAMP_HEADER,
-    SIGNATURE_PUBLIC_KEY_HEADER,
-    SUBJECT_ID_HEADER,
-    SN_HEADER,
-    EVENT_TYPE_HEADER,
-    IDEMPOTENCY_KEY_HEADER,
-    REQUEST_ID_HEADER,
-    TEST_HEADER,
-];
+/// Headers managed by the HTTP sink itself, on top of the shared contract
+/// list (`SINK_RESERVED_HEADERS` in `delivery.rs`): body encoding and auth
+/// are set per request, so custom values for them are rejected too.
+const HTTP_RESERVED_HEADERS: &[&str] =
+    &["content-type", "content-encoding", "authorization"];
 
-/// Headers that must never be sent on a health check GET because they describe
-/// a delivery payload that does not exist or would duplicate internally-set
-/// headers. Unlike [`RESERVED_HEADERS`], this list is smaller: it keeps generic
-/// custom headers but explicitly drops any header tied to body encoding,
-/// per-event metadata or internal request tracking.
-const HEALTHCHECK_EXCLUDED_HEADERS: &[&str] = &[
-    "content-type",
-    "content-encoding",
-    "authorization",
-    SUBJECT_ID_HEADER,
-    SN_HEADER,
-    EVENT_TYPE_HEADER,
-    IDEMPOTENCY_KEY_HEADER,
-    REQUEST_ID_HEADER,
-    SIGNATURE_HEADER,
-    SIGNATURE_TIMESTAMP_HEADER,
-    SIGNATURE_PUBLIC_KEY_HEADER,
-    TEST_HEADER,
-];
-
-/// Whether `name` collides with a header reserved for internal sink use.
+/// Whether `name` collides with a header reserved for internal sink use:
+/// the shared contract headers plus the HTTP-specific ones above. Custom
+/// values for these names are ignored because they would break the delivery
+/// contract or create duplicate headers on the wire. Used for deliveries and
+/// health checks alike: a GET has no body and no event context, so the same
+/// contract applies. The comparison is case-insensitive.
 fn is_reserved_header(name: &str) -> bool {
-    RESERVED_HEADERS
-        .iter()
-        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+    is_sink_reserved_header(name)
+        || HTTP_RESERVED_HEADERS
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 /// Whether the authentication configuration has all required OAuth2 fields
@@ -514,7 +455,7 @@ impl HttpTransport {
     ) -> Result<Self, SinkError> {
         let client = build_http_client(&sink_name, &config).await?;
 
-        let password = std::env::var(sink_password_env_var(&sink_name))
+        let mut password = std::env::var(sink_password_env_var(&sink_name))
             .unwrap_or_default();
         let api_key = std::env::var(sink_apikey_env_var(&sink_name))
             .ok()
@@ -533,13 +474,11 @@ impl HttpTransport {
         if let Some(auth) = &config.auth {
             if oauth2_credentials_ready(auth) {
                 // If OAuth2 is configured, the password environment variable must exist.
-                if password.is_empty() {
-                    return Err(SinkError::ClientBuild(format!(
-                        "OAuth2 configured for sink '{}' but password environment variable {} is not set",
-                        sink_name,
-                        sink_password_env_var(&sink_name)
-                    )));
-                }
+                password = load_required_secret(
+                    &sink_name,
+                    &sink_password_env_var(&sink_name),
+                    "OAuth2",
+                )?;
             } else if api_key.is_empty() {
                 return Err(SinkError::ClientBuild(format!(
                     "API key authentication configured for sink '{}' but neither 'api_key' nor environment variable {} is set",
@@ -611,22 +550,14 @@ impl HttpTransport {
                 if let Some(metrics) = try_core_metrics() {
                     metrics.observe_sink_retry(sink_name);
                 }
-                // Saturate the exponent so a large `max_retries` cannot
-                // overflow the shift (debug panic / masked shift in release).
-                let exp = (attempt - 1).min(63);
-                let base_delay = self
-                    .config
-                    .retry_base_delay_ms
-                    .saturating_mul(1_u64 << exp);
-                let mut delay = crate::sink::add_jitter(base_delay);
-                // Honor the server-provided Retry-After hint when it exceeds
-                // the computed backoff.
-                if let Some(retry_after_ms) =
-                    last_err.as_ref().and_then(retry_after_of)
-                {
-                    delay = delay.max(retry_after_ms);
-                }
-                delay = delay.min(self.config.retry_max_delay_ms);
+                // The server-provided Retry-After hint is honored when it
+                // exceeds the computed backoff.
+                let delay = crate::sink::retry_delay_ms(
+                    self.config.retry_base_delay_ms,
+                    self.config.retry_max_delay_ms,
+                    attempt,
+                    last_err.as_ref().and_then(retry_after_of),
+                );
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
 
@@ -637,14 +568,7 @@ impl HttpTransport {
                 Ok(()) => {
                     return Ok(());
                 }
-                Err(
-                    e @ (SinkError::Delivery {
-                        retryable: false, ..
-                    }
-                    | SinkError::ClientBuild(_)
-                    | SinkError::Rejected { .. }
-                    | SinkError::Shutdown),
-                ) => {
+                Err(e) if crate::sink::is_permanent_error(&e) => {
                     // Permanent error: 422, bad config, etc. No retries.
                     return Err(e);
                 }
@@ -672,11 +596,7 @@ impl HttpTransport {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| SinkError::Delivery {
-            message: "Max retries exceeded".to_owned(),
-            retryable: false,
-            retry_after_ms: None,
-        }))
+        Err(last_err.unwrap_or_else(crate::sink::max_retries_exceeded_error))
     }
 
     async fn timed_send_once(
@@ -686,20 +606,10 @@ impl HttpTransport {
         signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
-        let start = Instant::now();
-        let result =
-            self.send_once(url, payload, signature_headers, meta).await;
-        let duration = start.elapsed();
-
-        if let Some(metrics) = try_core_metrics() {
-            metrics.observe_sink_request_duration(
-                &self.sink_name,
-                sink_result_label(&result),
-                duration,
-            );
-        }
-
-        result
+        timed_sink_request(&self.sink_name, || {
+            self.send_once(url, payload, signature_headers, meta)
+        })
+        .await
     }
 
     fn apply_custom_headers(
@@ -727,10 +637,7 @@ impl HttpTransport {
         for (name, value) in &self.config.headers {
             // A GET health check has no body and no event context; do not let
             // custom headers pretend otherwise.
-            if HEALTHCHECK_EXCLUDED_HEADERS
-                .iter()
-                .any(|excluded| name.eq_ignore_ascii_case(excluded))
-            {
+            if is_reserved_header(name) {
                 continue;
             }
             request = request.header(name, value);
@@ -769,10 +676,7 @@ impl HttpTransport {
                 .header(SUBJECT_ID_HEADER, &meta.subject_id)
                 .header(SN_HEADER, meta.sn.to_string())
                 .header(EVENT_TYPE_HEADER, meta.event_type.as_str())
-                .header(
-                    IDEMPOTENCY_KEY_HEADER,
-                    format!("{}-{}", meta.subject_id, meta.sn),
-                );
+                .header(IDEMPOTENCY_KEY_HEADER, meta.idempotency_key());
         }
 
         if let Some(encoding) = self.config.compression.content_encoding() {
@@ -880,20 +784,37 @@ impl HttpTransport {
         })
     }
 
+    /// Prepare one batch group for delivery: rendered URL and encoded JSON
+    /// array payload. Returns `None` for an empty group (groups are never
+    /// empty by construction, but the caller continues instead of failing
+    /// the whole batch).
+    async fn prepare_group(
+        &self,
+        event_type: &str,
+        group: &[IncomingSinkEvent],
+    ) -> Result<Option<(String, Vec<u8>)>, SinkError> {
+        let Some(first) = group.first() else {
+            return Ok(None);
+        };
+        let schema_id = batch_group_schema_id(first);
+        let url = self.url_template.render_url_encoded_with_event_type(
+            first.subject_id(),
+            &schema_id,
+            event_type,
+        );
+        let payload = self.encode_body(group).await?;
+        Ok(Some((url, payload)))
+    }
+
     /// Serialize and, when configured, compress the delivery body.
     /// Signing happens on the encoded bytes (the exact wire payload).
     /// Compression runs in `spawn_blocking` because `GzEncoder` is CPU-bound
     /// and batches can be large.
-    async fn encode_body<T: serde::Serialize + Sync>(
+    async fn encode_body<T: serde::Serialize + Sync + ?Sized>(
         &self,
         body: &T,
     ) -> Result<Vec<u8>, SinkError> {
-        let raw =
-            serde_json::to_vec(body).map_err(|e| SinkError::Delivery {
-                message: format!("JSON serialization failed: {}", e),
-                retryable: false,
-                retry_after_ms: None,
-            })?;
+        let raw = serialize_json_payload(body)?;
 
         if matches!(self.config.compression, HttpCompression::None) {
             return Ok(raw);
@@ -931,11 +852,7 @@ impl SinkTransport for HttpTransport {
             event_type.as_str(),
         );
         let payload = self.encode_body(data.as_ref()).await?;
-        let meta = DeliveryMeta {
-            subject_id,
-            sn: extract_sn(&data),
-            event_type: event_type.as_str().to_owned(),
-        };
+        let meta = DeliveryMeta::from_data(&data);
 
         self.send_with_retry(&url, payload, Some(&meta)).await
     }
@@ -947,11 +864,7 @@ impl SinkTransport for HttpTransport {
             light.event_type.as_str(),
         );
         let payload = self.encode_body(&light).await?;
-        let meta = DeliveryMeta {
-            subject_id: light.subject_id.clone(),
-            sn: light.sn,
-            event_type: light.event_type.as_str().to_owned(),
-        };
+        let meta = DeliveryMeta::from_light(&light);
 
         self.send_with_retry(&url, payload, Some(&meta)).await
     }
@@ -1045,8 +958,7 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded_with_event_type("-", "-", "test");
-        let payload =
-            self.encode_body(&serde_json::json!({"test": true})).await?;
+        let payload = self.encode_body(&test_delivery_payload()).await?;
         let request_id = generate_request_id();
 
         let mut request = self.client.post(&url).body(payload.clone());
@@ -1136,21 +1048,11 @@ impl SinkTransport for HttpTransport {
         for (event_type, group) in
             group_events_by_type(events, self.url_template.has_event_type())
         {
-            let Some(first) = group.first() else {
+            let Some((url, payload)) =
+                self.prepare_group(&event_type, &group).await?
+            else {
                 continue;
             };
-            let schema_id = match first {
-                IncomingSinkEvent::Full(data) => {
-                    data.payload.get_subject_schema().1
-                }
-                IncomingSinkEvent::Light(light) => light.schema_id.clone(),
-            };
-            let url = self.url_template.render_url_encoded_with_event_type(
-                first.subject_id(),
-                &schema_id,
-                &event_type,
-            );
-            let payload = self.encode_body(&group).await?;
 
             self.send_with_retry(&url, payload, None).await?;
         }
@@ -1169,21 +1071,11 @@ impl SinkTransport for HttpTransport {
         for (event_type, group) in
             group_events_by_type(events, self.url_template.has_event_type())
         {
-            let Some(first) = group.first() else {
+            let Some((url, payload)) =
+                self.prepare_group(&event_type, &group).await?
+            else {
                 continue;
             };
-            let schema_id = match first {
-                IncomingSinkEvent::Full(data) => {
-                    data.payload.get_subject_schema().1
-                }
-                IncomingSinkEvent::Light(light) => light.schema_id.clone(),
-            };
-            let url = self.url_template.render_url_encoded_with_event_type(
-                first.subject_id(),
-                &schema_id,
-                &event_type,
-            );
-            let payload = self.encode_body(&group).await?;
             let signature_headers = self.sign_payload(&payload, None).await?;
             self.timed_send_once(&url, &payload, &signature_headers, None)
                 .await?;
@@ -1795,6 +1687,25 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                 .and_then(|v| v.to_str().ok()),
             Some("custom-value")
         );
+    }
+
+    #[test]
+    fn reserved_headers_compose_contract_and_http_specific() {
+        // Shared contract headers (from delivery.rs).
+        for name in ["x-ave-sn", "X-Ave-Signature", "Idempotency-Key"] {
+            assert!(is_reserved_header(name), "{name} must be reserved");
+        }
+        // HTTP-specific extras.
+        for name in ["content-type", "Content-Encoding", "Authorization"] {
+            assert!(is_reserved_header(name), "{name} must be reserved");
+        }
+        // Regular custom headers pass through.
+        for name in ["x-custom-tenant", "x-ave", "traceparent"] {
+            assert!(
+                !is_reserved_header(name),
+                "{name} must not be reserved"
+            );
+        }
     }
 
     /// Parse a raw HTTP request buffer into a map of lowercase header names to
