@@ -11,6 +11,8 @@
 //! Anything in this module is part of the public sink contract — adding a new
 //! transport means reusing these names and helpers, not redefining them.
 
+use ave_common::IncomingSinkEvent;
+
 use crate::sink::SinkError;
 use crate::sink::transport::NodeSigner;
 
@@ -162,6 +164,55 @@ pub fn sink_password_env_var(sink_name: &str) -> String {
     sink_secret_env_var("AVE_SINK_PASSWORD_", sink_name)
 }
 
+/// Whether `name` collides with a header reserved for internal sink use
+/// (case-insensitive comparison against [`SINK_RESERVED_HEADERS`]).
+pub fn is_sink_reserved_header(name: &str) -> bool {
+    SINK_RESERVED_HEADERS
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+/// Map the result of a single delivery attempt to the result label of the
+/// `core_sink_request_duration_seconds` metric. Shared by every transport so
+/// the label set cannot diverge.
+pub fn sink_result_label(result: &Result<(), SinkError>) -> &'static str {
+    match result {
+        Ok(()) => "success",
+        Err(SinkError::Auth { .. }) => "auth",
+        Err(SinkError::Delivery {
+            retryable: true, ..
+        }) => "transient",
+        Err(SinkError::Shutdown) => "shutdown",
+        Err(_) => "permanent",
+    }
+}
+
+/// Group a batch of events by event type when the transport's address
+/// template routes by type (`{{event-type}}`); otherwise a single group
+/// carries the whole batch. Group order follows first appearance so a
+/// homogeneous batch produces one message, and the relative order inside
+/// each group is preserved.
+pub fn group_events_by_type(
+    events: Vec<IncomingSinkEvent>,
+    route_by_type: bool,
+) -> Vec<(String, Vec<IncomingSinkEvent>)> {
+    let Some(first) = events.first() else {
+        return Vec::new();
+    };
+    if !route_by_type {
+        return vec![(first.event_type().as_str().to_owned(), events)];
+    }
+    let mut groups: Vec<(String, Vec<IncomingSinkEvent>)> = Vec::new();
+    for event in events {
+        let event_type = event.event_type().as_str().to_owned();
+        match groups.iter_mut().find(|(t, _)| *t == event_type) {
+            Some((_, group)) => group.push(event),
+            None => groups.push((event_type, vec![event])),
+        }
+    }
+    groups
+}
+
 fn sink_secret_env_var(prefix: &str, sink_name: &str) -> String {
     format!(
         "{prefix}{}",
@@ -250,5 +301,112 @@ mod tests {
              x-extra:1\n\
              y"
         );
+    }
+
+    fn light_event(sn: u64, event_type: ave_common::SinkTypes) -> ave_common::LightEvent {
+        ave_common::LightEvent {
+            subject_id: format!("subject-{sn}"),
+            schema_id: "schema".to_owned(),
+            governance_id: None,
+            sn,
+            event_type,
+            success: true,
+        }
+    }
+
+    #[test]
+    fn is_sink_reserved_header_matches_case_insensitively() {
+        for name in ["x-ave-sn", "X-Ave-SN", "Idempotency-Key", "X-AVE-TEST"] {
+            assert!(is_sink_reserved_header(name), "{name} must be reserved");
+        }
+        for name in ["x-custom", "x-ave", "x-ave-sniper"] {
+            assert!(
+                !is_sink_reserved_header(name),
+                "{name} must not be reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn sink_result_label_covers_the_whole_taxonomy() {
+        assert_eq!(sink_result_label(&Ok(())), "success");
+        assert_eq!(
+            sink_result_label(&Err(SinkError::Auth {
+                message: String::new(),
+                retry_after_ms: None,
+            })),
+            "auth"
+        );
+        assert_eq!(
+            sink_result_label(&Err(SinkError::Delivery {
+                message: String::new(),
+                retryable: true,
+                retry_after_ms: None,
+            })),
+            "transient"
+        );
+        assert_eq!(
+            sink_result_label(&Err(SinkError::Delivery {
+                message: String::new(),
+                retryable: false,
+                retry_after_ms: None,
+            })),
+            "permanent"
+        );
+        assert_eq!(sink_result_label(&Err(SinkError::Shutdown)), "shutdown");
+        assert_eq!(
+            sink_result_label(&Err(SinkError::Rejected {
+                message: String::new(),
+            })),
+            "permanent"
+        );
+        assert_eq!(
+            sink_result_label(&Err(SinkError::ClientBuild(String::new()))),
+            "permanent"
+        );
+    }
+
+    #[test]
+    fn group_events_by_type_empty_batch_produces_no_groups() {
+        assert!(group_events_by_type(Vec::new(), false).is_empty());
+        assert!(group_events_by_type(Vec::new(), true).is_empty());
+    }
+
+    #[test]
+    fn group_events_by_type_without_routing_keeps_single_group() {
+        let events = vec![
+            IncomingSinkEvent::Light(light_event(1, ave_common::SinkTypes::Create)),
+            IncomingSinkEvent::Light(light_event(2, ave_common::SinkTypes::Fact)),
+        ];
+        let groups = group_events_by_type(events, false);
+        assert_eq!(groups.len(), 1);
+        // The group carries the type of the first event and the whole batch.
+        assert_eq!(groups[0].0, "create");
+        assert_eq!(groups[0].1.len(), 2);
+    }
+
+    #[test]
+    fn group_events_by_type_routes_preserving_order() {
+        let events = vec![
+            IncomingSinkEvent::Light(light_event(1, ave_common::SinkTypes::Fact)),
+            IncomingSinkEvent::Light(light_event(2, ave_common::SinkTypes::Create)),
+            IncomingSinkEvent::Light(light_event(3, ave_common::SinkTypes::Fact)),
+        ];
+        let groups = group_events_by_type(events, true);
+        assert_eq!(groups.len(), 2);
+        // First-appearance order: fact group first, then create.
+        assert_eq!(groups[0].0, "fact");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "create");
+        assert_eq!(groups[1].1.len(), 1);
+        // Relative order inside the group is preserved.
+        let IncomingSinkEvent::Light(first) = &groups[0].1[0] else {
+            panic!("light event expected");
+        };
+        let IncomingSinkEvent::Light(second) = &groups[0].1[1] else {
+            panic!("light event expected");
+        };
+        assert_eq!(first.sn, 1);
+        assert_eq!(second.sn, 3);
     }
 }

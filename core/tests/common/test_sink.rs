@@ -88,6 +88,9 @@ struct TestSinkState {
     content_encodings: Vec<Option<String>>,
     /// All headers received on each `/events` request, in request order.
     headers: Vec<HeaderMap>,
+    /// Path of each `/events` request, in request order (the wildcard route
+    /// `/events/{*rest}` lets tests exercise `{{event-type}}` URL templates).
+    paths: Vec<String>,
     raw_bodies: Vec<Vec<u8>>,
     received_at: Vec<std::time::Instant>,
     /// Number of events accepted per request (1 for individual deliveries,
@@ -250,6 +253,7 @@ impl TestSink {
             idempotency_headers: Vec::new(),
             content_encodings: Vec::new(),
             headers: Vec::new(),
+            paths: Vec::new(),
             raw_bodies: Vec::new(),
             received_at: Vec::new(),
             batch_lens: Vec::new(),
@@ -261,6 +265,7 @@ impl TestSink {
     fn app(state: Arc<Mutex<TestSinkState>>) -> Router {
         Router::new()
             .route("/events", post(Self::receive).get(Self::health))
+            .route("/events/{*rest}", post(Self::receive).get(Self::health))
             .route("/auth/token", post(Self::auth))
             .with_state(state)
     }
@@ -597,8 +602,15 @@ impl TestSink {
         self.state.lock().await.batch_lens.clone()
     }
 
+    /// Path of each request received, in request order.
+    #[allow(dead_code)]
+    pub async fn paths(&self) -> Vec<String> {
+        self.state.lock().await.paths.clone()
+    }
+
     async fn receive(
         State(state): State<Arc<Mutex<TestSinkState>>>,
+        uri: axum::http::Uri,
         headers: HeaderMap,
         body: axum::body::Bytes,
     ) -> Response {
@@ -664,6 +676,7 @@ impl TestSink {
         guard.idempotency_headers.push(idempotency_headers);
         guard.content_encodings.push(content_encoding);
         guard.headers.push(headers);
+        guard.paths.push(uri.path().to_owned());
         guard.raw_bodies.push(body.to_vec());
         guard.received_at.push(std::time::Instant::now());
 

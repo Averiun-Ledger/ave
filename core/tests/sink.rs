@@ -234,6 +234,179 @@ async fn sink_custom_headers_are_delivered_and_internal_headers_override() {
 
 #[traced_test]
 #[tokio::test]
+async fn sink_event_type_url_template_routes_by_type() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "example-sink",
+            format!("{}/{{{{event-type}}}}", sink.url()),
+            Some(governance_id.to_string()),
+            // Filtered to Create: facts arrive as lightweight events, so the
+            // test exercises the `{{event-type}}` routing of both `send`
+            // (full create) and `send_light` (light fact).
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+    let governance_id_str = governance_id.to_string();
+    emit_fact(&node.api, subject_id, json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+
+    sink.wait_for_count(2, true).await;
+
+    // Deliveries are ordered per subject: create (sn 0) before fact (sn 1).
+    assert_eq!(sink.paths().await, vec!["/events/create", "/events/fact"]);
+
+    // The create arrived as a full event and the fact as a light one.
+    let events = sink.snapshot().await;
+    assert_sink_contains_create(&events, &subject_id_str, 0);
+    assert_sink_contains_light_fact(
+        &events,
+        &subject_id_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_event_type_url_groups_by_type() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "example-sink",
+            format!("{}/{{{{event-type}}}}", sink.url()),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(3, true).await;
+
+    // Every POST went to the route of its event type; the exact flush split
+    // depends on batch timing, so only the routing is asserted.
+    let paths = sink.paths().await;
+    assert!(
+        paths
+            .iter()
+            .all(|p| p == "/events/create" || p == "/events/fact"),
+        "unexpected request paths: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().filter(|p| *p == "/events/create").count(),
+        1,
+        "the create event must be delivered exactly once: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "/events/fact"),
+        "fact events must reach the fact route: {paths:?}"
+    );
+    let lens = sink.batch_lens().await;
+    assert_eq!(
+        lens.iter().sum::<usize>(),
+        3,
+        "all three events must be accepted: {lens:?}"
+    );
+}
+
+
+#[traced_test]
+#[tokio::test]
 async fn sink_last_error_is_reported_after_delivery_failure() {
     let sink = TestSink::start().await;
 

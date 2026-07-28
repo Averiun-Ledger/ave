@@ -940,7 +940,8 @@ impl From<ave_bridge::ave_common::sink::HttpCompression>
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 #[serde(default)]
 pub struct HttpSinkConfigHttp {
-    /// URL endpoint for the sink
+    /// URL endpoint template; supports the `{{schema-id}}`, `{{subject-id}}`
+    /// and `{{event-type}}` placeholders.
     pub url: String,
     /// Per-sink authentication configuration
     pub auth: Option<SinkAuthConfigHttp>,
@@ -1221,6 +1222,10 @@ pub struct KafkaSinkConfigHttp {
     /// Interval in milliseconds between librdkafka producer statistics
     /// reports, used to expose producer metrics. `0` disables them.
     pub statistics_interval_ms: u64,
+    /// Custom static headers added to every delivered message.
+    /// Internal sink headers (`x-ave-*`, `idempotency-key`) take precedence.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1365,6 +1370,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     queue_buffering_max_messages: kafka
                         .queue_buffering_max_messages,
                     statistics_interval_ms: kafka.statistics_interval_ms,
+                    headers: kafka.headers,
                 })
             }
         };
@@ -1519,5 +1525,49 @@ mod tests {
         assert_eq!(proxy.url, "http://proxy.example.com:8080");
         assert!(proxy.username.is_empty());
         assert!(proxy.no_proxy.is_empty());
+    }
+
+    /// The Kafka mirror must expose the operator-configured custom static
+    /// headers, carried over from the bridge config like any other tuning
+    /// knob. A missing `headers` key falls back to an empty map.
+    #[test]
+    fn sink_server_kafka_maps_custom_headers() {
+        let server: ave_bridge::SinkServer = serde_json::from_value(json!({
+            "server": "kafka-headers-sink",
+            "transport": {
+                "type": "kafka",
+                "bootstrap_servers": "broker:9092",
+                "topic": "ave-events",
+                "headers": { "x-custom-tenant": "tenant-1" }
+            }
+        }))
+        .expect("sink server should deserialize");
+
+        let SinkTransportConfigHttp::Kafka(kafka) =
+            SinkServerHttp::from(server).transport
+        else {
+            panic!("expected Kafka transport");
+        };
+        assert_eq!(
+            kafka.headers.get("x-custom-tenant").map(String::as_str),
+            Some("tenant-1")
+        );
+
+        let server: ave_bridge::SinkServer = serde_json::from_value(json!({
+            "server": "kafka-no-headers-sink",
+            "transport": {
+                "type": "kafka",
+                "bootstrap_servers": "broker:9092",
+                "topic": "ave-events"
+            }
+        }))
+        .expect("sink server without headers should deserialize");
+
+        let SinkTransportConfigHttp::Kafka(kafka) =
+            SinkServerHttp::from(server).transport
+        else {
+            panic!("expected Kafka transport");
+        };
+        assert!(kafka.headers.is_empty());
     }
 }

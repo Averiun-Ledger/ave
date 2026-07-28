@@ -1284,6 +1284,9 @@ impl HttpCompression {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(default)]
 pub struct HttpSinkConfig {
+    /// URL endpoint template; supports the `{{schema-id}}`, `{{subject-id}}`
+    /// and `{{event-type}}` placeholders (values are percent-encoded as URL
+    /// path segments).
     pub url: String,
     /// Per-sink authentication. When `Some`, the worker will load the
     /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
@@ -1774,6 +1777,11 @@ pub struct KafkaSinkConfig {
     /// Interval in milliseconds between librdkafka producer statistics
     /// reports, used to expose producer metrics. `0` disables them.
     pub statistics_interval_ms: u64,
+    /// Custom static headers added to every delivered message. Headers that
+    /// collide with the sink's own headers (`x-ave-*`, `idempotency-key`)
+    /// are ignored so the delivery contract is never broken.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 impl Default for KafkaSinkConfig {
@@ -1805,6 +1813,7 @@ impl Default for KafkaSinkConfig {
             batch_size_bytes: 1_000_000,
             queue_buffering_max_messages: 100_000,
             statistics_interval_ms: 1_000,
+            headers: HashMap::new(),
         }
     }
 }

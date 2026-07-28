@@ -1,7 +1,7 @@
 //! Kafka delivery logic for a single external sink.
 
 use std::sync::{Arc, atomic::AtomicU64};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rdkafka::ClientConfig;
@@ -21,7 +21,8 @@ use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
     SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id,
-    sign_delivery, sink_password_env_var,
+    group_events_by_type, is_sink_reserved_header, sign_delivery,
+    sink_password_env_var, sink_result_label,
 };
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
@@ -96,15 +97,50 @@ impl rdkafka::ClientContext for KafkaStatsContext {
     }
 }
 
+/// Key strategy resolved once at construction: the `Template` variant holds
+/// the already-compiled template, so `compute_key` cannot hit an
+/// uncompiled-template invariant.
+enum ResolvedKeyStrategy {
+    SubjectId,
+    None,
+    Static(String),
+    Template(CompiledTemplate),
+}
+
+impl ResolvedKeyStrategy {
+    fn from_config(strategy: &KafkaKeyStrategy) -> Self {
+        match strategy {
+            KafkaKeyStrategy::SubjectId => Self::SubjectId,
+            KafkaKeyStrategy::None => Self::None,
+            KafkaKeyStrategy::Static(value) => Self::Static(value.clone()),
+            KafkaKeyStrategy::Template(template) => {
+                Self::Template(CompiledTemplate::new(template))
+            }
+        }
+    }
+
+    /// Derive the Kafka message key for a delivery to `subject_id` under
+    /// `schema_id`. `None` means the message is sent without a key
+    /// (round-robin partition).
+    fn compute_key(&self, subject_id: &str, schema_id: &str) -> Option<String> {
+        match self {
+            Self::SubjectId => Some(subject_id.to_owned()),
+            Self::None => None,
+            Self::Static(value) => Some(value.clone()),
+            Self::Template(template) => {
+                Some(template.render(subject_id, schema_id))
+            }
+        }
+    }
+}
+
 /// Kafka transport for a single sink server.
 pub struct KafkaTransport {
     sink_name: String,
     config: KafkaSinkConfig,
     producer: FutureProducer<KafkaStatsContext>,
     topic_template: CompiledTemplate,
-    /// Compiled template for the `Template` key strategy. `None` for every
-    /// other strategy.
-    key_template: Option<CompiledTemplate>,
+    key_strategy: ResolvedKeyStrategy,
     /// Node identity signer; required when `config.signature` is enabled.
     signer: Option<NodeSigner>,
 }
@@ -163,12 +199,7 @@ impl KafkaTransport {
                 config.statistics_interval_ms.to_string(),
             );
 
-        let key_template = match &config.key_strategy {
-            KafkaKeyStrategy::Template(template) => {
-                Some(CompiledTemplate::new(template))
-            }
-            _ => None,
-        };
+        let key_strategy = ResolvedKeyStrategy::from_config(&config.key_strategy);
 
         // Point 11: transactional producer requires a non-empty
         // `transactional.id` so Kafka can fence zombie producers.
@@ -274,7 +305,7 @@ impl KafkaTransport {
         Ok(Self {
             sink_name,
             topic_template: CompiledTemplate::new(&config.topic),
-            key_template,
+            key_strategy,
             producer,
             config,
             signer,
@@ -314,17 +345,7 @@ impl KafkaTransport {
     /// delivery to `subject_id` under `schema_id`. `None` means the message
     /// is sent without a key (round-robin partition).
     fn compute_key(&self, subject_id: &str, schema_id: &str) -> Option<String> {
-        match &self.config.key_strategy {
-            KafkaKeyStrategy::SubjectId => Some(subject_id.to_owned()),
-            KafkaKeyStrategy::None => None,
-            KafkaKeyStrategy::Static(value) => Some(value.clone()),
-            KafkaKeyStrategy::Template(_) => Some(
-                self.key_template
-                    .as_ref()
-                    .expect("key template compiled for Template strategy")
-                    .render(subject_id, schema_id),
-            ),
-        }
+        self.key_strategy.compute_key(subject_id, schema_id)
     }
 
     async fn produce(
@@ -348,125 +369,32 @@ impl KafkaTransport {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
 
-            // Each attempt is a fresh transaction: a retryable failure
-            // aborts the previous one and starts over. Aborting ignores the
-            // result intentionally: the producer may already be in a fatal
-            // state, and the next begin_transaction would surface that.
-            let transactional = self.config.transactional;
-            if transactional {
-                if let Err(e) = self.producer.begin_transaction() {
-                    last_err = Some(SinkError::Delivery {
-                        message: format!("begin transaction: {e}"),
-                        retryable: true,
-                        retry_after_ms: None,
-                    });
-                    continue;
-                }
-            }
-
-            // `FutureRecord::headers` replaces the whole header set, so all
-            // headers (meta, additional and signature) are composed into a
-            // single `OwnedHeaders` before attaching them.
-            let mut headers = match meta {
-                Some(meta) => build_headers(meta, request_id),
-                None => OwnedHeaders::new(),
-            };
-            if let Some(extra) = &additional_headers {
-                for header in extra.as_borrowed().iter() {
-                    headers = headers.insert(Header {
-                        key: header.key,
-                        value: header.value,
-                    });
-                }
-            }
-            if let Some(sig) = &signature_headers {
-                headers = headers
-                    .insert(Header {
-                        key: SIGNATURE_HEADER,
-                        value: Some(&sig.signature),
-                    })
-                    .insert(Header {
-                        key: SIGNATURE_TIMESTAMP_HEADER,
-                        value: Some(&sig.timestamp),
-                    })
-                    .insert(Header {
-                        key: SIGNATURE_PUBLIC_KEY_HEADER,
-                        value: Some(&sig.public_key),
-                    });
-            }
-
-            let mut record =
-                FutureRecord::to(topic).payload(payload).headers(headers);
-            if let Some(key) = key {
-                record = record.key(key);
-            }
-
-            let send_result = self
-                .producer
-                .send(
-                    record,
-                    Duration::from_millis(self.config.request_timeout_ms),
+            match self
+                .produce_once(
+                    topic,
+                    key,
+                    payload,
+                    meta,
+                    additional_headers.clone(),
+                    &signature_headers,
+                    request_id,
                 )
-                .await;
-
-            match send_result {
-                Ok(delivery) => {
-                    if transactional {
-                        if let Err(e) = self.producer.commit_transaction(
-                            Duration::from_millis(
-                                self.config.request_timeout_ms,
-                            ),
-                        ) {
-                            // The message reached the broker but the commit
-                            // failed: abort so the receiver does not see a
-                            // dangling transaction, and retry as a unit.
-                            let _ = self.producer.abort_transaction(
-                                Duration::from_millis(
-                                    self.config.request_timeout_ms,
-                                ),
-                            );
-                            last_err = Some(SinkError::Delivery {
-                                message: format!("commit transaction: {e}"),
-                                retryable: true,
-                                retry_after_ms: None,
-                            });
-                            continue;
-                        }
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(
+                    e @ (SinkError::Delivery {
+                        retryable: false, ..
                     }
-                    debug!(
-                        msg_type = "SinkSend",
-                        sink = %self.sink_name,
-                        topic = %topic,
-                        partition = delivery.partition,
-                        offset = delivery.offset,
-                        request_id = %request_id,
-                        "Sink delivery succeeded"
-                    );
-                    return Ok(());
+                    | SinkError::ClientBuild(_)
+                    | SinkError::Rejected { .. }
+                    | SinkError::Shutdown),
+                ) => {
+                    // Permanent error: no retries.
+                    return Err(e);
                 }
-                Err((err, _message)) => {
-                    if transactional {
-                        let _ = self.producer.abort_transaction(
-                            Duration::from_millis(
-                                self.config.request_timeout_ms,
-                            ),
-                        );
-                    }
-                    let e = map_produce_error(err);
-                    match e {
-                        SinkError::Delivery {
-                            retryable: false, ..
-                        }
-                        | SinkError::ClientBuild(_)
-                        | SinkError::Rejected { .. }
-                        | SinkError::Shutdown => {
-                            // Permanent error: no retries.
-                            return Err(e);
-                        }
-                        _ => {
-                            last_err = Some(e);
-                        }
-                    }
+                Err(e) => {
+                    last_err = Some(e);
                 }
             }
         }
@@ -476,6 +404,210 @@ impl KafkaTransport {
             retryable: false,
             retry_after_ms: None,
         }))
+    }
+
+    /// One produce attempt with request-duration metrics, so every transport
+    /// reports `core_sink_request_duration_seconds` with the same labels.
+    /// Used by `produce` (retry loop) and by best-effort batch delivery.
+    #[allow(clippy::too_many_arguments)]
+    async fn produce_once(
+        &self,
+        topic: &str,
+        key: Option<&str>,
+        payload: &[u8],
+        meta: Option<&DeliveryMeta>,
+        additional_headers: Option<OwnedHeaders>,
+        signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
+        request_id: &str,
+    ) -> Result<(), SinkError> {
+        let start = Instant::now();
+        let result = self
+            .produce_attempt(
+                topic,
+                key,
+                payload,
+                meta,
+                additional_headers,
+                signature_headers,
+                request_id,
+            )
+            .await;
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_sink_request_duration(
+                &self.sink_name,
+                sink_result_label(&result),
+                start.elapsed(),
+            );
+        }
+        result
+    }
+
+    /// A single produce attempt: optional transaction, one send, optional
+    /// commit. Each retry of `produce` is a fresh transaction: a retryable
+    /// failure aborts the previous one and starts over. Aborting ignores the
+    /// result intentionally: the producer may already be in a fatal state,
+    /// and the next begin_transaction would surface that.
+    #[allow(clippy::too_many_arguments)]
+    async fn produce_attempt(
+        &self,
+        topic: &str,
+        key: Option<&str>,
+        payload: &[u8],
+        meta: Option<&DeliveryMeta>,
+        additional_headers: Option<OwnedHeaders>,
+        signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
+        request_id: &str,
+    ) -> Result<(), SinkError> {
+        let transactional = self.config.transactional;
+        if transactional {
+            self.producer.begin_transaction().map_err(|e| {
+                SinkError::Delivery {
+                    message: format!("begin transaction: {e}"),
+                    retryable: true,
+                    retry_after_ms: None,
+                }
+            })?;
+        }
+
+        // `FutureRecord::headers` replaces the whole header set, so all
+        // headers (custom, meta, additional and signature) are composed into
+        // a single `OwnedHeaders` before attaching them. Custom static
+        // headers go first and reserved ones are filtered out, so the
+        // internal contract headers always win.
+        let mut headers = OwnedHeaders::new();
+        for (name, value) in &self.config.headers {
+            if is_sink_reserved_header(name) {
+                continue;
+            }
+            headers = headers.insert(Header {
+                key: name.as_str(),
+                value: Some(value.as_str()),
+            });
+        }
+        if let Some(meta) = meta {
+            for header in build_headers(meta, request_id).as_borrowed().iter()
+            {
+                headers = headers.insert(Header {
+                    key: header.key,
+                    value: header.value,
+                });
+            }
+        }
+        if let Some(extra) = &additional_headers {
+            for header in extra.as_borrowed().iter() {
+                headers = headers.insert(Header {
+                    key: header.key,
+                    value: header.value,
+                });
+            }
+        }
+        if let Some(sig) = signature_headers {
+            headers = headers
+                .insert(Header {
+                    key: SIGNATURE_HEADER,
+                    value: Some(&sig.signature),
+                })
+                .insert(Header {
+                    key: SIGNATURE_TIMESTAMP_HEADER,
+                    value: Some(&sig.timestamp),
+                })
+                .insert(Header {
+                    key: SIGNATURE_PUBLIC_KEY_HEADER,
+                    value: Some(&sig.public_key),
+                });
+        }
+
+        let mut record =
+            FutureRecord::to(topic).payload(payload).headers(headers);
+        if let Some(key) = key {
+            record = record.key(key);
+        }
+
+        let send_result = self
+            .producer
+            .send(
+                record,
+                Duration::from_millis(self.config.request_timeout_ms),
+            )
+            .await;
+
+        match send_result {
+            Ok(delivery) => {
+                if transactional {
+                    if let Err(e) = self.producer.commit_transaction(
+                        Duration::from_millis(self.config.request_timeout_ms),
+                    ) {
+                        // The message reached the broker but the commit
+                        // failed: abort so the receiver does not see a
+                        // dangling transaction, and retry as a unit.
+                        let _ = self.producer.abort_transaction(
+                            Duration::from_millis(
+                                self.config.request_timeout_ms,
+                            ),
+                        );
+                        return Err(SinkError::Delivery {
+                            message: format!("commit transaction: {e}"),
+                            retryable: true,
+                            retry_after_ms: None,
+                        });
+                    }
+                }
+                debug!(
+                    msg_type = "SinkSend",
+                    sink = %self.sink_name,
+                    topic = %topic,
+                    partition = delivery.partition,
+                    offset = delivery.offset,
+                    request_id = %request_id,
+                    "Sink delivery succeeded"
+                );
+                Ok(())
+            }
+            Err((err, _message)) => {
+                if transactional {
+                    let _ = self.producer.abort_transaction(
+                        Duration::from_millis(self.config.request_timeout_ms),
+                    );
+                }
+                Err(map_produce_error(err))
+            }
+        }
+    }
+
+    /// Prepare one batch group for production: topic, message key, JSON
+    /// array payload and request id. Returns `None` for an empty group
+    /// (groups are never empty by construction, but the caller continues
+    /// instead of failing the whole batch).
+    fn prepare_group(
+        &self,
+        event_type: &str,
+        group: &[IncomingSinkEvent],
+    ) -> Result<Option<(String, Option<String>, Vec<u8>, String)>, SinkError>
+    {
+        let Some(first) = group.first() else {
+            return Ok(None);
+        };
+        let schema_id = match first {
+            IncomingSinkEvent::Full(data) => {
+                data.payload.get_subject_schema().1
+            }
+            IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+        };
+        let topic = self.topic_template.render_with_event_type(
+            first.subject_id(),
+            &schema_id,
+            event_type,
+        );
+        let payload = serde_json::to_vec(group).map_err(|e| {
+            SinkError::Delivery {
+                message: format!("JSON serialization failed: {e}"),
+                retryable: false,
+                retry_after_ms: None,
+            }
+        })?;
+        let request_id = generate_request_id();
+        let key = self.compute_key(first.subject_id(), &schema_id);
+        Ok(Some((topic, key, payload, request_id)))
     }
 
     fn fetch_metadata(&self) -> Result<(), SinkError> {
@@ -644,59 +776,52 @@ impl SinkTransport for KafkaTransport {
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        let Some(first_event) = events.first() else {
-            return Ok(());
-        };
-
-        // Group by event type only when the template routes by type;
-        // otherwise one message carries the whole batch. Group order follows
-        // first appearance so a homogeneous batch produces one message.
-        let mut groups: Vec<(String, Vec<IncomingSinkEvent>)> = Vec::new();
-        if self.topic_template.has_event_type() {
-            for event in events {
-                let event_type = event.event_type().as_str().to_owned();
-                match groups.iter_mut().find(|(t, _)| *t == event_type) {
-                    Some((_, group)) => group.push(event),
-                    None => groups.push((event_type, vec![event])),
-                }
-            }
-        } else {
-            let event_type = first_event.event_type().as_str().to_owned();
-            groups.push((event_type, events));
-        }
-
-        for (event_type, group) in groups {
-            // `group` is never empty: it is created with its first element.
-            let Some(first) = group.first() else {
+        for (event_type, group) in
+            group_events_by_type(events, self.topic_template.has_event_type())
+        {
+            let Some((topic, key, payload, request_id)) =
+                self.prepare_group(&event_type, &group)?
+            else {
                 continue;
             };
-            let schema_id = match first {
-                IncomingSinkEvent::Full(data) => {
-                    data.payload.get_subject_schema().1
-                }
-                IncomingSinkEvent::Light(light) => light.schema_id.clone(),
-            };
-            let topic = self.topic_template.render_with_event_type(
-                first.subject_id(),
-                &schema_id,
-                &event_type,
-            );
-            let payload = serde_json::to_vec(&group).map_err(|e| {
-                SinkError::Delivery {
-                    message: format!("JSON serialization failed: {e}"),
-                    retryable: false,
-                    retry_after_ms: None,
-                }
-            })?;
-
-            let request_id = generate_request_id();
-            let key = self.compute_key(first.subject_id(), &schema_id);
             self.produce(
                 &topic,
                 key.as_deref(),
                 &payload,
                 None,
                 None,
+                &request_id,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Best-effort batch delivery: a single produce attempt per group, no
+    /// retries. Used during Pause/Stop teardown where blocking on retries
+    /// would delay actor shutdown; the cursor guarantees re-delivery via
+    /// catch-up.
+    async fn send_batch_best_effort(
+        &self,
+        events: Vec<IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        for (event_type, group) in
+            group_events_by_type(events, self.topic_template.has_event_type())
+        {
+            let Some((topic, key, payload, request_id)) =
+                self.prepare_group(&event_type, &group)?
+            else {
+                continue;
+            };
+            let signature_headers = self.sign_payload(&payload, None).await?;
+            self.produce_once(
+                &topic,
+                key.as_deref(),
+                &payload,
+                None,
+                None,
+                &signature_headers,
                 &request_id,
             )
             .await?;

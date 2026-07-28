@@ -28,7 +28,8 @@ use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
     SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, generate_request_id,
-    sign_delivery, sink_password_env_var,
+    group_events_by_type, sign_delivery, sink_password_env_var,
+    sink_result_label,
 };
 use crate::sink::extract_sn;
 use crate::sink::template::CompiledTemplate;
@@ -691,18 +692,9 @@ impl HttpTransport {
         let duration = start.elapsed();
 
         if let Some(metrics) = try_core_metrics() {
-            let result_label = match &result {
-                Ok(()) => "success",
-                Err(SinkError::Auth { .. }) => "auth",
-                Err(SinkError::Delivery {
-                    retryable: true, ..
-                }) => "transient",
-                Err(SinkError::Shutdown) => "shutdown",
-                Err(_) => "permanent",
-            };
             metrics.observe_sink_request_duration(
                 &self.sink_name,
-                result_label,
+                sink_result_label(&result),
                 duration,
             );
         }
@@ -932,23 +924,28 @@ impl HttpTransport {
 impl SinkTransport for HttpTransport {
     async fn send(&self, data: Arc<DataToSink>) -> Result<(), SinkError> {
         let (subject_id, schema_id) = data.payload.get_subject_schema();
-        let url = self
-            .url_template
-            .render_url_encoded(&subject_id, &schema_id);
+        let event_type = SinkTypes::from(data.as_ref());
+        let url = self.url_template.render_url_encoded_with_event_type(
+            &subject_id,
+            &schema_id,
+            event_type.as_str(),
+        );
         let payload = self.encode_body(data.as_ref()).await?;
         let meta = DeliveryMeta {
             subject_id,
             sn: extract_sn(&data),
-            event_type: SinkTypes::from(data.as_ref()).as_str().to_owned(),
+            event_type: event_type.as_str().to_owned(),
         };
 
         self.send_with_retry(&url, payload, Some(&meta)).await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
-        let url = self
-            .url_template
-            .render_url_encoded(&light.subject_id, &light.schema_id);
+        let url = self.url_template.render_url_encoded_with_event_type(
+            &light.subject_id,
+            &light.schema_id,
+            light.event_type.as_str(),
+        );
         let payload = self.encode_body(&light).await?;
         let meta = DeliveryMeta {
             subject_id: light.subject_id.clone(),
@@ -969,7 +966,11 @@ impl SinkTransport for HttpTransport {
             .health_check_url
             .clone()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.url_template.render_url_encoded("-", "-"));
+            .unwrap_or_else(|| {
+                self.url_template.render_url_encoded_with_event_type(
+                    "-", "-", "-",
+                )
+            });
 
         let request_id = generate_request_id();
         let mut request = self.client.get(&url);
@@ -1041,7 +1042,9 @@ impl SinkTransport for HttpTransport {
     async fn test(&self) -> Result<(), SinkError> {
         self.health_check().await?;
 
-        let url = self.url_template.render_url_encoded("-", "-");
+        let url = self
+            .url_template
+            .render_url_encoded_with_event_type("-", "-", "test");
         let payload =
             self.encode_body(&serde_json::json!({"test": true})).await?;
         let request_id = generate_request_id();
@@ -1119,54 +1122,74 @@ impl SinkTransport for HttpTransport {
         }
     }
 
-    /// Deliver a batch of events as a single POST with a JSON array body.
-    /// Per-event idempotency headers are not sent: every array element
-    /// already carries `subject_id`, `sn` and the event type.
+    /// Deliver a batch of events as JSON array payloads. When the URL
+    /// template routes by event type (`{{event-type}}`), events are grouped
+    /// by type (preserving the relative order inside each group) and one
+    /// POST is sent per group, so every type lands in its own route;
+    /// otherwise the whole batch is sent as a single JSON array. Per-event
+    /// idempotency headers are not sent: every array element already carries
+    /// `subject_id`, `sn` and the event type.
     async fn send_batch(
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        let Some(first) = events.first() else {
-            return Ok(());
-        };
-        let schema_id = match first {
-            IncomingSinkEvent::Full(data) => {
-                data.payload.get_subject_schema().1
-            }
-            IncomingSinkEvent::Light(light) => light.schema_id.clone(),
-        };
-        let url = self
-            .url_template
-            .render_url_encoded(first.subject_id(), &schema_id);
-        let payload = self.encode_body(&events).await?;
+        for (event_type, group) in
+            group_events_by_type(events, self.url_template.has_event_type())
+        {
+            let Some(first) = group.first() else {
+                continue;
+            };
+            let schema_id = match first {
+                IncomingSinkEvent::Full(data) => {
+                    data.payload.get_subject_schema().1
+                }
+                IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+            };
+            let url = self.url_template.render_url_encoded_with_event_type(
+                first.subject_id(),
+                &schema_id,
+                &event_type,
+            );
+            let payload = self.encode_body(&group).await?;
 
-        self.send_with_retry(&url, payload, None).await
+            self.send_with_retry(&url, payload, None).await?;
+        }
+
+        Ok(())
     }
 
-    /// Best-effort batch delivery: a single attempt, no retries and no auth
-    /// refresh. Used during Pause/Stop teardown where blocking on retries
-    /// would delay actor shutdown; the cursor guarantees re-delivery via
-    /// catch-up.
+    /// Best-effort batch delivery: a single attempt per group, no retries
+    /// and no auth refresh. Used during Pause/Stop teardown where blocking
+    /// on retries would delay actor shutdown; the cursor guarantees
+    /// re-delivery via catch-up.
     async fn send_batch_best_effort(
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        let Some(first) = events.first() else {
-            return Ok(());
-        };
-        let schema_id = match first {
-            IncomingSinkEvent::Full(data) => {
-                data.payload.get_subject_schema().1
-            }
-            IncomingSinkEvent::Light(light) => light.schema_id.clone(),
-        };
-        let url = self
-            .url_template
-            .render_url_encoded(first.subject_id(), &schema_id);
-        let payload = self.encode_body(&events).await?;
-        let signature_headers = self.sign_payload(&payload, None).await?;
-        self.timed_send_once(&url, &payload, &signature_headers, None)
-            .await
+        for (event_type, group) in
+            group_events_by_type(events, self.url_template.has_event_type())
+        {
+            let Some(first) = group.first() else {
+                continue;
+            };
+            let schema_id = match first {
+                IncomingSinkEvent::Full(data) => {
+                    data.payload.get_subject_schema().1
+                }
+                IncomingSinkEvent::Light(light) => light.schema_id.clone(),
+            };
+            let url = self.url_template.render_url_encoded_with_event_type(
+                first.subject_id(),
+                &schema_id,
+                &event_type,
+            );
+            let payload = self.encode_body(&group).await?;
+            let signature_headers = self.sign_payload(&payload, None).await?;
+            self.timed_send_once(&url, &payload, &signature_headers, None)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// If the sink has OAuth2 auth config, obtain a token eagerly on startup.

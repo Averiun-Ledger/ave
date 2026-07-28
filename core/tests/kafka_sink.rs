@@ -2004,6 +2004,177 @@ async fn kafka_transport_exposes_producer_stats() {
     }
 }
 
+/// Best-effort batch delivery produces the same per-type messages as
+/// `send_batch` (one array message per event-type topic).
+#[tokio::test]
+async fn kafka_transport_batch_best_effort_delivers() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "best-{{schema-id}}-{{event-type}}",
+        |cfg| cfg.batch_delivery = true,
+    );
+    let transport =
+        KafkaTransport::new("test-best-effort".to_string(), config, None)
+            .unwrap();
+
+    let light = |sn: u64| LightEvent {
+        subject_id: SUBJECT_ID.to_string(),
+        schema_id: SCHEMA_ID.to_string(),
+        governance_id: None,
+        sn,
+        event_type: SinkTypes::Fact,
+        success: true,
+    };
+    let events: Vec<IncomingSinkEvent> = vec![
+        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+            SUBJECT_ID, SCHEMA_ID,
+        ))),
+        IncomingSinkEvent::Light(light(1)),
+        IncomingSinkEvent::Light(light(2)),
+    ];
+
+    transport.send_batch_best_effort(events).await.unwrap();
+
+    let create_messages =
+        env.consume_string("best-Example-create", 1, TIMEOUT).await;
+    assert_eq!(create_messages.len(), 1);
+
+    let fact_messages =
+        env.consume_string("best-Example-fact", 1, TIMEOUT).await;
+    assert_eq!(fact_messages.len(), 1);
+    let facts: Vec<IncomingSinkEvent> =
+        serde_json::from_str(&fact_messages[0].1).unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].sn(), 1);
+    assert_eq!(facts[1].sn(), 2);
+}
+
+/// Best-effort delivery must not run the retry loop: a batch to an
+/// unreachable broker fails fast even with a huge retry backoff configured
+/// (with retries this test would take minutes, not seconds).
+#[tokio::test]
+async fn kafka_transport_batch_best_effort_fails_fast() {
+    // Nothing listens on this address; every produce attempt fails on
+    // delivery timeout.
+    let config =
+        kafka_sink_config_with("127.0.0.1:1", "best-effort-dead", |cfg| {
+            cfg.batch_delivery = true;
+            cfg.request_timeout_ms = 1_000;
+            cfg.max_retries = 3;
+            cfg.retry_base_delay_ms = 60_000;
+            cfg.retry_max_delay_ms = 120_000;
+        });
+    let sink_name = "test-best-effort-dead";
+    let transport =
+        KafkaTransport::new(sink_name.to_string(), config, None).unwrap();
+
+    // Initialize the core metrics global (idempotent via `OnceLock`) so the
+    // failure also proves the shared duration metric records the transient
+    // result label.
+    let mut registry = prometheus_client::registry::Registry::default();
+    ave_core::metrics::register(&mut registry);
+
+    let events = vec![IncomingSinkEvent::Light(example_light_event(
+        SUBJECT_ID, SCHEMA_ID,
+    ))];
+    let start = std::time::Instant::now();
+    let result = transport.send_batch_best_effort(events).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "delivery to a dead broker must fail");
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "best-effort must not run the retry loop (took {elapsed:?} with a 60s retry base delay)"
+    );
+
+    // The metric is recorded synchronously before the call returns.
+    let expected = format!(
+        "core_sink_request_duration_seconds_count{{sink=\"{sink_name}\",result=\"transient\"}}"
+    );
+    let mut text = String::new();
+    prometheus_client::encoding::text::encode(&mut text, &registry).unwrap();
+    assert!(
+        text.contains(&expected),
+        "missing transient duration metric {expected}\n{text}"
+    );
+}
+
+/// Kafka deliveries report the shared `core_sink_request_duration_seconds`
+/// metric with the same result labels as the HTTP transport.
+#[tokio::test]
+async fn kafka_transport_records_request_duration() {
+    let env = RedpandaEnv::start().await;
+
+    // Initialize the core metrics global (idempotent via `OnceLock`) and keep
+    // a registry that shares the underlying metric storage.
+    let mut registry = prometheus_client::registry::Registry::default();
+    ave_core::metrics::register(&mut registry);
+
+    let sink_name = "test-duration";
+    let transport = KafkaTransport::new(
+        sink_name.to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "duration-{{schema-id}}"),
+        None,
+    )
+    .unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    // The metric is recorded synchronously before `send` returns, so no
+    // polling is needed.
+    let expected = format!(
+        "core_sink_request_duration_seconds_count{{sink=\"{sink_name}\",result=\"success\"}}"
+    );
+    let mut text = String::new();
+    prometheus_client::encoding::text::encode(&mut text, &registry).unwrap();
+    assert!(
+        text.contains(&expected),
+        "missing request duration metric {expected}\n{text}"
+    );
+}
+
+/// Custom static headers reach the broker; reserved ones are filtered so
+/// the internal delivery contract always wins.
+#[tokio::test]
+async fn kafka_transport_custom_headers() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "headers-{{schema-id}}",
+        |cfg| {
+            cfg.headers
+                .insert("x-custom-tenant".to_owned(), "tenant-1".to_owned());
+            // Reserved header: the custom value must be ignored.
+            cfg.headers.insert("X-Ave-SN".to_owned(), "9999".to_owned());
+        },
+    );
+    let transport =
+        KafkaTransport::new("test-headers".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_with_headers("headers-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    let headers = &messages[0].2;
+    let get = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    assert_eq!(get("x-custom-tenant"), Some("tenant-1"));
+    // The reserved header carries the internal value (`sn` of the event),
+    // not the custom one.
+    assert_eq!(get("x-ave-sn"), Some("0"));
+}
+
 /// `send_light` path with `SubjectId` key strategy: a light (filtered)
 /// delivery still uses compute_key and the key reaches the broker.
 #[tokio::test]
@@ -2079,6 +2250,60 @@ async fn kafka_transport_transactional_batch() {
     let fact_messages = env
         .consume_string("tx-batch-Example-fact", 1, TIMEOUT)
         .await;
+    assert_eq!(fact_messages.len(), 1);
+    let facts: Vec<IncomingSinkEvent> =
+        serde_json::from_str(&fact_messages[0].1).unwrap();
+    assert_eq!(facts.len(), 2);
+    assert!(facts.iter().all(|e| e.event_type() == SinkTypes::Fact));
+}
+
+/// `send_batch_best_effort` under transactions: each group is delivered in
+/// its own single-attempt transaction (begin/send/commit without the retry
+/// loop), and the receiver sees the same per-type array messages as with
+/// `send_batch`.
+#[tokio::test]
+async fn kafka_transport_transactional_batch_best_effort() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "tx-best-{{schema-id}}-{{event-type}}",
+        |cfg| {
+            cfg.transactional = true;
+            cfg.batch_delivery = true;
+        },
+    );
+    let transport =
+        KafkaTransport::new("test-tx-best".to_string(), config, None).unwrap();
+
+    let light = |sn: u64| LightEvent {
+        subject_id: SUBJECT_ID.to_string(),
+        schema_id: SCHEMA_ID.to_string(),
+        governance_id: None,
+        sn,
+        event_type: SinkTypes::Fact,
+        success: true,
+    };
+    let events = vec![
+        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+            SUBJECT_ID, SCHEMA_ID,
+        ))),
+        IncomingSinkEvent::Light(light(1)),
+        IncomingSinkEvent::Light(light(2)),
+    ];
+
+    transport.send_batch_best_effort(events).await.unwrap();
+
+    let create_messages = env
+        .consume_string("tx-best-Example-create", 1, TIMEOUT)
+        .await;
+    assert_eq!(create_messages.len(), 1);
+    let creates: Vec<IncomingSinkEvent> =
+        serde_json::from_str(&create_messages[0].1).unwrap();
+    assert_eq!(creates.len(), 1);
+    assert_eq!(creates[0].event_type(), SinkTypes::Create);
+
+    let fact_messages =
+        env.consume_string("tx-best-Example-fact", 1, TIMEOUT).await;
     assert_eq!(fact_messages.len(), 1);
     let facts: Vec<IncomingSinkEvent> =
         serde_json::from_str(&fact_messages[0].1).unwrap();
