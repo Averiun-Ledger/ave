@@ -1124,6 +1124,31 @@ impl From<ave_bridge::ave_common::sink::KafkaCompression>
     }
 }
 
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum KafkaKeyStrategyHttp {
+    /// Use the event's subject id as the key.
+    SubjectId,
+    /// Send messages without a key (round-robin partition).
+    None,
+    /// Use a fixed literal key for every delivery.
+    Static(String),
+    /// Render the key from `{{subject-id}}` and `{{schema-id}}` placeholders.
+    Template(String),
+}
+
+impl From<ave_bridge::ave_common::sink::KafkaKeyStrategy> for KafkaKeyStrategyHttp {
+    fn from(value: ave_bridge::ave_common::sink::KafkaKeyStrategy) -> Self {
+        use ave_bridge::ave_common::sink::KafkaKeyStrategy;
+        match value {
+            KafkaKeyStrategy::SubjectId => Self::SubjectId,
+            KafkaKeyStrategy::None => Self::None,
+            KafkaKeyStrategy::Static(v) => Self::Static(v),
+            KafkaKeyStrategy::Template(v) => Self::Template(v),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Default)]
 #[serde(default)]
 pub struct KafkaTlsConfigHttp {
@@ -1177,6 +1202,18 @@ pub struct KafkaSinkConfigHttp {
     pub connections_max_idle_ms: u64,
     /// Metadata cache max age, in milliseconds.
     pub metadata_max_age_ms: u64,
+    /// Strategy used to derive the Kafka message key for each delivery.
+    pub key_strategy: KafkaKeyStrategyHttp,
+    /// Use Kafka transactions for exactly-once semantics on the producer side.
+    pub transactional: bool,
+    /// Transactional id used by Kafka to fence zombies.
+    pub transactional_id: Option<String>,
+    /// Producer linger in milliseconds.
+    pub linger_ms: u64,
+    /// Producer batch size in bytes.
+    pub batch_size_bytes: usize,
+    /// Producer queue capacity in number of messages.
+    pub queue_buffering_max_messages: usize,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1313,6 +1350,12 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     socket_keepalive: kafka.socket_keepalive,
                     connections_max_idle_ms: kafka.connections_max_idle_ms,
                     metadata_max_age_ms: kafka.metadata_max_age_ms,
+                    key_strategy: kafka.key_strategy.into(),
+                    transactional: kafka.transactional,
+                    transactional_id: kafka.transactional_id,
+                    linger_ms: kafka.linger_ms,
+                    batch_size_bytes: kafka.batch_size_bytes,
+                    queue_buffering_max_messages: kafka.queue_buffering_max_messages,
                 })
             }
         };

@@ -47,11 +47,13 @@ pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
 /// because concurrent mutation of the process environment is UB; tests that
 /// use distinct variable names and short-lived scopes are safe in practice.
+#[allow(dead_code)]
 pub struct TempEnvVar {
     name: &'static str,
 }
 
 impl TempEnvVar {
+    #[allow(dead_code)]
     pub fn set(name: &'static str, value: &str) -> Self {
         unsafe { std::env::set_var(name, value) };
         Self { name }

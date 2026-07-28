@@ -12,7 +12,7 @@ use tracing::debug;
 
 use ave_common::{DataToSink, IncomingSinkEvent, LightEvent};
 
-use crate::config::{KafkaAcks, KafkaSecurityConfig, KafkaSinkConfig};
+use crate::config::{KafkaAcks, KafkaKeyStrategy, KafkaSecurityConfig, KafkaSinkConfig};
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
 use crate::sink::delivery::{
@@ -80,6 +80,9 @@ pub struct KafkaTransport {
     config: KafkaSinkConfig,
     producer: FutureProducer,
     topic_template: CompiledTemplate,
+    /// Compiled template for the `Template` key strategy. `None` for every
+    /// other strategy.
+    key_template: Option<CompiledTemplate>,
     /// Node identity signer; required when `config.signature` is enabled.
     signer: Option<NodeSigner>,
 }
@@ -115,7 +118,29 @@ impl KafkaTransport {
             .set("socket.timeout.ms", config.socket_timeout_ms.to_string())
             .set("socket.keepalive.enable", config.socket_keepalive.to_string())
             .set("connections.max.idle.ms", config.connections_max_idle_ms.to_string())
-            .set("metadata.max.age.ms", config.metadata_max_age_ms.to_string());
+            .set("metadata.max.age.ms", config.metadata_max_age_ms.to_string())
+            // Producer batch tuning (point 12).
+            .set("linger.ms", config.linger_ms.to_string())
+            .set("batch.size", config.batch_size_bytes.to_string())
+            .set("queue.buffering.max.messages",
+                config.queue_buffering_max_messages.to_string());
+
+        let key_template = match &config.key_strategy {
+            KafkaKeyStrategy::Template(template) => {
+                Some(CompiledTemplate::new(template))
+            }
+            _ => None,
+        };
+
+        // Point 11: transactional producer requires a non-empty
+        // `transactional.id` so Kafka can fence zombie producers.
+        if config.transactional {
+            let transactional_id = config
+                .transactional_id
+                .clone()
+                .unwrap_or_else(|| format!("ave-sink-{sink_name}"));
+            client_config.set("transactional.id", &transactional_id);
+        }
 
         // Idempotence requires `acks=all`; otherwise librdkafka rejects the
         // producer configuration. Keep it enabled only for the default acks.
@@ -180,15 +205,33 @@ impl KafkaTransport {
             )));
         }
 
-        let producer = client_config.create().map_err(|e| {
+        let producer: FutureProducer = client_config.create().map_err(|e| {
             SinkError::ClientBuild(format!(
                 "failed to create kafka producer: {e}"
             ))
         })?;
 
+        // For transactional producers, ask the broker to fence zombies and
+        // establish the producer epoch before the first delivery. This is a
+        // one-time setup; the operation is synchronous from the caller's
+        // point of view because `init_transactions` does not return until the
+        // coordinator responds, which is exactly what we want — a misconfigured
+        // `transactional.id` must surface at construction, not at the first
+        // delivery.
+        if config.transactional {
+            producer
+                .init_transactions(Duration::from_millis(config.request_timeout_ms))
+                .map_err(|e| {
+                    SinkError::ClientBuild(format!(
+                        "failed to init kafka transactions for sink '{sink_name}': {e}"
+                    ))
+                })?;
+        }
+
         Ok(Self {
             sink_name,
             topic_template: CompiledTemplate::new(&config.topic),
+            key_template,
             producer,
             config,
             signer,
@@ -225,10 +268,31 @@ impl KafkaTransport {
         .await
     }
 
+    /// Derive the Kafka message key from the configured strategy for a
+    /// delivery to `subject_id` under `schema_id`. `None` means the message
+    /// is sent without a key (round-robin partition).
+    fn compute_key(
+        &self,
+        subject_id: &str,
+        schema_id: &str,
+    ) -> Option<String> {
+        match &self.config.key_strategy {
+            KafkaKeyStrategy::SubjectId => Some(subject_id.to_owned()),
+            KafkaKeyStrategy::None => None,
+            KafkaKeyStrategy::Static(value) => Some(value.clone()),
+            KafkaKeyStrategy::Template(_) => Some(
+                self.key_template
+                    .as_ref()
+                    .expect("key template compiled for Template strategy")
+                    .render(subject_id, schema_id),
+            ),
+        }
+    }
+
     async fn produce(
         &self,
         topic: &str,
-        key: &str,
+        key: Option<&str>,
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
         additional_headers: Option<OwnedHeaders>,
@@ -244,6 +308,22 @@ impl KafkaTransport {
                 }
                 let delay = self.retry_delay(attempt);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+
+            // Each attempt is a fresh transaction: a retryable failure
+            // aborts the previous one and starts over. Aborting ignores the
+            // result intentionally: the producer may already be in a fatal
+            // state, and the next begin_transaction would surface that.
+            let transactional = self.config.transactional;
+            if transactional {
+                if let Err(e) = self.producer.begin_transaction() {
+                    last_err = Some(SinkError::Delivery {
+                        message: format!("begin transaction: {e}"),
+                        retryable: true,
+                        retry_after_ms: None,
+                    });
+                    continue;
+                }
             }
 
             // `FutureRecord::headers` replaces the whole header set, so all
@@ -277,20 +357,43 @@ impl KafkaTransport {
                     });
             }
 
-            let record = FutureRecord::to(topic)
-                .key(key)
+            let mut record = FutureRecord::to(topic)
                 .payload(payload)
                 .headers(headers);
+            if let Some(key) = key {
+                record = record.key(key);
+            }
 
-            match self
+            let send_result = self
                 .producer
                 .send(
                     record,
                     Duration::from_millis(self.config.request_timeout_ms),
                 )
-                .await
-            {
+                .await;
+
+            match send_result {
                 Ok(delivery) => {
+                    if transactional {
+                        if let Err(e) = self.producer.commit_transaction(
+                            Duration::from_millis(self.config.request_timeout_ms),
+                        ) {
+                            // The message reached the broker but the commit
+                            // failed: abort so the receiver does not see a
+                            // dangling transaction, and retry as a unit.
+                            let _ = self.producer.abort_transaction(
+                                Duration::from_millis(
+                                    self.config.request_timeout_ms,
+                                ),
+                            );
+                            last_err = Some(SinkError::Delivery {
+                                message: format!("commit transaction: {e}"),
+                                retryable: true,
+                                retry_after_ms: None,
+                            });
+                            continue;
+                        }
+                    }
                     debug!(
                         msg_type = "SinkSend",
                         sink = %self.sink_name,
@@ -303,6 +406,11 @@ impl KafkaTransport {
                     return Ok(());
                 }
                 Err((err, _message)) => {
+                    if transactional {
+                        let _ = self.producer.abort_transaction(
+                            Duration::from_millis(self.config.request_timeout_ms),
+                        );
+                    }
                     let e = map_produce_error(err);
                     match e {
                         SinkError::Delivery {
@@ -435,8 +543,16 @@ impl SinkTransport for KafkaTransport {
             event_type: event_type.as_str().to_owned(),
         };
 
-        self.produce(&topic, &subject_id, &payload, Some(&meta), None, &request_id)
-            .await
+        let key = self.compute_key(&subject_id, &schema_id);
+        self.produce(
+            &topic,
+            key.as_deref(),
+            &payload,
+            Some(&meta),
+            None,
+            &request_id,
+        )
+        .await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
@@ -459,8 +575,16 @@ impl SinkTransport for KafkaTransport {
             event_type: light.event_type.as_str().to_owned(),
         };
 
-        self.produce(&topic, &light.subject_id, &payload, Some(&meta), None, &request_id)
-            .await
+        let key = self.compute_key(&light.subject_id, &light.schema_id);
+        self.produce(
+            &topic,
+            key.as_deref(),
+            &payload,
+            Some(&meta),
+            None,
+            &request_id,
+        )
+        .await
     }
 
     /// Deliver a batch of events as JSON array messages. When the topic
@@ -525,9 +649,10 @@ impl SinkTransport for KafkaTransport {
             })?;
 
             let request_id = generate_request_id();
+            let key = self.compute_key(first.subject_id(), &schema_id);
             self.produce(
                 &topic,
-                first.subject_id(),
+                key.as_deref(),
                 &payload,
                 None,
                 None,
@@ -553,7 +678,7 @@ impl SinkTransport for KafkaTransport {
         let topic = self.topic_template.render_with_event_type("-", "-", "test");
         let request_id = generate_request_id();
         let (key, payload, headers) = build_test_delivery(&request_id)?;
-        self.produce(&topic, &key, &payload, None, Some(headers), &request_id)
+        self.produce(&topic, Some(&key), &payload, None, Some(headers), &request_id)
             .await
     }
 

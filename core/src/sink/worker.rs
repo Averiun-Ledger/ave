@@ -4,7 +4,7 @@
 //! WorkerIdle.  The MANAGER decides when to stop the worker (after a
 //! configurable idle timeout).  The worker NEVER self-destructs.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -150,7 +150,11 @@ pub struct SinkWorker {
     /// manager is in the process of shutting the worker down.
     idle_reported: bool,
     healthcheck_state: HealthcheckState,
-    in_catch_up: HashSet<String>,
+    /// Subjects with a catch-up in progress, mapped to the `from_sn` the
+    /// current catch-up started from. A new catch-up request with a lower
+    /// `from_sn` (e.g. a replay that rewound the cursor) restarts the
+    /// in-flight catch-up so events are re-delivered in order.
+    in_catch_up: HashMap<String, u64>,
     blocked: Option<String>,
     /// Number of times the sink has "recovered" via healthcheck without
     /// a successful delivery.  Used to detect flapping sinks (LEV-2).
@@ -466,7 +470,28 @@ impl Handler<Self> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                if self.in_catch_up.contains(&subject_id) {
+                if let Some(&current_from) = self.in_catch_up.get(&subject_id)
+                {
+                    if from_sn < current_from {
+                        // A lower from_sn (e.g. a replay that rewound the
+                        // cursor mid-flight) restarts the catch-up: the
+                        // subject worker bumps its generation, dropping the
+                        // stale delivery chain, and re-delivers from from_sn
+                        // so events keep their order.
+                        self.in_catch_up.insert(subject_id.clone(), from_sn);
+                        let child_ref =
+                            self.ensure_subject_worker(&subject_id, ctx)
+                                .await?;
+                        child_ref
+                            .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
+                                from_sn,
+                                batch_size: self.server.catch_up_batch_size,
+                            })
+                            .await?;
+                        self.schedule_child_shutdown(ctx, subject_id.clone());
+                    }
+                    // from_sn >= current_from: already covered by the
+                    // in-flight catch-up, nothing to do.
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
@@ -483,7 +508,14 @@ impl Handler<Self> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                self.in_catch_up.insert(subject_id.clone());
+                self.in_catch_up.insert(subject_id.clone(), from_sn);
+                // Reset flapping counter: the sink has accepted a new catch-up
+                // attempt, so previous healthchecks that passed during the
+                // failure are no longer evidence of a broken sink. If the
+                // catch-up keeps failing, the next healthcheck increments
+                // the counter again; if it succeeds, `DeliveryResult Success`
+                // confirms the recovery.
+                self.recoveries_after_failure = 0;
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
 
@@ -630,7 +662,20 @@ impl Handler<Self> for SinkWorker {
                 if let Some(child_ref) =
                     self.active_subject_workers.remove(&subject_id)
                 {
-                    let _ = child_ref.tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::Stop).await;
+                    // Wait for the child to confirm shutdown: only then is its
+                    // actor path free, so a `create_child` for a subsequent
+                    // event of the same subject cannot fail with "already
+                    // exists". The child is idle by definition (the shutdown
+                    // timer fired), so this returns immediately.
+                    if let Err(e) = child_ref.ask_stop().await {
+                        error!(
+                            msg_type = "ChildShutdown",
+                            sink = %self.sink_name,
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to confirm subject worker shutdown"
+                        );
+                    }
                 }
                 self.pending_child_shutdowns.remove(&subject_id);
                 Ok(SinkWorkerResponse::Ok)
@@ -925,14 +970,14 @@ impl SinkWorker {
         while let Some((subject_id, from_sn)) =
             self.pending_catch_ups.pop_front()
         {
-            if self.in_catch_up.contains(&subject_id) {
+            if self.in_catch_up.contains_key(&subject_id) {
                 continue;
             }
             if self.in_catch_up.len() >= self.server.max_catch_up_concurrency {
                 self.pending_catch_ups.push_front((subject_id, from_sn));
                 break;
             }
-            self.in_catch_up.insert(subject_id.clone());
+            self.in_catch_up.insert(subject_id.clone(), from_sn);
             self.last_activity = Instant::now();
             self.idle_reported = false;
             match self.ensure_subject_worker(&subject_id, ctx).await {
@@ -1012,7 +1057,7 @@ impl SinkWorker {
             last_activity: Instant::now(),
             idle_reported: false,
             healthcheck_state: HealthcheckState::Healthy,
-            in_catch_up: HashSet::new(),
+            in_catch_up: HashMap::new(),
             blocked: None,
             recoveries_after_failure: 0,
             pending_healthcheck: None,

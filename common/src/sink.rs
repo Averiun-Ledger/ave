@@ -970,6 +970,47 @@ mod tests {
         server.batch_delivery_size = 0;
         assert!(server.validate().is_err());
     }
+
+    #[test]
+    fn test_kafka_sink_config_tuning_defaults_are_valid() {
+        let mut cfg = KafkaSinkConfig::default();
+        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
+        cfg.topic = "test-topic".to_string();
+        cfg.validate()
+            .expect("tuning defaults must validate when required fields are set");
+    }
+
+    #[test]
+    fn test_kafka_sink_config_rejects_zero_tuning() {
+        fn assert_rejects(cfg: &KafkaSinkConfig, expected_component: &str) {
+            match cfg.validate() {
+                Err(Error::InvalidConfiguration { component, .. })
+                    if component == expected_component => {}
+                other => panic!(
+                    "expected InvalidConfiguration for {expected_component}, got {other:?}"
+                ),
+            }
+        }
+
+        let mut cfg = KafkaSinkConfig::default();
+        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
+        cfg.topic = "test-topic".to_string();
+        assert!(cfg.validate().is_ok(), "baseline config must validate");
+
+        cfg.linger_ms = 0;
+        assert_rejects(&cfg, "KafkaSinkConfig.linger_ms");
+        cfg.linger_ms = 5;
+
+        cfg.batch_size_bytes = 0;
+        assert_rejects(&cfg, "KafkaSinkConfig.batch_size_bytes");
+        cfg.batch_size_bytes = 1_000_000;
+
+        cfg.queue_buffering_max_messages = 0;
+        assert_rejects(
+            &cfg,
+            "KafkaSinkConfig.queue_buffering_max_messages",
+        );
+    }
 }
 
 /// OAuth2 grant type used to obtain a token from the authentication endpoint.
@@ -1620,6 +1661,31 @@ impl std::fmt::Display for KafkaCompression {
     }
 }
 
+/// Strategy used to derive the Kafka message key for each delivery. The key
+/// controls partitioning: messages with the same key always land on the same
+/// partition and are delivered in order.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum KafkaKeyStrategy {
+    /// Use the event's subject id as the key (default). Preserves per-subject
+    /// ordering, which is the usual requirement.
+    #[default]
+    SubjectId,
+    /// Send messages without a key. Kafka distributes them round-robin across
+    /// partitions; useful when the receiver does not need any per-event
+    /// ordering or partitioning guarantee.
+    None,
+    /// Use a fixed literal key for every delivery. Use only when every event
+    /// must land on the same partition regardless of subject.
+    Static(String),
+    /// Render the key from the subject id and schema id using the shared
+    /// `{{subject-id}}` / `{{schema-id}}` placeholders.
+    Template(String),
+}
+
 /// Kafka-specific sink configuration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -1630,8 +1696,8 @@ pub struct KafkaSinkConfig {
     /// Comma-separated list of `host:port` bootstrap brokers.
     pub bootstrap_servers: String,
     /// Topic template; supports the `{{schema-id}}` and `{{subject-id}}`
-    /// placeholders. The subject id is always used as the message key, so
-    /// per-subject ordering is preserved regardless of the topic layout.
+    /// placeholders (and `{{event-type}}` when using batch delivery). The
+    /// message key strategy is configured separately via `key_strategy`.
     pub topic: String,
     /// Producer client id (informational).
     pub client_id: String,
@@ -1674,6 +1740,22 @@ pub struct KafkaSinkConfig {
     pub connections_max_idle_ms: u64,
     /// Metadata cache max age, in milliseconds.
     pub metadata_max_age_ms: u64,
+    /// Strategy used to derive the Kafka message key for each delivery.
+    pub key_strategy: KafkaKeyStrategy,
+    /// Use Kafka transactions for exactly-once semantics on the producer
+    /// side. Adds one transaction-coordinator round trip per delivery;
+    /// opt-in for sinks that need it.
+    pub transactional: bool,
+    /// Transactional id used by Kafka to fence zombies. When `transactional`
+    /// is enabled and this is `None`, defaults to `ave-sink-{sink_name}`.
+    pub transactional_id: Option<String>,
+    /// Producer linger in milliseconds. Higher values batch more messages
+    /// at the cost of latency.
+    pub linger_ms: u64,
+    /// Producer batch size in bytes.
+    pub batch_size_bytes: usize,
+    /// Producer queue capacity in number of messages.
+    pub queue_buffering_max_messages: usize,
 }
 
 impl Default for KafkaSinkConfig {
@@ -1698,6 +1780,12 @@ impl Default for KafkaSinkConfig {
             socket_keepalive: true,
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 900_000,
+            key_strategy: KafkaKeyStrategy::default(),
+            transactional: false,
+            transactional_id: None,
+            linger_ms: 5,
+            batch_size_bytes: 1_000_000,
+            queue_buffering_max_messages: 100_000,
         }
     }
 }
@@ -1770,6 +1858,33 @@ impl KafkaSinkConfig {
             "KafkaSinkConfig.metadata_max_age_ms",
             self.metadata_max_age_ms,
         )?;
+        require_positive_u64("KafkaSinkConfig.linger_ms", self.linger_ms)?;
+        if self.batch_size_bytes == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.batch_size_bytes".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.queue_buffering_max_messages == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.queue_buffering_max_messages"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.transactional
+            && self
+                .transactional_id
+                .as_deref()
+                .is_some_and(str::is_empty)
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.transactional_id".to_string(),
+                reason: "must be a non-empty string when transactional is true; \
+                         leave it unset to use the default 'ave-sink-{sink_name}'"
+                    .to_string(),
+            });
+        }
         Ok(())
     }
 }

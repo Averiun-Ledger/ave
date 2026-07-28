@@ -2485,6 +2485,7 @@ async fn sink_permanent_failure_and_manual_recovery() {
     // The replay from SN 1 is merged with the existing cursor (SN 2), so the
     // worker re-sends SN 1..4. SN 1 and 2 are therefore duplicated while SN 3
     // and 4 are delivered for the first time, giving 7 stored events in total.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(7, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 7);
@@ -2707,6 +2708,7 @@ async fn sink_flapping_blocks_after_repeated_recovery() {
     // Confirm through the API that the sink is no longer blocked.
     assert_sink_unblocked(&node.api, "example-sink").await;
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -6129,6 +6131,7 @@ async fn sink_auth_token_refresh() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "auth-sink").await;
     api_key_sink.wait_for_count(4, true).await;
     let api_key_events = api_key_sink.full_snapshot().await;
     assert_eq!(
@@ -6215,6 +6218,11 @@ async fn sink_auth_token_refresh() {
     let oauth_headers_baseline = oauth_sink.authorization_headers().await.len();
 
     oauth_sink.set_mode(ResponseMode::UnauthorizedOnce).await;
+    // Baseline before the 401: the absolute number of token fetches is not
+    // stable because the worker can be recreated by the idle shutdown under
+    // load (each recreation fetches a fresh token), so the refresh is
+    // asserted as a delta instead of a fixed count.
+    let auth_baseline = oauth_sink.auth_requests().await.len();
 
     emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 4}}), true)
         .await
@@ -6238,10 +6246,9 @@ async fn sink_auth_token_refresh() {
     );
 
     let auth_requests = oauth_sink.auth_requests().await;
-    assert_eq!(
-        auth_requests.len(),
-        2,
-        "expected eager token fetch + refresh after 401"
+    assert!(
+        auth_requests.len() > auth_baseline,
+        "the 401 must trigger a token refresh before the retry"
     );
     assert!(
         auth_requests
@@ -9679,8 +9686,8 @@ async fn sink_batch_delivery_failure_retries_whole_batch() {
     // After recovery the whole batch is delivered again, exactly once and in
     // order.
     sink.set_mode(ResponseMode::Accept).await;
-    sink.wait_for_count(4, true).await;
     wait_for_sink_caught_up(&node.api, "batch-fail-sink").await;
+    sink.wait_for_count(4, true).await;
 
     let events = sink.snapshot().await;
     assert_no_duplicate_events(&events);
@@ -9956,4 +9963,380 @@ async fn sink_client_credentials_oauth2() {
     unsafe {
         std::env::remove_var(auth_env);
     }
+}
+
+
+/// Test: `replay_restarts_inflight_catch_up_preserving_order`.
+///
+/// **Objective:** verify that a replay requested while a long catch-up is in
+/// flight **restarts** the catch-up from the lower `from_sn` instead of being
+/// queued behind it, and that the stale delivery chain is discarded
+/// (generation fencing in the subject worker), so events always arrive in
+/// order.
+///
+/// **Setup:**
+/// - Node with governance and a subject with SN 0..=19 created *before* the
+///   sink exists.
+/// - Restart the node with a slow sink (`ResponseMode::Timeout(200)` per
+///   request): the startup catch-up from SN 0 takes ~4 s, keeping it in
+///   flight.
+///
+/// **Action:**
+/// - Wait until the first 3 catch-up deliveries land, then request a replay
+///   from SN 10 while the catch-up is still running.
+///
+/// **Verifications:**
+/// - The replay is accepted (`processed`, no `errors`).
+/// - Once everything settles, the received SN sequence is an ordered prefix
+///   `0..M` (whatever the original catch-up delivered before the restart,
+///   strictly ordered, no interleaving) followed by the complete, strictly
+///   ordered sequence `10..=19` redelivered by the restarted catch-up. Any
+///   overlap between the prefix and the suffix is the expected at-least-once
+///   redelivery of events the original catch-up had already sent.
+#[traced_test]
+#[tokio::test]
+async fn replay_restarts_inflight_catch_up_preserving_order() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=18 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 19}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with the sink configured and slow (200 ms per request) so the
+    // startup catch-up from SN 0 stays in flight for ~4 seconds.
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::Timeout(200)).await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The catch-up is running (200 ms per delivery). Wait for the first
+    // deliveries and request a replay from SN 10 while it is still in flight.
+    sink.wait_for_count(3, true).await;
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "example-sink".to_owned(),
+                subject_id: subject_id_str.clone(),
+                from_sn: 10,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.processed.len(), 1);
+    assert!(response.errors.is_empty());
+
+    // The restarted catch-up redelivers SN 10..=19, in order, at the end.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(13, true).await;
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+
+    let suffix: Vec<u64> = (10..=19).collect();
+    let split = sns.len() - suffix.len();
+    assert_eq!(
+        &sns[split..],
+        suffix.as_slice(),
+        "the restarted catch-up must redeliver SN 10..=19 in order at the end; got {sns:?}"
+    );
+    let expected_prefix: Vec<u64> = (0..split as u64).collect();
+    assert_eq!(
+        &sns[..split],
+        expected_prefix.as_slice(),
+        "events before the restart must be the strictly ordered prefix 0..M of the original catch-up; got {sns:?}"
+    );
+}
+
+/// Test: `pending_replay_survives_node_restart`.
+///
+/// **Objective:** an accepted replay whose re-delivery is still pending when
+/// the node stops must be resumed after the restart (persisted replay floor),
+/// even though the delivery cursor was already advanced past the replay's
+/// `from_sn` by the in-flight catch-up.
+///
+/// **Setup:**
+/// - The sink receives Create + 4 facts (SN 0..=4).
+/// - The sink drops deliveries; a replay from SN 1 is accepted: the cursor is
+///   rewound to 0 and the replay floor (SN 1) is persisted, but nothing can
+///   be delivered yet.
+/// - The sink becomes slow (400 ms per request) so the catch-up re-delivers
+///   the replay range one event at a time.
+///
+/// **Action:** restart the node after the first replayed event lands, while
+/// the rest of the replay is still in flight.
+///
+/// **Verifications:**
+/// - After the restart the pending replay is resumed and the full range
+///   SN 1..=4 is redelivered, in order. Without the persisted floor the
+///   cursor (already at SN 1) would make the manager resume from SN 2 and the
+///   final count would stay at 9, so waiting for 10 events distinguishes the
+///   fixed behaviour.
+#[traced_test]
+#[tokio::test]
+async fn pending_replay_survives_node_restart() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=4 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Restart with the sink configured: startup catch-up delivers SN 0..=4.
+    let sink = TestSink::start().await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(5, true).await;
+
+    // Sink down: the replay is accepted (floor SN 1 persisted, cursor rewound
+    // to 0) but its catch-up cannot deliver anything.
+    sink.set_mode(ResponseMode::Drop).await;
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "example-sink".to_owned(),
+                subject_id: subject_id_str.clone(),
+                from_sn: 1,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.processed.len(), 1);
+    assert!(response.errors.is_empty());
+
+    // Slow sink: the catch-up redelivers the replay range one event at a time
+    // (400 ms each). Restart the node right after the first replayed event
+    // lands, while the rest of the replay is still in flight.
+    sink.set_mode(ResponseMode::Timeout(400)).await;
+    sink.wait_for_count(6, true).await;
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The pending replay is resumed: SN 1..=4 is redelivered, in order.
+    // Without the persisted floor the manager would resume from SN 2 and the
+    // count would stall at 9.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(10, true).await;
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(
+        &sns[sns.len() - 4..],
+        &[1, 2, 3, 4],
+        "the resumed replay must redeliver SN 1..=4 in order at the end; got {sns:?}"
+    );
+    assert_eq!(&sns[..5], &[0, 1, 2, 3, 4], "initial catch-up; got {sns:?}");
+}
+
+/// Test: `live_delivery_across_worker_idle_shutdowns`.
+///
+/// **Objective:** live events emitted right as the sink worker and its
+/// subject worker are being shut down for idleness must still be delivered,
+/// in order. Both shutdowns are synchronous (`ask_stop`): an event arriving
+/// during the shutdown waits in the parent's mailbox and the worker is
+/// recreated afterwards, instead of racing the old worker's termination and
+/// losing the event (or letting a later event advance the cursor past it).
+///
+/// **Setup:** sink with `sink_worker_idle_timeout_ms: 200` and
+/// `sink_subject_worker_idle_timeout_ms: 200`.
+///
+/// **Action:** emit facts paced ~250 ms apart, so every fact arrives while
+/// the previous workers are being torn down (or have just been).
+///
+/// **Verifications:** the sink stores Create + 5 facts, strictly in order,
+/// with no gaps and no duplicates.
+#[traced_test]
+#[tokio::test]
+async fn live_delivery_across_worker_idle_shutdowns() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    // Restart with the sink configured with very short idle timeouts so the
+    // sink worker and the subject worker are torn down between events.
+    let sink = TestSink::start().await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        short_idle_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    // Each fact arrives ~250 ms after the previous delivery, while the
+    // workers are being shut down for idleness (or have just been).
+    for i in 1..=5 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+        sink.wait_for_count((i + 1) as usize, true).await;
+    }
+
+    let events = sink.snapshot().await;
+    assert_eq!(
+        events.len(),
+        6,
+        "every live event must be delivered exactly once across idle shutdowns"
+    );
+    assert_subject_sn_sequence(&events, &subject_id_str, 0, 5);
 }

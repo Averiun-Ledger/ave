@@ -21,6 +21,7 @@ use crate::common::CreateNodeConfig;
 
 pub const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
+#[allow(dead_code)]
 pub fn example_schema_governance_fact() -> serde_json::Value {
     json!({
         "schemas": {
@@ -71,6 +72,7 @@ pub fn example_schema_governance_fact() -> serde_json::Value {
     })
 }
 
+#[allow(dead_code)]
 pub fn make_sink_entry(
     server_name: &str,
     url: String,
@@ -80,6 +82,7 @@ pub fn make_sink_entry(
     make_sink_entry_with_concurrency(server_name, url, governance_id, events, 2)
 }
 
+#[allow(dead_code)]
 pub fn make_sink_entry_with_concurrency(
     server_name: &str,
     url: String,
@@ -110,6 +113,7 @@ pub fn make_sink_entry_with_concurrency(
     }
 }
 
+#[allow(dead_code)]
 pub fn make_sink_entry_with_auth(
     server_name: &str,
     url: String,
@@ -140,6 +144,7 @@ pub fn make_sink_entry_with_auth(
     }
 }
 
+#[allow(dead_code)]
 pub fn make_sink_entry_with_signature(
     server_name: &str,
     url: String,
@@ -155,6 +160,7 @@ pub fn make_sink_entry_with_signature(
     )
 }
 
+#[allow(dead_code)]
 pub fn make_sink_entry_with_signature_and_retries(
     server_name: &str,
     url: String,
@@ -188,6 +194,7 @@ pub fn make_sink_entry_with_signature_and_retries(
 
 /// Returns a sink entry whose HTTP transport uses the given TLS settings
 /// (custom CA, mTLS client credentials).
+#[allow(dead_code)]
 pub fn make_sink_entry_with_tls(
     server_name: &str,
     url: String,
@@ -220,6 +227,7 @@ pub fn make_sink_entry_with_tls(
 
 /// Returns a sink entry whose HTTP transport delivers events in batches
 /// (a single POST with a JSON array), optionally gzip-compressed.
+#[allow(dead_code)]
 pub fn make_sink_entry_batch(
     server_name: &str,
     url: String,
@@ -254,6 +262,7 @@ pub fn make_sink_entry_batch(
 
 /// Returns a sink entry whose HTTP transport routes deliveries through the
 /// given forward proxy.
+#[allow(dead_code)]
 pub fn make_sink_entry_with_proxy(
     server_name: &str,
     url: String,
@@ -286,6 +295,7 @@ pub fn make_sink_entry_with_proxy(
 
 /// Returns a sink entry whose HTTP transport adds the given custom static
 /// headers to every delivery and health-check request.
+#[allow(dead_code)]
 pub fn make_sink_entry_with_headers(
     server_name: &str,
     url: String,
@@ -318,6 +328,7 @@ pub fn make_sink_entry_with_headers(
 
 /// Returns a sink entry with a custom retry policy, used to test backoff
 /// and server-provided `Retry-After` handling.
+#[allow(dead_code)]
 pub fn make_sink_entry_with_retry_policy(
     server_name: &str,
     url: String,
@@ -351,6 +362,7 @@ pub fn make_sink_entry_with_retry_policy(
     }
 }
 
+#[allow(dead_code)]
 pub fn example_sink_config(
     url: String,
     governance_id: Option<String>,
@@ -365,6 +377,7 @@ pub fn example_sink_config(
 
 /// Returns a sink configuration designed to trigger flapping detection after
 /// one failed recovery.
+#[allow(dead_code)]
 pub fn flapping_sink_config(
     url: String,
     governance_id: Option<String>,
@@ -394,6 +407,7 @@ pub fn flapping_sink_config(
 /// Returns a sink configuration designed to test transient errors (5xx) and
 /// fast consecutive events. The short retry delay and limited retries let the
 /// test observe backoff and lagging without flapping.
+#[allow(dead_code)]
 pub fn transient_error_sink_config(
     url: String,
     governance_id: Option<String>,
@@ -426,6 +440,7 @@ pub fn transient_error_sink_config(
 /// Returns a sink configuration with a very short worker idle timeout so the
 /// worker is stopped quickly when inactive. Used to test worker shutdown and
 /// recreation.
+#[allow(dead_code)]
 pub fn short_idle_sink_config(
     url: String,
     governance_id: Option<String>,
@@ -455,6 +470,7 @@ pub fn short_idle_sink_config(
 
 /// Poll `get_sinks_status` until `sink_name` is reported as blocked.
 /// Returns the block reason. Panics on timeout.
+#[allow(dead_code)]
 pub async fn wait_for_sink_blocked(api: &Api, sink_name: &str) -> String {
     let mut attempts = 0;
     loop {
@@ -474,6 +490,7 @@ pub async fn wait_for_sink_blocked(api: &Api, sink_name: &str) -> String {
 
 /// Poll `get_sinks_status` until `sink_name` is no longer blocked.
 /// Panics on timeout.
+#[allow(dead_code)]
 pub async fn wait_for_sink_unblocked(api: &Api, sink_name: &str) {
     let mut attempts = 0;
     loop {
@@ -493,6 +510,7 @@ pub async fn wait_for_sink_unblocked(api: &Api, sink_name: &str) {
 
 /// Poll `get_sinks_status` until `sink_name` reports at least `min`
 /// lagging subjects. Panics on timeout.
+#[allow(dead_code)]
 pub async fn wait_for_sink_lagging_subjects(
     api: &Api,
     sink_name: &str,
@@ -519,6 +537,7 @@ pub async fn wait_for_sink_lagging_subjects(
 
 /// Poll `get_sinks_status` until `sink_name` reports zero lagging subjects.
 /// Panics on timeout.
+#[allow(dead_code)]
 pub async fn wait_for_sink_caught_up(api: &Api, sink_name: &str) {
     let mut attempts = 0;
     loop {
@@ -538,6 +557,7 @@ pub async fn wait_for_sink_caught_up(api: &Api, sink_name: &str) {
 
 /// Assert through `get_sinks_status` that `sink_name` is currently blocked.
 /// Returns the block reason. Panics if the sink is missing or not blocked.
+#[allow(dead_code)]
 pub async fn assert_sink_blocked(api: &Api, sink_name: &str) -> String {
     let statuses = api.get_sinks_status().await.unwrap();
     let status = statuses
@@ -556,6 +576,7 @@ pub async fn assert_sink_blocked(api: &Api, sink_name: &str) -> String {
 
 /// Assert through `get_sinks_status` that `sink_name` is currently not blocked.
 /// Panics if the sink is missing or still blocked.
+#[allow(dead_code)]
 pub async fn assert_sink_unblocked(api: &Api, sink_name: &str) {
     let statuses = api.get_sinks_status().await.unwrap();
     let status = statuses
@@ -574,6 +595,7 @@ pub async fn assert_sink_unblocked(api: &Api, sink_name: &str) {
 
 /// Assert through `get_sinks_status` that `sink_name` has at least `min`
 /// lagging subjects. Panics if the sink is missing or has fewer.
+#[allow(dead_code)]
 pub async fn assert_sink_lagging(api: &Api, sink_name: &str, min: usize) {
     let statuses = api.get_sinks_status().await.unwrap();
     let status = statuses
@@ -593,6 +615,7 @@ pub async fn assert_sink_lagging(api: &Api, sink_name: &str, min: usize) {
 
 /// Assert through `get_sinks_status` that `sink_name` has no lagging subjects.
 /// Panics if the sink is missing or still lagging.
+#[allow(dead_code)]
 pub async fn assert_sink_not_lagging(api: &Api, sink_name: &str) {
     let statuses = api.get_sinks_status().await.unwrap();
     let status = statuses
@@ -610,6 +633,7 @@ pub async fn assert_sink_not_lagging(api: &Api, sink_name: &str) {
 
 /// Assert through `get_sinks_status` that `sink_name` is running.
 /// Panics if the sink is missing or not running.
+#[allow(dead_code)]
 pub async fn assert_sink_running(api: &Api, sink_name: &str) {
     let statuses = api.get_sinks_status().await.unwrap();
     let status = statuses
@@ -625,6 +649,7 @@ pub async fn assert_sink_running(api: &Api, sink_name: &str) {
     );
 }
 
+#[allow(dead_code)]
 pub fn governance_with_transfer_roles_fact(
     new_owner_key: &str,
 ) -> serde_json::Value {
@@ -696,6 +721,7 @@ pub fn governance_with_transfer_roles_fact(
     })
 }
 
+#[allow(dead_code)]
 pub fn governance_with_viewpoints_fact(witness_key: &str) -> serde_json::Value {
     json!({
         "members": {
@@ -760,6 +786,7 @@ pub fn governance_with_viewpoints_fact(witness_key: &str) -> serde_json::Value {
     })
 }
 
+#[allow(dead_code)]
 pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
     vec![make_governance_sink_entry(
         "gov-sink",
@@ -768,6 +795,7 @@ pub fn governance_sink_config(url: String) -> Vec<SinkConfigEntry> {
     )]
 }
 
+#[allow(dead_code)]
 pub fn make_governance_sink_entry(
     server_name: &str,
     url: String,
@@ -795,6 +823,7 @@ pub fn make_governance_sink_entry(
     }
 }
 
+#[allow(dead_code)]
 pub fn restart_config(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
@@ -812,6 +841,7 @@ pub fn restart_config(
     )
 }
 
+#[allow(dead_code)]
 pub fn restart_config_with_peers(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
@@ -831,6 +861,7 @@ pub fn restart_config_with_peers(
     )
 }
 
+#[allow(dead_code)]
 pub fn restart_config_safe_mode(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
@@ -874,6 +905,7 @@ pub fn restart_config_with_peers_and_safe_mode(
     }
 }
 
+#[allow(dead_code)]
 pub fn assert_event_is_create(
     event: &IncomingSinkEvent,
     subject_id: &str,
@@ -889,6 +921,7 @@ pub fn assert_event_is_create(
     }
 }
 
+#[allow(dead_code)]
 pub fn assert_event_is_fact_full(
     event: &IncomingSinkEvent,
     subject_id: &str,
@@ -920,6 +953,7 @@ pub fn assert_event_is_fact_full(
     }
 }
 
+#[allow(dead_code)]
 pub fn assert_event_is_fact_opaque(
     event: &IncomingSinkEvent,
     subject_id: &str,
@@ -955,6 +989,7 @@ pub fn assert_event_is_fact_opaque(
 
 /// Asserts that `event` is a lightweight fact event for `subject_id` at `sn`
 /// with the expected success flag and governance identifier.
+#[allow(dead_code)]
 pub fn assert_event_is_light_fact(
     event: &IncomingSinkEvent,
     subject_id: &str,
@@ -985,6 +1020,7 @@ pub fn assert_event_is_light_fact(
     }
 }
 
+#[allow(dead_code)]
 pub fn sample_sinks() -> Vec<SinkConfigEntry> {
     vec![
         SinkConfigEntry {
@@ -1037,6 +1073,7 @@ fn find_event<'a>(
 }
 
 /// Asserts that `events` contains a Create event for `subject_id` at `sn`.
+#[allow(dead_code)]
 pub fn assert_sink_contains_create(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1047,6 +1084,7 @@ pub fn assert_sink_contains_create(
 }
 
 /// Asserts that `events` contains a FactFull event for `subject_id` at `sn`.
+#[allow(dead_code)]
 pub fn assert_sink_contains_fact_full(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1059,6 +1097,7 @@ pub fn assert_sink_contains_fact_full(
 }
 
 /// Asserts that `events` contains a FactOpaque event for `subject_id` at `sn`.
+#[allow(dead_code)]
 pub fn assert_sink_contains_fact_opaque(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1078,6 +1117,7 @@ pub fn assert_sink_contains_fact_opaque(
 
 /// Asserts that `events` contains a lightweight fact event for `subject_id`
 /// at `sn` with the expected success flag and governance identifier.
+#[allow(dead_code)]
 pub fn assert_sink_contains_light_fact(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1090,6 +1130,7 @@ pub fn assert_sink_contains_light_fact(
 }
 
 /// Counts how many events belong to `subject_id`.
+#[allow(dead_code)]
 pub fn count_events_for_subject(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1130,6 +1171,7 @@ pub fn assert_event_is_confirm(
     }
 }
 
+#[allow(dead_code)]
 pub fn assert_event_is_reject(
     event: &IncomingSinkEvent,
     subject_id: &str,
@@ -1145,6 +1187,7 @@ pub fn assert_event_is_reject(
     }
 }
 
+#[allow(dead_code)]
 pub fn assert_event_is_eol(
     event: &IncomingSinkEvent,
     subject_id: &str,
@@ -1160,6 +1203,7 @@ pub fn assert_event_is_eol(
     }
 }
 
+#[allow(dead_code)]
 pub fn assert_sink_contains_transfer(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1169,6 +1213,7 @@ pub fn assert_sink_contains_transfer(
     assert_event_is_transfer(event, subject_id, sn);
 }
 
+#[allow(dead_code)]
 pub fn assert_sink_contains_confirm(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1178,6 +1223,7 @@ pub fn assert_sink_contains_confirm(
     assert_event_is_confirm(event, subject_id, sn);
 }
 
+#[allow(dead_code)]
 pub fn assert_sink_contains_reject(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1187,6 +1233,7 @@ pub fn assert_sink_contains_reject(
     assert_event_is_reject(event, subject_id, sn);
 }
 
+#[allow(dead_code)]
 pub fn assert_sink_contains_eol(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1199,6 +1246,7 @@ pub fn assert_sink_contains_eol(
 /// Asserts that the event at `(subject_id, sn)` is a `Transfer` with the
 /// expected success flag, owner, new owner and governance version. Failed
 /// transfers must have a non-empty error.
+#[allow(dead_code)]
 pub fn assert_sink_contains_transfer_with_owners(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1258,6 +1306,7 @@ pub fn assert_sink_contains_transfer_with_owners(
 /// expected success flag, old-owner name and governance version. Successful
 /// confirms must have a patch and no error; failed confirms must have a
 /// non-empty error and no patch.
+#[allow(dead_code)]
 pub fn assert_sink_contains_confirm_with_name(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1318,6 +1367,7 @@ pub fn assert_sink_contains_confirm_with_name(
 
 /// Returns a vector with only the first occurrence of each `(subject_id, sn)`
 /// pair, preserving input order.
+#[allow(dead_code)]
 pub fn deduplicate_events_by_sn(
     events: &[IncomingSinkEvent],
 ) -> Vec<IncomingSinkEvent> {
@@ -1333,6 +1383,7 @@ pub fn deduplicate_events_by_sn(
 }
 
 /// Asserts that `events` contains no duplicate `(subject_id, sn)` pairs.
+#[allow(dead_code)]
 pub fn assert_no_duplicate_events(events: &[IncomingSinkEvent]) {
     use std::collections::HashSet;
     let mut seen = HashSet::new();
@@ -1349,6 +1400,7 @@ pub fn assert_no_duplicate_events(events: &[IncomingSinkEvent]) {
 
 /// Asserts that, for each subject, the sequence of SNs in `events` is exactly
 /// `expected_from..=expected_to` in order.
+#[allow(dead_code)]
 pub fn assert_subject_sn_sequence(
     events: &[IncomingSinkEvent],
     subject_id: &str,
@@ -1369,6 +1421,7 @@ pub fn assert_subject_sn_sequence(
 }
 
 /// Asserts that none of the events in `events` is a `FactFull` payload.
+#[allow(dead_code)]
 pub fn assert_no_fact_full_events(events: &[IncomingSinkEvent]) {
     assert!(
         !events.iter().any(|e| matches!(
@@ -1380,6 +1433,7 @@ pub fn assert_no_fact_full_events(events: &[IncomingSinkEvent]) {
     );
 }
 
+#[allow(dead_code)]
 fn data_to_sink_subject_sn(data: &DataToSink) -> (String, u64) {
     match &data.payload {
         DataToSinkEvent::Create { subject_id, sn, .. }
@@ -1395,6 +1449,7 @@ fn data_to_sink_subject_sn(data: &DataToSink) -> (String, u64) {
 }
 
 /// Asserts that `data` is a `Create` event for `(subject_id, sn)`.
+#[allow(dead_code)]
 pub fn assert_data_to_sink_is_create(
     data: &DataToSink,
     subject_id: &str,
@@ -1412,6 +1467,7 @@ pub fn assert_data_to_sink_is_create(
 
 /// Asserts that `data` is a `FactFull` event for `(subject_id, sn)` with the
 /// expected success flag and payload.
+#[allow(dead_code)]
 pub fn assert_data_to_sink_is_fact_full(
     data: &DataToSink,
     subject_id: &str,
@@ -1462,6 +1518,7 @@ pub fn assert_data_to_sink_is_fact_full(
 }
 
 /// Asserts the metadata fields of a `SinkEventsPage`.
+#[allow(dead_code)]
 pub fn assert_sink_events_page(
     page: &ave_common::response::SinkEventsPage,
     expected_from_sn: u64,

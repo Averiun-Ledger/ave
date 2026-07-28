@@ -14,9 +14,9 @@ use ave_common::{
     sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent},
 };
 use ave_core::config::{
-    KafkaAcks, KafkaCompression, KafkaSaslMechanism, KafkaSecurityConfig,
-    KafkaSinkConfig, KafkaTlsConfig, SinkConfigEntry, SinkServer,
-    SinkTransportConfig,
+    KafkaAcks, KafkaCompression, KafkaKeyStrategy, KafkaSaslMechanism,
+    KafkaSecurityConfig, KafkaSinkConfig, KafkaTlsConfig, SinkConfigEntry,
+    SinkServer, SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
 use ave_core::sink::SinkTransport;
@@ -1755,4 +1755,441 @@ async fn kafka_broker_down_and_catch_up() {
         .find(|s| s.name == "kafka-down-sink")
         .expect("kafka-down-sink in status response");
     assert_eq!(status.transport.as_deref(), Some("kafka"));
+}
+
+/// Default `SubjectId` strategy: the message key equals the event subject id.
+#[tokio::test]
+async fn kafka_transport_key_strategy_subject_id() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-subject-{{schema-id}}", |cfg| {
+        cfg.key_strategy = KafkaKeyStrategy::SubjectId;
+    });
+    let transport =
+        KafkaTransport::new("test-key-subject".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("key-subject-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, SUBJECT_ID);
+}
+
+/// `None` strategy: the message is sent without a key (round-robin
+/// partition). The consumer reports the key as the empty string.
+#[tokio::test]
+async fn kafka_transport_key_strategy_none() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-none-{{schema-id}}", |cfg| {
+        cfg.key_strategy = KafkaKeyStrategy::None;
+    });
+    let transport =
+        KafkaTransport::new("test-key-none".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("key-none-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert!(
+        messages[0].0.is_empty(),
+        "no-key strategy must produce an empty key, got {:?}",
+        messages[0].0
+    );
+}
+
+/// `Static` strategy: every delivery carries the same configured key.
+#[tokio::test]
+async fn kafka_transport_key_strategy_static() {
+    let env = RedpandaEnv::start().await;
+    let fixed_key = "global-partition".to_owned();
+    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-static-{{schema-id}}", |cfg| {
+        cfg.key_strategy = KafkaKeyStrategy::Static(fixed_key.clone());
+    });
+    let transport =
+        KafkaTransport::new("test-key-static".to_string(), config, None).unwrap();
+
+    // Two deliveries from two different subjects must share the same key.
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    transport
+        .send(Arc::new(example_data_to_sink("other-subject", SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("key-static-Example", 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2);
+    for (key, _) in &messages {
+        assert_eq!(key, &fixed_key);
+    }
+}
+
+/// `Template` strategy: the key is rendered from `{{subject-id}}` and
+/// `{{schema-id}}` placeholders.
+#[tokio::test]
+async fn kafka_transport_key_strategy_template() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-template-{{schema-id}}", |cfg| {
+        cfg.key_strategy = KafkaKeyStrategy::Template(
+            "ave/{{schema-id}}/{{subject-id}}".to_owned(),
+        );
+    });
+    let transport =
+        KafkaTransport::new("test-key-template".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("key-template-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, format!("ave/{SCHEMA_ID}/{SUBJECT_ID}"));
+}
+
+/// Transactional sink with the default `transactional_id` delivers a message
+/// and the broker accepts the commit.
+#[tokio::test]
+async fn kafka_transport_transactional_delivers() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "tx-default-{{schema-id}}",
+        |cfg| {
+            cfg.transactional = true;
+        },
+    );
+    let transport =
+        KafkaTransport::new("test-tx-default".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("tx-default-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, SUBJECT_ID);
+}
+
+/// Transactional sink with an explicit `transactional_id` also works (the id
+/// is passed through to librdkafka for zombie fencing).
+#[tokio::test]
+async fn kafka_transport_transactional_with_explicit_id() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "tx-explicit-{{schema-id}}",
+        |cfg| {
+            cfg.transactional = true;
+            cfg.transactional_id = Some("ave-sink-test-explicit-id".to_owned());
+        },
+    );
+    let transport =
+        KafkaTransport::new("test-tx-explicit".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("tx-explicit-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+}
+
+/// Custom producer batch tuning (linger, batch size, queue capacity) builds
+/// the producer and still delivers messages end-to-end.
+#[tokio::test]
+async fn kafka_transport_tuning_delivers() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(&env.bootstrap_servers, "tune-{{schema-id}}", |cfg| {
+        cfg.linger_ms = 50;
+        cfg.batch_size_bytes = 65_536;
+        cfg.queue_buffering_max_messages = 10_000;
+    });
+    let transport =
+        KafkaTransport::new("test-tune".to_string(), config, None).unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("tune-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+}
+
+/// `send_light` path with `SubjectId` key strategy: a light (filtered)
+/// delivery still uses compute_key and the key reaches the broker.
+#[tokio::test]
+async fn kafka_transport_key_strategy_send_light() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(&env.bootstrap_servers, "key-light-{{schema-id}}", |cfg| {
+        cfg.key_strategy = KafkaKeyStrategy::SubjectId;
+    });
+    let transport =
+        KafkaTransport::new("test-key-light".to_string(), config, None).unwrap();
+
+    transport
+        .send_light(example_light_event(SUBJECT_ID, SCHEMA_ID))
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("key-light-Example", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].0, SUBJECT_ID,
+        "send_light must apply the same key strategy as send"
+    );
+}
+
+/// `send_batch` under transactions: each group becomes a transactional
+/// commit, and the receiver sees every group as its own array message.
+#[tokio::test]
+async fn kafka_transport_transactional_batch() {
+    let env = RedpandaEnv::start().await;
+    let config = kafka_sink_config_with(
+        &env.bootstrap_servers,
+        "tx-batch-{{schema-id}}-{{event-type}}",
+        |cfg| {
+            cfg.transactional = true;
+            cfg.batch_delivery = true;
+        },
+    );
+    let transport =
+        KafkaTransport::new("test-tx-batch".to_string(), config, None).unwrap();
+
+    let light = |sn: u64| LightEvent {
+        subject_id: SUBJECT_ID.to_string(),
+        schema_id: SCHEMA_ID.to_string(),
+        governance_id: None,
+        sn,
+        event_type: SinkTypes::Fact,
+        success: true,
+    };
+    let events = vec![
+        IncomingSinkEvent::Full(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID))),
+        IncomingSinkEvent::Light(light(1)),
+        IncomingSinkEvent::Light(light(2)),
+    ];
+
+    transport.send_batch(events).await.unwrap();
+
+    let create_messages =
+        env.consume_string("tx-batch-Example-create", 1, TIMEOUT).await;
+    assert_eq!(create_messages.len(), 1);
+    let creates: Vec<IncomingSinkEvent> =
+        serde_json::from_str(&create_messages[0].1).unwrap();
+    assert_eq!(creates.len(), 1);
+    assert_eq!(creates[0].event_type(), SinkTypes::Create);
+
+    let fact_messages =
+        env.consume_string("tx-batch-Example-fact", 1, TIMEOUT).await;
+    assert_eq!(fact_messages.len(), 1);
+    let facts: Vec<IncomingSinkEvent> =
+        serde_json::from_str(&fact_messages[0].1).unwrap();
+    assert_eq!(facts.len(), 2);
+    assert!(facts.iter().all(|e| e.event_type() == SinkTypes::Fact));
+}
+
+/// `key_strategy: Static` configured on a real node: every event delivered by
+/// the node carries the same fixed key, regardless of subject. This proves the
+/// `SinkConfigEntry` -> `KafkaSinkConfig` -> transport pipeline threads the
+/// strategy all the way to the broker.
+#[traced_test]
+#[tokio::test]
+async fn kafka_node_key_strategy_static() {
+    let env = RedpandaEnv::start().await;
+    let topic = "ave-node-key-static";
+
+    let (mut nodes, mut dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+        bootstrap: vec![vec![]],
+        addressable: vec![vec![0]],
+        ephemeral: vec![],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let mut owner = nodes.remove(0);
+    let mut owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    let fixed_key = "global-partition".to_owned();
+    let owner_keys = owner.keys.clone();
+    let owner_local_db = owner_dirs[0].path().to_path_buf();
+    let owner_ext_db = owner_dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(restart_config(
+        owner_keys,
+        owner_local_db,
+        owner_ext_db,
+        format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "Example".to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![SinkServer {
+                server: "node-key-static-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                    bootstrap_servers: env.bootstrap_servers.clone(),
+                    topic: topic.to_owned(),
+                    key_strategy: KafkaKeyStrategy::Static(fixed_key.clone()),
+                    ..KafkaSinkConfig::default()
+                }),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                ..Default::default()
+            }],
+        }],
+    ))
+    .await;
+    owner_dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "node-key-static-sink").await;
+    let messages = env.consume_string(topic, 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2, "expected Create + one fact");
+
+    for (key, _) in &messages {
+        assert_eq!(
+            key, &fixed_key,
+            "every delivery from a Static key strategy must carry the fixed key (subject was {})",
+            subject_id_str
+        );
+    }
+}
+
+/// `transactional: true` on a real node: the producer's `init_transactions`
+/// runs at node startup (otherwise the sink worker fails to build), every
+/// live event reaches the broker through a committed transaction, and the
+/// receiver sees the expected sequence. This proves the full pipeline
+/// survives the transactional producer's stricter contract.
+#[traced_test]
+#[tokio::test]
+async fn kafka_node_transactional_delivers() {
+    let env = RedpandaEnv::start().await;
+    let topic = "ave-node-tx";
+
+    let (mut nodes, mut dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+        bootstrap: vec![vec![]],
+        addressable: vec![vec![0]],
+        ephemeral: vec![],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let mut owner = nodes.remove(0);
+    let mut owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    let owner_keys = owner.keys.clone();
+    let owner_local_db = owner_dirs[0].path().to_path_buf();
+    let owner_ext_db = owner_dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(restart_config(
+        owner_keys,
+        owner_local_db,
+        owner_ext_db,
+        format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "Example".to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![SinkServer {
+                server: "node-tx-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                    bootstrap_servers: env.bootstrap_servers.clone(),
+                    topic: topic.to_owned(),
+                    transactional: true,
+                    ..KafkaSinkConfig::default()
+                }),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                ..Default::default()
+            }],
+        }],
+    ))
+    .await;
+    owner_dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &owner.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    wait_for_sink_caught_up(&owner.api, "node-tx-sink").await;
+    let messages = env.consume_string(topic, 3, TIMEOUT).await;
+    assert_eq!(
+        messages.len(),
+        3,
+        "transactional sink must deliver Create + 2 facts"
+    );
+
+    for (key, _) in &messages {
+        assert_eq!(key, &subject_id_str);
+    }
 }
