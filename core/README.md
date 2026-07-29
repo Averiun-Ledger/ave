@@ -149,6 +149,93 @@ The runtime includes outbound sink handling for propagating events to external s
 - timeout and retry policies
 - token bootstrap and token refresh flows
 
+## Kafka sink operations
+
+Operational notes for running a Kafka sink in production.
+
+### Broker ACLs
+
+The identity used by the sink needs at least:
+
+- `Write` and `Describe` on every target topic.
+- With idempotence enabled (the default when `acks=all`) or transactions
+  (`transactional: true`): `IdempotentWrite` / `InitProducerId` on the
+  cluster, plus `Write` and `Describe` on the transactional id resource when
+  transactions are used.
+
+A missing ACL surfaces as an auth error on delivery and sends the sink to
+the lagging/blocked state; it does not crash the node.
+
+### Environment variables
+
+Secrets are never written in the configuration file. They are read from
+environment variables named after the sink, upper-cased with every
+non-alphanumeric character replaced by `_`:
+
+- `AVE_SINK_PASSWORD_{{SERVER}}` — SASL password (PLAIN/SCRAM) or OIDC
+  client secret (OAUTHBEARER).
+- `AVE_SINK_APIKEY_{{SERVER}}` — API key, when configured.
+- `AVE_SINK_PROXY_PASSWORD_{{SERVER}}` — proxy password (HTTP sinks).
+
+Example: a sink named `billing-events.eu` reads
+`AVE_SINK_PASSWORD_BILLING_EVENTS_EU`.
+
+### SASL authentication
+
+- `PLAIN` / `SCRAM-SHA-256` / `SCRAM-SHA-512`: username in the sink config,
+  password in `AVE_SINK_PASSWORD_{{SERVER}}`.
+- `OAUTHBEARER` (OIDC): set `oauth_token_url` to the IdP token endpoint; the
+  SASL username is the OIDC client id and the client secret is read from
+  `AVE_SINK_PASSWORD_{{SERVER}}`. Tokens are fetched with the
+  `client_credentials` grant and refreshed automatically before expiry;
+  `oauth_scope` is optional.
+- `GSSAPI` (Kerberos): fill the `kerberos` section (`service_name`,
+  `principal`, `keytab`); the realm is derived from the principal. The host
+  needs a working Kerberos setup (krb5.conf, keytab readable by the node
+  process) and a librdkafka build with Cyrus SASL (`sasl_gssapi` in
+  `builtin.features`).
+
+### Topics
+
+Pre-create the target topics with the desired partition count and
+replication factor. If broker-side auto-creation is disabled, deliveries
+fail with `UnknownTopicOrPartition` and are retried indefinitely: the sink
+does not die, but it does not deliver until the topic exists.
+
+### Transactions
+
+With `transactional: true` every delivery is its own Kafka transaction
+(begin/send/commit, abort on failure) and the producer fences zombie
+instances of itself at startup. The default `transactional.id` is
+`ave-sink-{sink_name}-{node_id}`, stable and unique per node, so several
+nodes can run the same sink without fencing each other. If you set
+`transactional_id` explicitly in a multi-node deployment, it must differ
+per node. Transactions require `acks=all`; the configuration is rejected
+otherwise.
+
+### Metrics to watch
+
+- `core_kafka_producer_queue_size{sink}` — producer queue depth; sustained
+  growth means the broker cannot keep up (backpressure).
+- `core_kafka_producer_tx_errors_total{sink}` — transmission errors and
+  request timeouts reported by librdkafka.
+- `core_kafka_producer_fatal_errors_total{sink}` — fatal producer errors
+  (fenced, unsupported feature). The producer instance is dead after one of
+  these; alert on any increase.
+- `core_kafka_producer_rtt_seconds{sink}` — broker round-trip time.
+- `core_sink_request_duration_seconds{sink,result}` — per-attempt delivery
+  latency.
+- `core_sink_events_total{sink,result}` and `core_sink_blocked{sink}` —
+  delivery outcomes and blocked state.
+
+### Poison messages
+
+A permanently rejected event (for example, a payload larger than the
+broker's `max.message.bytes`) blocks the sink: subsequent events queue
+behind it until the underlying cause is fixed and the sink is unblocked.
+There is no dead-letter queue yet; watch `core_sink_blocked{sink}` and the
+sink status API for the blocked reason.
+
 ## Crate layout
 
 Public modules are grouped by responsibility:

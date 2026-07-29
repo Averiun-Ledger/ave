@@ -1047,8 +1047,11 @@ impl SinkWorker {
         server: SinkServer,
         is_governance: bool,
         signer: Option<NodeSigner>,
+        node_public_key: String,
     ) -> Result<Self, SinkError> {
-        let client = crate::sink::build_transport(&server, signer).await?;
+        let client =
+            crate::sink::build_transport(&server, signer, Some(&node_public_key))
+                .await?;
         Ok(Self {
             sink_name,
             server,

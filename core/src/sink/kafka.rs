@@ -8,12 +8,13 @@ use rdkafka::ClientConfig;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{Header, Headers, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
-use tracing::debug;
+use tracing::{debug, error};
 
 use ave_common::{DataToSink, IncomingSinkEvent, LightEvent};
 
 use crate::config::{
-    KafkaAcks, KafkaKeyStrategy, KafkaSecurityConfig, KafkaSinkConfig,
+    KafkaAcks, KafkaKeyStrategy, KafkaSaslMechanism, KafkaSecurityConfig,
+    KafkaSinkConfig,
 };
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
@@ -73,15 +74,31 @@ fn build_headers(meta: &DeliveryMeta, request_id: &str) -> OwnedHeaders {
         })
 }
 
+/// Everything needed to mint an OAUTHBEARER token on librdkafka's refresh
+/// callback: the OIDC client-credentials flow runs on the node's runtime
+/// from the producer's poll thread via `Handle::block_on`.
+struct KafkaOAuthContext {
+    handle: tokio::runtime::Handle,
+    client: reqwest::Client,
+    auth: ave_common::sink::SinkAuthConfig,
+    password: String,
+    principal: String,
+    retry_base_delay_ms: u64,
+}
+
 /// Producer context that forwards librdkafka statistics to the core metrics.
 /// `last_tx_errors` holds the absolute error total of the previous report,
 /// because librdkafka reports cumulative values (point 13).
 struct KafkaStatsContext {
     sink_name: String,
     last_tx_errors: AtomicU64,
+    /// Present only with the OAUTHBEARER SASL mechanism.
+    oauth: Option<KafkaOAuthContext>,
 }
 
 impl rdkafka::ClientContext for KafkaStatsContext {
+    const ENABLE_REFRESH_OAUTH_TOKEN: bool = true;
+
     fn stats(&self, statistics: rdkafka::Statistics) {
         if let Some(metrics) = try_core_metrics() {
             metrics.observe_kafka_producer_stats(
@@ -90,6 +107,54 @@ impl rdkafka::ClientContext for KafkaStatsContext {
                 &self.last_tx_errors,
             );
         }
+    }
+
+    fn generate_oauth_token(
+        &self,
+        _oauthbearer_config: Option<&str>,
+    ) -> Result<rdkafka::client::OAuthToken, Box<dyn std::error::Error>> {
+        let oauth = self.oauth.as_ref().ok_or(
+            "OAUTHBEARER token refresh requested without OAuth configuration",
+        )?;
+        let response =
+            oauth.handle.block_on(crate::sink::obtain_token_with_retry(
+                &oauth.client,
+                &oauth.auth,
+                &oauth.password,
+                oauth.retry_base_delay_ms,
+            ))?;
+        let lifetime_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64
+            + response.expires_in.saturating_mul(1_000);
+        Ok(rdkafka::client::OAuthToken {
+            token: response.access_token,
+            principal_name: oauth.principal.clone(),
+            lifetime_ms,
+        })
+    }
+
+    fn error(&self, error: KafkaError, reason: &str) {
+        // `Fatal` is librdkafka's own dead-producer signal. `Fenced` is
+        // counted as fatal too: a fenced transactional producer can no
+        // longer deliver and this transport never re-initializes it, so for
+        // alerting purposes the producer is dead.
+        let is_fatal = matches!(
+            error,
+            KafkaError::Global(RDKafkaErrorCode::Fatal)
+                | KafkaError::Global(RDKafkaErrorCode::Fenced)
+        );
+        if is_fatal && let Some(metrics) = try_core_metrics() {
+            metrics.observe_kafka_producer_fatal_error(&self.sink_name);
+        }
+        error!(
+            msg_type = "KafkaClientError",
+            sink = %self.sink_name,
+            fatal = is_fatal,
+            error = %error,
+            reason = %reason,
+            "librdkafka client error"
+        );
     }
 }
 
@@ -130,6 +195,19 @@ impl ResolvedKeyStrategy {
     }
 }
 
+/// Default transactional id: stable per node (derived from the node public
+/// key) so restarts keep fencing the node's own zombies, and unique per
+/// node so several nodes running the same sink never fence each other.
+fn default_transactional_id(sink_name: &str, node_id: Option<&str>) -> String {
+    match node_id {
+        Some(node_id) => {
+            let short: String = node_id.chars().take(12).collect();
+            format!("ave-sink-{sink_name}-{short}")
+        }
+        None => format!("ave-sink-{sink_name}"),
+    }
+}
+
 /// Kafka transport for a single sink server.
 pub struct KafkaTransport {
     sink_name: String,
@@ -157,6 +235,7 @@ impl KafkaTransport {
         sink_name: String,
         config: KafkaSinkConfig,
         signer: Option<NodeSigner>,
+        node_id: Option<&str>,
     ) -> Result<Self, SinkError> {
         let mut client_config = ClientConfig::new();
         client_config
@@ -195,15 +274,23 @@ impl KafkaTransport {
                 config.statistics_interval_ms.to_string(),
             );
 
+        if let Some(partitioner) = &config.partitioner {
+            client_config.set("partitioner", partitioner);
+        }
+
         let key_strategy = ResolvedKeyStrategy::from_config(&config.key_strategy);
 
         // Point 11: transactional producer requires a non-empty
-        // `transactional.id` so Kafka can fence zombie producers.
+        // `transactional.id` so Kafka can fence zombie producers. The default
+        // id is derived from the node identity so two nodes running the same
+        // sink never fence each other.
         if config.transactional {
             let transactional_id = config
                 .transactional_id
                 .clone()
-                .unwrap_or_else(|| format!("ave-sink-{sink_name}"));
+                .unwrap_or_else(|| {
+                    default_transactional_id(&sink_name, node_id)
+                });
             client_config.set("transactional.id", &transactional_id);
         }
 
@@ -223,6 +310,7 @@ impl KafkaTransport {
             KafkaSecurityConfig::Ssl | KafkaSecurityConfig::SaslSsl { .. }
         );
 
+        let mut oauth_context: Option<KafkaOAuthContext> = None;
         match &config.security {
             KafkaSecurityConfig::Plaintext => {
                 client_config.set("security.protocol", "plaintext");
@@ -230,25 +318,85 @@ impl KafkaTransport {
             KafkaSecurityConfig::Ssl => {
                 client_config.set("security.protocol", "ssl");
             }
+            KafkaSecurityConfig::SaslPlaintext { .. } => {
+                client_config.set("security.protocol", "sasl_plaintext");
+            }
+            KafkaSecurityConfig::SaslSsl { .. } => {
+                client_config.set("security.protocol", "sasl_ssl");
+            }
+        }
+        let sasl = match &config.security {
             KafkaSecurityConfig::SaslPlaintext {
                 mechanism,
                 username,
-            } => {
-                client_config
-                    .set("security.protocol", "sasl_plaintext")
-                    .set("sasl.mechanism", mechanism.as_str())
-                    .set("sasl.username", username)
-                    .set("sasl.password", sasl_password(&sink_name)?);
             }
-            KafkaSecurityConfig::SaslSsl {
+            | KafkaSecurityConfig::SaslSsl {
                 mechanism,
                 username,
-            } => {
-                client_config
-                    .set("security.protocol", "sasl_ssl")
-                    .set("sasl.mechanism", mechanism.as_str())
-                    .set("sasl.username", username)
-                    .set("sasl.password", sasl_password(&sink_name)?);
+            } => Some((mechanism, username)),
+            _ => None,
+        };
+        if let Some((mechanism, username)) = sasl {
+            client_config.set("sasl.mechanism", mechanism.as_str());
+            match mechanism {
+                KafkaSaslMechanism::Plain
+                | KafkaSaslMechanism::ScramSha256
+                | KafkaSaslMechanism::ScramSha512 => {
+                    client_config
+                        .set("sasl.username", username)
+                        .set("sasl.password", sasl_password(&sink_name)?);
+                }
+                KafkaSaslMechanism::OAuthBearer => {
+                    // The token is fetched and refreshed by the
+                    // `generate_oauth_token` context callback, so the OIDC
+                    // properties (`sasl.oauthbearer.client.id`, ...) are
+                    // intentionally not set: they select librdkafka's own
+                    // OIDC client, which requires a libcurl build.
+                    let secret = sasl_password(&sink_name)?;
+                    let token_url = config.oauth_token_url.clone().ok_or_else(|| {
+                        SinkError::ClientBuild(format!(
+                            "OAUTHBEARER configured for sink '{sink_name}' but oauth_token_url is not set"
+                        ))
+                    })?;
+                    let token_client = reqwest::Client::builder()
+                        .timeout(Duration::from_millis(config.request_timeout_ms))
+                        .build()
+                        .map_err(|e| {
+                            SinkError::ClientBuild(format!(
+                                "sink '{sink_name}': failed to build OAuth token client: {e}"
+                            ))
+                        })?;
+                    oauth_context = Some(KafkaOAuthContext {
+                        handle: tokio::runtime::Handle::current(),
+                        client: token_client,
+                        auth: ave_common::sink::SinkAuthConfig {
+                            auth_url: token_url,
+                            username: String::new(),
+                            api_key: String::new(),
+                            grant_type:
+                                ave_common::sink::OAuth2GrantType::ClientCredentials,
+                            client_id: username.clone(),
+                            scope: config
+                                .oauth_scope
+                                .clone()
+                                .unwrap_or_default(),
+                        },
+                        password: secret,
+                        principal: username.clone(),
+                        retry_base_delay_ms: config.retry_base_delay_ms,
+                    });
+                }
+                KafkaSaslMechanism::Gssapi => {
+                    let kerberos = config.kerberos.as_ref().ok_or_else(|| {
+                        SinkError::ClientBuild(format!(
+                            "GSSAPI configured for sink '{sink_name}' but the kerberos section is missing"
+                        ))
+                    })?;
+                    client_config
+                        .set("sasl.kerberos.service.name", &kerberos.service_name)
+                        .set("sasl.kerberos.principal", &kerberos.principal)
+                        .set("sasl.kerberos.keytab", &kerberos.keytab);
+                }
             }
         }
 
@@ -274,6 +422,7 @@ impl KafkaTransport {
             .create_with_context(KafkaStatsContext {
                 sink_name: sink_name.clone(),
                 last_tx_errors: AtomicU64::new(0),
+                oauth: oauth_context,
             })
             .map_err(|e| {
                 SinkError::ClientBuild(format!(
@@ -858,6 +1007,123 @@ mod tests {
         };
         assert_eq!(get(0), (TEST_HEADER, Some("true".to_owned())));
         assert_eq!(get(1), (REQUEST_ID_HEADER, Some("req-456".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn generate_oauth_token_fetches_from_oidc_endpoint() {
+        use rdkafka::ClientContext as _;
+
+        // Mock OIDC token endpoint speaking the client_credentials contract.
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "oidc-token-123",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let ctx = KafkaStatsContext {
+            sink_name: "unit-oauth".to_owned(),
+            last_tx_errors: AtomicU64::new(0),
+            oauth: Some(KafkaOAuthContext {
+                handle: tokio::runtime::Handle::current(),
+                client: reqwest::Client::new(),
+                auth: ave_common::sink::SinkAuthConfig {
+                    auth_url: format!("http://{addr}/token"),
+                    username: String::new(),
+                    api_key: String::new(),
+                    grant_type:
+                        ave_common::sink::OAuth2GrantType::ClientCredentials,
+                    client_id: "client-1".to_owned(),
+                    scope: "read".to_owned(),
+                },
+                password: "secret".to_owned(),
+                principal: "client-1".to_owned(),
+                retry_base_delay_ms: 10,
+            }),
+        };
+
+        // The callback contract is synchronous and runs off-runtime:
+        // exercise it from a blocking thread, exactly like librdkafka's poll
+        // thread would (`Handle::block_on` panics on a runtime thread), and
+        // await it so the runtime keeps polling the token fetch.
+        let (token, principal_name, lifetime_ms) =
+            tokio::task::spawn_blocking(move || {
+                ctx.generate_oauth_token(None)
+                    .map(|t| (t.token, t.principal_name, t.lifetime_ms))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .expect("callback thread should not panic")
+            .expect("token should be generated");
+
+        assert_eq!(token, "oidc-token-123");
+        assert_eq!(principal_name, "client-1");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_millis() as i64;
+        assert!(
+            lifetime_ms > now_ms,
+            "the token must expire in the future"
+        );
+    }
+
+    #[test]
+    fn kafka_stats_context_counts_only_fatal_errors() {        use rdkafka::ClientContext as _;
+
+        // Initialize the core metrics global (idempotent via `OnceLock`).
+        let mut registry = prometheus_client::registry::Registry::default();
+        crate::metrics::register(&mut registry);
+
+        let ctx = KafkaStatsContext {
+            sink_name: "unit-fatal".to_owned(),
+            last_tx_errors: AtomicU64::new(0),
+            oauth: None,
+        };
+        ctx.error(KafkaError::Global(RDKafkaErrorCode::Fatal), "test fatal");
+        ctx.error(
+            KafkaError::Global(RDKafkaErrorCode::BrokerNotAvailable),
+            "test non-fatal",
+        );
+
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, &registry)
+            .unwrap();
+        assert!(
+            text.contains(
+                "core_kafka_producer_fatal_errors_total{sink=\"unit-fatal\"} 1"
+            ),
+            "fatal counter must be 1 after one fatal and one non-fatal error:\n{text}"
+        );
+    }
+
+    #[test]
+    fn default_transactional_id_is_per_node_stable_and_truncated() {        let id = default_transactional_id("sink", Some("node-public-key-abcdef"));
+        // First 12 chars of the node id: unique per node, stable per restart.
+        assert_eq!(id, "ave-sink-sink-node-public-");
+        assert_eq!(
+            id,
+            default_transactional_id("sink", Some("node-public-key-abcdef")),
+            "the default id must be stable across constructions"
+        );
+        assert_ne!(
+            default_transactional_id("sink", Some("node-a")),
+            default_transactional_id("sink", Some("node-b")),
+            "different nodes must get different ids"
+        );
+        // Without node identity, the historical sink-only default remains.
+        assert_eq!(default_transactional_id("sink", None), "ave-sink-sink");
     }
 
     #[test]

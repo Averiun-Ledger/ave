@@ -3256,6 +3256,7 @@ impl Actor for Governance {
                 SinkManager::initial(SinkManagerInitParams {
                     sinks: tracker_sinks,
                     is_governance: false,
+                    node_public_key: self.our_key.to_string(),
                 }),
             )
             .await

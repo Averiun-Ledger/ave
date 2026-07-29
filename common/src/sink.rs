@@ -523,7 +523,7 @@ mod tests {
         // Unknown SASL mechanisms are rejected at deserialization time.
         let json = r#"{
             "protocol": "sasl_ssl",
-            "mechanism": "GSSAPI",
+            "mechanism": "SCRAM-SHA-1",
             "username": "ave"
         }"#;
         assert!(serde_json::from_str::<KafkaSecurityConfig>(json).is_err());
@@ -1029,6 +1029,133 @@ mod tests {
             "0 disables the stats callback and must validate"
         );
     }
+
+    #[test]
+    fn test_kafka_sink_config_rejects_invalid_delivery_config() {
+        fn assert_rejects(cfg: &KafkaSinkConfig, expected_component: &str) {
+            match cfg.validate() {
+                Err(Error::InvalidConfiguration { component, .. })
+                    if component == expected_component => {}
+                other => panic!(
+                    "expected InvalidConfiguration for {expected_component}, got {other:?}"
+                ),
+            }
+        }
+
+        let mut cfg = KafkaSinkConfig::default();
+        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
+        cfg.topic = "test-topic".to_string();
+        assert!(cfg.validate().is_ok(), "baseline config must validate");
+
+        // client_id must not be empty.
+        cfg.client_id = String::new();
+        assert_rejects(&cfg, "KafkaSinkConfig.client_id");
+        cfg.client_id = "ave-sink".to_string();
+
+        // Unknown template placeholders are rejected instead of being sent
+        // literally over the wire.
+        cfg.topic = "ave-{{schema-id}}-{{region}}".to_string();
+        assert_rejects(&cfg, "KafkaSinkConfig.topic");
+        cfg.topic = "ave-{{schema-id}".to_string();
+        assert_rejects(&cfg, "KafkaSinkConfig.topic");
+        cfg.topic =
+            "ave-{{schema-id}}-{{subject-id}}-{{event-type}}".to_string();
+        assert!(
+            cfg.validate().is_ok(),
+            "the three known placeholders must validate"
+        );
+        cfg.topic = "test-topic".to_string();
+
+        // Transactions require acks=all (idempotence).
+        cfg.transactional = true;
+        cfg.acks = KafkaAcks::One;
+        assert_rejects(&cfg, "KafkaSinkConfig.transactional");
+        cfg.acks = KafkaAcks::Zero;
+        assert_rejects(&cfg, "KafkaSinkConfig.transactional");
+        cfg.acks = KafkaAcks::All;
+        assert!(
+            cfg.validate().is_ok(),
+            "transactional with acks=all must validate"
+        );
+        cfg.transactional = false;
+
+        // The partitioner must be a known librdkafka partitioner.
+        cfg.partitioner = Some("roundrobin".to_string());
+        assert_rejects(&cfg, "KafkaSinkConfig.partitioner");
+        cfg.partitioner = Some("murmur2_random".to_string());
+        assert!(
+            cfg.validate().is_ok(),
+            "a known partitioner must validate"
+        );
+        cfg.partitioner = None;
+
+        // OAUTHBEARER requires the OIDC token endpoint, and the endpoint is
+        // rejected for any other mechanism.
+        cfg.security = KafkaSecurityConfig::SaslSsl {
+            mechanism: KafkaSaslMechanism::OAuthBearer,
+            username: "client-1".to_string(),
+        };
+        assert_rejects(&cfg, "KafkaSinkConfig.oauth_token_url");
+        cfg.oauth_token_url =
+            Some("https://idp.example/token".to_string());
+        assert!(
+            cfg.validate().is_ok(),
+            "OAUTHBEARER with a token URL must validate"
+        );
+        cfg.security = KafkaSecurityConfig::SaslSsl {
+            mechanism: KafkaSaslMechanism::ScramSha256,
+            username: "client-1".to_string(),
+        };
+        assert_rejects(&cfg, "KafkaSinkConfig.oauth_token_url");
+        cfg.oauth_token_url = None;
+
+        // GSSAPI requires the kerberos section, and the section is rejected
+        // for any other mechanism.
+        cfg.security = KafkaSecurityConfig::SaslSsl {
+            mechanism: KafkaSaslMechanism::Gssapi,
+            username: "ave@EXAMPLE.COM".to_string(),
+        };
+        assert_rejects(&cfg, "KafkaSinkConfig.kerberos");
+        cfg.kerberos = Some(KafkaKerberosConfig {
+            service_name: "kafka".to_string(),
+            principal: "ave@EXAMPLE.COM".to_string(),
+            keytab: "/etc/ave/ave.keytab".to_string(),
+        });
+        assert!(
+            cfg.validate().is_ok(),
+            "GSSAPI with a kerberos section must validate"
+        );
+        cfg.security = KafkaSecurityConfig::SaslSsl {
+            mechanism: KafkaSaslMechanism::ScramSha256,
+            username: "client-1".to_string(),
+        };
+        assert_rejects(&cfg, "KafkaSinkConfig.kerberos");
+        cfg.kerberos = None;
+        cfg.security = KafkaSecurityConfig::Plaintext;
+    }
+
+    #[test]
+    fn test_http_sink_config_rejects_unknown_url_placeholders() {
+        let mut cfg = HttpSinkConfig {
+            url: "https://sink.example/{{region}}".to_string(),
+            ..HttpSinkConfig::default()
+        };
+        match cfg.validate() {
+            Err(Error::InvalidConfiguration { component, .. })
+                if component == "HttpSinkConfig.url" => {}
+            other => panic!(
+                "expected InvalidConfiguration for HttpSinkConfig.url, got {other:?}"
+            ),
+        }
+
+        cfg.url =
+            "https://sink.example/{{schema-id}}/{{subject-id}}/{{event-type}}"
+                .to_string();
+        assert!(
+            cfg.validate().is_ok(),
+            "the three known placeholders must validate"
+        );
+    }
 }
 
 /// OAuth2 grant type used to obtain a token from the authentication endpoint.
@@ -1386,6 +1513,7 @@ impl Default for HttpSinkConfig {
 impl HttpSinkConfig {
     pub fn validate(&self) -> Result<(), Error> {
         validate_url("HttpSinkConfig.url", &self.url)?;
+        validate_template_placeholders("HttpSinkConfig.url", &self.url)?;
         if let Some(auth) = &self.auth {
             auth.validate().map_err(|e| Error::InvalidConfiguration {
                 component: "HttpSinkConfig.auth".to_string(),
@@ -1500,6 +1628,14 @@ pub enum KafkaSaslMechanism {
     /// SCRAM challenge-response with SHA-512.
     #[serde(rename = "SCRAM-SHA-512")]
     ScramSha512,
+    /// OIDC bearer tokens (`client_credentials` grant against
+    /// `oauth_token_url`); the token is refreshed by librdkafka before it
+    /// expires.
+    #[serde(rename = "OAUTHBEARER")]
+    OAuthBearer,
+    /// Kerberos/GSSAPI authentication (requires the `kerberos` section).
+    #[serde(rename = "GSSAPI")]
+    Gssapi,
 }
 
 impl KafkaSaslMechanism {
@@ -1509,6 +1645,8 @@ impl KafkaSaslMechanism {
             Self::Plain => "PLAIN",
             Self::ScramSha256 => "SCRAM-SHA-256",
             Self::ScramSha512 => "SCRAM-SHA-512",
+            Self::OAuthBearer => "OAUTHBEARER",
+            Self::Gssapi => "GSSAPI",
         }
     }
 }
@@ -1516,6 +1654,41 @@ impl KafkaSaslMechanism {
 impl std::fmt::Display for KafkaSaslMechanism {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Kerberos/GSSAPI configuration for Kafka SASL. Required when the SASL
+/// mechanism is `GSSAPI`; rejected for any other mechanism.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct KafkaKerberosConfig {
+    /// Kerberos service name of the Kafka brokers (usually `kafka`).
+    pub service_name: String,
+    /// Client principal used to authenticate (e.g. `ave@EXAMPLE.COM`); the
+    /// realm is derived from the principal.
+    pub principal: String,
+    /// Path to the client's keytab file.
+    pub keytab: String,
+}
+
+impl KafkaKerberosConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        for (component, value) in [
+            ("KafkaKerberosConfig.service_name", &self.service_name),
+            ("KafkaKerberosConfig.principal", &self.principal),
+            ("KafkaKerberosConfig.keytab", &self.keytab),
+        ] {
+            if value.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: component.to_string(),
+                    reason: "must not be empty when using GSSAPI".to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1765,7 +1938,10 @@ pub struct KafkaSinkConfig {
     /// opt-in for sinks that need it.
     pub transactional: bool,
     /// Transactional id used by Kafka to fence zombies. When `transactional`
-    /// is enabled and this is `None`, defaults to `ave-sink-{sink_name}`.
+    /// is enabled and this is `None`, defaults to
+    /// `ave-sink-{sink_name}-{node_id}` (stable and unique per node, so
+    /// several nodes running the same sink never fence each other). When
+    /// set explicitly in a multi-node deployment, it must differ per node.
     pub transactional_id: Option<String>,
     /// Producer linger in milliseconds. Higher values batch more messages
     /// at the cost of latency.
@@ -1782,6 +1958,25 @@ pub struct KafkaSinkConfig {
     /// are ignored so the delivery contract is never broken.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// librdkafka partitioner (`random`, `consistent`, `consistent_random`,
+    /// `murmur2`, `murmur2_random`, `fnv1a`, `fnv1a_random`). `None` keeps
+    /// the librdkafka default (`consistent_random`: keyed messages land on a
+    /// stable partition, unkeyed ones rotate).
+    #[serde(default)]
+    pub partitioner: Option<String>,
+    /// OIDC token endpoint used with the `OAUTHBEARER` SASL mechanism
+    /// (`client_credentials` grant; the client id is the SASL username and
+    /// the client secret is read from `AVE_SINK_PASSWORD_{{SERVER}}`).
+    /// Required with that mechanism, rejected otherwise.
+    #[serde(default)]
+    pub oauth_token_url: Option<String>,
+    /// Optional OAuth2 scope requested at the OIDC token endpoint.
+    #[serde(default)]
+    pub oauth_scope: Option<String>,
+    /// Kerberos configuration used with the `GSSAPI` SASL mechanism.
+    /// Required with that mechanism, rejected otherwise.
+    #[serde(default)]
+    pub kerberos: Option<KafkaKerberosConfig>,
 }
 
 impl Default for KafkaSinkConfig {
@@ -1814,6 +2009,10 @@ impl Default for KafkaSinkConfig {
             queue_buffering_max_messages: 100_000,
             statistics_interval_ms: 1_000,
             headers: HashMap::new(),
+            partitioner: None,
+            oauth_token_url: None,
+            oauth_scope: None,
+            kerberos: None,
         }
     }
 }
@@ -1829,6 +2028,13 @@ impl KafkaSinkConfig {
         if self.topic.is_empty() {
             return Err(Error::InvalidConfiguration {
                 component: "KafkaSinkConfig.topic".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        validate_template_placeholders("KafkaSinkConfig.topic", &self.topic)?;
+        if self.client_id.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.client_id".to_string(),
                 reason: "must not be empty".to_string(),
             });
         }
@@ -1910,6 +2116,62 @@ impl KafkaSinkConfig {
                     .to_string(),
             });
         }
+        if self.transactional && !matches!(self.acks, KafkaAcks::All) {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.transactional".to_string(),
+                reason: "requires acks=all (transactions need idempotence)"
+                    .to_string(),
+            });
+        }
+        if let Some(partitioner) = &self.partitioner
+            && !KAFKA_PARTITIONERS.contains(&partitioner.as_str())
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.partitioner".to_string(),
+                reason: format!(
+                    "unknown partitioner '{partitioner}'; expected one of: {}",
+                    KAFKA_PARTITIONERS.join(", ")
+                ),
+            });
+        }
+
+        let sasl_mechanism = match &self.security {
+            KafkaSecurityConfig::SaslPlaintext { mechanism, .. }
+            | KafkaSecurityConfig::SaslSsl { mechanism, .. } => Some(mechanism),
+            KafkaSecurityConfig::Plaintext | KafkaSecurityConfig::Ssl => None,
+        };
+        if matches!(sasl_mechanism, Some(KafkaSaslMechanism::OAuthBearer)) {
+            if self.oauth_token_url.as_deref().is_none_or(str::is_empty) {
+                return Err(Error::InvalidConfiguration {
+                    component: "KafkaSinkConfig.oauth_token_url".to_string(),
+                    reason:
+                        "must be set and non-empty with the OAUTHBEARER mechanism"
+                            .to_string(),
+                });
+            }
+        } else if self.oauth_token_url.is_some() {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.oauth_token_url".to_string(),
+                reason: "is only meaningful with the OAUTHBEARER mechanism"
+                    .to_string(),
+            });
+        }
+        if matches!(sasl_mechanism, Some(KafkaSaslMechanism::Gssapi)) {
+            let Some(kerberos) = &self.kerberos else {
+                return Err(Error::InvalidConfiguration {
+                    component: "KafkaSinkConfig.kerberos".to_string(),
+                    reason: "section required with the GSSAPI mechanism"
+                        .to_string(),
+                });
+            };
+            kerberos.validate()?;
+        } else if self.kerberos.is_some() {
+            return Err(Error::InvalidConfiguration {
+                component: "KafkaSinkConfig.kerberos".to_string(),
+                reason: "is only meaningful with the GSSAPI mechanism"
+                    .to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -1974,6 +2236,47 @@ fn require_positive_u64(component: &str, value: u64) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// Validate the `{{placeholder}}` names of a sink address template (topic,
+/// URL). Only the placeholders the transports know how to render are
+/// allowed; anything else would be sent literally over the wire, so it is
+/// rejected here instead of failing silently at delivery time.
+fn validate_template_placeholders(
+    component: &str,
+    value: &str,
+) -> Result<(), Error> {
+    const ALLOWED: [&str; 3] = ["schema-id", "subject-id", "event-type"];
+    let mut rest = value;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            return Err(Error::InvalidConfiguration {
+                component: component.to_string(),
+                reason: "unclosed template placeholder '{{'".to_string(),
+            });
+        };
+        let name = &after[..end];
+        if !ALLOWED.contains(&name) {
+            return Err(Error::InvalidConfiguration {
+                component: component.to_string(),
+                reason: format!("unknown template placeholder '{{{{{name}}}}}'"),
+            });
+        }
+        rest = &after[end + 2..];
+    }
+    Ok(())
+}
+
+/// librdkafka partitioner names accepted by `KafkaSinkConfig.partitioner`.
+const KAFKA_PARTITIONERS: [&str; 7] = [
+    "random",
+    "consistent",
+    "consistent_random",
+    "murmur2",
+    "murmur2_random",
+    "fnv1a",
+    "fnv1a_random",
+];
 
 /// Target of a sink configuration entry.
 ///

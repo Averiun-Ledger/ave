@@ -50,6 +50,9 @@ pub struct SinkManagerInitParams {
     /// governance events). `false` when under a Governance (handles
     /// tracker events).
     pub is_governance: bool,
+    /// Public key of the node hosting this manager. Used by the Kafka
+    /// transport to derive a per-node default `transactional.id`.
+    pub node_public_key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +300,9 @@ pub struct SinkManager {
     /// `false` when it handles tracker events (under Governance).
     #[serde(skip)]
     is_governance: bool,
+    /// Public key of the node hosting this manager, from the init params.
+    #[serde(skip)]
+    node_public_key: String,
     /// F-5: Cancellation tokens for pending worker shutdown timers.  Each token
     /// is shared between the manager and the spawned timer task; cancelling the
     /// token aborts the timer *before* it sends `Stop`, eliminating the race
@@ -413,6 +419,7 @@ impl BorshDeserialize for SinkManager {
             blocked_sinks,
             replay_floors,
             is_governance: false, // default from BorshDeserialize, will be overridden by create_initial
+            node_public_key: String::new(), // same: re-derived from init params
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashMap::new(),
@@ -450,6 +457,7 @@ impl PersistentActor for SinkManager {
             blocked_sinks: BTreeMap::new(),
             replay_floors: BTreeMap::new(),
             is_governance: params.is_governance,
+            node_public_key: params.node_public_key.clone(),
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashMap::new(),
@@ -554,6 +562,7 @@ impl PersistentActor for SinkManager {
             blocked_sinks: self.blocked_sinks.clone(),
             replay_floors: self.replay_floors.clone(),
             is_governance: self.is_governance,
+            node_public_key: self.node_public_key.clone(),
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: self.catch_up_in_flight.clone(),
@@ -615,6 +624,7 @@ impl Actor for SinkManager {
         // from the init params here so the decision below is robust even if the
         // recovery path changes in the future.
         self.is_governance = params.is_governance;
+        self.node_public_key = params.node_public_key.clone();
 
         // Validate sink server name uniqueness.
         let mut seen = HashSet::new();
@@ -1353,6 +1363,7 @@ impl SinkManager {
                     server.clone(),
                     self.is_governance,
                     signer,
+                    self.node_public_key.clone(),
                 )
                 .await
                 .map_err(|e| ActorError::Functional {
@@ -2115,9 +2126,10 @@ impl SinkManager {
             _ => None,
         };
 
-        let transport = build_transport(&server, signer)
-            .await
-            .map_err(|e| format!("failed to build sink transport: {}", e))?;
+        let transport =
+            build_transport(&server, signer, Some(self.node_public_key.as_str()))
+                .await
+                .map_err(|e| format!("failed to build sink transport: {}", e))?;
 
         transport.test().await.map_err(|e| {
             warn!(
@@ -2510,6 +2522,7 @@ mod tests {
             blocked_sinks: BTreeMap::new(),
             replay_floors: BTreeMap::new(),
             is_governance: false,
+            node_public_key: String::new(),
             pending_worker_shutdowns: HashMap::new(),
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashMap::new(),

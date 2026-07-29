@@ -7,7 +7,7 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{ClientConfig, Message};
 use testcontainers::core::{
     CmdWaitFor, ContainerPort, CopyDataSource, CopyToContainer, ExecCommand,
-    WaitFor,
+    Host, WaitFor,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, Image, ImageExt};
@@ -312,6 +312,189 @@ impl Image for RedpandaSasl {
                 &self.username,
                 "-p",
                 &self.password,
+                "--mechanism",
+                "SCRAM-SHA-256",
+            ])
+            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+        ])
+    }
+}
+
+/// A running Redpanda container configured with SCRAM (an admin user used by
+/// the test consumer) and OAUTHBEARER/OIDC (used by the sink producer).
+pub struct RedpandaOidcEnv {
+    container: ContainerAsync<RedpandaOidc>,
+    pub bootstrap_servers: String,
+    pub admin_username: String,
+    pub admin_password: String,
+    /// Held for the container's lifetime; releases a `REDPANDA_SLOTS` slot
+    /// on drop so a waiting test can start its own container.
+    _slot: SemaphorePermit<'static>,
+}
+
+impl RedpandaOidcEnv {
+    /// Start Redpanda with OIDC validation pointing at `discovery_url` (the
+    /// mock IdP's discovery document) and a SCRAM admin user for consumers.
+    /// The OIDC principal is a superuser, so no ACL or topic setup is
+    /// needed (this test exercises OAUTHBEARER authentication, not broker
+    /// authorization).
+    pub async fn start(
+        discovery_url: &str,
+        audience: &str,
+        oidc_principal: &str,
+    ) -> Self {
+        let slot = REDPANDA_SLOTS
+            .acquire()
+            .await
+            .expect("redpanda semaphore is never closed");
+        let admin_username = "admin".to_owned();
+        let admin_password = "admin-secret".to_owned();
+        let host_port = free_local_port();
+        let image = RedpandaOidc::new(
+            host_port,
+            discovery_url,
+            audience,
+            admin_username.clone(),
+            admin_password.clone(),
+            oidc_principal,
+        )
+        .with_mapped_port(host_port, ContainerPort::Tcp(KAFKA_PORT))
+        // Lets the container reach the host-side mock IdP both on Docker
+        // Desktop (where `host.docker.internal` is native) and on native
+        // Linux (via the host-gateway mapping).
+        .with_host("host.docker.internal", Host::HostGateway);
+        let container =
+            image.start().await.expect("start redpanda oidc container");
+        Self {
+            container,
+            bootstrap_servers: format!("127.0.0.1:{host_port}"),
+            admin_username,
+            admin_password,
+            _slot: slot,
+        }
+    }
+
+    /// Consume `expected_count` messages from `topic` authenticated with the
+    /// SCRAM admin user.
+    pub async fn consume_string(
+        &self,
+        topic: &str,
+        expected_count: usize,
+        timeout: Duration,
+    ) -> Vec<(String, String)> {
+        consume_string_with_config(
+            &self.bootstrap_servers,
+            topic,
+            expected_count,
+            timeout,
+            ConsumerAuth::Sasl {
+                username: &self.admin_username,
+                password: &self.admin_password,
+            },
+        )
+        .await
+    }
+
+    /// Container stdout + stderr, for failure diagnostics (OIDC validation
+    /// errors are logged by redpanda, not returned to the client).
+    pub async fn logs(&self) -> String {
+        let stdout = self.container.stdout_to_vec().await.unwrap_or_default();
+        let stderr = self.container.stderr_to_vec().await.unwrap_or_default();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        )
+    }
+}
+
+/// Redpanda single-node image bootstrapped with SCRAM (admin) and
+/// OAUTHBEARER/OIDC validation against an external discovery URL. Both the
+/// admin user and the OIDC principal are superusers.
+#[derive(Debug, Clone)]
+pub struct RedpandaOidc {
+    host_port: u16,
+    admin_username: String,
+    admin_password: String,
+    bootstrap_copy: CopyToContainer,
+}
+
+impl RedpandaOidc {
+    pub fn new(
+        host_port: u16,
+        discovery_url: &str,
+        audience: &str,
+        admin_username: impl Into<String>,
+        admin_password: impl Into<String>,
+        oidc_principal: &str,
+    ) -> Self {
+        let admin_username = admin_username.into();
+        let admin_password = admin_password.into();
+        let bootstrap_yaml = format!(
+            "enable_sasl: true\n\
+             superusers:\n  - {admin_username}\n  - {oidc_principal}\n\
+             sasl_mechanisms: ['SCRAM', 'OAUTHBEARER']\n\
+             oidc_discovery_url: {discovery_url}\n\
+             oidc_principal_mapping: $.sub\n\
+             oidc_token_audience: {audience}\n\
+             auto_create_topics_enabled: true\n"
+        );
+        let bootstrap_copy = CopyToContainer::new(
+            CopyDataSource::Data(bootstrap_yaml.into_bytes()),
+            "/etc/redpanda/.bootstrap.yaml",
+        );
+        Self {
+            host_port,
+            admin_username,
+            admin_password,
+            bootstrap_copy,
+        }
+    }
+}
+
+impl Image for RedpandaOidc {
+    fn name(&self) -> &str {
+        IMAGE_NAME
+    }
+
+    fn tag(&self) -> &str {
+        IMAGE_TAG
+    }
+
+    fn ready_conditions(&self) -> Vec<WaitFor> {
+        redpanda_ready_conditions()
+    }
+
+    fn cmd(
+        &self,
+    ) -> impl IntoIterator<Item = impl Into<std::borrow::Cow<'_, str>>> {
+        redpanda_start_cmd(self.host_port)
+    }
+
+    fn expose_ports(&self) -> &[ContainerPort] {
+        &[
+            ContainerPort::Tcp(KAFKA_PORT),
+            ContainerPort::Tcp(ADMIN_API_PORT),
+        ]
+    }
+
+    fn copy_to_sources(&self) -> impl IntoIterator<Item = &CopyToContainer> {
+        std::iter::once(&self.bootstrap_copy)
+    }
+
+    fn exec_after_start(
+        &self,
+        _cs: testcontainers::core::ContainerState,
+    ) -> testcontainers::core::error::Result<Vec<ExecCommand>> {
+        Ok(vec![
+            ExecCommand::new([
+                "rpk",
+                "acl",
+                "user",
+                "create",
+                &self.admin_username,
+                "-p",
+                &self.admin_password,
                 "--mechanism",
                 "SCRAM-SHA-256",
             ])

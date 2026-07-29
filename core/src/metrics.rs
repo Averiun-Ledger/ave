@@ -100,6 +100,7 @@ pub struct CoreMetrics {
     kafka_producer_tx_errors: Family<SinkNameLabels, Counter>,
     kafka_producer_rtt_seconds:
         Family<SinkNameLabels, Histogram, fn() -> Histogram>,
+    kafka_producer_fatal_errors: Family<SinkNameLabels, Counter>,
     distribution_failures: Family<DistributionFailureLabels, Counter>,
     distribution_duration_seconds:
         Family<DistributionDurationLabels, Histogram, fn() -> Histogram>,
@@ -162,6 +163,7 @@ impl CoreMetrics {
                     0.5, 1.0,
                 ])
             }),
+            kafka_producer_fatal_errors: Family::default(),
             distribution_failures: Family::default(),
             distribution_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
@@ -272,6 +274,11 @@ impl CoreMetrics {
             "core_kafka_producer_rtt_seconds",
             "Kafka broker round-trip time reported by producer statistics, labeled by sink.",
             self.kafka_producer_rtt_seconds.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_fatal_errors",
+            "Total fatal Kafka producer errors (producer fenced, unsupported feature, ...), labeled by sink.",
+            self.kafka_producer_fatal_errors.clone(),
         );
         registry.register(
             "core_distribution_failures_total",
@@ -507,6 +514,17 @@ impl CoreMetrics {
                     .observe(rtt.avg as f64 / 1_000_000.0);
             }
         }
+    }
+
+    /// Record a fatal error reported by the librdkafka client error callback
+    /// (producer fenced, unsupported feature, ...). Unlike the stats-derived
+    /// counters, a fatal error means the producer instance is dead.
+    pub fn observe_kafka_producer_fatal_error(&self, sink: &str) {
+        self.kafka_producer_fatal_errors
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .inc();
     }
 
     pub fn observe_distribution_failure(&self, reason: &'static str) {

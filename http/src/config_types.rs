@@ -1030,6 +1030,13 @@ pub enum KafkaSaslMechanismHttp {
     /// SCRAM challenge-response with SHA-512.
     #[serde(rename = "SCRAM-SHA-512")]
     ScramSha512,
+    /// OIDC bearer tokens (`client_credentials` grant against
+    /// `oauth_token_url`).
+    #[serde(rename = "OAUTHBEARER")]
+    OAuthBearer,
+    /// Kerberos/GSSAPI authentication.
+    #[serde(rename = "GSSAPI")]
+    Gssapi,
 }
 
 impl From<ave_bridge::ave_common::sink::KafkaSaslMechanism>
@@ -1046,6 +1053,35 @@ impl From<ave_bridge::ave_common::sink::KafkaSaslMechanism>
             ave_bridge::ave_common::sink::KafkaSaslMechanism::ScramSha512 => {
                 Self::ScramSha512
             }
+            ave_bridge::ave_common::sink::KafkaSaslMechanism::OAuthBearer => {
+                Self::OAuthBearer
+            }
+            ave_bridge::ave_common::sink::KafkaSaslMechanism::Gssapi => {
+                Self::Gssapi
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Default)]
+#[serde(default)]
+pub struct KafkaKerberosConfigHttp {
+    /// Kerberos service name of the Kafka brokers (usually `kafka`).
+    pub service_name: String,
+    /// Client principal used to authenticate.
+    pub principal: String,
+    /// Path to the client's keytab file.
+    pub keytab: String,
+}
+
+impl From<ave_bridge::ave_common::sink::KafkaKerberosConfig>
+    for KafkaKerberosConfigHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::KafkaKerberosConfig) -> Self {
+        Self {
+            service_name: value.service_name,
+            principal: value.principal,
+            keytab: value.keytab,
         }
     }
 }
@@ -1226,6 +1262,18 @@ pub struct KafkaSinkConfigHttp {
     /// Internal sink headers (`x-ave-*`, `idempotency-key`) take precedence.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// librdkafka partitioner; `None` keeps the librdkafka default.
+    #[serde(default)]
+    pub partitioner: Option<String>,
+    /// OIDC token endpoint used with the `OAUTHBEARER` SASL mechanism.
+    #[serde(default)]
+    pub oauth_token_url: Option<String>,
+    /// Optional OAuth2 scope requested at the OIDC token endpoint.
+    #[serde(default)]
+    pub oauth_scope: Option<String>,
+    /// Kerberos configuration used with the `GSSAPI` SASL mechanism.
+    #[serde(default)]
+    pub kerberos: Option<KafkaKerberosConfigHttp>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1371,6 +1419,10 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         .queue_buffering_max_messages,
                     statistics_interval_ms: kafka.statistics_interval_ms,
                     headers: kafka.headers,
+                    partitioner: kafka.partitioner,
+                    oauth_token_url: kafka.oauth_token_url,
+                    oauth_scope: kafka.oauth_scope,
+                    kerberos: kafka.kerberos.map(Into::into),
                 })
             }
         };

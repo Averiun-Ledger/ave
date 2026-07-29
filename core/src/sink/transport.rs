@@ -110,9 +110,12 @@ impl NodeSigner {
 }
 
 /// Build the transport for a sink server from its configuration.
+/// `node_id` (the node's public key) is only used by the Kafka transport to
+/// derive a per-node default `transactional.id`.
 pub async fn build_transport(
     server: &SinkServer,
     signer: Option<NodeSigner>,
+    node_id: Option<&str>,
 ) -> Result<Arc<dyn SinkTransport>, SinkError> {
     match &server.transport {
         SinkTransportConfig::Http(http) => Ok(Arc::new(
@@ -123,6 +126,7 @@ pub async fn build_transport(
             server.server.clone(),
             kafka.clone(),
             signer,
+            node_id,
         )?)),
     }
 }

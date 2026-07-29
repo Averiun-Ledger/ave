@@ -54,6 +54,7 @@ testcontainers = { workspace = true }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 rcgen = "0.14"
 tokio-rustls = "0.26"
+aws-lc-rs = { version = "1", features = ["ring-io"] }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]

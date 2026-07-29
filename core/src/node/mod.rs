@@ -913,6 +913,7 @@ impl Actor for Node {
                 SinkManager::initial(SinkManagerInitParams {
                     sinks: gov_sinks,
                     is_governance: true,
+                    node_public_key: self.our_key.to_string(),
                 }),
             )
             .await
