@@ -781,11 +781,11 @@ mod tests {
                 },
                 servers: vec![SinkServer {
                     server: "kafka-sink".to_string(),
-                    transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                    transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                         bootstrap_servers: "broker:9092".to_string(),
                         topic: "ave".to_string(),
                         ..KafkaSinkConfig::default()
-                    }),
+                    })),
                     ..SinkServer::default()
                 }],
             },

@@ -475,11 +475,10 @@ pub async fn wait_for_sink_blocked(api: &Api, sink_name: &str) -> String {
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
-        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
-            if let Some(reason) = &status.blocked {
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
+            && let Some(reason) = &status.blocked {
                 return reason.clone();
             }
-        }
         if attempts > 100 {
             panic!("timeout waiting for sink {} to be blocked", sink_name);
         }
@@ -495,11 +494,10 @@ pub async fn wait_for_sink_unblocked(api: &Api, sink_name: &str) {
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
-        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
-            if status.blocked.is_none() {
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
+            && status.blocked.is_none() {
                 return;
             }
-        }
         if attempts > 100 {
             panic!("timeout waiting for sink {} to be unblocked", sink_name);
         }
@@ -519,11 +517,10 @@ pub async fn wait_for_sink_lagging_subjects(
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
-        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
-            if status.lagging_subjects >= min {
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
+            && status.lagging_subjects >= min {
                 return;
             }
-        }
         if attempts > 100 {
             panic!(
                 "timeout waiting for sink {} to have {} lagging subjects",
@@ -542,11 +539,10 @@ pub async fn wait_for_sink_caught_up(api: &Api, sink_name: &str) {
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
-        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
-            if status.lagging_subjects == 0 {
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
+            && status.lagging_subjects == 0 {
                 return;
             }
-        }
         if attempts > 100 {
             panic!("timeout waiting for sink {} to catch up", sink_name);
         }
@@ -824,7 +820,7 @@ pub fn make_governance_sink_entry(
 }
 
 #[allow(dead_code)]
-pub fn restart_config(
+pub const fn restart_config(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
     ext_db: std::path::PathBuf,
@@ -842,7 +838,7 @@ pub fn restart_config(
 }
 
 #[allow(dead_code)]
-pub fn restart_config_with_peers(
+pub const fn restart_config_with_peers(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
     ext_db: std::path::PathBuf,
@@ -862,7 +858,7 @@ pub fn restart_config_with_peers(
 }
 
 #[allow(dead_code)]
-pub fn restart_config_safe_mode(
+pub const fn restart_config_safe_mode(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
     ext_db: std::path::PathBuf,
@@ -880,7 +876,7 @@ pub fn restart_config_safe_mode(
     )
 }
 
-pub fn restart_config_with_peers_and_safe_mode(
+pub const fn restart_config_with_peers_and_safe_mode(
     keys: ave_common::identity::keys::KeyPair,
     local_db: std::path::PathBuf,
     ext_db: std::path::PathBuf,

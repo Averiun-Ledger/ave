@@ -2618,8 +2618,8 @@ async fn test_deleting_role_removes_from_all_users() {
     db.assign_role_to_user(user2.id, role.id, None).unwrap();
 
     // Verify both have permissions
-    assert!(db.get_effective_permissions(user1.id).unwrap().len() > 0);
-    assert!(db.get_effective_permissions(user2.id).unwrap().len() > 0);
+    assert!(!db.get_effective_permissions(user1.id).unwrap().is_empty());
+    assert!(!db.get_effective_permissions(user2.id).unwrap().is_empty());
 
     // Delete role
     db.delete_role(role.id).unwrap();
@@ -3254,8 +3254,8 @@ async fn test_direct_permission_overrides_role_permission() {
     );
 
     // Should be denied
-    assert_eq!(
-        perm.allowed, false,
+    assert!(
+        !perm.allowed,
         "Direct deny should override role allow"
     );
 
@@ -3323,8 +3323,8 @@ async fn test_direct_deny_blocks_role_allow_functionally() {
 
     // CRITICAL: The effective permission should be DENIED (false)
     // because direct permission overrides role permission
-    assert_eq!(
-        get_perm.allowed, false,
+    assert!(
+        !get_perm.allowed,
         "Direct deny should override role 'all' permission - user should be BLOCKED"
     );
 
@@ -3344,7 +3344,7 @@ async fn test_direct_deny_blocks_role_allow_functionally() {
     let user_roles = db.get_user_roles(user.id).unwrap();
     let auth_ctx = AuthContext {
         user_id: user.id,
-        username: user.username.clone(),
+        username: user.username,
         roles: user_roles,
         permissions: effective_perms,
         api_key_id: "test-key".to_string(),

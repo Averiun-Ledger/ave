@@ -337,11 +337,11 @@ impl SinkSubjectWorker {
     /// and delivers it (whole batch in `batch_delivery` mode, event by event
     /// otherwise), chaining the continuation with the given `generation`.
     async fn run_catch_up_batch(
-        &mut self,
+        &self,
         from_sn: u64,
         batch_size: usize,
         generation: u64,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let subject_id = ctx.path().key().to_owned();
         let events = match self

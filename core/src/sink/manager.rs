@@ -465,7 +465,7 @@ impl PersistentActor for SinkManager {
             blocked_sinks: BTreeMap::new(),
             replay_floors: BTreeMap::new(),
             is_governance: params.is_governance,
-            node_public_key: params.node_public_key.clone(),
+            node_public_key: params.node_public_key,
             pending_worker_shutdowns: HashMap::new(),
             next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
@@ -2120,9 +2120,9 @@ impl SinkManager {
     }
 
     async fn handle_test_sink(
-        &mut self,
+        &self,
         sink_name: &str,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), String> {
         let server = match self.sink_servers.get(sink_name) {
             Some(server) => server.clone(),
@@ -2201,14 +2201,13 @@ impl SinkManager {
                 // restarting it from the lower SN so the whole range is
                 // re-delivered in order; anything else is already covered
                 // by the in-flight catch-up.
-                if from_sn < in_flight_from {
-                    if let Err(e) = self
+                if from_sn < in_flight_from
+                    && let Err(e) = self
                         .send_catch_up(sink.clone(), subject_id, from_sn, ctx)
                         .await
                     {
                         error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up restart to worker");
                     }
-                }
                 continue;
             }
 

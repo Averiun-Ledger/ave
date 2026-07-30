@@ -146,7 +146,7 @@ async fn test_update_protocol() {
     node2
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(node1.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -160,7 +160,7 @@ async fn test_update_protocol() {
     node3
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(node1.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -297,7 +297,7 @@ async fn test_approve_invalid_gov_version() {
     node1
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node2.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(node2.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -311,7 +311,7 @@ async fn test_approve_invalid_gov_version() {
     node3
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node2.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(node2.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -407,7 +407,7 @@ async fn test_approve_invalid_gov_version() {
     new_node2
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(node1.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -467,7 +467,7 @@ async fn test_approve_invalid_gov_version() {
     new_node2
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node3.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(node3.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -572,7 +572,7 @@ async fn test_invalid_init_state() {
     assert_eq!(state.owner, node.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_governance_properties_eq(
         state.properties,
@@ -580,7 +580,7 @@ async fn test_invalid_init_state() {
             version: 0,
             members: BTreeMap::from([(
                 "Owner".to_owned(),
-                PublicKey::from_str(&node.public_key()).unwrap(),
+                PublicKey::from_str(node.public_key()).unwrap(),
             )]),
             roles_gov: RolesGov {
                 approver: BTreeSet::from(["Owner".to_owned()]),
@@ -653,7 +653,7 @@ async fn test_invalid_contract() {
     assert_eq!(state.owner, node.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 0);
     assert_governance_properties_eq(
         state.properties,
@@ -661,7 +661,7 @@ async fn test_invalid_contract() {
             version: 0,
             members: BTreeMap::from([(
                 "Owner".to_owned(),
-                PublicKey::from_str(&node.public_key()).unwrap(),
+                PublicKey::from_str(node.public_key()).unwrap(),
             )]),
             roles_gov: RolesGov {
                 approver: BTreeSet::from(["Owner".to_owned()]),
@@ -850,7 +850,7 @@ async fn test_governance_and_subject_copy_with_approve() {
     assert_eq!(state.owner, node2.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node2.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 11);
     assert_eq!(
         state.properties,
@@ -870,7 +870,7 @@ async fn test_governance_and_subject_copy_with_approve() {
     assert_eq!(state.owner, node2.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node2.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 11);
     assert_eq!(
         state.properties,
@@ -943,22 +943,22 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.owner, addressable.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, addressable.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     let expected = GovernanceData {
         version: 1,
         members: BTreeMap::from([
             (
                 "AveNode2".to_owned(),
-                PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+                PublicKey::from_str(bootstrap.public_key()).unwrap(),
             ),
             (
                 "AveNode3".to_owned(),
-                PublicKey::from_str(&ephimeral.public_key()).unwrap(),
+                PublicKey::from_str(ephimeral.public_key()).unwrap(),
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&addressable.public_key()).unwrap(),
+                PublicKey::from_str(addressable.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -999,7 +999,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.owner, addressable.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, addressable.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_governance_properties_eq(state.properties, expected.clone());
 
@@ -1019,7 +1019,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.owner, addressable.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, addressable.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -1088,13 +1088,13 @@ async fn test_many_schema_in_one_governance() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     let expected = GovernanceData {
         version: 1,
         members: BTreeMap::from([(
             "Owner".to_owned(),
-            PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            PublicKey::from_str(owner_governance.public_key()).unwrap(),
         )]),
         roles_gov: RolesGov {
             approver: BTreeSet::from(["Owner".to_owned()]),
@@ -1227,7 +1227,7 @@ async fn test_transfer_event_governance_1() {
     emit_transfer(
         owner_governance,
         governance_id.clone(),
-        PublicKey::from_str(&future_owner.public_key()).unwrap(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
         true,
     )
     .await
@@ -1267,7 +1267,7 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     let expected = GovernanceData {
         version: 4,
@@ -1278,7 +1278,7 @@ async fn test_transfer_event_governance_1() {
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&future_owner.public_key()).unwrap(),
+                PublicKey::from_str(future_owner.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -1315,18 +1315,18 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, Some(future_owner.public_key().to_string()));
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     let expected = GovernanceData {
         version: 2,
         members: BTreeMap::from([
             (
                 "AveNode1".to_owned(),
-                PublicKey::from_str(&future_owner.public_key()).unwrap(),
+                PublicKey::from_str(future_owner.public_key()).unwrap(),
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -1404,7 +1404,7 @@ async fn test_transfer_event_governance_2() {
     emit_transfer(
         owner_governance,
         governance_id.clone(),
-        PublicKey::from_str(&future_owner.public_key()).unwrap(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
         true,
     )
     .await
@@ -1478,7 +1478,7 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     let expected = GovernanceData {
         version: 4,
@@ -1489,11 +1489,11 @@ async fn test_transfer_event_governance_2() {
             ),
             (
                 "AveNode_Old".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&future_owner.public_key()).unwrap(),
+                PublicKey::from_str(future_owner.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -1533,7 +1533,7 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -1598,7 +1598,7 @@ async fn test_governance_fail_approve() {
     assert_eq!(state.owner, node1.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node1.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_governance_properties_eq(
         state.properties,
@@ -1606,7 +1606,7 @@ async fn test_governance_fail_approve() {
             version: 0,
             members: BTreeMap::from([(
                 "Owner".to_owned(),
-                PublicKey::from_str(&node1.public_key()).unwrap(),
+                PublicKey::from_str(node1.public_key()).unwrap(),
             )]),
             roles_gov: RolesGov {
                 approver: BTreeSet::from(["Owner".to_owned()]),
@@ -1750,11 +1750,11 @@ async fn test_governance_manual_many_approvers() {
         members: BTreeMap::from([
             (
                 "Approver1".to_owned(),
-                PublicKey::from_str(&approver_1.public_key()).unwrap(),
+                PublicKey::from_str(approver_1.public_key()).unwrap(),
             ),
             (
                 "Approver2".to_owned(),
-                PublicKey::from_str(&approver_2.public_key()).unwrap(),
+                PublicKey::from_str(approver_2.public_key()).unwrap(),
             ),
             (
                 "AveNode1".to_owned(),
@@ -1762,7 +1762,7 @@ async fn test_governance_manual_many_approvers() {
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner.public_key()).unwrap(),
+                PublicKey::from_str(owner.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -1805,7 +1805,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_1, governance_id.clone(), Some(2), true)
@@ -1819,7 +1819,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_2, governance_id.clone(), Some(2), true)
@@ -1833,7 +1833,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -1928,11 +1928,11 @@ async fn test_governance_auto_many_approvers() {
         members: BTreeMap::from([
             (
                 "Approver1".to_owned(),
-                PublicKey::from_str(&approver_1.public_key()).unwrap(),
+                PublicKey::from_str(approver_1.public_key()).unwrap(),
             ),
             (
                 "Approver2".to_owned(),
-                PublicKey::from_str(&approver_2.public_key()).unwrap(),
+                PublicKey::from_str(approver_2.public_key()).unwrap(),
             ),
             (
                 "AveNode1".to_owned(),
@@ -1940,7 +1940,7 @@ async fn test_governance_auto_many_approvers() {
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner.public_key()).unwrap(),
+                PublicKey::from_str(owner.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -1983,7 +1983,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_1, governance_id.clone(), Some(2), true)
@@ -1997,7 +1997,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_2, governance_id.clone(), Some(2), true)
@@ -2011,7 +2011,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -2135,15 +2135,15 @@ async fn test_governance_not_quorum_many_approvers() {
         members: BTreeMap::from([
             (
                 "Approver1".to_owned(),
-                PublicKey::from_str(&approver_1.public_key()).unwrap(),
+                PublicKey::from_str(approver_1.public_key()).unwrap(),
             ),
             (
                 "Approver2".to_owned(),
-                PublicKey::from_str(&approver_2.public_key()).unwrap(),
+                PublicKey::from_str(approver_2.public_key()).unwrap(),
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner.public_key()).unwrap(),
+                PublicKey::from_str(owner.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -2186,7 +2186,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_1, governance_id.clone(), Some(2), true)
@@ -2200,7 +2200,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_2, governance_id.clone(), Some(2), true)
@@ -2214,7 +2214,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.owner, owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -2283,7 +2283,7 @@ async fn test_change_roles_gov() {
         members: BTreeMap::from([
             (
                 "AveNode1".to_owned(),
-                PublicKey::from_str(&eval_node.public_key()).unwrap(),
+                PublicKey::from_str(eval_node.public_key()).unwrap(),
             ),
             (
                 "AveNode2".to_owned(),
@@ -2291,7 +2291,7 @@ async fn test_change_roles_gov() {
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -2336,7 +2336,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(eval_node, governance_id.clone(), Some(2), true)
@@ -2350,7 +2350,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 
@@ -2373,7 +2373,7 @@ async fn test_change_roles_gov() {
         members: BTreeMap::from([
             (
                 "AveNode1".to_owned(),
-                PublicKey::from_str(&eval_node.public_key()).unwrap(),
+                PublicKey::from_str(eval_node.public_key()).unwrap(),
             ),
             (
                 "AveNode2".to_owned(),
@@ -2381,7 +2381,7 @@ async fn test_change_roles_gov() {
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -2420,7 +2420,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(eval_node, governance_id.clone(), Some(3), true)
@@ -2434,7 +2434,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected);
 
@@ -2461,7 +2461,7 @@ async fn test_change_roles_gov() {
         members: BTreeMap::from([
             (
                 "AveNode1".to_owned(),
-                PublicKey::from_str(&eval_node.public_key()).unwrap(),
+                PublicKey::from_str(eval_node.public_key()).unwrap(),
             ),
             (
                 "AveNode2".to_owned(),
@@ -2473,7 +2473,7 @@ async fn test_change_roles_gov() {
             ),
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         ]),
         roles_gov: RolesGov {
@@ -2512,7 +2512,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(eval_node, governance_id.clone(), Some(4), true)
@@ -2526,7 +2526,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -2633,7 +2633,7 @@ async fn test_delete_schema() {
     assert_eq!(state.owner, node1.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node1.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2676,7 +2676,7 @@ async fn test_delete_schema() {
     assert_eq!(state.owner, node1.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node1.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2788,7 +2788,7 @@ async fn test_change_schema() {
     assert_eq!(state.owner, node1.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node1.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2833,7 +2833,7 @@ async fn test_change_schema() {
     assert_eq!(state.owner, node1.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, node1.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
@@ -2928,7 +2928,7 @@ async fn test_gov_no_all_validators() {
         members: BTreeMap::from([
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
             (
                 "offline".to_owned(),
@@ -2973,7 +2973,7 @@ async fn test_gov_no_all_validators() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -3063,7 +3063,7 @@ async fn test_gov_no_all_evaluators() {
         members: BTreeMap::from([
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
             (
                 "offline".to_owned(),
@@ -3108,7 +3108,7 @@ async fn test_gov_no_all_evaluators() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -3210,7 +3210,7 @@ async fn test_gov_fail_no_all_evaluators() {
         members: BTreeMap::from([
             (
                 "Owner".to_owned(),
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
             (
                 "offline".to_owned(),
@@ -3255,7 +3255,7 @@ async fn test_gov_fail_no_all_evaluators() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected);
 }
@@ -3838,7 +3838,7 @@ async fn test_sink_replay_and_external_db_battery() {
 
     let owner = nodes[0].api.clone();
     let bob = nodes[1].api.clone();
-    let bob_pk = PublicKey::from_str(&bob.public_key()).unwrap();
+    let bob_pk = PublicKey::from_str(bob.public_key()).unwrap();
     let charlie_pk =
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
     let invalid_member_pk =
@@ -4332,7 +4332,7 @@ async fn test_build_batch_gov() {
     witness
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4401,7 +4401,7 @@ async fn test_update_offer_gov() {
     witness
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();

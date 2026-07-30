@@ -263,7 +263,7 @@ pub mod tests {
                 ..Default::default()
             },
             network: newtork_config,
-            contracts_path: contracts_path,
+            contracts_path,
             always_accept: false,
             tracking_size: 100,
             safe_mode: false,

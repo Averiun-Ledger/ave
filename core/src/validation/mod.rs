@@ -980,12 +980,11 @@ pub mod tests {
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
-        if !request_actor
+        if request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
-            .await
-            .is_err()
+            .await.is_ok()
         {
             panic!("Invalid response")
         }

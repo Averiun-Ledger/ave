@@ -199,14 +199,15 @@ impl ResolvedKeyStrategy {
 /// key) so restarts keep fencing the node's own zombies, and unique per
 /// node so several nodes running the same sink never fence each other.
 fn default_transactional_id(sink_name: &str, node_id: Option<&str>) -> String {
-    match node_id {
-        Some(node_id) => {
-            let short: String = node_id.chars().take(12).collect();
-            format!("ave-sink-{sink_name}-{short}")
-        }
-        None => format!("ave-sink-{sink_name}"),
-    }
+    node_id.map_or_else(|| format!("ave-sink-{sink_name}"), |node_id| {
+        let short: String = node_id.chars().take(12).collect();
+        format!("ave-sink-{sink_name}-{short}")
+    })
 }
+
+/// Topic, optional message key, JSON payload and request id of a batch
+/// group ready to be produced.
+type PreparedGroup = (String, Option<String>, Vec<u8>, String);
 
 /// Build the reqwest client that fetches OAUTHBEARER tokens from the OIDC
 /// endpoint. Honors the sink's `tls.ca_certificate` as an additional root
@@ -629,18 +630,12 @@ impl KafkaTransport {
         if let Some(meta) = meta {
             for header in build_headers(meta, request_id).as_borrowed().iter()
             {
-                headers = headers.insert(Header {
-                    key: header.key,
-                    value: header.value,
-                });
+                headers = headers.insert(header);
             }
         }
         if let Some(extra) = &additional_headers {
             for header in extra.as_borrowed().iter() {
-                headers = headers.insert(Header {
-                    key: header.key,
-                    value: header.value,
-                });
+                headers = headers.insert(header);
             }
         }
         if let Some(sig) = signature_headers {
@@ -675,8 +670,8 @@ impl KafkaTransport {
 
         match send_result {
             Ok(delivery) => {
-                if transactional {
-                    if let Err(e) = self.producer.commit_transaction(
+                if transactional
+                    && let Err(e) = self.producer.commit_transaction(
                         Duration::from_millis(self.config.request_timeout_ms),
                     ) {
                         // The message reached the broker but the commit
@@ -693,7 +688,6 @@ impl KafkaTransport {
                             retry_after_ms: None,
                         });
                     }
-                }
                 debug!(
                     msg_type = "SinkSend",
                     sink = %self.sink_name,
@@ -724,8 +718,7 @@ impl KafkaTransport {
         &self,
         event_type: &str,
         group: &[IncomingSinkEvent],
-    ) -> Result<Option<(String, Option<String>, Vec<u8>, String)>, SinkError>
-    {
+    ) -> Result<Option<PreparedGroup>, SinkError> {
         let Some(first) = group.first() else {
             return Ok(None);
         };

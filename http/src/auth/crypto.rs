@@ -197,8 +197,8 @@ mod tests {
     #[test]
     fn test_api_key_hash_deterministic() {
         let key = "ave_node_test123";
-        let hash1 = hash_api_key(&key);
-        let hash2 = hash_api_key(&key);
+        let hash1 = hash_api_key(key);
+        let hash2 = hash_api_key(key);
 
         // Same key should produce same hash
         assert_eq!(hash1, hash2);

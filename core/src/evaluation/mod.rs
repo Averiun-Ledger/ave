@@ -952,7 +952,7 @@ pub mod tests {
             res,
             format!(
                 "The approval request for subject {} has changed to accepted",
-                subject_id.to_string()
+                subject_id
             )
         );
 
@@ -1212,7 +1212,7 @@ pub mod tests {
             res,
             format!(
                 "The approval request for subject {} has changed to accepted",
-                subject_id.to_string()
+                subject_id
             )
         );
 
@@ -1328,12 +1328,11 @@ pub mod tests {
 
         let signed_event_req = Signed::from_parts(transfer_request, signature);
 
-        if !request_actor
+        if request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
-            .await
-            .is_err()
+            .await.is_ok()
         {
             panic!("Invalid response")
         }
@@ -1391,7 +1390,7 @@ pub mod tests {
             res,
             format!(
                 "The approval request for subject {} has changed to accepted",
-                subject_id.to_string()
+                subject_id
             )
         );
 
@@ -1629,7 +1628,7 @@ pub mod tests {
             res,
             format!(
                 "The approval request for subject {} has changed to accepted",
-                subject_id.to_string()
+                subject_id
             )
         );
 
@@ -1667,13 +1666,13 @@ pub mod tests {
 
         assert_eq!(
             metadata.schema_id.to_string(),
-            subject_data.schema_id.to_string()
+            subject_data.schema_id
         );
         assert_eq!(metadata.schema_id, SchemaType::Governance);
 
         assert_eq!(
             metadata.namespace.to_string(),
-            subject_data.namespace.to_string()
+            subject_data.namespace
         );
         assert_eq!(metadata.namespace, Namespace::new());
 
@@ -2486,12 +2485,11 @@ pub mod tests {
 
         let signed_event_req = Signed::from_parts(transfer_request, signature);
 
-        if !request_actor
+        if request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
-            .await
-            .is_err()
+            .await.is_ok()
         {
             panic!("Invalid response")
         }

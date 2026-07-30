@@ -67,11 +67,13 @@ pub fn add_jitter(base: u64) -> u64 {
 }
 
 /// Compute the backoff delay for a delivery retry `attempt` (1-based: it is
-/// only called after the first failure). Saturates the exponent so a large
-/// `max_retries` cannot overflow the shift, applies ±25% jitter, honors the
-/// optional server-provided `retry_after_hint` when it exceeds the computed
-/// backoff and caps the result at `max_ms`. Shared by every transport so
-/// the retry policy cannot diverge.
+/// only called after the first failure).
+///
+/// Saturates the exponent so a large `max_retries` cannot overflow the
+/// shift, applies ±25% jitter, honors the optional server-provided
+/// `retry_after_hint` when it exceeds the computed backoff and caps the
+/// result at `max_ms`. Shared by every transport so the retry policy cannot
+/// diverge.
 pub fn retry_delay_ms(
     base_ms: u64,
     max_ms: u64,
@@ -212,11 +214,10 @@ pub async fn obtain_token_with_retry(
             let mut delay = add_jitter(base_delay);
             // Honor a server-provided Retry-After hint when it exceeds the
             // computed backoff.
-            if let Some(SinkError::Auth { retry_after_ms, .. }) = &last_err {
-                if let Some(hint) = retry_after_ms {
+            if let Some(SinkError::Auth { retry_after_ms, .. }) = &last_err
+                && let Some(hint) = retry_after_ms {
                     delay = delay.max(*hint);
                 }
-            }
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
         match obtain_token(client, auth, password_or_secret).await {
@@ -225,13 +226,10 @@ pub async fn obtain_token_with_retry(
             Err(e) => return Err(e),
         }
     }
-    Err(match last_err {
-        Some(e) => e,
-        None => SinkError::Auth {
-            message: "token refresh failed".to_owned(),
-            retry_after_ms: None,
-        },
-    })
+    Err(last_err.unwrap_or_else(|| SinkError::Auth {
+        message: "token refresh failed".to_owned(),
+        retry_after_ms: None,
+    }))
 }
 
 /// Read a PEM file referenced by the TLS configuration asynchronously.
@@ -290,7 +288,7 @@ mod tests {
         for _ in 0..1_000 {
             let jittered = add_jitter(base);
             assert!(
-                jittered >= 750 && jittered <= 1_250,
+                (750..=1_250).contains(&jittered),
                 "jittered value {jittered} outside [750, 1250]"
             );
         }

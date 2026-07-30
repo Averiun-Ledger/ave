@@ -598,9 +598,7 @@ mod tests {
     fn test_sink_auth_config_validate_allows_empty_for_env_api_key() {
         // All fields empty: the API key is injected through
         // `AVE_SINK_APIKEY_{{SERVER}}` at worker startup.
-        let auth = SinkAuthConfig {
-            ..SinkAuthConfig::default()
-        };
+        let auth = SinkAuthConfig::default();
         assert!(auth.validate().is_ok());
     }
 
@@ -681,9 +679,7 @@ mod tests {
         assert!(!json.contains("super-secret"));
         assert!(json.contains("***"));
         // Empty keys serialize as empty, not redacted.
-        let empty = SinkAuthConfig {
-            ..SinkAuthConfig::default()
-        };
+        let empty = SinkAuthConfig::default();
         assert!(!serde_json::to_string(&empty).unwrap().contains("***"));
     }
 
@@ -1001,9 +997,11 @@ mod tests {
 
     #[test]
     fn test_kafka_sink_config_tuning_defaults_are_valid() {
-        let mut cfg = KafkaSinkConfig::default();
-        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
-        cfg.topic = "test-topic".to_string();
+        let cfg = KafkaSinkConfig {
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
+            topic: "test-topic".to_string(),
+            ..Default::default()
+        };
         cfg.validate().expect(
             "tuning defaults must validate when required fields are set",
         );
@@ -1021,9 +1019,11 @@ mod tests {
             }
         }
 
-        let mut cfg = KafkaSinkConfig::default();
-        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
-        cfg.topic = "test-topic".to_string();
+        let mut cfg = KafkaSinkConfig {
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
+            topic: "test-topic".to_string(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok(), "baseline config must validate");
 
         cfg.linger_ms = 0;
@@ -1067,9 +1067,11 @@ mod tests {
             }
         }
 
-        let mut cfg = KafkaSinkConfig::default();
-        cfg.bootstrap_servers = "127.0.0.1:9092".to_string();
-        cfg.topic = "test-topic".to_string();
+        let mut cfg = KafkaSinkConfig {
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
+            topic: "test-topic".to_string(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok(), "baseline config must validate");
 
         // client_id must not be empty.
@@ -1213,6 +1215,7 @@ impl OAuth2GrantType {
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[derive(Default)]
 pub struct SinkAuthConfig {
     /// OAuth2 / token endpoint URL. Must be set together with `username` for
     /// the `password` grant, or with `client_id` for `client_credentials`.
@@ -1236,18 +1239,6 @@ pub struct SinkAuthConfig {
     pub scope: String,
 }
 
-impl Default for SinkAuthConfig {
-    fn default() -> Self {
-        Self {
-            auth_url: String::new(),
-            username: String::new(),
-            api_key: String::new(),
-            grant_type: OAuth2GrantType::default(),
-            client_id: String::new(),
-            scope: String::new(),
-        }
-    }
-}
 
 // Manual `Serialize` impl instead of `serialize_with`: ts-rs cannot parse
 // that attribute and warns on every build. The emitted JSON is identical,
@@ -2209,7 +2200,7 @@ impl KafkaSinkConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfig {
     Http(Box<HttpSinkConfig>),
-    Kafka(KafkaSinkConfig),
+    Kafka(Box<KafkaSinkConfig>),
 }
 
 impl Default for SinkTransportConfig {

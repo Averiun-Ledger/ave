@@ -125,7 +125,7 @@ pub async fn build_transport(
         SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(
             KafkaTransport::new(
                 server.server.clone(),
-                kafka.clone(),
+                kafka.as_ref().clone(),
                 signer,
                 node_id,
             )

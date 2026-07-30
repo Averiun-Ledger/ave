@@ -391,7 +391,7 @@ fn is_reserved_header(name: &str) -> bool {
 /// Whether the authentication configuration has all required OAuth2 fields
 /// for the configured grant type. The config is assumed to have passed
 /// `SinkAuthConfig::validate`, so only the active grant's pair is checked.
-fn oauth2_credentials_ready(auth: &SinkAuthConfig) -> bool {
+const fn oauth2_credentials_ready(auth: &SinkAuthConfig) -> bool {
     use ave_common::sink::OAuth2GrantType;
     !auth.auth_url.is_empty()
         && match auth.grant_type {
@@ -723,8 +723,7 @@ impl HttpTransport {
             .await?;
 
             let header = format!("Bearer {}", token.access_token);
-            let mut guard = self.cached_token.write().await;
-            *guard = Some(token);
+            *self.cached_token.write().await = Some(token);
             return Ok(Some(header));
         }
 
@@ -1302,9 +1301,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     #[tokio::test]
     async fn auth_without_any_credential_fails() {
         let mut config = base_config();
-        config.auth = Some(SinkAuthConfig {
-            ..SinkAuthConfig::default()
-        });
+        config.auth = Some(SinkAuthConfig::default());
         let err = client_build_error(
             HttpTransport::new("unit-missing-key".to_owned(), config, None)
                 .await,
@@ -1741,11 +1738,14 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             .await
             .expect("health check should succeed");
 
-        let headers = captured.lock().await;
-        assert_eq!(headers.len(), 1);
-        let request_id = headers[0]
-            .get("x-ave-request-id")
-            .expect("X-Ave-Request-Id header should be present");
+        let request_id = {
+            let headers = captured.lock().await;
+            assert_eq!(headers.len(), 1);
+            headers[0]
+                .get("x-ave-request-id")
+                .expect("X-Ave-Request-Id header should be present")
+                .clone()
+        };
         assert!(!request_id.is_empty(), "request id should not be empty");
     }
 
@@ -1772,10 +1772,14 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             .await
             .expect("second health check should succeed");
 
-        let headers = captured.lock().await;
-        assert_eq!(headers.len(), 2);
-        let first = headers[0].get("x-ave-request-id").unwrap();
-        let second = headers[1].get("x-ave-request-id").unwrap();
+        let (first, second) = {
+            let headers = captured.lock().await;
+            assert_eq!(headers.len(), 2);
+            (
+                headers[0].get("x-ave-request-id").unwrap().clone(),
+                headers[1].get("x-ave-request-id").unwrap().clone(),
+            )
+        };
         assert_ne!(
             first, second,
             "each delivery attempt must carry a unique request id"
@@ -1857,7 +1861,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
         // First request is the health check GET.
         assert!(
-            requests[0].get("x-ave-test").is_none(),
+            !requests[0].contains_key("x-ave-test"),
             "health check should not carry X-Ave-Test"
         );
 
@@ -1872,6 +1876,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             Some(&"application/json".to_owned()),
             "test POST must set Content-Type to application/json"
         );
+        drop(requests);
     }
 
     /// Start a minimal HTTP server that returns a redirect on the first request

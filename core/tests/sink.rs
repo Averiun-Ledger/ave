@@ -471,12 +471,10 @@ async fn sink_last_error_is_reported_after_delivery_failure() {
     for _ in 0..20 {
         let statuses = node.api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == "example-sink")
-        {
-            if status.last_error.is_some() {
+            && status.last_error.is_some() {
                 found = true;
                 break;
             }
-        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(found, "last_error should be set after a delivery failure");
@@ -1104,7 +1102,7 @@ async fn replay_filters_and_combinations() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
         true,
     )
     .await
@@ -1209,7 +1207,7 @@ async fn replay_filters_and_combinations() {
     .unwrap();
 
     let new_owner_pk =
-        PublicKey::from_str(&new_owner.api.public_key()).unwrap();
+        PublicKey::from_str(new_owner.api.public_key()).unwrap();
     emit_transfer(&owner.api, subject_id.clone(), new_owner_pk, true)
         .await
         .unwrap();
@@ -1222,7 +1220,7 @@ async fn replay_filters_and_combinations() {
         .await
         .unwrap();
 
-    let owner_pk = PublicKey::from_str(&owner.api.public_key()).unwrap();
+    let owner_pk = PublicKey::from_str(owner.api.public_key()).unwrap();
     emit_transfer(&new_owner.api, subject_id.clone(), owner_pk, true)
         .await
         .unwrap();
@@ -3920,7 +3918,7 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_viewpoints_fact(&witness.api.public_key()),
+        governance_with_viewpoints_fact(witness.api.public_key()),
         true,
     )
     .await
@@ -4448,7 +4446,7 @@ async fn sink_non_fact_event_types_and_fields() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
         true,
     )
     .await
@@ -4547,7 +4545,7 @@ async fn sink_non_fact_event_types_and_fields() {
         .unwrap();
 
     // SN 2: transfer Owner -> NewOwner.
-    let new_owner_pk = PublicKey::from_str(&new_owner_pk_str).unwrap();
+    let new_owner_pk = PublicKey::from_str(new_owner_pk_str).unwrap();
     emit_transfer(&owner.api, subject_id.clone(), new_owner_pk, true)
         .await
         .unwrap();
@@ -4565,7 +4563,7 @@ async fn sink_non_fact_event_types_and_fields() {
         .unwrap();
 
     // SN 4: transfer NewOwner -> Owner.
-    let owner_pk = PublicKey::from_str(&owner_pk_str).unwrap();
+    let owner_pk = PublicKey::from_str(owner_pk_str).unwrap();
     emit_transfer(&new_owner.api, subject_id.clone(), owner_pk, true)
         .await
         .unwrap();
@@ -6937,11 +6935,10 @@ async fn wait_for_sink_not_lagging(api: &Api, sink_name: &str) {
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
-        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
-            if status.lagging_subjects == 0 {
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
+            && status.lagging_subjects == 0 {
                 return;
             }
-        }
         if attempts > 100 {
             panic!(
                 "timeout waiting for sink {} to have no lagging subjects",
@@ -7163,7 +7160,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
         true,
     )
     .await
@@ -7251,7 +7248,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
 
     // SN 3: successful transfer Owner -> NewOwner.
     let new_owner_pk =
-        PublicKey::from_str(&new_owner.api.public_key()).unwrap();
+        PublicKey::from_str(new_owner.api.public_key()).unwrap();
     emit_transfer(
         &owner.api,
         governance_id.clone(),
@@ -7295,7 +7292,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         .unwrap();
 
     // SN 5: successful transfer NewOwner -> Owner.
-    let owner_pk = PublicKey::from_str(&owner_pk_str).unwrap();
+    let owner_pk = PublicKey::from_str(owner_pk_str).unwrap();
     emit_transfer(&new_owner.api, governance_id.clone(), owner_pk, true)
         .await
         .unwrap();
@@ -7340,7 +7337,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         2,
         false,
-        &owner_pk_str,
+        owner_pk_str,
         &unknown_key_str,
         1,
     );
@@ -7349,8 +7346,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         3,
         true,
-        &owner_pk_str,
-        &new_owner_pk_str,
+        owner_pk_str,
+        new_owner_pk_str,
         1,
     );
     assert_sink_contains_confirm_with_name(
@@ -7366,8 +7363,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         5,
         true,
-        &new_owner_pk_str,
-        &owner_pk_str,
+        new_owner_pk_str,
+        owner_pk_str,
         3,
     );
     assert_sink_contains_confirm_with_name(
@@ -7385,7 +7382,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         2,
         false,
-        &owner_pk_str,
+        owner_pk_str,
         &unknown_key_str,
         1,
     );
@@ -7394,8 +7391,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         3,
         true,
-        &owner_pk_str,
-        &new_owner_pk_str,
+        owner_pk_str,
+        new_owner_pk_str,
         1,
     );
     assert_sink_contains_confirm_with_name(
@@ -7411,8 +7408,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         5,
         true,
-        &new_owner_pk_str,
-        &owner_pk_str,
+        new_owner_pk_str,
+        owner_pk_str,
         3,
     );
     assert_sink_contains_confirm_with_name(

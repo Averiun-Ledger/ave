@@ -2732,7 +2732,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::Denied {
                 cause: libp2p::swarm::ConnectionDenied::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, "test"),
+                    std::io::Error::other("test"),
                 ),
             },
             &peer,
@@ -2749,7 +2749,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::WrongPeerId {
                 obtained,
-                address: addr.clone(),
+                address: addr,
             },
             &peer,
             true,
@@ -2818,7 +2818,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::WrongPeerId {
                 obtained: PeerId::random(),
-                address: addr.clone(),
+                address: addr,
             },
             &peer,
             false,
@@ -2830,7 +2830,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::Denied {
                 cause: libp2p::swarm::ConnectionDenied::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, "test"),
+                    std::io::Error::other("test"),
                 ),
             },
             &peer,
@@ -2936,7 +2936,7 @@ mod tests {
         );
 
         // Duplicate should be ignored
-        worker.add_pending_inbound_message(peer, msg.clone());
+        worker.add_pending_inbound_message(peer, msg);
         assert_eq!(
             worker.pending_inbound_messages.get(&peer).unwrap().len(),
             1
@@ -3181,8 +3181,7 @@ mod tests {
             .handle_connection_events(SwarmEvent::Behaviour(
                 BehaviourEvent::IdentifyError {
                     peer_id: peer,
-                    error: swarm::StreamUpgradeError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    error: swarm::StreamUpgradeError::Io(std::io::Error::other(
                         "test",
                     )),
                 },
@@ -3481,7 +3480,7 @@ mod tests {
         assert_eq!(worker.pending_outbound_messages_len(), 1);
         assert_eq!(worker.pending_outbound_bytes_len(), 3);
 
-        worker.add_pending_inbound_message(peer, msg.clone());
+        worker.add_pending_inbound_message(peer, msg);
         assert_eq!(worker.pending_inbound_messages_len(), 1);
         assert_eq!(worker.pending_inbound_bytes_len(), 3);
     }
@@ -3683,7 +3682,7 @@ mod tests {
         let peer = PeerId::random();
         let msg = Bytes::from(vec![1u8]);
 
-        let result = worker.send_message(peer, msg.clone());
+        let result = worker.send_message(peer, msg);
         assert!(result.is_ok());
         assert!(worker.pending_outbound_messages.contains_key(&peer));
         assert!(worker.retry_by_peer.contains_key(&peer));

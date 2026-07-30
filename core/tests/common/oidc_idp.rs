@@ -230,9 +230,7 @@ impl MockOidcIdp {
             let _ = axum::serve(listener, app).await;
         }));
 
-        let mut https_token_url = None;
-        let mut ca_pem = None;
-        if with_https {
+        let (https_token_url, ca_pem) = if with_https {
             let material = TestTlsMaterial::generate();
             let cert_der = CertificateDer::from_pem_slice(
                 material.server_cert_pem.as_bytes(),
@@ -277,10 +275,13 @@ impl MockOidcIdp {
                     .serve(tls_app.into_make_service())
                     .await;
             }));
-            https_token_url =
-                Some(format!("https://{tls_addr}/token"));
-            ca_pem = Some(material.ca_pem);
-        }
+            (
+                Some(format!("https://{tls_addr}/token")),
+                Some(material.ca_pem),
+            )
+        } else {
+            (None, None)
+        };
 
         Self {
             issuer,
@@ -294,7 +295,7 @@ impl MockOidcIdp {
     }
 
     /// Requests received so far per endpoint.
-    pub fn hits(&self) -> &IdpHits {
+    pub const fn hits(&self) -> &IdpHits {
         &self.hits
     }
 }

@@ -322,6 +322,7 @@ mod tests {
 
     // Basic serialization round-trip: f64 numbers
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_value_wrapper_number_f64() {
         let value =
             ValueWrapper(Value::Number(Number::from_f64(3.14).unwrap()));
@@ -712,7 +713,7 @@ mod tests {
     fn rejects_array_too_large() {
         let mut bytes = Vec::new();
         push_u8(&mut bytes, 3); // Type: Array
-        let len = (MAX_COLLECTION_SIZE as u32) + 1;
+        let len = MAX_COLLECTION_SIZE + 1;
         push_u32(&mut bytes, len);
         assert!(deser(bytes).is_err());
     }
@@ -722,7 +723,7 @@ mod tests {
     fn rejects_object_too_large() {
         let mut bytes = Vec::new();
         push_u8(&mut bytes, 4); // Type: Object
-        let len = (MAX_COLLECTION_SIZE as u32) + 1;
+        let len = MAX_COLLECTION_SIZE + 1;
         push_u32(&mut bytes, len);
         assert!(deser(bytes).is_err());
     }
@@ -732,7 +733,7 @@ mod tests {
     fn rejects_recursion_depth_exceeded_nested_arrays() {
         let mut bytes = Vec::new();
 
-        let levels = (MAX_RECURSION_DEPTH as usize) + 2;
+        let levels = MAX_RECURSION_DEPTH + 2;
         for _ in 0..levels {
             push_u8(&mut bytes, 3); // Array
             push_u32(&mut bytes, 1); // len=1
@@ -881,6 +882,7 @@ mod tests {
 
     // Tests push_f64: serializes floating point numbers correctly
     #[test]
+    #[allow(clippy::approx_constant)]
     fn accepts_f64_number_via_push_f64() {
         let mut bytes = Vec::new();
         push_u8(&mut bytes, 1); // Type: Number

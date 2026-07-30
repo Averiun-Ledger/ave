@@ -203,7 +203,7 @@ async fn fact_req_schema(
     });
 
     let (status, body) = make_request(
-        &client,
+        client,
         &server.url("/request"),
         "POST",
         None,
@@ -232,7 +232,7 @@ async fn transfer_req(
     });
 
     let (status, body) = make_request(
-        &client,
+        client,
         &server.url("/request"),
         "POST",
         None,
@@ -259,7 +259,7 @@ async fn reject_req(
     });
 
     let (status, body) = make_request(
-        &client,
+        client,
         &server.url("/request"),
         "POST",
         None,
@@ -287,7 +287,7 @@ async fn confirm_req(
     });
 
     let (status, body) = make_request(
-        &client,
+        client,
         &server.url("/request"),
         "POST",
         None,
@@ -314,7 +314,7 @@ async fn eol_req(
     });
 
     let (status, body) = make_request(
-        &client,
+        client,
         &server.url("/request"),
         "POST",
         None,
@@ -454,7 +454,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&format!("/approval")),
+        &server.url(&"/approval".to_string()),
         "GET",
         None,
         None,
@@ -470,7 +470,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&format!("/approval?state=accepted")),
+        &server.url(&"/approval?state=accepted".to_string()),
         "GET",
         None,
         None,
@@ -522,7 +522,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&format!("/approval?state=accepted")),
+        &server.url(&"/approval?state=accepted".to_string()),
         "GET",
         None,
         None,
@@ -1085,7 +1085,7 @@ async fn test_gov_sub_deserialization() {
     assert!(status.is_success());
     let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
-    assert_eq!(res[0].active, true);
+    assert!(res[0].active);
     assert_eq!(res[0].description, Some("A governance".to_string()));
     assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].governance_id, governance_id.clone());
@@ -1146,7 +1146,7 @@ async fn test_gov_sub_deserialization() {
     assert!(status.is_success());
     let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
-    assert_eq!(res[0].active, false);
+    assert!(!res[0].active);
     assert_eq!(res[0].description, Some("A governance".to_string()));
     assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].governance_id, governance_id);
@@ -1499,7 +1499,7 @@ async fn test_subject_deserialization() {
     assert!(status.is_success());
     let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 6);
-    assert_eq!(subject.active, false);
+    assert!(!subject.active);
 
     // events/{subject_id}?quantity={u64}&page={u64}&reverse={bool} -> PaginatorEvents
     let (status, body) = make_request(

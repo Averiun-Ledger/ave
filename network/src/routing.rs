@@ -201,7 +201,7 @@ impl Behaviour {
     }
 
     #[cfg(any(test, feature = "test"))]
-    pub fn is_invalid_address(&self, _addr: &Multiaddr) -> bool {
+    pub const fn is_invalid_address(&self, _addr: &Multiaddr) -> bool {
         false
     }
 

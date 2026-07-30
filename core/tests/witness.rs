@@ -139,7 +139,7 @@ async fn test_witeness_not_gov() {
         .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&witness_alice.public_key()).unwrap(),
+                PublicKey::from_str(witness_alice.public_key()).unwrap(),
             ),
         )
         .await
@@ -317,7 +317,7 @@ async fn test_not_access() {
         .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&witness_alice.public_key()).unwrap(),
+                PublicKey::from_str(witness_alice.public_key()).unwrap(),
             ),
         )
         .await
@@ -346,7 +346,7 @@ async fn test_not_access() {
         .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&witness_alice.public_key()).unwrap(),
+                PublicKey::from_str(witness_alice.public_key()).unwrap(),
             ),
         )
         .await
@@ -507,7 +507,7 @@ async fn test_basic_access() {
     emit_transfer(
         witness_alice,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -554,7 +554,7 @@ async fn test_basic_access() {
     new_alice
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -581,7 +581,7 @@ async fn test_basic_access() {
     new_alice
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -610,7 +610,7 @@ async fn test_basic_access() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -639,7 +639,7 @@ async fn test_basic_access() {
     new_alice
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -844,7 +844,7 @@ async fn test_basic_transfers() {
     emit_transfer(
         witness_alice,
         subject_id_3.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -853,7 +853,7 @@ async fn test_basic_transfers() {
     witness_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -894,14 +894,14 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
+        get_subject(witness_alice, subject_id_3.clone(), Some(3), true)
             .await
             .unwrap();
 
     witness_alice
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -911,14 +911,14 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
+        get_subject(witness_alice, subject_id_3.clone(), Some(3), true)
             .await
             .unwrap();
 
     emit_transfer(
         &witness_bob,
         subject_id_3.clone(),
-        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        PublicKey::from_str(witness_charlie.public_key()).unwrap(),
         true,
     )
     .await
@@ -927,7 +927,7 @@ async fn test_basic_transfers() {
     witness_charlie
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -977,7 +977,7 @@ async fn test_basic_transfers() {
     witness_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1004,7 +1004,7 @@ async fn test_basic_transfers() {
     emit_transfer(
         witness_alice,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -1013,7 +1013,7 @@ async fn test_basic_transfers() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1054,14 +1054,14 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+        get_subject(witness_alice, subject_id_1.clone(), Some(3), true)
             .await
             .unwrap();
 
     witness_alice
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1071,7 +1071,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
+        get_subject(witness_alice, subject_id_1.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -1088,7 +1088,7 @@ async fn test_basic_transfers() {
     emit_transfer(
         witness_alice,
         subject_id_2.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -1097,7 +1097,7 @@ async fn test_basic_transfers() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1118,7 +1118,7 @@ async fn test_basic_transfers() {
     witness_alice
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1132,7 +1132,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_2.clone(), Some(3), true)
+        get_subject(witness_alice, subject_id_2.clone(), Some(3), true)
             .await
             .unwrap();
     let _state = get_subject(&owner, subject_id_2.clone(), Some(3), true)
@@ -1144,7 +1144,7 @@ async fn test_basic_transfers() {
             "data": 205,
         }
     });
-    emit_fact(&witness_alice, subject_id_2.clone(), json, true)
+    emit_fact(witness_alice, subject_id_2.clone(), json, true)
         .await
         .unwrap();
 
@@ -1181,7 +1181,7 @@ async fn test_basic_transfers() {
     new_bob
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1201,7 +1201,7 @@ async fn test_basic_transfers() {
     new_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1278,7 +1278,7 @@ async fn test_basic_transfers() {
     new_alice
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1300,7 +1300,7 @@ async fn test_basic_transfers() {
     new_alice
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1322,7 +1322,7 @@ async fn test_basic_transfers() {
     new_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1341,7 +1341,7 @@ async fn test_basic_transfers() {
     new_charlie
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1364,7 +1364,7 @@ async fn test_basic_transfers() {
     new_charlie
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1641,7 +1641,7 @@ async fn test_basic_explicit_witness() {
     new_bob
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1661,7 +1661,7 @@ async fn test_basic_explicit_witness() {
     new_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1723,7 +1723,7 @@ async fn test_basic_explicit_witness() {
     new_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2045,7 +2045,7 @@ async fn test_basic_implicit_witness() {
     new_bob
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2065,7 +2065,7 @@ async fn test_basic_implicit_witness() {
     new_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2085,7 +2085,7 @@ async fn test_basic_implicit_witness() {
     new_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2137,7 +2137,7 @@ async fn test_basic_implicit_witness() {
     new_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2301,7 +2301,7 @@ async fn test_explicit_witness() {
     emit_transfer(
         &witness_alice,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -2310,7 +2310,7 @@ async fn test_explicit_witness() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2404,7 +2404,7 @@ async fn test_explicit_witness() {
     emit_transfer(
         &witness_alice,
         subject_id_3.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -2413,7 +2413,7 @@ async fn test_explicit_witness() {
     witness_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2535,7 +2535,7 @@ async fn test_explicit_witness() {
     new_alice
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2558,7 +2558,7 @@ async fn test_explicit_witness() {
     new_alice
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2581,7 +2581,7 @@ async fn test_explicit_witness() {
     new_alice
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2641,7 +2641,7 @@ async fn test_explicit_witness() {
     emit_transfer(
         &new_alice,
         subject_id_2.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -2650,7 +2650,7 @@ async fn test_explicit_witness() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2685,7 +2685,7 @@ async fn test_explicit_witness() {
     new_alice
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2738,7 +2738,7 @@ async fn test_explicit_witness() {
     new_alice
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2761,7 +2761,7 @@ async fn test_explicit_witness() {
     new_alice
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -2944,7 +2944,7 @@ async fn test_explicit_witness_2() {
     emit_transfer(
         &witness_alice,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -2953,7 +2953,7 @@ async fn test_explicit_witness_2() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3002,7 +3002,7 @@ async fn test_explicit_witness_2() {
     witness_charlie
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3050,7 +3050,7 @@ async fn test_explicit_witness_2() {
     emit_transfer(
         &witness_alice,
         subject_id_2.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -3059,7 +3059,7 @@ async fn test_explicit_witness_2() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3135,7 +3135,7 @@ async fn test_explicit_witness_2() {
     witness_charlie
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3214,7 +3214,7 @@ async fn test_explicit_witness_2() {
     emit_transfer(
         &witness_alice,
         subject_id_3.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -3223,7 +3223,7 @@ async fn test_explicit_witness_2() {
     witness_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3302,7 +3302,7 @@ async fn test_explicit_witness_2() {
     new_charlie
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3326,7 +3326,7 @@ async fn test_explicit_witness_2() {
     new_charlie
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3503,7 +3503,7 @@ async fn test_explicit_witness_2_1() {
     emit_transfer(
         &witness_alice,
         subject_id_4.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -3512,7 +3512,7 @@ async fn test_explicit_witness_2_1() {
     witness_bob
         .authorize_governance(
             subject_id_4.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3563,7 +3563,7 @@ async fn test_explicit_witness_2_1() {
     witness_charlie
         .authorize_governance(
             subject_id_4.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3642,7 +3642,7 @@ async fn test_explicit_witness_2_1() {
     emit_transfer(
         &witness_alice,
         subject_id_5.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -3651,7 +3651,7 @@ async fn test_explicit_witness_2_1() {
     witness_bob
         .authorize_governance(
             subject_id_5.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3724,7 +3724,7 @@ async fn test_explicit_witness_2_1() {
     witness_charlie
         .authorize_governance(
             subject_id_5.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3797,7 +3797,7 @@ async fn test_explicit_witness_2_1() {
     emit_transfer(
         &witness_alice,
         subject_id_6.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -3806,7 +3806,7 @@ async fn test_explicit_witness_2_1() {
     witness_bob
         .authorize_governance(
             subject_id_6.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3884,7 +3884,7 @@ async fn test_explicit_witness_2_1() {
     new_charlie_2
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -3908,7 +3908,7 @@ async fn test_explicit_witness_2_1() {
     new_charlie_2
         .authorize_governance(
             subject_id_6.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4252,7 +4252,7 @@ async fn test_range() {
     new_bob
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4272,7 +4272,7 @@ async fn test_range() {
     new_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4299,7 +4299,7 @@ async fn test_range() {
     new_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4506,7 +4506,7 @@ async fn test_ns_schema() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4583,7 +4583,7 @@ async fn test_ns_schema() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4649,7 +4649,7 @@ async fn test_ns_schema() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4667,7 +4667,7 @@ async fn test_ns_schema() {
     witness_charlie
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4868,7 +4868,7 @@ async fn test_multi_source() {
     emit_transfer(
         &witness_alice,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -4877,7 +4877,7 @@ async fn test_multi_source() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4951,7 +4951,7 @@ async fn test_multi_source() {
     new_alice
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -4974,7 +4974,7 @@ async fn test_multi_source() {
     new_alice
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5049,7 +5049,7 @@ async fn test_multi_source() {
     emit_transfer(
         &new_alice,
         subject_id_2.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -5058,7 +5058,7 @@ async fn test_multi_source() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5136,7 +5136,7 @@ async fn test_multi_source() {
     new_charlie
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5160,7 +5160,7 @@ async fn test_multi_source() {
     new_charlie
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5271,7 +5271,7 @@ async fn test_multi_source() {
     new_charlie
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5295,7 +5295,7 @@ async fn test_multi_source() {
     new_charlie
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5486,7 +5486,7 @@ async fn test_more_cases() {
     emit_transfer(
         &witness_alice,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -5495,7 +5495,7 @@ async fn test_more_cases() {
     witness_bob
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5525,7 +5525,7 @@ async fn test_more_cases() {
     emit_transfer(
         &witness_bob,
         subject_id_1.clone(),
-        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        PublicKey::from_str(witness_charlie.public_key()).unwrap(),
         true,
     )
     .await
@@ -5534,7 +5534,7 @@ async fn test_more_cases() {
     witness_charlie
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5610,7 +5610,7 @@ async fn test_more_cases() {
     new_dali
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5633,7 +5633,7 @@ async fn test_more_cases() {
     new_dali
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5681,7 +5681,7 @@ async fn test_more_cases() {
     emit_transfer(
         &witness_alice,
         subject_id_2.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -5690,7 +5690,7 @@ async fn test_more_cases() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5711,7 +5711,7 @@ async fn test_more_cases() {
     witness_alice
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5783,7 +5783,7 @@ async fn test_more_cases() {
     new_dali
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5806,7 +5806,7 @@ async fn test_more_cases() {
     new_dali
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -5996,7 +5996,7 @@ async fn test_more_cases_1_1() {
     emit_transfer(
         &witness_alice,
         subject_id_3.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -6005,7 +6005,7 @@ async fn test_more_cases_1_1() {
     witness_bob
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6035,7 +6035,7 @@ async fn test_more_cases_1_1() {
     witness_charlie
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6043,7 +6043,7 @@ async fn test_more_cases_1_1() {
     emit_transfer(
         &witness_bob,
         subject_id_3.clone(),
-        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        PublicKey::from_str(witness_charlie.public_key()).unwrap(),
         true,
     )
     .await
@@ -6116,7 +6116,7 @@ async fn test_more_cases_1_1() {
     new_alice
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6139,7 +6139,7 @@ async fn test_more_cases_1_1() {
     new_alice
         .authorize_governance(
             subject_id_3.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6434,7 +6434,7 @@ async fn test_more_cases_2() {
     new_charlie
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6458,7 +6458,7 @@ async fn test_more_cases_2() {
     new_charlie
         .authorize_governance(
             subject_id_1.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6696,7 +6696,7 @@ async fn test_more_cases_2_1() {
     emit_transfer(
         &witness_alice,
         subject_id_2.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -6705,7 +6705,7 @@ async fn test_more_cases_2_1() {
     witness_bob
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6726,7 +6726,7 @@ async fn test_more_cases_2_1() {
     witness_alice
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -6767,7 +6767,7 @@ async fn test_more_cases_2_1() {
     witness_charlie
         .authorize_governance(
             subject_id_2.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -7223,7 +7223,7 @@ async fn test_chained_old_owners_witness_range_cut() {
     emit_transfer(
         &witness_alice,
         subject_id.clone(),
-        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        PublicKey::from_str(witness_bob.public_key()).unwrap(),
         true,
     )
     .await
@@ -7286,7 +7286,7 @@ async fn test_chained_old_owners_witness_range_cut() {
     emit_transfer(
         &witness_bob,
         subject_id.clone(),
-        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        PublicKey::from_str(witness_charlie.public_key()).unwrap(),
         true,
     )
     .await
@@ -7349,7 +7349,7 @@ async fn test_chained_old_owners_witness_range_cut() {
     new_dali
         .authorize_governance(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -7364,7 +7364,7 @@ async fn test_chained_old_owners_witness_range_cut() {
     new_dali
         .authorize_governance(
             subject_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -7628,7 +7628,7 @@ async fn test_old_owner_cut_ranges_battery() {
         emit_transfer(
             &witness_alice,
             subject_id.clone(),
-            PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+            PublicKey::from_str(witness_bob.public_key()).unwrap(),
             true,
         )
         .await
@@ -7702,7 +7702,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 governance_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -7727,7 +7727,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -7983,7 +7983,7 @@ async fn test_old_owner_cut_ranges_battery() {
         emit_transfer(
             &witness_alice,
             subject_id.clone(),
-            PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+            PublicKey::from_str(witness_bob.public_key()).unwrap(),
             true,
         )
         .await
@@ -7993,7 +7993,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -8067,7 +8067,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 governance_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -8091,7 +8091,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -8329,7 +8329,7 @@ async fn test_old_owner_cut_ranges_battery() {
         emit_transfer(
             &witness_alice,
             subject_id.clone(),
-            PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+            PublicKey::from_str(witness_bob.public_key()).unwrap(),
             true,
         )
         .await
@@ -8402,7 +8402,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -8452,7 +8452,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 governance_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await
@@ -8476,7 +8476,7 @@ async fn test_old_owner_cut_ranges_battery() {
             .authorize_governance(
                 subject_id.clone(),
                 AuthWitness::One(
-                    PublicKey::from_str(&owner.public_key()).unwrap(),
+                    PublicKey::from_str(owner.public_key()).unwrap(),
                 ),
             )
             .await

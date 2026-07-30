@@ -816,15 +816,19 @@ mod tests {
         metrics.register_into(&mut registry);
 
         let last_tx_errors = AtomicU64::new(0);
-        let mut stats = rdkafka::Statistics::default();
-        stats.msg_cnt = 7;
-        let mut broker = rdkafka::statistics::Broker::default();
-        broker.txerrs = 3;
-        broker.req_timeouts = 1;
-        broker.rtt = Some(rdkafka::statistics::Window {
-            avg: 1_500,
+        let mut stats = rdkafka::Statistics {
+            msg_cnt: 7,
             ..Default::default()
-        });
+        };
+        let broker = rdkafka::statistics::Broker {
+            txerrs: 3,
+            req_timeouts: 1,
+            rtt: Some(rdkafka::statistics::Window {
+                avg: 1_500,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         stats.brokers.insert("broker:9092/1".to_owned(), broker);
 
         metrics.observe_kafka_producer_stats(
@@ -835,7 +839,6 @@ mod tests {
 
         // librdkafka reports cumulative values: the second report must only
         // advance the error counter by the delta (6 - 4 = 2).
-        let mut stats = stats;
         stats.msg_cnt = 0;
         let mut broker = stats
             .brokers

@@ -1054,7 +1054,7 @@ async fn test_http_get_sink_events_permissions() {
         .await;
         let key = login(&server, &client, &username, "TestPass123!")
             .await
-            .expect(&format!("{} login", role));
+            .unwrap_or_else(|_| panic!("{} login", role));
         let (status, _body) = make_request(
             &client,
             &format!("{}/{}", server.url("/sink-events"), unknown_subject),
@@ -1319,11 +1319,10 @@ async fn wait_for_sink_blocked(
         .await;
         assert_eq!(status, 200);
         let sinks: Vec<Value> = serde_json::from_value(body).unwrap();
-        if let Some(sink) = sinks.iter().find(|s| s["name"] == name) {
-            if !sink["blocked"].is_null() {
+        if let Some(sink) = sinks.iter().find(|s| s["name"] == name)
+            && !sink["blocked"].is_null() {
                 return;
             }
-        }
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     }
     panic!("sink {} did not become blocked in time", name);

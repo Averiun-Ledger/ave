@@ -691,6 +691,7 @@ impl TestSink {
                 // lightweight events, so tests can verify partial filters.
                 guard.batch_lens.push(received_events.len());
                 guard.events.extend(received_events);
+                drop(guard);
                 StatusCode::OK.into_response()
             }
             ResponseMode::ServerError => {

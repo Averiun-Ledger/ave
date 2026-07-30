@@ -713,7 +713,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -726,7 +726,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Get Admin role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -746,7 +746,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Create test user with Admin role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_admin_user",
@@ -764,7 +764,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Login as test admin user to get management key
     let test_login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(
             &json!({"username": "test_admin_user", "password": "TestPass123!"}),
         )
@@ -779,7 +779,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -860,7 +860,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -873,7 +873,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Get Sender role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -893,7 +893,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Create test user with Sender role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_sender_user",
@@ -911,7 +911,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Login as test sender user to get management key
     let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
+            .post(server.url("/login"))
             .json(&json!({"username": "test_sender_user", "password": "TestPass123!"}))
             .send()
             .await
@@ -924,7 +924,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -1045,7 +1045,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -1058,7 +1058,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Get Manager role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -1078,7 +1078,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Create test user with Manager role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_manager_user",
@@ -1096,7 +1096,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Login as test manager user to get management key
     let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
+            .post(server.url("/login"))
             .json(&json!({"username": "test_manager_user", "password": "TestPass123!"}))
             .send()
             .await
@@ -1109,7 +1109,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -1212,7 +1212,7 @@ async fn test_data_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -1225,7 +1225,7 @@ async fn test_data_role_endpoints_access() {
 
     // Get Data role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -1245,7 +1245,7 @@ async fn test_data_role_endpoints_access() {
 
     // Create test user with Data role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_data_user",
@@ -1263,7 +1263,7 @@ async fn test_data_role_endpoints_access() {
 
     // Login as test data user to get management key
     let test_login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(
             &json!({"username": "test_data_user", "password": "TestPass123!"}),
         )
@@ -1278,7 +1278,7 @@ async fn test_data_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",

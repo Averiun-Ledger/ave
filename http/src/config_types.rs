@@ -1280,12 +1280,12 @@ pub struct KafkaSinkConfigHttp {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfigHttp {
     Http(Box<HttpSinkConfigHttp>),
-    Kafka(KafkaSinkConfigHttp),
+    Kafka(Box<KafkaSinkConfigHttp>),
 }
 
 impl Default for SinkTransportConfigHttp {
     fn default() -> Self {
-        Self::Http(Box::new(HttpSinkConfigHttp::default()))
+        Self::Http(Box::default())
     }
 }
 
@@ -1389,7 +1389,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                 }))
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
-                SinkTransportConfigHttp::Kafka(KafkaSinkConfigHttp {
+                SinkTransportConfigHttp::Kafka(Box::new(KafkaSinkConfigHttp {
                     bootstrap_servers: kafka.bootstrap_servers,
                     topic: kafka.topic,
                     client_id: kafka.client_id,
@@ -1426,7 +1426,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     oauth_token_url: kafka.oauth_token_url,
                     oauth_scope: kafka.oauth_scope,
                     kerberos: kafka.kerberos.map(Into::into),
-                })
+                }))
             }
         };
         Self {

@@ -37,7 +37,7 @@ async fn gov_life() {
     let owner = &nodes[1].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(&owner, vec![&bootstrap]).await;
+        create_and_authorize_governance(owner, vec![&bootstrap]).await;
 
     nodes[1].token.cancel();
     join_all(nodes[1].handler.iter_mut()).await;
@@ -225,7 +225,7 @@ async fn gov_life() {
     emit_transfer(
         &owner,
         governance_id.clone(),
-        PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+        PublicKey::from_str(bootstrap.public_key()).unwrap(),
         true,
     )
     .await
@@ -291,7 +291,7 @@ async fn gov_life() {
         .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+                PublicKey::from_str(bootstrap.public_key()).unwrap(),
             ),
         )
         .await
@@ -368,7 +368,7 @@ async fn gov_life() {
     emit_transfer(
         &owner,
         governance_id.clone(),
-        PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+        PublicKey::from_str(bootstrap.public_key()).unwrap(),
         true,
     )
     .await
@@ -634,7 +634,7 @@ async fn tracker_life() {
     let owner = &nodes[1].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(&owner, vec![&bootstrap]).await;
+        create_and_authorize_governance(owner, vec![&bootstrap]).await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -727,7 +727,7 @@ async fn tracker_life() {
         }
     });
 
-    emit_fact(&owner, governance_id.clone(), json, true)
+    emit_fact(owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -736,7 +736,7 @@ async fn tracker_life() {
             .await
             .unwrap();
 
-    let _state = get_subject(&owner, subject_id.clone(), Some(0), true)
+    let _state = get_subject(owner, subject_id.clone(), Some(0), true)
         .await
         .unwrap();
 
@@ -813,7 +813,7 @@ async fn tracker_life() {
     emit_transfer(
         &owner,
         subject_id.clone(),
-        PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+        PublicKey::from_str(bootstrap.public_key()).unwrap(),
         true,
     )
     .await
@@ -944,7 +944,7 @@ async fn tracker_life() {
     emit_transfer(
         &owner,
         subject_id.clone(),
-        PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+        PublicKey::from_str(bootstrap.public_key()).unwrap(),
         true,
     )
     .await
@@ -1176,7 +1176,7 @@ async fn not_node_role() {
     let owner = &nodes[1].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(&owner, vec![&bootstrap]).await;
+        create_and_authorize_governance(owner, vec![&bootstrap]).await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -1269,7 +1269,7 @@ async fn not_node_role() {
         }
     });
 
-    emit_fact(&owner, governance_id.clone(), json, true)
+    emit_fact(owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -1278,11 +1278,11 @@ async fn not_node_role() {
             .await
             .unwrap();
 
-    let _state = get_subject(&owner, subject_id.clone(), Some(0), true)
+    let _state = get_subject(owner, subject_id.clone(), Some(0), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner, subject_id.clone(), Some(0), true)
+    let _state = get_subject(owner, subject_id.clone(), Some(0), true)
         .await
         .unwrap();
 

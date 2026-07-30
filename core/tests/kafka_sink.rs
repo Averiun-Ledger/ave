@@ -1,3 +1,7 @@
+// `RedpandaEnv` must stay alive until each test ends: its `Drop` stops the
+// container, so tightening its lifetime would break the test, not improve it.
+#![allow(clippy::significant_drop_tightening)]
+
 mod common;
 
 use std::collections::BTreeSet;
@@ -887,11 +891,11 @@ fn make_kafka_sink_entry(
         servers: vec![SinkServer {
             server: server_name.to_owned(),
             events,
-            transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+            transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                 bootstrap_servers,
                 topic: topic.to_owned(),
                 ..KafkaSinkConfig::default()
-            }),
+            })),
             healthcheck_intervals_secs: vec![1],
             startup_healthcheck_delay_secs: 0,
             max_catch_up_concurrency: 2,
@@ -1312,12 +1316,12 @@ async fn kafka_node_signature_headers() {
             servers: vec![SinkServer {
                 server: "signature-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                     bootstrap_servers: env.bootstrap_servers.clone(),
                     topic: topic.to_owned(),
                     signature: true,
                     ..KafkaSinkConfig::default()
-                }),
+                })),
                 ..Default::default()
             }],
         }],
@@ -1453,13 +1457,13 @@ async fn kafka_node_batch_delivery() {
             servers: vec![SinkServer {
                 server: "kafka-batch-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                     bootstrap_servers: env.bootstrap_servers.clone(),
                     topic: topic.to_owned(),
                     batch_delivery: true,
                     batch_max_delay_ms: 30_000,
                     ..KafkaSinkConfig::default()
-                }),
+                })),
                 batch_delivery_size: 3,
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
@@ -1598,13 +1602,13 @@ async fn kafka_node_batch_delivery_timer_flush() {
             servers: vec![SinkServer {
                 server: "kafka-batch-timer-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                     bootstrap_servers: env.bootstrap_servers.clone(),
                     topic: topic.to_owned(),
                     batch_delivery: true,
                     batch_max_delay_ms: 10_000,
                     ..KafkaSinkConfig::default()
-                }),
+                })),
                 batch_delivery_size: 100,
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
@@ -1730,13 +1734,13 @@ async fn kafka_node_signature_v2_binds_headers() {
             servers: vec![SinkServer {
                 server: "kafka-signature-v2-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                     bootstrap_servers: env.bootstrap_servers.clone(),
                     topic: topic.to_owned(),
                     signature: true,
                     signature_version: 2,
                     ..KafkaSinkConfig::default()
-                }),
+                })),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,
@@ -2773,12 +2777,12 @@ async fn kafka_node_key_strategy_static() {
             servers: vec![SinkServer {
                 server: "node-key-static-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                     bootstrap_servers: env.bootstrap_servers.clone(),
                     topic: topic.to_owned(),
                     key_strategy: KafkaKeyStrategy::Static(fixed_key.clone()),
                     ..KafkaSinkConfig::default()
-                }),
+                })),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,
@@ -2871,12 +2875,12 @@ async fn kafka_node_transactional_delivers() {
             servers: vec![SinkServer {
                 server: "node-tx-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(KafkaSinkConfig {
+                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                     bootstrap_servers: env.bootstrap_servers.clone(),
                     topic: topic.to_owned(),
                     transactional: true,
                     ..KafkaSinkConfig::default()
-                }),
+                })),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,

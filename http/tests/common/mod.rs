@@ -1085,7 +1085,7 @@ impl TestServer {
         format!("http://{}", self.addr)
     }
 
-    pub fn memory_port(&self) -> u16 {
+    pub const fn memory_port(&self) -> u16 {
         self.memory_port
     }
 
@@ -1121,7 +1121,7 @@ impl TestApp {
         )
     }
 
-    pub fn memory_port(&self) -> u16 {
+    pub const fn memory_port(&self) -> u16 {
         self.memory_port
     }
 }

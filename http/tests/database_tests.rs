@@ -834,7 +834,7 @@ async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
     let logs = db
         .query_audit_logs(&AuditLogQuery {
             user_id: Some(user.id),
-            api_key_id: Some(new_key_info.id.clone()),
+            api_key_id: Some(new_key_info.id),
             endpoint: Some("/login".to_string()),
             http_method: Some("POST".to_string()),
             ip_address: None,
@@ -928,7 +928,7 @@ async fn test_rotate_api_key_transactional_writes_audit() {
     let logs = db
         .query_audit_logs(&AuditLogQuery {
             user_id: Some(user.id),
-            api_key_id: Some(old_key_info.id.clone()),
+            api_key_id: Some(old_key_info.id),
             endpoint: Some("/admin/api-keys/test/rotate".to_string()),
             http_method: Some("POST".to_string()),
             ip_address: None,
@@ -1020,7 +1020,7 @@ async fn test_apply_ttl_to_legacy_api_keys() {
     let base_config = AuthConfig {
         durability: false,
         enable: true,
-        database_path: path.clone(),
+        database_path: path,
         superadmin: "admin".to_string(),
         api_key: ApiKeyConfig {
             default_ttl_seconds: 0,

@@ -887,41 +887,35 @@ mod tests {
 
         let listener_loop = async move {
             loop {
-                match listener.select_next_some().await {
-                    SwarmEvent::IncomingConnectionError { error, .. } => {
-                        let ListenError::Denied { cause } = error else {
-                            panic!("Invalid Error")
-                        };
-                        assert!(cause.downcast::<NotAllowed>().is_ok());
-                        break;
-                    }
-                    _ => {}
+                if let SwarmEvent::IncomingConnectionError { error, .. } = listener.select_next_some().await {
+                    let ListenError::Denied { cause } = error else {
+                        panic!("Invalid Error")
+                    };
+                    assert!(cause.downcast::<NotAllowed>().is_ok());
+                    break;
                 }
             }
         };
 
         let dialer_loop = async move {
             loop {
-                match dialer.select_next_some().await {
-                    SwarmEvent::ConnectionClosed { cause, .. } => {
-                        if let Some(error) = cause {
-                            match error {
-                                ConnectionError::IO(e) => {
-                                    assert_eq!(
-                                        e.to_string(),
-                                        "Right(Io(Kind(BrokenPipe)))"
-                                    );
-                                    break;
-                                }
-                                _ => {
-                                    panic!("Invalid error");
-                                }
+                if let SwarmEvent::ConnectionClosed { cause, .. } = dialer.select_next_some().await {
+                    if let Some(error) = cause {
+                        match error {
+                            ConnectionError::IO(e) => {
+                                assert_eq!(
+                                    e.to_string(),
+                                    "Right(Io(Kind(BrokenPipe)))"
+                                );
+                                break;
                             }
-                        } else {
-                            panic!("Missing error");
-                        };
-                    }
-                    _ => {}
+                            _ => {
+                                panic!("Invalid error");
+                            }
+                        }
+                    } else {
+                        panic!("Missing error");
+                    };
                 }
             }
         };

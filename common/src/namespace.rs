@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(empty.level(), 0);
         assert_eq!(empty.key(), "");
         assert!(empty.is_empty());
-        assert!(empty.is_top_level() == false);
+        assert!(!empty.is_top_level());
         assert!(empty.is_ancestor_or_equal_of(&Namespace::from("a")));
         assert!(empty.is_ancestor_or_equal_of(&Namespace::new()));
 

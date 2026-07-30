@@ -36,10 +36,12 @@ pub const REQUEST_ID_HEADER: &str = "x-ave-request-id";
 /// Header marking a request as a non-persistent sink test delivery.
 pub const TEST_HEADER: &str = "x-ave-test";
 
-/// Headers reserved for internal sink use. Transports must reject any
-/// attempt by user configuration to override them; receivers can rely on
-/// them carrying the contract above. The list is lowercase and matches the
-/// constants above so a case-insensitive lookup is enough.
+/// Headers reserved for internal sink use.
+///
+/// Transports must reject any attempt by user configuration to override
+/// them; receivers can rely on them carrying the contract above. The list is
+/// lowercase and matches the constants above so a case-insensitive lookup is
+/// enough.
 pub const SINK_RESERVED_HEADERS: &[&str] = &[
     SIGNATURE_HEADER,
     SIGNATURE_TIMESTAMP_HEADER,
@@ -108,10 +110,11 @@ pub fn generate_request_id() -> String {
     format!("{}-{:016x}", nanos, fastrand::u64(..))
 }
 
-/// Build the canonical payload to sign. Version 1 signs the body only;
-/// version 2 prefixes the body with the critical delivery headers in
-/// lexicographic order so that tampering with them invalidates the
-/// signature.
+/// Build the canonical payload to sign.
+///
+/// Version 1 signs the body only; version 2 prefixes the body with the
+/// critical delivery headers in lexicographic order so that tampering with
+/// them invalidates the signature.
 ///
 /// `extra_canonical_headers` lets a transport bind transport-level metadata
 /// that does not live in `DeliveryMeta` (e.g. HTTP's `content-encoding`
@@ -139,7 +142,7 @@ pub fn canonical_payload(
         headers.push((SUBJECT_ID_HEADER, meta.subject_id.clone()));
     }
 
-    headers.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    headers.sort_by_key(|a| a.0.to_lowercase());
 
     let mut out = Vec::with_capacity(payload.len() + 256);
     for (name, value) in headers {
@@ -180,6 +183,7 @@ pub async fn sign_delivery(
 }
 
 /// Format the environment variable name for a sink's password.
+///
 /// Format: `AVE_SINK_PASSWORD_{{SERVER_UPPER}}` where non-alphanumeric
 /// chars are replaced by `_`. Used by every transport that needs to read a
 /// sink password from the environment (HTTP Basic auth, Kafka SASL, ...).
@@ -247,7 +251,7 @@ pub fn serialize_json_payload<T: serde::Serialize + ?Sized>(
 /// Map the result of a single delivery attempt to the result label of the
 /// `core_sink_request_duration_seconds` metric. Shared by every transport so
 /// the label set cannot diverge.
-pub fn sink_result_label(result: &Result<(), SinkError>) -> &'static str {
+pub const fn sink_result_label(result: &Result<(), SinkError>) -> &'static str {
     match result {
         Ok(()) => "success",
         Err(SinkError::Auth { .. }) => "auth",
@@ -259,10 +263,12 @@ pub fn sink_result_label(result: &Result<(), SinkError>) -> &'static str {
     }
 }
 
-/// Run a single delivery attempt recording its duration in the shared
-/// `core_sink_request_duration_seconds` metric, labeled with
-/// [`sink_result_label`]. Every transport times its attempts through this
-/// wrapper so the metric cannot diverge (or be forgotten).
+/// Run a single delivery attempt recording its duration.
+///
+/// The duration goes to the shared `core_sink_request_duration_seconds`
+/// metric, labeled with [`sink_result_label`]. Every transport times its
+/// attempts through this wrapper so the metric cannot diverge (or be
+/// forgotten).
 pub async fn timed_sink_request<F, Fut>(
     sink_name: &str,
     attempt: F,
@@ -283,11 +289,13 @@ where
     result
 }
 
-/// Group a batch of events by event type when the transport's address
-/// template routes by type (`{{event-type}}`); otherwise a single group
-/// carries the whole batch. Group order follows first appearance so a
-/// homogeneous batch produces one message, and the relative order inside
-/// each group is preserved.
+/// Group a batch of events by event type.
+///
+/// Grouping only applies when the transport's address template routes by
+/// type (`{{event-type}}`); otherwise a single group carries the whole
+/// batch. Group order follows first appearance so a homogeneous batch
+/// produces one message, and the relative order inside each group is
+/// preserved.
 pub fn group_events_by_type(
     events: Vec<IncomingSinkEvent>,
     route_by_type: bool,

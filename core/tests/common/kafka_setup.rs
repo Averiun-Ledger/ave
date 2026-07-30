@@ -139,7 +139,7 @@ pub struct Redpanda {
 }
 
 impl Redpanda {
-    pub fn new(host_port: u16) -> Self {
+    pub const fn new(host_port: u16) -> Self {
         Self { host_port }
     }
 }
@@ -783,7 +783,7 @@ async fn consume_next<C: rdkafka::consumer::ConsumerContext>(
 /// not know about yet. Kafka/Redpanda create topics on the first produce, so
 /// a test that consumes before the sink's first produce sees this and must
 /// keep polling rather than failing.
-fn is_topic_not_found(err: &KafkaError) -> bool {
+const fn is_topic_not_found(err: &KafkaError) -> bool {
     matches!(
         err,
         KafkaError::MessageConsumption(

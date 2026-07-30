@@ -241,7 +241,7 @@ mod tests {
         };
 
         let signature = Signature::new(&data, &signer).unwrap();
-        let signed = Signed::from_parts(data.clone(), signature);
+        let signed = Signed::from_parts(data, signature);
 
         assert_eq!(signed.content().value, "test");
         assert!(signed.verify().is_ok());

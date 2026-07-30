@@ -749,8 +749,10 @@ mod tests {
 
     #[test]
     fn config_validate_rejects_zero_max_app_message_bytes() {
-        let mut cfg = Config::default();
-        cfg.max_app_message_bytes = 0;
+        let cfg = Config {
+            max_app_message_bytes: 0,
+            ..Default::default()
+        };
         let err = cfg.validate().expect_err("should fail");
         assert!(
             err.to_string().contains("network.max_app_message_bytes"),
@@ -760,8 +762,10 @@ mod tests {
 
     #[test]
     fn config_validate_rejects_invalid_memory_limits() {
-        let mut cfg = Config::default();
-        cfg.memory_limits = MemoryLimitsConfig::Percentage { value: 2.0 };
+        let cfg = Config {
+            memory_limits: MemoryLimitsConfig::Percentage { value: 2.0 },
+            ..Default::default()
+        };
         let err = cfg.validate().expect_err("should fail");
         assert!(
             err.to_string().contains("network.memory_limits"),

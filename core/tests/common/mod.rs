@@ -134,27 +134,29 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let local_db = if let Some(local_db) = local_db {
-        local_db
-    } else {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let local_db = dir.path().to_path_buf();
-        vec_dirs.push(dir);
+    let local_db = local_db.map_or_else(
+        || {
+            let dir = tempfile::tempdir()
+                .expect("Can not create temporal directory");
+            let local_db = dir.path().to_path_buf();
+            vec_dirs.push(dir);
 
-        local_db
-    };
+            local_db
+        },
+        |local_db| local_db,
+    );
 
-    let ext_db = if let Some(ext_db) = ext_db {
-        ext_db
-    } else {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let ext_db = dir.path().to_path_buf();
-        vec_dirs.push(dir);
+    let ext_db = ext_db.map_or_else(
+        || {
+            let dir = tempfile::tempdir()
+                .expect("Can not create temporal directory");
+            let ext_db = dir.path().to_path_buf();
+            vec_dirs.push(dir);
 
-        ext_db
-    };
+            ext_db
+        },
+        |ext_db| ext_db,
+    );
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -372,7 +374,7 @@ pub async fn create_and_authorize_governance(
         node.authorize_governance(
             governance_id.clone(),
             ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(&owner_node.public_key()).unwrap(),
+                PublicKey::from_str(owner_node.public_key()).unwrap(),
             ),
         )
         .await
@@ -719,11 +721,10 @@ pub async fn node_running(
     node: &Api,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        if let Ok(state) = node.get_network_state().await {
-            if let MonitorNetworkState::Running = state {
+        if let Ok(state) = node.get_network_state().await
+            && state == MonitorNetworkState::Running {
                 break;
             }
-        }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     Ok(())

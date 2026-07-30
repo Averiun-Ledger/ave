@@ -2330,7 +2330,7 @@ mod tests {
                 schema_id: "governance".to_string(),
                 governance_id: None,
             },
-            servers: vec![server.clone()],
+            servers: vec![server],
         };
         let (target, found_server) =
             find_sink_config(&[entry], &SinkManagerTarget::Node, "gov_sink");
@@ -2355,7 +2355,7 @@ mod tests {
                 schema_id: "schema1".to_string(),
                 governance_id: Some("gov1".to_string()),
             },
-            servers: vec![server.clone()],
+            servers: vec![server],
         };
         let manager = SinkManagerTarget::Governance {
             governance_id: "gov1".to_string(),

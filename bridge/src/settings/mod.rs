@@ -944,8 +944,8 @@ http:
         assert!(config.http.enable_doc);
 
         // Defaults remain for everything not provided.
-        assert_eq!(config.logging.output.stdout, true);
-        assert_eq!(config.logging.output.file, false);
+        assert!(config.logging.output.stdout);
+        assert!(!config.logging.output.file);
         assert_eq!(config.logging.rotation, LoggingRotation::Size);
         assert_eq!(config.logging.file_path, PathBuf::from("logs"));
         assert_eq!(config.logging.max_files, 3);
