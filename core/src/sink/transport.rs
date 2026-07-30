@@ -122,11 +122,14 @@ pub async fn build_transport(
             HttpTransport::new(server.server.clone(), *http.clone(), signer)
                 .await?,
         )),
-        SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(KafkaTransport::new(
-            server.server.clone(),
-            kafka.clone(),
-            signer,
-            node_id,
-        )?)),
+        SinkTransportConfig::Kafka(kafka) => Ok(Arc::new(
+            KafkaTransport::new(
+                server.server.clone(),
+                kafka.clone(),
+                signer,
+                node_id,
+            )
+            .await?,
+        )),
     }
 }

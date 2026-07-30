@@ -836,6 +836,7 @@ http:
                     max_catch_up_concurrency: 2,
                     sink_subject_worker_idle_timeout_ms: 2_000,
                     max_recoveries_after_failure: 5,
+                    healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
                 },
                 SinkServer {
@@ -872,6 +873,7 @@ http:
                     max_catch_up_concurrency: 2,
                     sink_subject_worker_idle_timeout_ms: 2_000,
                     max_recoveries_after_failure: 5,
+                    healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
                 },
             ],

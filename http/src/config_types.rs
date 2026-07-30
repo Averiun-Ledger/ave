@@ -1312,6 +1312,8 @@ pub struct SinkServerHttp {
     pub sink_subject_worker_idle_timeout_ms: u64,
     /// Maximum recoveries after failure before the sink is considered flapping
     pub max_recoveries_after_failure: u32,
+    /// Consecutive failed healthchecks required before the sink is declared unhealthy
+    pub healthcheck_max_failures: u32,
     /// Delay before the first healthcheck after worker startup
     pub startup_healthcheck_delay_secs: u64,
 }
@@ -1329,6 +1331,7 @@ impl Default for SinkServerHttp {
             max_catch_up_concurrency: 2,
             sink_subject_worker_idle_timeout_ms: 2_000,
             max_recoveries_after_failure: 5,
+            healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
         }
     }
@@ -1438,6 +1441,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             sink_subject_worker_idle_timeout_ms: value
                 .sink_subject_worker_idle_timeout_ms,
             max_recoveries_after_failure: value.max_recoveries_after_failure,
+            healthcheck_max_failures: value.healthcheck_max_failures,
             startup_healthcheck_delay_secs: value
                 .startup_healthcheck_delay_secs,
         }

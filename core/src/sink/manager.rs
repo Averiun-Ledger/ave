@@ -98,6 +98,7 @@ pub enum SinkManagerMessage {
     /// racing the old one's termination and losing the event.
     WorkerShutdownTimeout {
         sink: String,
+        generation: u64,
     },
     /// Remove all tracking state for a subject that has been deleted.
     RemoveSubject {
@@ -306,9 +307,15 @@ pub struct SinkManager {
     /// F-5: Cancellation tokens for pending worker shutdown timers.  Each token
     /// is shared between the manager and the spawned timer task; cancelling the
     /// token aborts the timer *before* it sends `Stop`, eliminating the race
-    /// between `abort()` and a task that has already woken up.
+    /// between `abort()` and a task that has already woken up. The generation
+    /// stamps each schedule so a stale timeout message (already in the mailbox
+    /// when the timer was cancelled and re-armed) is discarded instead of
+    /// killing a worker with fresh activity.
     #[serde(skip)]
-    pending_worker_shutdowns: HashMap<String, CancellationToken>,
+    pending_worker_shutdowns: HashMap<String, (CancellationToken, u64)>,
+    /// Monotonic counter stamping every worker shutdown schedule.
+    #[serde(skip)]
+    next_worker_shutdown_generation: u64,
     /// Cancellation tokens for pending healthcheck timers.  When a sink has
     /// lagging subjects but no active worker, the manager schedules periodic
     /// healthchecks using `healthcheck_intervals_secs` to detect recovery.
@@ -421,6 +428,7 @@ impl BorshDeserialize for SinkManager {
             is_governance: false, // default from BorshDeserialize, will be overridden by create_initial
             node_public_key: String::new(), // same: re-derived from init params
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashMap::new(),
             pending_catch_ups: HashMap::new(),
@@ -459,6 +467,7 @@ impl PersistentActor for SinkManager {
             is_governance: params.is_governance,
             node_public_key: params.node_public_key.clone(),
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashMap::new(),
             pending_catch_ups: HashMap::new(),
@@ -564,6 +573,7 @@ impl PersistentActor for SinkManager {
             is_governance: self.is_governance,
             node_public_key: self.node_public_key.clone(),
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: self.catch_up_in_flight.clone(),
             pending_catch_ups: self.pending_catch_ups.clone(),
@@ -831,11 +841,17 @@ impl Handler<Self> for SinkManager {
             SinkManagerMessage::StartupReady => {
                 self.handle_startup_ready(ctx).await?;
             }
-            SinkManagerMessage::WorkerShutdownTimeout { sink } => {
-                // If the timer was cancelled by newer activity before this
-                // message was processed, the worker must stay alive.
-                if self.pending_worker_shutdowns.remove(&sink).is_none() {
-                    return Ok(SinkManagerResponse::Ok);
+            SinkManagerMessage::WorkerShutdownTimeout { sink, generation } => {
+                // Discard a stale timeout: it was emitted before the timer
+                // was cancelled and re-armed by newer activity, so stopping
+                // the worker now could destroy in-flight work.
+                match self.pending_worker_shutdowns.get(&sink) {
+                    Some((_, current)) if *current == generation => {
+                        self.pending_worker_shutdowns.remove(&sink);
+                    }
+                    _ => {
+                        return Ok(SinkManagerResponse::Ok);
+                    }
                 }
                 let child_name = format!("worker_{}", sink);
                 if let Ok(worker) =
@@ -1406,7 +1422,9 @@ impl SinkManager {
         ctx: &ActorContext<Self>,
     ) {
         // Cancel any existing shutdown timer for this worker
-        if let Some(token) = self.pending_worker_shutdowns.remove(&sink_name) {
+        if let Some((token, _)) =
+            self.pending_worker_shutdowns.remove(&sink_name)
+        {
             token.cancel();
         }
         let child_name = format!("worker_{}", sink_name);
@@ -1426,6 +1444,8 @@ impl SinkManager {
                 return;
             }
         };
+        self.next_worker_shutdown_generation += 1;
+        let generation = self.next_worker_shutdown_generation;
         let token = CancellationToken::new();
         let token_for_task = token.clone();
         let sink_name_for_msg = sink_name.clone();
@@ -1441,6 +1461,7 @@ impl SinkManager {
                         if let Err(e) = self_ref
                             .tell(SinkManagerMessage::WorkerShutdownTimeout {
                                 sink: sink_name_for_msg,
+                                generation,
                             })
                             .await
                         {
@@ -1455,12 +1476,15 @@ impl SinkManager {
         });
         // Keep the token for explicit per-sink cancellation.  The actor will
         // abort all spawned tasks automatically on stop/restart.
-        self.pending_worker_shutdowns.insert(sink_name, token);
+        self.pending_worker_shutdowns
+            .insert(sink_name, (token, generation));
     }
 
     /// Cancel pending worker shutdown timer for the given sink.
     fn cancel_worker_shutdown(&mut self, sink_name: &str) {
-        if let Some(token) = self.pending_worker_shutdowns.remove(sink_name) {
+        if let Some((token, _)) =
+            self.pending_worker_shutdowns.remove(sink_name)
+        {
             token.cancel();
         }
     }
@@ -1479,7 +1503,7 @@ impl SinkManager {
     ) -> Result<(), ActorError> {
         // Drop the shutdown timer for the dead worker: cancel it if it was
         // still pending (abnormal stop), no-op if it already fired.
-        if let Some(token) = self.pending_worker_shutdowns.remove(&sink) {
+        if let Some((token, _)) = self.pending_worker_shutdowns.remove(&sink) {
             token.cancel();
         }
         // Any catch-up running in the dead worker is no longer running.
@@ -2126,10 +2150,13 @@ impl SinkManager {
             _ => None,
         };
 
-        let transport =
-            build_transport(&server, signer, Some(self.node_public_key.as_str()))
-                .await
-                .map_err(|e| format!("failed to build sink transport: {}", e))?;
+        let transport = build_transport(
+            &server,
+            signer,
+            Some(self.node_public_key.as_str()),
+        )
+        .await
+        .map_err(|e| format!("failed to build sink transport: {}", e))?;
 
         transport.test().await.map_err(|e| {
             warn!(
@@ -2524,6 +2551,7 @@ mod tests {
             is_governance: false,
             node_public_key: String::new(),
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: HashMap::new(),
             pending_catch_ups: HashMap::new(),

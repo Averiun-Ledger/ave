@@ -15,9 +15,17 @@ use aws_lc_rs::signature::{self, KeyPair as _, RsaKeyPair};
 use axum::extract::State;
 use axum::response::Json;
 use axum::routing::{get, post};
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rustls::ServerConfig as RustlsServerConfig;
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer,
+};
 use serde_json::{Value, json};
+
+use super::test_sink::TestTlsMaterial;
 
 const KEY_ID: &str = "oidc-test-key";
 
@@ -154,14 +162,44 @@ pub struct MockOidcIdp {
     pub token_url: String,
     /// Audience claim the broker expects.
     pub audience: String,
+    /// HTTPS token endpoint; only set by `start_with_https`.
+    pub https_token_url: Option<String>,
+    /// PEM of the CA signing the HTTPS endpoint certificate; configure it as
+    /// the sink's `tls.ca_certificate`. Only set by `start_with_https`.
+    pub ca_pem: Option<String>,
     hits: IdpHits,
-    handle: tokio::task::JoinHandle<()>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+fn router(state: Arc<IdpState>) -> axum::Router {
+    axum::Router::new()
+        .route("/.well-known/openid-configuration", get(discovery))
+        .route("/jwks", get(jwks))
+        .route("/token", post(token))
+        .with_state(state)
 }
 
 impl MockOidcIdp {
     /// Start the IdP on a free port. `host_for_broker` is how the broker
     /// container reaches this host (e.g. `host.docker.internal`).
     pub async fn start(host_for_broker: &str, audience: &str) -> Self {
+        Self::start_inner(host_for_broker, audience, false).await
+    }
+
+    /// Like `start`, but additionally serves the same endpoints over HTTPS
+    /// with a throwaway CA: the broker keeps using the plain-HTTP discovery
+    /// and JWKS (Redpanda cannot trust a custom CA for its own OIDC fetch),
+    /// while the producer's token endpoint is the HTTPS one, so the sink
+    /// must trust `ca_pem` via `tls.ca_certificate` to obtain tokens.
+    pub async fn start_with_https(host_for_broker: &str, audience: &str) -> Self {
+        Self::start_inner(host_for_broker, audience, true).await
+    }
+
+    async fn start_inner(
+        host_for_broker: &str,
+        audience: &str,
+        with_https: bool,
+    ) -> Self {
         let key_pair = RsaKeyPair::generate(KeySize::Rsa2048)
             .expect("RSA-2048 keypair generation should succeed");
         let public_key = key_pair.public_key();
@@ -186,21 +224,72 @@ impl MockOidcIdp {
             jwk_e,
             hits: hits.clone(),
         });
-        let app = axum::Router::new()
-            .route("/.well-known/openid-configuration", get(discovery))
-            .route("/jwks", get(jwks))
-            .route("/token", post(token))
-            .with_state(state);
-        let handle = tokio::spawn(async move {
+        let mut handles = Vec::new();
+        let app = router(state.clone());
+        handles.push(tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
-        });
+        }));
+
+        let mut https_token_url = None;
+        let mut ca_pem = None;
+        if with_https {
+            let material = TestTlsMaterial::generate();
+            let cert_der = CertificateDer::from_pem_slice(
+                material.server_cert_pem.as_bytes(),
+            )
+            .expect("test server certificate PEM should parse");
+            let key_der = PrivatePkcs8KeyDer::from_pem_slice(
+                material.server_key_pem.as_bytes(),
+            )
+            .expect("test server key PEM should parse");
+            // Explicit crypto provider: the process-level default may be
+            // unset when several rustls backends are linked.
+            let provider = rustls::crypto::aws_lc_rs::default_provider();
+            let mut server_config =
+                RustlsServerConfig::builder_with_provider(Arc::new(provider))
+                    .with_safe_default_protocol_versions()
+                    .expect("default TLS versions should be valid")
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![cert_der],
+                        PrivateKeyDer::Pkcs8(key_der),
+                    )
+                    .expect("server cert/key should be valid");
+            server_config.alpn_protocols =
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let rustls_config = RustlsConfig::from_config(Arc::new(
+                server_config,
+            ));
+
+            let tls_listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("IdP TLS should bind an ephemeral port");
+            tls_listener
+                .set_nonblocking(true)
+                .expect("listener should be non-blocking");
+            let tls_addr = tls_listener
+                .local_addr()
+                .expect("listener has local address");
+            let tls_app = router(state);
+            handles.push(tokio::spawn(async move {
+                let _ = axum_server::from_tcp(tls_listener)
+                    .expect("listener should convert to tokio")
+                    .acceptor(RustlsAcceptor::new(rustls_config))
+                    .serve(tls_app.into_make_service())
+                    .await;
+            }));
+            https_token_url =
+                Some(format!("https://{tls_addr}/token"));
+            ca_pem = Some(material.ca_pem);
+        }
 
         Self {
             issuer,
             token_url,
             audience: audience.to_owned(),
+            https_token_url,
+            ca_pem,
             hits,
-            handle,
+            handles,
         }
     }
 
@@ -212,6 +301,8 @@ impl MockOidcIdp {
 
 impl Drop for MockOidcIdp {
     fn drop(&mut self) {
-        self.handle.abort();
+        for handle in &self.handles {
+            handle.abort();
+        }
     }
 }

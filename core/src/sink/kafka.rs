@@ -208,6 +208,33 @@ fn default_transactional_id(sink_name: &str, node_id: Option<&str>) -> String {
     }
 }
 
+/// Build the reqwest client that fetches OAUTHBEARER tokens from the OIDC
+/// endpoint. Honors the sink's `tls.ca_certificate` as an additional root
+/// CA so IdPs on corporate CAs work; proxying follows reqwest's standard
+/// system-proxy detection (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`).
+async fn build_oauth_token_client(
+    sink_name: &str,
+    config: &KafkaSinkConfig,
+) -> Result<reqwest::Client, SinkError> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_millis(config.request_timeout_ms));
+    if let Some(tls) = &config.tls
+        && !tls.ca_certificate.is_empty()
+    {
+        builder = crate::sink::add_root_certificates(
+            builder,
+            sink_name,
+            &tls.ca_certificate,
+        )
+        .await?;
+    }
+    builder.build().map_err(|e| {
+        SinkError::ClientBuild(format!(
+            "sink '{sink_name}': failed to build OAuth token client: {e}"
+        ))
+    })
+}
+
 /// Kafka transport for a single sink server.
 pub struct KafkaTransport {
     sink_name: String,
@@ -231,7 +258,7 @@ impl std::fmt::Debug for KafkaTransport {
 }
 
 impl KafkaTransport {
-    pub fn new(
+    pub async fn new(
         sink_name: String,
         config: KafkaSinkConfig,
         signer: Option<NodeSigner>,
@@ -358,14 +385,8 @@ impl KafkaTransport {
                             "OAUTHBEARER configured for sink '{sink_name}' but oauth_token_url is not set"
                         ))
                     })?;
-                    let token_client = reqwest::Client::builder()
-                        .timeout(Duration::from_millis(config.request_timeout_ms))
-                        .build()
-                        .map_err(|e| {
-                            SinkError::ClientBuild(format!(
-                                "sink '{sink_name}': failed to build OAuth token client: {e}"
-                            ))
-                        })?;
+                    let token_client =
+                        build_oauth_token_client(&sink_name, &config).await?;
                     oauth_context = Some(KafkaOAuthContext {
                         handle: tokio::runtime::Handle::current(),
                         client: token_client,
@@ -1172,5 +1193,144 @@ mod tests {
                 }
             ));
         }
+    }
+
+    fn oauth_config_with_ca(ca_path: &str) -> KafkaSinkConfig {
+        KafkaSinkConfig {
+            tls: Some(crate::config::KafkaTlsConfig {
+                ca_certificate: ca_path.to_owned(),
+                ..crate::config::KafkaTlsConfig::default()
+            }),
+            ..KafkaSinkConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn build_oauth_token_client_rejects_missing_ca_file() {
+        let config = oauth_config_with_ca("/nonexistent/ave-test-ca.pem");
+        let err = build_oauth_token_client("unit-oidc-missing-ca", &config)
+            .await
+            .unwrap_err();
+        let SinkError::ClientBuild(message) = err else {
+            panic!("expected ClientBuild error, got {err:?}");
+        };
+        assert!(
+            message.contains("cannot read TLS ca_certificate file"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_oauth_token_client_rejects_invalid_ca_pem() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, "not a pem").unwrap();
+        let config = oauth_config_with_ca(&ca_path.to_string_lossy());
+        let err = build_oauth_token_client("unit-oidc-bad-ca", &config)
+            .await
+            .unwrap_err();
+        let SinkError::ClientBuild(message) = err else {
+            panic!("expected ClientBuild error, got {err:?}");
+        };
+        assert!(
+            message.contains("invalid CA certificate"),
+            "unexpected error: {message}"
+        );
+    }
+
+    /// The OIDC token fetch must honor the sink's `tls.ca_certificate`: an
+    /// IdP serving HTTPS with a corporate (here: throwaway) CA is reachable
+    /// only when that CA is added to the token client.
+    #[tokio::test]
+    async fn build_oauth_token_client_fetches_token_over_custom_ca() {
+        use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair,
+            SanType,
+        };
+        use rustls::ServerConfig as RustlsServerConfig;
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Throwaway CA and server certificate for 127.0.0.1, same generation
+        // as the integration TLS helpers.
+        let ca_key = KeyPair::generate().expect("CA key should generate");
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "ave-test-oidc-ca");
+        let ca_cert = ca_params
+            .self_signed(&ca_key)
+            .expect("CA cert should generate");
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+        let server_key =
+            KeyPair::generate().expect("server key should generate");
+        let mut server_params = CertificateParams::default();
+        server_params.subject_alt_names =
+            vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        let server_cert = server_params
+            .signed_by(&server_key, &issuer)
+            .expect("server cert should generate");
+
+        // HTTPS token endpoint speaking the client_credentials contract.
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "tls-oidc-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                }))
+            }),
+        );
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let addr = listener.local_addr().expect("local address");
+        // Explicit crypto provider: the process-level default may be unset
+        // when several rustls backends are linked.
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let server_config =
+            RustlsServerConfig::builder_with_provider(Arc::new(provider))
+                .with_safe_default_protocol_versions()
+                .expect("default TLS versions should be valid")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![server_cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        server_key.serialize_der(),
+                    )),
+                )
+                .expect("server cert/key should be valid");
+        let rustls_config = RustlsConfig::from_config(Arc::new(server_config));
+        tokio::spawn(async move {
+            let _ = axum_server::from_tcp(listener)
+                .expect("listener should convert to tokio")
+                .acceptor(RustlsAcceptor::new(rustls_config))
+                .serve(app.into_make_service())
+                .await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca_cert.pem()).unwrap();
+        let config = oauth_config_with_ca(&ca_path.to_string_lossy());
+        let client = build_oauth_token_client("unit-oidc-tls", &config)
+            .await
+            .expect("client with custom CA should build");
+
+        let auth = ave_common::sink::SinkAuthConfig {
+            auth_url: format!("https://{addr}/token"),
+            username: String::new(),
+            api_key: String::new(),
+            grant_type: ave_common::sink::OAuth2GrantType::ClientCredentials,
+            client_id: "client-1".to_owned(),
+            scope: String::new(),
+        };
+        let response = crate::sink::obtain_token(&client, &auth, "secret")
+            .await
+            .expect("the token fetch must trust the configured CA");
+        assert_eq!(response.access_token, "tls-oidc-token");
     }
 }

@@ -125,6 +125,7 @@ async fn kafka_transport_happy_path() {
         kafka_sink_config(&env.bootstrap_servers, "ave-{{schema-id}}"),
         None, None,
     )
+    .await
     .unwrap();
 
     // Full event.
@@ -160,6 +161,7 @@ async fn kafka_transport_happy_path() {
         kafka_sink_config(&env.bootstrap_servers, "{{subject-id}}"),
         None, None,
     )
+    .await
     .unwrap();
     transport
         .send(Arc::new(example_data_to_sink(template_subject, SCHEMA_ID)))
@@ -181,6 +183,7 @@ async fn kafka_transport_sends_delivery_headers() {
         kafka_sink_config(&env.bootstrap_servers, "headers-{{schema-id}}"),
         None, None,
     )
+    .await
     .unwrap();
 
     transport
@@ -243,6 +246,7 @@ async fn kafka_transport_test_sends_test_message() {
         kafka_sink_config(&env.bootstrap_servers, "test-topic"),
         None, None,
     )
+    .await
     .unwrap();
 
     transport.test().await.unwrap();
@@ -285,6 +289,7 @@ async fn kafka_transport_test_renders_event_type_template() {
         ),
         None, None,
     )
+    .await
     .unwrap();
 
     transport.test().await.unwrap();
@@ -316,6 +321,7 @@ async fn kafka_transport_logs_request_id() {
         kafka_sink_config(&env.bootstrap_servers, "logs-{{schema-id}}"),
         None, None,
     )
+    .await
     .unwrap();
 
     transport
@@ -362,7 +368,7 @@ async fn kafka_transport_retries_on_unknown_topic() {
         cfg.retry_max_delay_ms = 500;
     });
     let transport =
-        KafkaTransport::new("test-retry".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-retry".to_string(), config, None, None).await.unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -391,6 +397,7 @@ async fn kafka_transport_retry_exhaustion_returns_retryable_error() {
     );
     let transport =
         KafkaTransport::new("test-retry-fail".to_string(), config, None, None)
+            .await
             .unwrap();
 
     let result = transport
@@ -436,7 +443,7 @@ async fn kafka_transport_tls_custom_ca() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("test-tls".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-tls".to_string(), config, None, None).await.unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -462,7 +469,7 @@ async fn kafka_transport_tls_missing_ca_fails() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("test-tls-fail".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-tls-fail".to_string(), config, None, None).await.unwrap();
 
     let result = transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -493,7 +500,7 @@ async fn kafka_transport_config_variants() {
             |cfg| cfg.compression = compression,
         );
         let transport =
-            KafkaTransport::new("test".to_string(), config, None, None).unwrap();
+            KafkaTransport::new("test".to_string(), config, None, None).await.unwrap();
         transport
             .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
             .await
@@ -514,7 +521,7 @@ async fn kafka_transport_config_variants() {
             |cfg| cfg.acks = acks,
         );
         let transport =
-            KafkaTransport::new("test".to_string(), config, None, None).unwrap();
+            KafkaTransport::new("test".to_string(), config, None, None).await.unwrap();
         transport
             .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
             .await
@@ -543,7 +550,7 @@ async fn kafka_transport_error_handling() {
         ..KafkaSinkConfig::default()
     };
     let err =
-        KafkaTransport::new("test".to_string(), config, None, None).unwrap_err();
+        KafkaTransport::new("test".to_string(), config, None, None).await.unwrap_err();
     assert!(matches!(err, SinkError::ClientBuild(_)));
 
     // Invalid acks values are rejected at deserialization time.
@@ -562,7 +569,7 @@ async fn kafka_transport_error_handling() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("test".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test".to_string(), config, None, None).await.unwrap();
     let err = transport.health_check().await.unwrap_err();
     assert!(
         matches!(
@@ -582,6 +589,7 @@ async fn kafka_transport_error_handling() {
         kafka_sink_config(&env.bootstrap_servers, "ave-{{schema-id}}"),
         None, None,
     )
+    .await
     .unwrap();
 
     let mut data = example_data_to_sink("BIG-SUBJECT", SCHEMA_ID);
@@ -617,6 +625,7 @@ async fn kafka_transport_sasl() {
         kafka_sink_config_sasl(&env.bootstrap_servers, "ave-sasl-ok", username),
         None, None,
     )
+    .await
     .unwrap();
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -640,7 +649,7 @@ async fn kafka_transport_sasl() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("sasl-bad".to_string(), bad_config, None, None).unwrap();
+        KafkaTransport::new("sasl-bad".to_string(), bad_config, None, None).await.unwrap();
     // Force an immediate connection attempt; librdkafka may report the bad
     // credentials as an auth error or, with some broker timings, as a
     // retryable connection timeout.
@@ -686,6 +695,7 @@ async fn kafka_transport_oauthbearer_delivers() {
     };
     let transport =
         KafkaTransport::new("test-oidc".to_string(), config, None, None)
+            .await
             .unwrap();
 
     if let Err(err) = transport
@@ -713,6 +723,81 @@ async fn kafka_transport_oauthbearer_delivers() {
     assert_eq!(messages[0].0, SUBJECT_ID);
 }
 
+/// Same full OAUTHBEARER flow but with the IdP's token endpoint served over
+/// HTTPS with a throwaway CA: the producer can only obtain the token by
+/// trusting that CA through `tls.ca_certificate` (the corporate-IdP case).
+/// The broker keeps validating against the plain-HTTP discovery/JWKS, which
+/// shares the same signing keys, so the token is accepted end to end.
+#[tokio::test]
+async fn kafka_transport_oauthbearer_delivers_over_custom_ca() {
+    let idp =
+        MockOidcIdp::start_with_https("host.docker.internal", "ave-kafka")
+            .await;
+    let discovery_url =
+        format!("{}/.well-known/openid-configuration", idp.issuer);
+    let env = RedpandaOidcEnv::start(&discovery_url, &idp.audience, "client-1")
+        .await;
+
+    let _secret =
+        TempEnvVar::set("AVE_SINK_PASSWORD_TEST_OIDC_TLS", "oidc-secret");
+
+    let dir = tempfile::tempdir().expect("tempdir for the IdP CA");
+    let ca_path = dir.path().join("idp-ca.pem");
+    std::fs::write(
+        &ca_path,
+        idp.ca_pem.as_ref().expect("https IdP exposes its CA"),
+    )
+    .expect("write IdP CA PEM");
+
+    let config = KafkaSinkConfig {
+        bootstrap_servers: env.bootstrap_servers.clone(),
+        topic: "oidc-tls-{{schema-id}}".to_owned(),
+        security: KafkaSecurityConfig::SaslPlaintext {
+            mechanism: KafkaSaslMechanism::OAuthBearer,
+            username: "client-1".to_owned(),
+        },
+        oauth_token_url: Some(
+            idp.https_token_url
+                .clone()
+                .expect("https IdP exposes an HTTPS token URL"),
+        ),
+        tls: Some(KafkaTlsConfig {
+            ca_certificate: ca_path.to_string_lossy().into_owned(),
+            ..KafkaTlsConfig::default()
+        }),
+        ..KafkaSinkConfig::default()
+    };
+    let transport =
+        KafkaTransport::new("test-oidc-tls".to_string(), config, None, None)
+            .await
+            .unwrap();
+
+    if let Err(err) = transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+    {
+        let hits = idp.hits();
+        panic!(
+            "OIDC-over-TLS delivery failed: {err}\n\
+             IdP hits — discovery: {}, jwks: {}, token: {}\n\
+             redpanda logs:\n{}",
+            hits.discovery(),
+            hits.jwks(),
+            hits.token(),
+            env.logs().await
+        );
+    }
+
+    let messages = env.consume_string("oidc-tls-Example", 1, TIMEOUT).await;
+    assert_eq!(
+        messages.len(),
+        1,
+        "the broker must accept the OIDC-authenticated delivery whose token \
+         was fetched over the custom-CA HTTPS endpoint"
+    );
+    assert_eq!(messages[0].0, SUBJECT_ID);
+}
+
 /// OAUTHBEARER without the client secret environment variable fails at
 /// build time naming the variable, like any other SASL secret.
 #[tokio::test]
@@ -733,6 +818,7 @@ async fn kafka_transport_oauthbearer_requires_secret_env() {
         None,
         None,
     )
+    .await
     .unwrap_err();
     let SinkError::ClientBuild(message) = err else {
         panic!("expected ClientBuild error, got {err:?}");
@@ -765,7 +851,9 @@ async fn kafka_transport_gssapi_config_accepted() {
         }),
         ..KafkaSinkConfig::default()
     };
-    match KafkaTransport::new("test-gssapi".to_string(), config, None, None) {
+    match KafkaTransport::new("test-gssapi".to_string(), config, None, None)
+        .await
+    {
         Ok(_) => {}
         Err(SinkError::ClientBuild(message)) => {
             assert!(
@@ -1011,7 +1099,7 @@ async fn kafka_transport_batch_delivery() {
         |cfg| cfg.batch_delivery = true,
     );
     let transport =
-        KafkaTransport::new("test-batch".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-batch".to_string(), config, None, None).await.unwrap();
 
     let events: Vec<IncomingSinkEvent> = vec![
         IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
@@ -1058,6 +1146,7 @@ async fn kafka_transport_batch_groups_by_event_type() {
     );
     let transport =
         KafkaTransport::new("test-batch-event-type".to_string(), config, None, None)
+            .await
             .unwrap();
 
     let light = |sn: u64| LightEvent {
@@ -1115,6 +1204,7 @@ async fn kafka_transport_topic_template_with_event_type() {
         ),
         None, None,
     )
+    .await
     .unwrap();
 
     // Full event (create).
@@ -1151,6 +1241,7 @@ async fn kafka_transport_signature_requires_signer() {
     config.signature = true;
 
     let err = KafkaTransport::new("test-signature".to_string(), config, None, None)
+        .await
         .unwrap_err();
     assert!(
         matches!(err, SinkError::ClientBuild(_)),
@@ -1901,6 +1992,7 @@ async fn kafka_transport_key_strategy_subject_id() {
     );
     let transport =
         KafkaTransport::new("test-key-subject".to_string(), config, None, None)
+            .await
             .unwrap();
 
     transport
@@ -1926,7 +2018,7 @@ async fn kafka_transport_key_strategy_none() {
         },
     );
     let transport =
-        KafkaTransport::new("test-key-none".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-key-none".to_string(), config, None, None).await.unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1956,6 +2048,7 @@ async fn kafka_transport_key_strategy_static() {
     );
     let transport =
         KafkaTransport::new("test-key-static".to_string(), config, None, None)
+            .await
             .unwrap();
 
     // Two deliveries from two different subjects must share the same key.
@@ -1991,6 +2084,7 @@ async fn kafka_transport_key_strategy_template() {
     );
     let transport =
         KafkaTransport::new("test-key-template".to_string(), config, None, None)
+            .await
             .unwrap();
 
     transport
@@ -2017,6 +2111,7 @@ async fn kafka_transport_transactional_delivers() {
     );
     let transport =
         KafkaTransport::new("test-tx-default".to_string(), config, None, None)
+            .await
             .unwrap();
 
     transport
@@ -2044,6 +2139,7 @@ async fn kafka_transport_transactional_with_explicit_id() {
     );
     let transport =
         KafkaTransport::new("test-tx-explicit".to_string(), config, None, None)
+            .await
             .unwrap();
 
     transport
@@ -2070,7 +2166,7 @@ async fn kafka_transport_tuning_delivers() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tune".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-tune".to_string(), config, None, None).await.unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2095,6 +2191,7 @@ async fn kafka_transport_partitioner_override_delivers() {
     );
     let transport =
         KafkaTransport::new("test-partitioner".to_string(), config, None, None)
+            .await
             .unwrap();
 
     transport
@@ -2129,7 +2226,7 @@ async fn kafka_transport_exposes_producer_stats() {
         },
     );
     let transport =
-        KafkaTransport::new(sink_name.to_string(), config, None, None).unwrap();
+        KafkaTransport::new(sink_name.to_string(), config, None, None).await.unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2168,6 +2265,7 @@ async fn kafka_transport_batch_best_effort_delivers() {
     );
     let transport =
         KafkaTransport::new("test-best-effort".to_string(), config, None, None)
+            .await
             .unwrap();
 
     let light = |sn: u64| LightEvent {
@@ -2220,7 +2318,7 @@ async fn kafka_transport_batch_best_effort_fails_fast() {
         });
     let sink_name = "test-best-effort-dead";
     let transport =
-        KafkaTransport::new(sink_name.to_string(), config, None, None).unwrap();
+        KafkaTransport::new(sink_name.to_string(), config, None, None).await.unwrap();
 
     // Initialize the core metrics global (idempotent via `OnceLock`): the
     // failure must surface with the transient label, and the shared retry
@@ -2271,6 +2369,7 @@ async fn kafka_transport_records_request_duration() {
         kafka_sink_config(&env.bootstrap_servers, "duration-{{schema-id}}"),
         None, None,
     )
+    .await
     .unwrap();
 
     transport
@@ -2307,7 +2406,7 @@ async fn kafka_transport_custom_headers() {
         },
     );
     let transport =
-        KafkaTransport::new("test-headers".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-headers".to_string(), config, None, None).await.unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2343,6 +2442,7 @@ async fn kafka_transport_key_strategy_send_light() {
     );
     let transport =
         KafkaTransport::new("test-key-light".to_string(), config, None, None)
+            .await
             .unwrap();
 
     transport
@@ -2372,7 +2472,7 @@ async fn kafka_transport_transactional_batch() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tx-batch".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-tx-batch".to_string(), config, None, None).await.unwrap();
 
     let light = |sn: u64| LightEvent {
         subject_id: SUBJECT_ID.to_string(),
@@ -2427,7 +2527,7 @@ async fn kafka_transport_transactional_batch_best_effort() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tx-best".to_string(), config, None, None).unwrap();
+        KafkaTransport::new("test-tx-best".to_string(), config, None, None).await.unwrap();
 
     let light = |sn: u64| LightEvent {
         subject_id: SUBJECT_ID.to_string(),
@@ -2484,6 +2584,7 @@ async fn kafka_transport_transactional_per_node_ids_do_not_fence() {
         None,
         Some("node-a-public-key"),
     )
+    .await
     .unwrap();
     let node_b = KafkaTransport::new(
         "same-sink".to_string(),
@@ -2491,6 +2592,7 @@ async fn kafka_transport_transactional_per_node_ids_do_not_fence() {
         None,
         Some("node-b-public-key"),
     )
+    .await
     .unwrap();
 
     // Interleave deliveries: with a shared transactional.id the second
@@ -2551,6 +2653,7 @@ async fn kafka_transport_transactional_shared_id_fences() {
         None,
         Some("shared-node-key"),
     )
+    .await
     .unwrap();
 
     // A delivers fine while it is the only producer with its id.
@@ -2566,6 +2669,7 @@ async fn kafka_transport_transactional_shared_id_fences() {
         None,
         Some("shared-node-key"),
     )
+    .await
     .unwrap();
     node_b
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))

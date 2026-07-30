@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures::StreamExt;
-use reqwest::{Certificate, Client, Identity, tls::Version};
+use reqwest::{Client, Identity, tls::Version};
 use tokio::sync::RwLock;
 use tracing::debug;
 
@@ -24,6 +24,7 @@ use crate::config::{
 };
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
+use crate::sink::read_tls_file;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
@@ -293,27 +294,12 @@ async fn build_http_client(
         builder = builder.use_preconfigured_tls(tls_config);
     } else if let Some(tls) = &config.tls {
         if !tls.ca_certificate.is_empty() {
-            let pem =
-                read_tls_file(sink_name, "ca_certificate", &tls.ca_certificate)
-                    .await?;
-            // With the rustls backend `Certificate::from_pem` defers parsing
-            // and silently accepts a buffer without PEM sections, so parse
-            // the bundle here and require at least one certificate.
-            let certs = Certificate::from_pem_bundle(&pem).map_err(|e| {
-                SinkError::ClientBuild(format!(
-                    "sink '{}': invalid CA certificate '{}': {}",
-                    sink_name, tls.ca_certificate, e
-                ))
-            })?;
-            if certs.is_empty() {
-                return Err(SinkError::ClientBuild(format!(
-                    "sink '{}': invalid CA certificate '{}': no PEM certificates found",
-                    sink_name, tls.ca_certificate
-                )));
-            }
-            for cert in certs {
-                builder = builder.add_root_certificate(cert);
-            }
+            builder = crate::sink::add_root_certificates(
+                builder,
+                sink_name,
+                &tls.ca_certificate,
+            )
+            .await?;
         }
 
         if !tls.client_certificate.is_empty() {
@@ -379,22 +365,6 @@ async fn build_http_client(
         SinkError::ClientBuild(format!(
             "sink '{}': failed to build HTTP client: {}",
             sink_name, e
-        ))
-    })
-}
-
-/// Read a PEM file referenced by the TLS configuration asynchronously.
-/// TLS files can be large and live on network filesystems, so this avoids
-/// blocking the async executor during client construction.
-async fn read_tls_file(
-    sink_name: &str,
-    field: &str,
-    path: &str,
-) -> Result<Vec<u8>, SinkError> {
-    tokio::fs::read(path).await.map_err(|e| {
-        SinkError::ClientBuild(format!(
-            "sink '{}': cannot read TLS {} file '{}': {}",
-            sink_name, field, path, e
         ))
     })
 }
@@ -707,33 +677,14 @@ impl HttpTransport {
                 "Sink delivery succeeded"
             );
             Ok(())
-        } else if status == 401 || status == 403 {
-            let body = read_limited_body(
-                response.bytes_stream(),
-                self.config.max_error_body_bytes,
-            )
-            .await;
-            Err(SinkError::Auth {
-                message: format!("HTTP {} ({}): {}", status, request_id, body),
-                retry_after_ms: None,
-            })
         } else {
-            // Read the Retry-After hint before consuming the body.
-            let retry_after_ms = if status == 429 || status.is_server_error() {
-                crate::sink::parse_retry_after(response.headers())
-            } else {
-                None
-            };
-            let body = read_limited_body(
-                response.bytes_stream(),
+            Err(map_error_response(
+                response,
+                &request_id,
                 self.config.max_error_body_bytes,
+                "HTTP",
             )
-            .await;
-            Err(SinkError::Delivery {
-                message: format!("HTTP {} ({}): {}", status, request_id, body),
-                retryable: status.is_server_error() || status == 429,
-                retry_after_ms,
-            })
+            .await)
         }
     }
 
@@ -917,34 +868,20 @@ impl SinkTransport for HttpTransport {
         let status = response.status();
         if status.is_success() {
             Ok(())
-        } else if status == 401 || status == 403 {
-            self.invalidate_cached_token().await;
-            let body = read_limited_body(
-                response.bytes_stream(),
-                self.config.max_error_body_bytes,
-            )
-            .await;
-            Err(SinkError::Auth {
-                message: format!(
-                    "Health check returned {} ({}): {}",
-                    status, request_id, body
-                ),
-                retry_after_ms: None,
-            })
         } else {
-            let body = read_limited_body(
-                response.bytes_stream(),
+            // Unlike deliveries (whose retry loop invalidates and retries
+            // once), a health check has no retry path: invalidate inline so
+            // the next one re-authenticates.
+            if status == 401 || status == 403 {
+                self.invalidate_cached_token().await;
+            }
+            Err(map_error_response(
+                response,
+                &request_id,
                 self.config.max_error_body_bytes,
+                "Health check returned",
             )
-            .await;
-            Err(SinkError::Delivery {
-                message: format!(
-                    "Health check returned {} ({}): {}",
-                    status, request_id, body
-                ),
-                retryable: status.is_server_error() || status == 429,
-                retry_after_ms: None,
-            })
+            .await)
         }
     }
 
@@ -998,39 +935,19 @@ impl SinkTransport for HttpTransport {
         let status = response.status();
         if status.is_success() {
             Ok(())
-        } else if status == 401 || status == 403 {
-            self.invalidate_cached_token().await;
-            let body = read_limited_body(
-                response.bytes_stream(),
-                self.config.max_error_body_bytes,
-            )
-            .await;
-            Err(SinkError::Auth {
-                message: format!(
-                    "Sink test returned {} ({}): {}",
-                    status, request_id, body
-                ),
-                retry_after_ms: None,
-            })
         } else {
-            let retry_after_ms = if status == 429 || status.is_server_error() {
-                crate::sink::parse_retry_after(response.headers())
-            } else {
-                None
-            };
-            let body = read_limited_body(
-                response.bytes_stream(),
+            // No retry loop here (deliveries invalidate in their retry
+            // loop): invalidate inline so the next test re-authenticates.
+            if status == 401 || status == 403 {
+                self.invalidate_cached_token().await;
+            }
+            Err(map_error_response(
+                response,
+                &request_id,
                 self.config.max_error_body_bytes,
+                "Sink test returned",
             )
-            .await;
-            Err(SinkError::Delivery {
-                message: format!(
-                    "Sink test returned {} ({}): {}",
-                    status, request_id, body
-                ),
-                retryable: status.is_server_error() || status == 429,
-                retry_after_ms,
-            })
+            .await)
         }
     }
 
@@ -1147,6 +1064,43 @@ where
     }
 
     String::from_utf8_lossy(&collected).into_owned()
+}
+
+/// Map a non-success HTTP response to the shared error taxonomy: 401/403 →
+/// `Auth`; 429 and 5xx → retryable `Delivery` honoring the `Retry-After`
+/// hint; any other status → non-retryable `Delivery`. The body is truncated
+/// to `max_error_body_bytes` and `label` prefixes the message (`"HTTP"` for
+/// deliveries, `"Health check returned"`, ...). Single place so every call
+/// site classifies statuses identically.
+async fn map_error_response(
+    response: reqwest::Response,
+    request_id: &str,
+    max_error_body_bytes: usize,
+    label: &str,
+) -> SinkError {
+    let status = response.status();
+    // Read the Retry-After hint before consuming the body.
+    let retry_after_ms = if status == 429 || status.is_server_error() {
+        crate::sink::parse_retry_after(response.headers())
+    } else {
+        None
+    };
+    let body =
+        read_limited_body(response.bytes_stream(), max_error_body_bytes)
+            .await;
+    let message = format!("{label} {status} ({request_id}): {body}");
+    if status == 401 || status == 403 {
+        SinkError::Auth {
+            message,
+            retry_after_ms: None,
+        }
+    } else {
+        SinkError::Delivery {
+            message,
+            retryable: status.is_server_error() || status == 429,
+            retry_after_ms,
+        }
+    }
 }
 
 #[cfg(test)]

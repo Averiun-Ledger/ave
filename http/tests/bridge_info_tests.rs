@@ -390,6 +390,11 @@ async fn test_approval_deserialization() {
 
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
+    // The create request must be fully applied before emitting governance
+    // facts: under load the subject is not the node's owner yet and the fact
+    // is rejected with "not the owner of subject".
+    wait_request_finish(&client, &server, None, &request_data.request_id)
+        .await;
 
     let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
@@ -647,6 +652,11 @@ async fn test_update_and_transfer_deserialization() {
 
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
+    // The create request must be fully applied before operating on the
+    // governance: under load the subject is not the node's owner yet and
+    // follow-up requests are rejected with "not the owner of subject".
+    wait_request_finish(&client, &server, None, &request_data.request_id)
+        .await;
 
     let (status, _body) = make_request(
         &client,

@@ -780,6 +780,7 @@ mod tests {
             max_catch_up_concurrency: 2,
             sink_subject_worker_idle_timeout_ms: 2_000,
             max_recoveries_after_failure: 5,
+            healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
         }
     }
@@ -972,6 +973,30 @@ mod tests {
         server.catch_up_batch_size = 100;
         server.batch_delivery_size = 0;
         assert!(server.validate().is_err());
+    }
+
+    #[test]
+    fn test_healthcheck_max_failures_defaults_to_three_and_rejects_zero() {
+        let server = valid_sink_server();
+        assert_eq!(server.healthcheck_max_failures, 3);
+        assert!(server.validate().is_ok());
+
+        let mut server = valid_sink_server();
+        server.healthcheck_max_failures = 1;
+        assert!(
+            server.validate().is_ok(),
+            "one failure must be allowed (immediate unhealthy)"
+        );
+
+        let mut server = valid_sink_server();
+        server.healthcheck_max_failures = 0;
+        match server.validate() {
+            Err(Error::InvalidConfiguration { component, .. })
+                if component == "SinkServer.healthcheck_max_failures" => {}
+            other => panic!(
+                "expected InvalidConfiguration for SinkServer.healthcheck_max_failures, got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -2364,6 +2389,11 @@ pub struct SinkServer {
     /// Maximum number of recoveries after failure before a sink is considered
     /// "flapping".
     pub max_recoveries_after_failure: u32,
+    /// Consecutive failed healthchecks required before the sink is declared
+    /// unhealthy and deliveries pause. A single slow healthcheck (e.g. a
+    /// transient network hiccup) must not stop the delivery pipeline.
+    /// Minimum 1 (immediate unhealthy on first failure).
+    pub healthcheck_max_failures: u32,
     /// Delay in seconds before the first healthcheck is scheduled after startup.
     pub startup_healthcheck_delay_secs: u64,
 }
@@ -2381,6 +2411,7 @@ impl Default for SinkServer {
             max_catch_up_concurrency: 2,
             sink_subject_worker_idle_timeout_ms: 2_000,
             max_recoveries_after_failure: 5,
+            healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
         }
     }
@@ -2453,6 +2484,10 @@ impl SinkServer {
         require_positive_u64(
             "SinkServer.max_recoveries_after_failure",
             self.max_recoveries_after_failure as u64,
+        )?;
+        require_positive_u64(
+            "SinkServer.healthcheck_max_failures",
+            self.healthcheck_max_failures as u64,
         )?;
         require_positive_u64(
             "SinkServer.startup_healthcheck_delay_secs",

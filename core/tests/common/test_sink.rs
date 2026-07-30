@@ -408,14 +408,19 @@ impl TestSink {
     pub async fn wait_for_count(&self, count: usize, timeout: bool) {
         let mut attempts = 0;
         loop {
-            let current = self.state.lock().await.events.len();
+            let (current, sns) = {
+                let guard = self.state.lock().await;
+                let sns: Vec<u64> =
+                    guard.events.iter().map(IncomingSinkEvent::sn).collect();
+                (guard.events.len(), sns)
+            };
             if current >= count {
                 return;
             }
             if timeout && attempts > 100 {
                 panic!(
-                    "test sink did not receive {} events; received {}",
-                    count, current
+                    "test sink did not receive {} events; received {} (sns: {:?})",
+                    count, current, sns
                 );
             }
             tokio::time::sleep(Duration::from_millis(300)).await;

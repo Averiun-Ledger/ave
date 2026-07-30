@@ -234,6 +234,52 @@ pub async fn obtain_token_with_retry(
     })
 }
 
+/// Read a PEM file referenced by the TLS configuration asynchronously.
+/// TLS files can be large and live on network filesystems, so this avoids
+/// blocking the async executor during client construction.
+pub(crate) async fn read_tls_file(
+    sink_name: &str,
+    field: &str,
+    path: &str,
+) -> Result<Vec<u8>, SinkError> {
+    tokio::fs::read(path).await.map_err(|e| {
+        SinkError::ClientBuild(format!(
+            "sink '{}': cannot read TLS {} file '{}': {}",
+            sink_name, field, path, e
+        ))
+    })
+}
+
+/// Add every PEM certificate in `path` as a root CA to the client builder.
+/// Shared by the HTTP sink and the OIDC token client of the Kafka sink so
+/// both honor the same custom-CA configuration.
+pub(crate) async fn add_root_certificates(
+    mut builder: reqwest::ClientBuilder,
+    sink_name: &str,
+    path: &str,
+) -> Result<reqwest::ClientBuilder, SinkError> {
+    let pem = read_tls_file(sink_name, "ca_certificate", path).await?;
+    // With the rustls backend `Certificate::from_pem` defers parsing and
+    // silently accepts a buffer without PEM sections, so parse the bundle
+    // here and require at least one certificate.
+    let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| {
+        SinkError::ClientBuild(format!(
+            "sink '{}': invalid CA certificate '{}': {}",
+            sink_name, path, e
+        ))
+    })?;
+    if certs.is_empty() {
+        return Err(SinkError::ClientBuild(format!(
+            "sink '{}': invalid CA certificate '{}': no PEM certificates found",
+            sink_name, path
+        )));
+    }
+    for cert in certs {
+        builder = builder.add_root_certificate(cert);
+    }
+    Ok(builder)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

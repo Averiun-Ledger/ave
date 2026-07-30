@@ -188,7 +188,9 @@ Example: a sink named `billing-events.eu` reads
   SASL username is the OIDC client id and the client secret is read from
   `AVE_SINK_PASSWORD_{{SERVER}}`. Tokens are fetched with the
   `client_credentials` grant and refreshed automatically before expiry;
-  `oauth_scope` is optional.
+  `oauth_scope` is optional. The token endpoint honors the sink's
+  `tls.ca_certificate` as an additional root CA (IdPs on corporate CAs) and
+  the standard `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables.
 - `GSSAPI` (Kerberos): fill the `kerberos` section (`service_name`,
   `principal`, `keytab`); the realm is derived from the principal. The host
   needs a working Kerberos setup (krb5.conf, keytab readable by the node
