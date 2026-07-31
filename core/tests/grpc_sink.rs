@@ -549,6 +549,92 @@ async fn grpc_transport_best_effort_is_single_attempt() {
     );
 }
 
+/// The stream lifecycle surfaces in the shared metrics: the in-flight
+/// gauge follows the window, acks feed the round-trip histogram and a
+/// stream cut increments the reconnect counter.
+#[test(tokio::test)]
+async fn grpc_transport_exposes_stream_metrics() {
+    // Initialize the core metrics global (idempotent OnceLock) with a
+    // registry that shares the metric storage, like the Kafka stats test.
+    let mut registry = prometheus_client::registry::Registry::default();
+    ave_core::metrics::register(&mut registry);
+    let encode = |registry: &prometheus_client::registry::Registry| {
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, registry)
+            .unwrap();
+        text
+    };
+
+    let sink = GrpcTestSink::start().await;
+    let sink_name = "test-stream-metrics";
+    let config = GrpcSinkConfig {
+        request_timeout_ms: 30_000,
+        retry_base_delay_ms: 1,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = Arc::new(
+        GrpcTransport::new(sink_name.to_owned(), config, None)
+            .await
+            .unwrap(),
+    );
+
+    // With a stalled consumer one delivery stays in flight: the gauge must
+    // reflect it (poll pattern, no fixed sleeps).
+    sink.pause_streams();
+    let pending = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move {
+            transport
+                .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+                .await
+        }
+    });
+    let gauge_one =
+        format!("core_sink_grpc_in_flight_batches{{sink=\"{sink_name}\"}} 1");
+    let mut attempts = 0;
+    loop {
+        if encode(&registry).contains(&gauge_one) {
+            break;
+        }
+        if attempts > 100 {
+            panic!("timeout waiting for the in-flight gauge to reach 1");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+
+    sink.resume_streams();
+    pending.await.unwrap().unwrap();
+
+    let text = encode(&registry);
+    assert!(
+        text.contains(&format!(
+            "core_sink_grpc_in_flight_batches{{sink=\"{sink_name}\"}} 0"
+        )),
+        "the gauge must return to 0 after the ack:\n{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "core_sink_grpc_ack_roundtrip_seconds_count{{sink=\"{sink_name}\"}} 1"
+        )),
+        "the ack must feed the round-trip histogram:\n{text}"
+    );
+
+    // A stream cut followed by a lazy reopen is a reconnection.
+    sink.cut_streams();
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    let text = encode(&registry);
+    assert!(
+        text.contains(&format!(
+            "core_sink_grpc_stream_reconnects_total{{sink=\"{sink_name}\"}} 1"
+        )),
+        "the cut must increment the reconnect counter:\n{text}"
+    );
+}
+
 /// Configured auth with a missing environment secret is a build error.
 #[test(tokio::test)]
 async fn grpc_transport_auth_missing_secret_is_build_error() {

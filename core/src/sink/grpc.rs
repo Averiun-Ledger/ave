@@ -109,6 +109,10 @@ pub struct GrpcTransport {
     unary_only: AtomicBool,
     /// In-flight window: maximum unacked deliveries on the stream.
     in_flight: Arc<Semaphore>,
+    /// Configured window size (for the in-flight gauge).
+    in_flight_limit: usize,
+    /// Set after the first stream open; later opens are reconnections.
+    stream_opened_once: AtomicBool,
 }
 
 impl std::fmt::Debug for GrpcTransport {
@@ -184,6 +188,7 @@ impl GrpcTransport {
             in_flight: Arc::new(Semaphore::new(
                 config.max_in_flight_batches.max(1),
             )),
+            in_flight_limit: config.max_in_flight_batches.max(1),
             config,
             signer,
             channel,
@@ -192,7 +197,22 @@ impl GrpcTransport {
             custom_metadata,
             stream: Arc::new(Mutex::new(None)),
             unary_only: AtomicBool::new(false),
+            stream_opened_once: AtomicBool::new(false),
         })
+    }
+
+    /// Update the in-flight gauge from the semaphore state (no extra
+    /// counter: the semaphore is the source of truth).
+    fn observe_in_flight(&self) {
+        if let Some(metrics) = try_core_metrics() {
+            let in_flight = self
+                .in_flight_limit
+                .saturating_sub(self.in_flight.available_permits());
+            metrics.set_grpc_in_flight_batches(
+                &self.sink_name,
+                in_flight as i64,
+            );
+        }
     }
 
     /// Per-request timeout for unary RPCs and per-message ack waits.
@@ -447,6 +467,7 @@ impl GrpcTransport {
             }
         };
         let handle = self.stream_handle().await?;
+        self.observe_in_flight();
 
         let (ack_tx, ack_rx) = oneshot::channel();
         handle
@@ -468,6 +489,7 @@ impl GrpcTransport {
             handle.pending.lock().await.remove(request_id);
             *self.stream.lock().await = None;
             drop(permit);
+            self.observe_in_flight();
             return Err(StreamFailure::Delivery(SinkError::Delivery {
                 message: format!(
                     "sink '{}': delivery stream closed",
@@ -479,8 +501,17 @@ impl GrpcTransport {
         }
 
         let result = timed_sink_request(&self.sink_name, || async {
+            let ack_start = std::time::Instant::now();
             match tokio::time::timeout(self.request_timeout(), ack_rx).await {
-                Ok(Ok(ack_result)) => ack_result,
+                Ok(Ok(ack_result)) => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_grpc_ack_roundtrip(
+                            &self.sink_name,
+                            ack_start.elapsed(),
+                        );
+                    }
+                    ack_result
+                }
                 Ok(Err(_closed)) => Err(SinkError::Delivery {
                     message: format!(
                         "sink '{}': delivery stream closed before ack",
@@ -506,6 +537,7 @@ impl GrpcTransport {
         })
         .await;
         drop(permit);
+        self.observe_in_flight();
         result.map_err(StreamFailure::Delivery)
     }
 
@@ -545,12 +577,33 @@ impl GrpcTransport {
         // reader task so other deliveries are not blocked behind it.
         drop(slot);
 
-        tokio::spawn(stream_reader(
-            response.into_inner(),
-            pending,
-            Arc::clone(&self.stream),
-            self.sink_name.clone(),
-        ));
+        // Any open after the first one is a reconnection (the slot is only
+        // cleared when the stream dies).
+        if self.stream_opened_once.swap(true, Ordering::AcqRel) {
+            if let Some(metrics) = try_core_metrics() {
+                metrics.observe_grpc_stream_reconnect(&self.sink_name);
+            }
+            tracing::debug!(
+                msg_type = "GrpcStreamReconnect",
+                sink = %self.sink_name,
+                "gRPC delivery stream reopened after a failure"
+            );
+        }
+
+        tokio::spawn(
+            tracing::Instrument::instrument(
+                stream_reader(
+                    response.into_inner(),
+                    pending,
+                    Arc::clone(&self.stream),
+                    self.sink_name.clone(),
+                ),
+                tracing::info_span!(
+                    "grpc_delivery_stream",
+                    sink = %self.sink_name
+                ),
+            ),
+        );
         Ok(handle)
     }
 

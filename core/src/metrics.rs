@@ -101,6 +101,10 @@ pub struct CoreMetrics {
     kafka_producer_rtt_seconds:
         Family<SinkNameLabels, Histogram, fn() -> Histogram>,
     kafka_producer_fatal_errors: Family<SinkNameLabels, Counter>,
+    grpc_stream_reconnects: Family<SinkNameLabels, Counter>,
+    grpc_in_flight_batches: Family<SinkNameLabels, Gauge>,
+    grpc_ack_roundtrip_seconds:
+        Family<SinkNameLabels, Histogram, fn() -> Histogram>,
     distribution_failures: Family<DistributionFailureLabels, Counter>,
     distribution_duration_seconds:
         Family<DistributionDurationLabels, Histogram, fn() -> Histogram>,
@@ -164,6 +168,14 @@ impl CoreMetrics {
                 ])
             }),
             kafka_producer_fatal_errors: Family::default(),
+            grpc_stream_reconnects: Family::default(),
+            grpc_in_flight_batches: Family::default(),
+            grpc_ack_roundtrip_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                    0.5, 1.0, 2.5, 5.0,
+                ])
+            }),
             distribution_failures: Family::default(),
             distribution_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
@@ -279,6 +291,21 @@ impl CoreMetrics {
             "core_kafka_producer_fatal_errors",
             "Total fatal Kafka producer errors (producer fenced, unsupported feature, ...), labeled by sink.",
             self.kafka_producer_fatal_errors.clone(),
+        );
+        registry.register(
+            "core_sink_grpc_stream_reconnects",
+            "Total gRPC delivery stream reconnections (stream death followed by a lazy reopen), labeled by sink.",
+            self.grpc_stream_reconnects.clone(),
+        );
+        registry.register(
+            "core_sink_grpc_in_flight_batches",
+            "Current unacked deliveries on the gRPC delivery stream, labeled by sink.",
+            self.grpc_in_flight_batches.clone(),
+        );
+        registry.register(
+            "core_sink_grpc_ack_roundtrip_seconds",
+            "Delivery-to-ack round-trip time of gRPC stream messages, labeled by sink.",
+            self.grpc_ack_roundtrip_seconds.clone(),
         );
         registry.register(
             "core_distribution_failures_total",
@@ -525,6 +552,36 @@ impl CoreMetrics {
                 sink: sink.to_owned(),
             })
             .inc();
+    }
+
+    /// Record a gRPC delivery stream reconnection: the stream died and the
+    /// transport reopened it lazily.
+    pub fn observe_grpc_stream_reconnect(&self, sink: &str) {
+        self.grpc_stream_reconnects
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .inc();
+    }
+
+    /// Update the current number of unacked deliveries on a sink's gRPC
+    /// delivery stream.
+    pub fn set_grpc_in_flight_batches(&self, sink: &str, count: i64) {
+        self.grpc_in_flight_batches
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(count);
+    }
+
+    /// Record the delivery-to-ack round-trip time of one gRPC stream
+    /// message.
+    pub fn observe_grpc_ack_roundtrip(&self, sink: &str, duration: Duration) {
+        self.grpc_ack_roundtrip_seconds
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .observe(duration.as_secs_f64());
     }
 
     pub fn observe_distribution_failure(&self, reason: &'static str) {
