@@ -17,6 +17,28 @@ service EventSink {
   // signature with the same configuration as real deliveries, without
   // advancing any cursor or altering persisted state.
   rpc Test(TestRequest) returns (TestResponse);
+  // Persistent bidirectional stream: deliveries are pipelined (the client
+  // does not wait for the ack of batch N before sending N+1, within its
+  // in-flight window) and each message is acked individually by request_id.
+  // Per-message failures travel in DeliverAck and do not tear down the
+  // stream; a terminal stream status forces the client to reconnect.
+  // Servers implementing only the unary RPCs are still fully supported (the
+  // client falls back to unary Deliver on UNIMPLEMENTED).
+  rpc DeliverStream(stream DeliverRequest) returns (stream DeliverAck);
+}
+
+// Per-message acknowledgement of the delivery stream.
+message DeliverAck {
+  // Correlates with DeliverRequest.request_id.
+  string request_id = 1;
+  // gRPC status code number of THIS message (0 = OK; e.g. 14 = UNAVAILABLE,
+  // 8 = RESOURCE_EXHAUSTED, 16 = UNAUTHENTICATED, 3 = INVALID_ARGUMENT),
+  // mapped with the same table as unary responses (see the node repository).
+  int32 error_code = 2;
+  string error_message = 3;
+  // Explicit server backpressure: delay before the client retries this
+  // message (0 = none).
+  uint64 retry_after_ms = 4;
 }
 
 // Routing and idempotency metadata of one event. Receivers filter/route on

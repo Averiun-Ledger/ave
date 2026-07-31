@@ -2487,6 +2487,10 @@ pub struct GrpcSinkConfig {
     /// Maximum size of an outbound gRPC message, i.e. one batch (bounds
     /// memory per RPC).
     pub max_encoding_message_bytes: usize,
+    /// Maximum number of unacknowledged deliveries in flight on the delivery
+    /// stream. When the window is full, senders wait: real backpressure
+    /// towards the sink workers, bounding memory by construction.
+    pub max_in_flight_batches: usize,
 }
 
 impl Default for GrpcSinkConfig {
@@ -2507,6 +2511,7 @@ impl Default for GrpcSinkConfig {
             headers: HashMap::new(),
             max_decoding_message_bytes: 4 * 1024 * 1024,
             max_encoding_message_bytes: 16 * 1024 * 1024,
+            max_in_flight_batches: 8,
         }
     }
 }
@@ -2579,6 +2584,12 @@ impl GrpcSinkConfig {
             return Err(Error::InvalidConfiguration {
                 component: "GrpcSinkConfig.max_encoding_message_bytes"
                     .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.max_in_flight_batches == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.max_in_flight_batches".to_string(),
                 reason: "must be greater than zero".to_string(),
             });
         }

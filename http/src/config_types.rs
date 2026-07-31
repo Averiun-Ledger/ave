@@ -1330,6 +1330,9 @@ pub struct GrpcSinkConfigHttp {
     pub max_decoding_message_bytes: usize,
     /// Maximum size of an outbound gRPC message (one batch).
     pub max_encoding_message_bytes: usize,
+    /// Maximum number of unacknowledged deliveries in flight on the delivery
+    /// stream (backpressure window).
+    pub max_in_flight_batches: usize,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1515,6 +1518,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         .max_decoding_message_bytes,
                     max_encoding_message_bytes: grpc
                         .max_encoding_message_bytes,
+                    max_in_flight_batches: grpc.max_in_flight_batches,
                 }))
             }
         };

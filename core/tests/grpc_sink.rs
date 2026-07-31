@@ -440,6 +440,152 @@ async fn grpc_transport_mtls_client_identity() {
     assert_eq!(sink.accepted_deliveries().len(), 1);
 }
 
+/// Pipelining: concurrent deliveries share one persistent stream and are
+/// correlated by `request_id`, even with a slow acker.
+#[test(tokio::test)]
+async fn grpc_transport_pipelines_over_single_stream() {
+    let sink = GrpcTestSink::start().await;
+    sink.set_stream_ack_delay(50);
+    let transport = Arc::new(
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+            .await,
+    );
+
+    let mut handles = Vec::new();
+    for _ in 0..6 {
+        let transport = Arc::clone(&transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+                .await
+                .unwrap();
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    assert_eq!(sink.accepted_deliveries().len(), 6);
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "every delivery must share a single persistent stream"
+    );
+}
+
+/// Stream cut mid-delivery: the in-flight message fails retryable, the
+/// transport reopens the stream lazily and the retry delivers it.
+#[test(tokio::test)]
+async fn grpc_transport_recovers_from_stream_cut() {
+    let sink = GrpcTestSink::start().await;
+    let config = GrpcSinkConfig {
+        retry_base_delay_ms: 1,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport =
+        build_transport(&sink.endpoint(), config).await;
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(sink.stream_opens(), 1);
+
+    // The open stream dies; the next delivery reconnects transparently.
+    sink.cut_streams();
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    assert_eq!(sink.accepted_deliveries().len(), 2);
+    assert_eq!(
+        sink.stream_opens(),
+        2,
+        "the transport must reopen the stream after a cut"
+    );
+}
+
+/// Backpressure: with a stalled consumer the in-flight window bounds the
+/// deliveries in progress (RAM bounded by construction); once the consumer
+/// resumes, every pending delivery completes.
+#[test(tokio::test)]
+async fn grpc_transport_stream_backpressure_on_stalled_consumer() {
+    let sink = GrpcTestSink::start().await;
+    let config = GrpcSinkConfig {
+        max_in_flight_batches: 2,
+        // The ack wait must outlast the stall so no retry fires.
+        request_timeout_ms: 30_000,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = Arc::new(build_transport(&sink.endpoint(), config).await);
+
+    sink.pause_streams();
+    let mut handles = Vec::new();
+    for _ in 0..3 {
+        let transport = Arc::clone(&transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+                .await
+        }));
+    }
+
+    // While stalled nothing is delivered and the third send cannot
+    // complete (window = 2): poll briefly to observe the stable state.
+    let stalled = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        async {
+            while sink.deliveries().is_empty()
+                && handles.iter().all(|h| !h.is_finished())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(50))
+                    .await;
+            }
+        },
+    )
+    .await;
+    assert!(
+        stalled.is_err(),
+        "the stall must hold for the whole observation window"
+    );
+    assert!(sink.deliveries().is_empty());
+    assert!(
+        handles.iter().all(|h| !h.is_finished()),
+        "no send may complete while the consumer is stalled"
+    );
+
+    sink.resume_streams();
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+    assert_eq!(sink.accepted_deliveries().len(), 3);
+}
+
+/// Unary fallback: a server without `DeliverStream` (v1-unary contract) is
+/// delivered through the unary RPC, and the transport remembers it.
+#[test(tokio::test)]
+async fn grpc_transport_unary_fallback_for_legacy_server() {
+    let sink = GrpcTestSink::start_unary_only().await;
+    let transport =
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+            .await;
+
+    for _ in 0..2 {
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(sink.accepted_deliveries().len(), 2);
+    assert_eq!(
+        sink.stream_opens(),
+        0,
+        "no stream may be established against a unary-only server"
+    );
+}
+
 /// Builds a sink configuration entry that delivers `Example` tracker events
 /// of one governance to a gRPC endpoint.
 fn make_grpc_sink_entry(
@@ -1136,6 +1282,11 @@ async fn grpc_node_catch_up_multiple_subjects() {
 
     wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
     sink.wait_for_accepted(6).await;
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "every subject must share the sink worker's single stream"
+    );
 
     // Subjects may interleave, but each one must arrive complete and in
     // order.
@@ -1157,4 +1308,183 @@ async fn grpc_node_catch_up_multiple_subjects() {
             .expect("subject must have deliveries");
         assert_eq!(sns, &expected, "subject {i} must arrive in order");
     }
+}
+
+/// Stream cut mid-live-delivery at the node level: the connection dies with
+/// the worker delivering, the transport reconnects transparently and the
+/// event arrives exactly once, in order, without the sink going lagging.
+#[test(tokio::test)]
+async fn grpc_node_recovers_from_stream_cut() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    sink.wait_for_accepted(2).await;
+    assert_eq!(sink.stream_opens(), 1);
+
+    // One live event over the open stream.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_accepted(3).await;
+
+    // The connection dies; the next live event reconnects transparently.
+    sink.cut_streams();
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_accepted(4).await;
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2, 3],
+        "the cut must not lose nor duplicate events; got {sns:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        2,
+        "the transport must reopen the stream after the cut"
+    );
+}
+
+/// Unary fallback at the node level: a v1 backend (unary RPCs only, as
+/// deployed with the MVP) keeps receiving catch-up and live events after
+/// the node upgrade, with no stream ever established.
+#[test(tokio::test)]
+async fn grpc_node_unary_fallback_legacy_server() {
+    let sink = GrpcTestSink::start_unary_only().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    sink.wait_for_accepted(2).await;
+
+    for i in 2..4 {
+        emit_fact(
+            &owner.api,
+            subject_id.clone(),
+            serde_json::json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_accepted(4).await;
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2, 3],
+        "a legacy unary backend must receive every event; got {sns:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        0,
+        "no stream may be established against a unary-only server"
+    );
+}
+
+/// Stalled consumer at the node level: the backend stops reading and the
+/// delivery simply waits (backpressure, no loss, no duplicates); once it
+/// resumes, the pending event arrives exactly once, in order.
+#[test(tokio::test)]
+async fn grpc_node_stalled_consumer_recovers() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    // The ack wait must outlast the stall so no retry fires mid-test.
+    let config = GrpcSinkConfig {
+        request_timeout_ms: 30_000,
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    sink.wait_for_accepted(2).await;
+
+    sink.pause_streams();
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // While stalled, nothing new is accepted (the delivery waits inside
+    // the in-flight window): observe the stable state with the poll
+    // pattern instead of a fixed sleep.
+    let stalled = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        async {
+            while sink.accepted_deliveries().len() == 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(50))
+                    .await;
+            }
+        },
+    )
+    .await;
+    assert!(
+        stalled.is_err(),
+        "no delivery may complete while the consumer is stalled"
+    );
+
+    sink.resume_streams();
+    sink.wait_for_accepted(3).await;
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "the stalled event must arrive exactly once after resuming; got {sns:?}"
+    );
 }

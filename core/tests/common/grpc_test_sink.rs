@@ -14,7 +14,7 @@ use ave_common::sink::pb::event_sink_server::{
     EventSink, EventSinkServer,
 };
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::{Code, Request, Response, Status};
 
@@ -64,6 +64,18 @@ struct GrpcSinkState {
     mode: Option<GrpcResponseMode>,
     deliveries: Vec<RecordedDelivery>,
     tests: Vec<RecordedTest>,
+    /// When false, `DeliverStream` answers UNIMPLEMENTED (drives the
+    /// client's unary fallback).
+    stream_enabled: bool,
+    /// Artificial delay before acking each stream message.
+    stream_ack_delay_ms: u64,
+    /// One-shot: the next read of an open stream tears it down with
+    /// UNAVAILABLE (simulates a connection cut mid-stream).
+    stream_cut: bool,
+    /// While set, open streams stop reading (simulates a stalled consumer).
+    stream_paused: bool,
+    /// Number of `DeliverStream` invocations (streams opened by clients).
+    stream_opens: usize,
 }
 
 /// In-process gRPC receiver. The server task ends when the instance is
@@ -73,6 +85,9 @@ pub struct GrpcTestSink {
     state: Arc<Mutex<GrpcSinkState>>,
     shutdown: tokio::sync::watch::Sender<bool>,
     health_reporter: Option<tonic_health::server::HealthReporter>,
+    /// Wakes stream handlers parked waiting for messages so stream control
+    /// changes (cut, pause) apply immediately, not on the next message.
+    control_notify: Arc<tokio::sync::Notify>,
 }
 
 impl GrpcTestSink {
@@ -86,6 +101,17 @@ impl GrpcTestSink {
     /// UNIMPLEMENTED fallback).
     pub async fn start_without_health_service() -> Self {
         Self::start_inner(false, None).await
+    }
+
+    /// Start a server that does not implement `DeliverStream` (drives the
+    /// client's unary-only fallback).
+    pub async fn start_unary_only() -> Self {
+        let sink = Self::start_inner(true, None).await;
+        sink.state
+            .lock()
+            .expect("state lock")
+            .stream_enabled = false;
+        sink
     }
 
     /// Start a TLS server with a throwaway CA (see [`TestTlsMaterial`]) and
@@ -116,6 +142,7 @@ impl GrpcTestSink {
     ) -> Self {
         let state = Arc::new(Mutex::new(GrpcSinkState {
             mode: Some(GrpcResponseMode::Accept),
+            stream_enabled: true,
             ..Default::default()
         }));
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -124,8 +151,10 @@ impl GrpcTestSink {
         let addr: SocketAddr =
             listener.local_addr().expect("listener has local address");
 
+        let control_notify = Arc::new(tokio::sync::Notify::new());
         let service = TestEventSink {
             state: Arc::clone(&state),
+            control_notify: Arc::clone(&control_notify),
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -163,6 +192,7 @@ impl GrpcTestSink {
             state,
             shutdown: shutdown_tx,
             health_reporter,
+            control_notify,
         }
     }
 
@@ -186,6 +216,35 @@ impl GrpcTestSink {
     /// Set how the server answers `Deliver` RPCs.
     pub fn set_mode(&self, mode: GrpcResponseMode) {
         self.state.lock().expect("state lock").mode = Some(mode);
+    }
+
+    /// Delay every stream ack by `ms` (drives client-side pipelining).
+    pub fn set_stream_ack_delay(&self, ms: u64) {
+        self.state.lock().expect("state lock").stream_ack_delay_ms = ms;
+    }
+
+    /// Tear down the currently open delivery stream(s) with UNAVAILABLE,
+    /// like a connection cut; new streams work again afterwards.
+    pub fn cut_streams(&self) {
+        self.state.lock().expect("state lock").stream_cut = true;
+        self.control_notify.notify_waiters();
+    }
+
+    /// Stop reading from open delivery streams (stalled consumer).
+    pub fn pause_streams(&self) {
+        self.state.lock().expect("state lock").stream_paused = true;
+        self.control_notify.notify_waiters();
+    }
+
+    /// Resume reading from open delivery streams.
+    pub fn resume_streams(&self) {
+        self.state.lock().expect("state lock").stream_paused = false;
+        self.control_notify.notify_waiters();
+    }
+
+    /// How many delivery streams clients have opened.
+    pub fn stream_opens(&self) -> usize {
+        self.state.lock().expect("state lock").stream_opens
     }
 
     /// Recorded `Deliver` RPCs, in arrival order.
@@ -268,6 +327,7 @@ impl Drop for GrpcTestSink {
 
 struct TestEventSink {
     state: Arc<Mutex<GrpcSinkState>>,
+    control_notify: Arc<tokio::sync::Notify>,
 }
 
 #[tonic::async_trait]
@@ -325,5 +385,129 @@ impl EventSink for TestEventSink {
             body: message.body,
         });
         Ok(Response::new(TestResponse {}))
+    }
+
+    type DeliverStreamStream =
+        ReceiverStream<Result<pb::DeliverAck, Status>>;
+
+    async fn deliver_stream(
+        &self,
+        request: Request<tonic::Streaming<DeliverRequest>>,
+    ) -> Result<Response<Self::DeliverStreamStream>, Status> {
+        let (metadata, _, mut streaming) = request.into_parts();
+        let authorization = metadata
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let api_key = metadata
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        {
+            let mut state = self.state.lock().expect("state lock");
+            if !state.stream_enabled {
+                return Err(Status::unimplemented(
+                    "test server without DeliverStream",
+                ));
+            }
+            state.stream_opens += 1;
+        }
+
+        let state = Arc::clone(&self.state);
+        let control_notify = Arc::clone(&self.control_notify);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                // Control flags are re-evaluated on every wakeup: the
+                // notify fires when a test cuts or pauses the stream while
+                // this task is parked waiting for messages.
+                let (cut, paused) = {
+                    let mut state = state.lock().expect("state lock");
+                    let cut = state.stream_cut;
+                    if cut {
+                        state.stream_cut = false;
+                    }
+                    (cut, state.stream_paused)
+                };
+                if cut {
+                    let _ = tx
+                        .send(Err(Status::unavailable(
+                            "test server cut the stream",
+                        )))
+                        .await;
+                    return;
+                }
+                if paused {
+                    // Stalled consumer: do not read until resumed.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50))
+                        .await;
+                    continue;
+                }
+
+                let message = tokio::select! {
+                    message = streaming.message() => match message {
+                        Ok(Some(message)) => message,
+                        Ok(None) | Err(_) => return,
+                    },
+                    () = control_notify.notified() => continue,
+                };
+
+                // The response mode is read fresh per message: a mode set
+                // while parked waiting for messages must apply to them.
+                let (delay, mode) = {
+                    let state = state.lock().expect("state lock");
+                    (
+                        state.stream_ack_delay_ms,
+                        state
+                            .mode
+                            .clone()
+                            .unwrap_or(GrpcResponseMode::Accept),
+                    )
+                };
+                let (error_code, error_message) = match &mode {
+                    GrpcResponseMode::Accept => (0, String::new()),
+                    GrpcResponseMode::AlwaysStatus(code) => {
+                        (*code as i32, "test server rejecting".to_owned())
+                    }
+                    GrpcResponseMode::FailTimes { code, remaining } => {
+                        if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
+                            (*code as i32, "test server rejecting".to_owned())
+                        } else {
+                            (0, String::new())
+                        }
+                    }
+                };
+
+                state.lock().expect("state lock").deliveries.push(
+                    RecordedDelivery {
+                        request_id: message.request_id.clone(),
+                        meta: message.meta.clone(),
+                        body: message.body.clone(),
+                        authorization: authorization.clone(),
+                        api_key: api_key.clone(),
+                        accepted: error_code == 0,
+                    },
+                );
+
+                if delay > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        delay,
+                    ))
+                    .await;
+                }
+                let ack = pb::DeliverAck {
+                    request_id: message.request_id,
+                    error_code,
+                    error_message,
+                    retry_after_ms: 0,
+                };
+                if tx.send(Ok(ack)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }

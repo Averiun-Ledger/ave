@@ -1,6 +1,8 @@
 //! gRPC transport for sink delivery (tonic, protobuf over HTTP/2).
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,6 +11,9 @@ use ave_common::sink::{
     GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
 };
 use ave_common::{DataToSink, LightEvent};
+use futures::StreamExt as _;
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::{Ascii, MetadataKey, MetadataValue};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Code, Request, Status};
@@ -28,13 +33,37 @@ use pb::event_sink_client::EventSinkClient;
 /// Service name reported to `grpc.health.v1` health checks.
 const HEALTH_SERVICE_NAME: &str = "ave.sink.v1.EventSink";
 
+/// Pending per-message acks of a live delivery stream, keyed by
+/// `request_id`. Resolved by the stream reader task; cleared (failing every
+/// waiter as retryable) when the stream dies.
+type PendingAcks =
+    Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), SinkError>>>>>;
+
+/// A live delivery stream: deliveries are forwarded into the RPC request
+/// stream and the reader task resolves their acks by `request_id`.
+#[derive(Clone)]
+struct StreamHandle {
+    tx: mpsc::Sender<pb::DeliverRequest>,
+    pending: PendingAcks,
+}
+
+/// Failure of a stream delivery attempt.
+enum StreamFailure {
+    /// The server does not implement `DeliverStream`: use the unary RPC.
+    Unimplemented,
+    /// A regular sink error (retryable or permanent).
+    Delivery(SinkError),
+}
+
 /// gRPC delivery transport: protobuf over a single multiplexed HTTP/2
 /// channel per sink.
 ///
-/// Deliveries are unary `Deliver` RPCs (see
-/// `temporal/plan-sink-grpc-mvp.md`); payloads are the same canonical JSON
-/// documents as the HTTP sink, so receivers share parser and signature
-/// verification across transports.
+/// Deliveries are pipelined over a persistent bidirectional stream
+/// (`DeliverStream`): a bounded in-flight window gives real backpressure
+/// and every message is acked individually. Servers implementing only the
+/// unary RPCs of the MVP are fully supported (automatic unary fallback).
+/// Payloads are the same canonical JSON documents as the HTTP sink, so
+/// receivers share parser and signature verification across transports.
 pub struct GrpcTransport {
     sink_name: String,
     config: GrpcSinkConfig,
@@ -45,6 +74,14 @@ pub struct GrpcTransport {
     auth: Option<(MetadataKey<Ascii>, MetadataValue<Ascii>)>,
     /// User-provided static metadata (reserved keys already filtered out).
     custom_metadata: Vec<(MetadataKey<Ascii>, MetadataValue<Ascii>)>,
+    /// Lazily opened delivery stream; cleared on stream death so the next
+    /// delivery reopens it.
+    stream: Arc<Mutex<Option<StreamHandle>>>,
+    /// Set once the server answers `DeliverStream` with UNIMPLEMENTED:
+    /// every delivery uses the unary RPC from then on.
+    unary_only: AtomicBool,
+    /// In-flight window: maximum unacked deliveries on the stream.
+    in_flight: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for GrpcTransport {
@@ -72,8 +109,7 @@ impl GrpcTransport {
                 ))
             })?;
         endpoint = endpoint
-            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
-            .timeout(Duration::from_millis(config.request_timeout_ms));
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms));
 
         if config.tls.is_some() || config.endpoint.starts_with("https://") {
             let tls_config =
@@ -100,13 +136,23 @@ impl GrpcTransport {
 
         Ok(Self {
             sink_name,
+            in_flight: Arc::new(Semaphore::new(
+                config.max_in_flight_batches.max(1),
+            )),
             config,
             signer,
             channel,
             client,
             auth,
             custom_metadata,
+            stream: Arc::new(Mutex::new(None)),
+            unary_only: AtomicBool::new(false),
         })
+    }
+
+    /// Per-request timeout for unary RPCs and per-message ack waits.
+    const fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.config.request_timeout_ms)
     }
 
     /// Sign the delivery body with the node identity when configured.
@@ -198,13 +244,39 @@ impl GrpcTransport {
         Err(last_err.unwrap_or_else(crate::sink::max_retries_exceeded_error))
     }
 
-    /// One `Deliver` RPC attempt, timed for the shared duration metric.
+    /// One delivery attempt over the stream (with unary fallback), timed
+    /// for the shared duration metric.
     async fn deliver_once(
         &self,
         body: pb::SignedPayload,
         meta: Option<pb::EventMeta>,
     ) -> Result<(), SinkError> {
         let request_id = generate_request_id();
+        if !self.unary_only.load(Ordering::Acquire) {
+            match self
+                .deliver_via_stream(&request_id, &body, &meta)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(StreamFailure::Unimplemented) => {
+                    // v1-unary-only server: remember it and deliver every
+                    // message with the unary RPC from now on.
+                    self.unary_only.store(true, Ordering::Release);
+                }
+                Err(StreamFailure::Delivery(e)) => return Err(e),
+            }
+        }
+        self.deliver_unary(request_id, body, meta).await
+    }
+
+    /// One unary `Deliver` RPC attempt (MVP contract and fallback for
+    /// servers without `DeliverStream`).
+    async fn deliver_unary(
+        &self,
+        request_id: String,
+        body: pb::SignedPayload,
+        meta: Option<pb::EventMeta>,
+    ) -> Result<(), SinkError> {
         let mut client = self.client.clone();
         timed_sink_request(&self.sink_name, || async {
             let mut request = Request::new(pb::DeliverRequest {
@@ -212,6 +284,7 @@ impl GrpcTransport {
                 meta,
                 body: Some(body),
             });
+            request.set_timeout(self.request_timeout());
             self.apply_metadata(&mut request);
             client
                 .deliver(request)
@@ -220,6 +293,135 @@ impl GrpcTransport {
                 .map_err(|e| map_status(&e))
         })
         .await
+    }
+
+    /// One delivery attempt over the persistent stream: waits for an
+    /// in-flight slot (backpressure), enqueues the request and waits for
+    /// its per-message ack.
+    async fn deliver_via_stream(
+        &self,
+        request_id: &str,
+        body: &pb::SignedPayload,
+        meta: &Option<pb::EventMeta>,
+    ) -> Result<(), StreamFailure> {
+        // The semaphore is never closed; an acquisition error is impossible.
+        let permit = match self.in_flight.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Err(StreamFailure::Delivery(SinkError::Delivery {
+                    message: format!(
+                        "sink '{}': in-flight window closed",
+                        self.sink_name
+                    ),
+                    retryable: true,
+                    retry_after_ms: None,
+                }));
+            }
+        };
+        let handle = self.stream_handle().await?;
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .pending
+            .lock()
+            .await
+            .insert(request_id.to_owned(), ack_tx);
+        let send_result = handle
+            .tx
+            .send(pb::DeliverRequest {
+                request_id: request_id.to_owned(),
+                meta: meta.clone(),
+                body: Some(body.clone()),
+            })
+            .await;
+        if send_result.is_err() {
+            // The reader task is gone: forget the pending ack and force a
+            // lazy reopen on the next attempt.
+            handle.pending.lock().await.remove(request_id);
+            *self.stream.lock().await = None;
+            drop(permit);
+            return Err(StreamFailure::Delivery(SinkError::Delivery {
+                message: format!(
+                    "sink '{}': delivery stream closed",
+                    self.sink_name
+                ),
+                retryable: true,
+                retry_after_ms: None,
+            }));
+        }
+
+        let result = timed_sink_request(&self.sink_name, || async {
+            match tokio::time::timeout(self.request_timeout(), ack_rx).await {
+                Ok(Ok(ack_result)) => ack_result,
+                Ok(Err(_closed)) => Err(SinkError::Delivery {
+                    message: format!(
+                        "sink '{}': delivery stream closed before ack",
+                        self.sink_name
+                    ),
+                    retryable: true,
+                    retry_after_ms: None,
+                }),
+                Err(_elapsed) => {
+                    // The ack may still arrive: drop the pending entry so a
+                    // late ack is ignored instead of leaking.
+                    handle.pending.lock().await.remove(request_id);
+                    Err(SinkError::Delivery {
+                        message: format!(
+                            "sink '{}': stream ack timeout after {} ms",
+                            self.sink_name, self.config.request_timeout_ms
+                        ),
+                        retryable: true,
+                        retry_after_ms: None,
+                    })
+                }
+            }
+        })
+        .await;
+        drop(permit);
+        result.map_err(StreamFailure::Delivery)
+    }
+
+    /// The live stream, opening it lazily on first use. Concurrent callers
+    /// are serialized so exactly one stream exists per transport.
+    async fn stream_handle(&self) -> Result<StreamHandle, StreamFailure> {
+        let mut slot = self.stream.lock().await;
+        if let Some(handle) = slot.as_ref() {
+            return Ok(handle.clone());
+        }
+
+        let (tx, rx) = mpsc::channel(self.config.max_in_flight_batches.max(1));
+        let mut request = Request::new(ReceiverStream::new(rx));
+        self.apply_metadata(&mut request);
+        let response = self
+            .client
+            .clone()
+            .deliver_stream(request)
+            .await
+            .map_err(|e| {
+                if e.code() == Code::Unimplemented {
+                    StreamFailure::Unimplemented
+                } else {
+                    StreamFailure::Delivery(map_status(&e))
+                }
+            })?;
+
+        let pending: PendingAcks = Arc::new(Mutex::new(HashMap::new()));
+        let handle = StreamHandle {
+            tx,
+            pending: Arc::clone(&pending),
+        };
+        *slot = Some(handle.clone());
+        // The guard is no longer needed: release it before spawning the
+        // reader task so other deliveries are not blocked behind it.
+        drop(slot);
+
+        tokio::spawn(stream_reader(
+            response.into_inner(),
+            pending,
+            Arc::clone(&self.stream),
+            self.sink_name.clone(),
+        ));
+        Ok(handle)
     }
 
     /// `grpc.health.v1.Health/Check` against the sink service. The boolean
@@ -235,6 +437,7 @@ impl GrpcTransport {
                 service: HEALTH_SERVICE_NAME.to_owned(),
             },
         );
+        request.set_timeout(self.request_timeout());
         self.apply_metadata(&mut request);
         match client.check(request).await {
             Ok(response) => {
@@ -268,6 +471,7 @@ impl GrpcTransport {
                 request_id,
                 body: Some(body),
             });
+            request.set_timeout(self.request_timeout());
             self.apply_metadata(&mut request);
             client.test(request).await.map(|_| ()).map_err(|e| map_status(&e))
         })
@@ -343,12 +547,78 @@ impl SinkTransport for GrpcTransport {
     }
 }
 
+/// Read the acks of a delivery stream, resolving each pending delivery by
+/// `request_id`. When the stream ends (server close or terminal status)
+/// every pending delivery is failed as retryable (its cursor never
+/// advanced, so catch-up re-delivers in order) and the transport slot is
+/// cleared so the next delivery reopens the stream lazily.
+async fn stream_reader(
+    mut streaming: tonic::codec::Streaming<pb::DeliverAck>,
+    pending: PendingAcks,
+    slot: Arc<Mutex<Option<StreamHandle>>>,
+    sink_name: String,
+) {
+    loop {
+        match streaming.next().await {
+            Some(Ok(ack)) => {
+                let sender = pending.lock().await.remove(&ack.request_id);
+                if let Some(sender) = sender {
+                    // The waiter may have timed out already; a late ack is
+                    // then simply dropped.
+                    let _ = sender.send(map_ack(&ack));
+                }
+            }
+            Some(Err(status)) => {
+                tracing::debug!(
+                    sink = %sink_name,
+                    error = %status,
+                    "gRPC delivery stream closed by the server"
+                );
+                break;
+            }
+            None => break,
+        }
+    }
+
+    // Dropping the oneshot senders makes every waiter see the stream as
+    // broken (retryable); clearing the slot forces a lazy reopen.
+    pending.lock().await.clear();
+    *slot.lock().await = None;
+}
+
+/// Map a per-message stream ack to a delivery result, using the same status
+/// table as unary responses plus the optional `retry_after_ms` hint.
+fn map_ack(ack: &pb::DeliverAck) -> Result<(), SinkError> {
+    if ack.error_code == 0 {
+        return Ok(());
+    }
+    let retry_after_ms =
+        (ack.retry_after_ms > 0).then_some(ack.retry_after_ms);
+    Err(map_code(
+        Code::from(ack.error_code),
+        format!("gRPC stream ack {}: {}", ack.error_code, ack.error_message),
+        retry_after_ms,
+    ))
+}
+
 /// Map a gRPC status to the shared sink error taxonomy (see the MVP plan):
 /// transient statuses retry with backoff, auth statuses drive the token
 /// path, everything else is a permanent rejection.
 fn map_status(status: &Status) -> SinkError {
-    let message = format!("gRPC {}: {}", status.code(), status.message());
-    match status.code() {
+    map_code(
+        status.code(),
+        format!("gRPC {}: {}", status.code(), status.message()),
+        None,
+    )
+}
+
+/// Shared status-code mapping for unary responses and stream acks.
+const fn map_code(
+    code: Code,
+    message: String,
+    retry_after_ms: Option<u64>,
+) -> SinkError {
+    match code {
         Code::Unavailable
         | Code::DeadlineExceeded
         | Code::Cancelled
@@ -359,11 +629,11 @@ fn map_status(status: &Status) -> SinkError {
         | Code::ResourceExhausted => SinkError::Delivery {
             message,
             retryable: true,
-            retry_after_ms: None,
+            retry_after_ms,
         },
         Code::Unauthenticated => SinkError::Auth {
             message,
-            retry_after_ms: None,
+            retry_after_ms,
         },
         // `Code::Ok` never reaches this point (success returns before the
         // mapping); it is covered for exhaustiveness and treated as
@@ -371,7 +641,7 @@ fn map_status(status: &Status) -> SinkError {
         Code::Ok => SinkError::Delivery {
             message,
             retryable: true,
-            retry_after_ms: None,
+            retry_after_ms,
         },
         Code::PermissionDenied
         | Code::InvalidArgument
