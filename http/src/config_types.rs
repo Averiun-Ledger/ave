@@ -1278,9 +1278,66 @@ pub struct KafkaSinkConfigHttp {
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+pub enum GrpcAuthConfigHttp {
+    /// `authorization: Bearer <token>` metadata on every RPC.
+    BearerToken,
+    /// `x-api-key: <key>` metadata on every RPC.
+    ApiKey,
+}
+
+#[derive(Debug, Default, Serialize, Clone, ToSchema, Deserialize)]
+pub struct GrpcTlsConfigHttp {
+    /// Path to an additional PEM-encoded root CA certificate to trust.
+    pub ca_certificate: String,
+    /// Path to the PEM-encoded client certificate chain used for mTLS.
+    pub client_certificate: String,
+    /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
+    pub client_key: String,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct GrpcSinkConfigHttp {
+    /// Server endpoint (`http://host:port`, `https://host:port` or `dns:///host:port`).
+    pub endpoint: String,
+    /// Per-RPC authentication.
+    pub auth: Option<GrpcAuthConfigHttp>,
+    /// TLS customization: additional root CA and mTLS identity.
+    pub tls: Option<GrpcTlsConfigHttp>,
+    /// Whether deliveries are signed with the node identity (canonical v2).
+    pub signature: bool,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    /// Maximum transient retries per delivery.
+    pub max_retries: usize,
+    /// Base delay between delivery retries, in milliseconds.
+    pub retry_base_delay_ms: u64,
+    /// Upper bound for any delivery retry delay, in milliseconds.
+    pub retry_max_delay_ms: u64,
+    /// Whether events are delivered in batches (single request with a JSON array)
+    /// instead of one request per event.
+    pub batch_delivery: bool,
+    /// Maximum time a live event waits for a batch to fill before it is
+    /// flushed. Only used when `batch_delivery` is enabled.
+    pub batch_max_delay_ms: u64,
+    /// Message compression for deliveries: `none` (default) or `gzip`.
+    pub compression: HttpCompressionHttp,
+    /// Custom static metadata added to every RPC.
+    /// Internal sink metadata (`authorization`, `x-api-key`, `x-ave-*`, `grpc-*`)
+    /// takes precedence.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Maximum size of an inbound gRPC message.
+    pub max_decoding_message_bytes: usize,
+    /// Maximum size of an outbound gRPC message (one batch).
+    pub max_encoding_message_bytes: usize,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SinkTransportConfigHttp {
     Http(Box<HttpSinkConfigHttp>),
     Kafka(Box<KafkaSinkConfigHttp>),
+    Grpc(Box<GrpcSinkConfigHttp>),
 }
 
 impl Default for SinkTransportConfigHttp {
@@ -1426,6 +1483,38 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     oauth_token_url: kafka.oauth_token_url,
                     oauth_scope: kafka.oauth_scope,
                     kerberos: kafka.kerberos.map(Into::into),
+                }))
+            }
+            ave_bridge::SinkTransportConfig::Grpc(grpc) => {
+                SinkTransportConfigHttp::Grpc(Box::new(GrpcSinkConfigHttp {
+                    endpoint: grpc.endpoint,
+                    auth: grpc.auth.map(|a| match a {
+                        ave_bridge::ave_common::sink::GrpcAuthConfig::BearerToken => {
+                            GrpcAuthConfigHttp::BearerToken
+                        }
+                        ave_bridge::ave_common::sink::GrpcAuthConfig::ApiKey => {
+                            GrpcAuthConfigHttp::ApiKey
+                        }
+                    }),
+                    tls: grpc.tls.map(|t| GrpcTlsConfigHttp {
+                        ca_certificate: t.ca_certificate,
+                        client_certificate: t.client_certificate,
+                        client_key: t.client_key,
+                    }),
+                    signature: grpc.signature,
+                    connect_timeout_ms: grpc.connect_timeout_ms,
+                    request_timeout_ms: grpc.request_timeout_ms,
+                    max_retries: grpc.max_retries,
+                    retry_base_delay_ms: grpc.retry_base_delay_ms,
+                    retry_max_delay_ms: grpc.retry_max_delay_ms,
+                    batch_delivery: grpc.batch_delivery,
+                    batch_max_delay_ms: grpc.batch_max_delay_ms,
+                    compression: grpc.compression.into(),
+                    headers: grpc.headers,
+                    max_decoding_message_bytes: grpc
+                        .max_decoding_message_bytes,
+                    max_encoding_message_bytes: grpc
+                        .max_encoding_message_bytes,
                 }))
             }
         };

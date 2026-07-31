@@ -11,7 +11,8 @@ use crate::config::{SinkServer, SinkTransportConfig};
 use crate::model::common::node::SignTypesNode;
 use crate::node::{Node, NodeMessage, NodeResponse};
 use crate::sink::{
-    error::SinkError, http::HttpTransport, kafka::KafkaTransport,
+    error::SinkError, grpc::GrpcTransport, http::HttpTransport,
+    kafka::KafkaTransport,
 };
 use ave_common::IncomingSinkEvent;
 
@@ -128,6 +129,14 @@ pub async fn build_transport(
                 kafka.as_ref().clone(),
                 signer,
                 node_id,
+            )
+            .await?,
+        )),
+        SinkTransportConfig::Grpc(grpc) => Ok(Arc::new(
+            GrpcTransport::new(
+                server.server.clone(),
+                grpc.as_ref().clone(),
+                signer,
             )
             .await?,
         )),

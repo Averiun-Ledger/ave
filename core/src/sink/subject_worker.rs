@@ -318,6 +318,9 @@ impl SinkSubjectWorker {
             SinkTransportConfig::Kafka(kafka) => {
                 (kafka.batch_delivery, kafka.batch_max_delay_ms)
             }
+            SinkTransportConfig::Grpc(grpc) => {
+                (grpc.batch_delivery, grpc.batch_max_delay_ms)
+            }
         };
         Self {
             sink_name,

@@ -146,6 +146,35 @@ impl DataToSinkEvent {
             } => (subject_id.clone(), schema_id.to_string()),
         }
     }
+
+    /// Returns the governance that owns the event's subject, when known.
+    pub fn get_governance_id(&self) -> Option<String> {
+        match self {
+            Self::Create { governance_id, .. }
+            | Self::FactFull { governance_id, .. }
+            | Self::FactOpaque { governance_id, .. }
+            | Self::Transfer { governance_id, .. }
+            | Self::Confirm { governance_id, .. }
+            | Self::Reject { governance_id, .. }
+            | Self::Eol { governance_id, .. } => governance_id.clone(),
+        }
+    }
+}
+
+/// Generated from `proto/ave/sink/v1/sink.proto` (see `common/build.rs`).
+///
+/// Single source of truth of the gRPC sink contract: the node builds its
+/// transport on it and external backends implement `event_sink_server` from
+/// this same module, without copying the `.proto` file. Lints are disabled:
+/// this is prost-generated code, not hand-written.
+///
+/// Only available with the `sink-grpc` feature: tonic does not compile for
+/// the wasm32 target used by the contract SDK.
+#[cfg(feature = "sink-grpc")]
+pub mod pb {
+    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+
+    tonic::include_proto!("ave.sink.v1");
 }
 
 /// Categorisation of sink event types used for routing/filtering.
@@ -993,6 +1022,173 @@ mod tests {
                 "expected InvalidConfiguration for SinkServer.healthcheck_max_failures, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn test_grpc_sink_config_defaults_are_valid_with_endpoint() {
+        let cfg = GrpcSinkConfig {
+            endpoint: "http://127.0.0.1:50051".to_string(),
+            ..Default::default()
+        };
+        cfg.validate()
+            .expect("grpc defaults must validate with an endpoint set");
+        assert_eq!(cfg.connect_timeout_ms, 2_000);
+        assert_eq!(cfg.request_timeout_ms, 5_000);
+        assert_eq!(cfg.max_retries, 2);
+        assert_eq!(cfg.retry_base_delay_ms, 500);
+        assert_eq!(cfg.retry_max_delay_ms, 30_000);
+        assert!(!cfg.batch_delivery);
+        assert_eq!(cfg.batch_max_delay_ms, 100);
+        assert!(matches!(cfg.compression, HttpCompression::None));
+        assert_eq!(cfg.max_decoding_message_bytes, 4 * 1024 * 1024);
+        assert_eq!(cfg.max_encoding_message_bytes, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_grpc_sink_config_validate_rejections() {
+        fn assert_rejects(cfg: &GrpcSinkConfig, expected_component: &str) {
+            match cfg.validate() {
+                Err(Error::InvalidConfiguration { component, .. })
+                    if component == expected_component => {}
+                other => panic!(
+                    "expected InvalidConfiguration for {expected_component}, got {other:?}"
+                ),
+            }
+        }
+
+        // Empty endpoint.
+        assert_rejects(
+            &GrpcSinkConfig::default(),
+            "GrpcSinkConfig.endpoint",
+        );
+        // Unsupported scheme.
+        assert_rejects(
+            &GrpcSinkConfig {
+                endpoint: "ftp://127.0.0.1:50051".to_string(),
+                ..Default::default()
+            },
+            "GrpcSinkConfig.endpoint",
+        );
+        // Zero timeouts and message limits.
+        let base = || GrpcSinkConfig {
+            endpoint: "http://127.0.0.1:50051".to_string(),
+            ..Default::default()
+        };
+        assert_rejects(
+            &GrpcSinkConfig {
+                connect_timeout_ms: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.connect_timeout_ms",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                request_timeout_ms: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.request_timeout_ms",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                max_decoding_message_bytes: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.max_decoding_message_bytes",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                max_encoding_message_bytes: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.max_encoding_message_bytes",
+        );
+        // mTLS certificate without key.
+        assert_rejects(
+            &GrpcSinkConfig {
+                tls: Some(GrpcTlsConfig {
+                    client_certificate: "/tmp/cert.pem".to_string(),
+                    ..Default::default()
+                }),
+                ..base()
+            },
+            "GrpcTlsConfig",
+        );
+        // dns:/// endpoints are accepted.
+        GrpcSinkConfig {
+            endpoint: "dns:///sink.internal:50051".to_string(),
+            ..Default::default()
+        }
+        .validate()
+        .expect("dns:/// endpoints must validate");
+    }
+
+    #[test]
+    fn test_grpc_sink_config_serde_roundtrip_and_tag() {
+        let cfg = SinkTransportConfig::Grpc(Box::new(GrpcSinkConfig {
+            endpoint: "https://sink.example:443".to_string(),
+            ..Default::default()
+        }));
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""type":"grpc""#), "tagged as grpc: {json}");
+        let decoded: SinkTransportConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, decoded);
+
+        // A config without the new fields deserializes with defaults.
+        let minimal: GrpcSinkConfig =
+            serde_json::from_str(r#"{"endpoint": "http://localhost:50051"}"#)
+                .unwrap();
+        assert_eq!(minimal.max_retries, 2);
+    }
+
+    #[test]
+    #[cfg(feature = "sink-grpc")]
+    fn test_grpc_pb_messages_prost_roundtrip() {
+        use prost::Message as _;
+
+        let request = pb::DeliverRequest {
+            request_id: "req-1".to_string(),
+            meta: Some(pb::EventMeta {
+                subject_id: "subject-1".to_string(),
+                sn: 42,
+                event_type: "fact".to_string(),
+                schema_id: "Example".to_string(),
+                governance_id: "gov-1".to_string(),
+                idempotency_key: "subject-1-42".to_string(),
+                light: true,
+            }),
+            body: Some(pb::SignedPayload {
+                payload: br#"{"event":"fact"}"#.to_vec(),
+                signature: "ab12".to_string(),
+                signature_timestamp: 1_234_567_890,
+                public_key: "pk".to_string(),
+            }),
+        };
+
+        let bytes = request.encode_to_vec();
+        let decoded = pb::DeliverRequest::decode(bytes.as_slice())
+            .expect("deliver request must decode");
+        assert_eq!(request, decoded);
+
+        // Field numbers are part of the public contract: renumbering them
+        // breaks wire compatibility with deployed backends.
+        let meta = decoded.meta.expect("meta present");
+        let body = decoded.body.expect("body present");
+        assert_eq!(meta.sn, 42);
+        assert!(meta.light);
+        assert_eq!(body.signature_timestamp, 1_234_567_890);
+
+        let test_request = pb::TestRequest {
+            request_id: "req-2".to_string(),
+            body: Some(pb::SignedPayload {
+                payload: br#"{"test":true}"#.to_vec(),
+                ..Default::default()
+            }),
+        };
+        let decoded_test = pb::TestRequest::decode(
+            test_request.encode_to_vec().as_slice(),
+        )
+        .expect("test request must decode");
+        assert_eq!(test_request, decoded_test);
     }
 
     #[test]
@@ -2192,7 +2388,211 @@ impl KafkaSinkConfig {
     }
 }
 
-/// Transport selected for a sink server. HTTP and Kafka are supported.
+/// Authentication mode for the gRPC transport.
+///
+/// Secrets are never stored in the configuration: the bearer token is read
+/// from `AVE_SINK_TOKEN_{{SERVER}}` and the API key from
+/// `AVE_SINK_APIKEY_{{SERVER}}` (where `{{SERVER}}` is the sink name
+/// upper-cased with non-alphanumeric characters replaced by `_`), the same
+/// pattern used by the other transports.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GrpcAuthConfig {
+    /// `authorization: Bearer <token>` metadata on every RPC.
+    BearerToken,
+    /// `x-api-key: <key>` metadata on every RPC.
+    ApiKey,
+}
+
+/// TLS configuration for the gRPC transport.
+///
+/// Certificates are referenced by filesystem path; the client private key
+/// must be PEM-encoded PKCS#8.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct GrpcTlsConfig {
+    /// Path to an additional PEM-encoded root CA certificate to trust
+    /// (e.g. a corporate CA doing TLS inspection).
+    pub ca_certificate: String,
+    /// Path to the PEM-encoded client certificate chain used for mTLS.
+    /// Must be set together with `client_key`.
+    pub client_certificate: String,
+    /// Path to the PEM-encoded PKCS#8 client private key used for mTLS.
+    /// Must be set together with `client_certificate`.
+    pub client_key: String,
+}
+
+impl GrpcTlsConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        let cert_set = !self.client_certificate.is_empty();
+        let key_set = !self.client_key.is_empty();
+        if cert_set != key_set {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcTlsConfig".to_string(),
+                reason:
+                    "client_certificate and client_key must be set together (mTLS)"
+                        .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// gRPC-specific sink configuration (protobuf over HTTP/2, point to point).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct GrpcSinkConfig {
+    /// Server endpoint (`http://host:port`, `https://host:port` or
+    /// `dns:///host:port`). A single HTTP/2 connection is multiplexed for
+    /// every delivery of this sink.
+    pub endpoint: String,
+    /// Per-RPC authentication (see [`GrpcAuthConfig`]).
+    pub auth: Option<GrpcAuthConfig>,
+    /// TLS customization: additional root CA and mTLS identity.
+    pub tls: Option<GrpcTlsConfig>,
+    /// Sign each delivery with the node's Ed25519 identity (canonical v2,
+    /// the same algorithm as the HTTP sink) and send it inside the
+    /// `SignedPayload` message.
+    pub signature: bool,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    /// Maximum transient retries per delivery.
+    pub max_retries: usize,
+    /// Base delay between delivery retries, in milliseconds.
+    pub retry_base_delay_ms: u64,
+    /// Upper bound for any delivery retry delay, in milliseconds.
+    pub retry_max_delay_ms: u64,
+    /// Deliver events in batches: a single `DeliverRequest` with a JSON
+    /// array payload instead of one request per event. Opt-in: it changes
+    /// the contract with the receiver.
+    pub batch_delivery: bool,
+    /// Maximum time a live event waits for a batch to fill before it is
+    /// flushed. Only used when `batch_delivery` is enabled.
+    pub batch_max_delay_ms: u64,
+    /// Message compression for deliveries: `none` (default) or `gzip`.
+    pub compression: HttpCompression,
+    /// Custom static metadata added to every RPC. Keys reserved by the sink
+    /// contract (`authorization`, `x-api-key`, `x-ave-*`, `grpc-*`) are
+    /// ignored so the delivery contract is never broken.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// Maximum size of an inbound gRPC message (bounds memory per RPC).
+    pub max_decoding_message_bytes: usize,
+    /// Maximum size of an outbound gRPC message, i.e. one batch (bounds
+    /// memory per RPC).
+    pub max_encoding_message_bytes: usize,
+}
+
+impl Default for GrpcSinkConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            auth: None,
+            tls: None,
+            signature: false,
+            connect_timeout_ms: 2_000,
+            request_timeout_ms: 5_000,
+            max_retries: 2,
+            retry_base_delay_ms: 500,
+            retry_max_delay_ms: 30_000,
+            batch_delivery: false,
+            batch_max_delay_ms: 100,
+            compression: HttpCompression::None,
+            headers: HashMap::new(),
+            max_decoding_message_bytes: 4 * 1024 * 1024,
+            max_encoding_message_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+impl GrpcSinkConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.endpoint.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.endpoint".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if !self.endpoint.starts_with("http://")
+            && !self.endpoint.starts_with("https://")
+            && !self.endpoint.starts_with("dns:///")
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.endpoint".to_string(),
+                reason: format!(
+                    "must be an http/https/dns endpoint, got {}",
+                    self.endpoint
+                ),
+            });
+        }
+        require_positive_u64(
+            "GrpcSinkConfig.connect_timeout_ms",
+            self.connect_timeout_ms,
+        )?;
+        require_positive_u64(
+            "GrpcSinkConfig.request_timeout_ms",
+            self.request_timeout_ms,
+        )?;
+        if self.request_timeout_ms < self.connect_timeout_ms {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.request_timeout_ms".to_string(),
+                reason: format!(
+                    "must be greater than or equal to connect_timeout_ms ({})",
+                    self.connect_timeout_ms
+                ),
+            });
+        }
+        if self.max_retries > 100 {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.max_retries".to_string(),
+                reason: "must be 100 or less".to_string(),
+            });
+        }
+        require_positive_u64(
+            "GrpcSinkConfig.retry_base_delay_ms",
+            self.retry_base_delay_ms,
+        )?;
+        require_positive_u64(
+            "GrpcSinkConfig.retry_max_delay_ms",
+            self.retry_max_delay_ms,
+        )?;
+        if self.batch_delivery {
+            require_positive_u64(
+                "GrpcSinkConfig.batch_max_delay_ms",
+                self.batch_max_delay_ms,
+            )?;
+        }
+        if self.max_decoding_message_bytes == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.max_decoding_message_bytes"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.max_encoding_message_bytes == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "GrpcSinkConfig.max_encoding_message_bytes"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Transport selected for a sink server. HTTP, Kafka and gRPC are supported.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -2201,6 +2601,7 @@ impl KafkaSinkConfig {
 pub enum SinkTransportConfig {
     Http(Box<HttpSinkConfig>),
     Kafka(Box<KafkaSinkConfig>),
+    Grpc(Box<GrpcSinkConfig>),
 }
 
 impl Default for SinkTransportConfig {
@@ -2214,15 +2615,17 @@ impl SinkTransportConfig {
         match self {
             Self::Http(http) => http.validate(),
             Self::Kafka(kafka) => kafka.validate(),
+            Self::Grpc(grpc) => grpc.validate(),
         }
     }
 
     /// Transport kind identifier, matching the serde `type` tag
-    /// (`"http"`, `"kafka"`).
+    /// (`"http"`, `"kafka"`, `"grpc"`).
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Http(_) => "http",
             Self::Kafka(_) => "kafka",
+            Self::Grpc(_) => "grpc",
         }
     }
 }

@@ -1,6 +1,6 @@
 //! Shared wire contract for every sink transport.
 //!
-//! Every transport (HTTP, Kafka, future MQTT, gRPC, ...) must use the same
+//! Every transport (HTTP, Kafka, gRPC, ...) must use the same
 //! header names on the wire and the same canonical payload for version-2
 //! signatures, so receivers can implement verification and deduplication
 //! once and apply it to any sink. The lowercase form is canonical: HTTP and
@@ -195,6 +195,12 @@ pub fn sink_password_env_var(sink_name: &str) -> String {
 /// Format: `AVE_SINK_APIKEY_{{SERVER_UPPER}}`.
 pub fn sink_apikey_env_var(sink_name: &str) -> String {
     sink_secret_env_var("AVE_SINK_APIKEY_", sink_name)
+}
+
+/// Format the environment variable name for a sink's bearer token.
+/// Format: `AVE_SINK_TOKEN_{{SERVER_UPPER}}`.
+pub fn sink_token_env_var(sink_name: &str) -> String {
+    sink_secret_env_var("AVE_SINK_TOKEN_", sink_name)
 }
 
 /// Format the environment variable name for a sink's proxy password.
@@ -613,7 +619,8 @@ mod tests {
     }
 
     #[test]
-    fn serialize_json_payload_success_and_permanent_error() {        let payload =
+    fn serialize_json_payload_success_and_permanent_error() {
+        let payload =
             serialize_json_payload(&serde_json::json!({"a": 1})).expect("payload serializes");
         assert_eq!(payload, br#"{"a":1}"#.to_vec());
 

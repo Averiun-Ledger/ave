@@ -17,15 +17,24 @@ serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 borsh = { workspace = true }
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 utoipa = { workspace = true, optional = true }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl"], optional = true }
 
+[build-dependencies]
+tonic-build = { workspace = true, optional = true }
+protoc-bin-vendored = { workspace = true, optional = true }
+
 [dev-dependencies]
-ave-common = { path = ".", features = ["typescript"] }
+ave-common = { path = ".", features = ["typescript", "sink-grpc"] }
 
 [features]
 default = ["common"]
 common = ["ave-identity", "value-wrapper"]
 value-wrapper = []
+# gRPC sink protobuf types. Optional: tonic does not compile for the
+# wasm32 target used by the contract SDK, which depends on this crate.
+sink-grpc = ["tonic", "prost", "tonic-build", "protoc-bin-vendored"]
 openapi = ["utoipa"]
 typescript = ["ts-rs"]

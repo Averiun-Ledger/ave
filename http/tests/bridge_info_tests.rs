@@ -2220,7 +2220,9 @@ fn test_sink_server_http_fields() {
     assert_eq!(http.server, "TestSink");
     let transport = match &http.transport {
         SinkTransportConfigHttp::Http(t) => t,
-        SinkTransportConfigHttp::Kafka(_) => panic!("expected http transport"),
+        SinkTransportConfigHttp::Kafka(_) | SinkTransportConfigHttp::Grpc(_) => {
+            panic!("expected http transport")
+        }
     };
     assert_eq!(transport.url, "https://test.sink");
     assert!(transport.auth.is_some());
@@ -2245,7 +2247,9 @@ fn test_sink_server_http_fields() {
     assert_eq!(http2.server, "S2");
     let transport2 = match &http2.transport {
         SinkTransportConfigHttp::Http(t) => t,
-        SinkTransportConfigHttp::Kafka(_) => panic!("expected http transport"),
+        SinkTransportConfigHttp::Kafka(_) | SinkTransportConfigHttp::Grpc(_) => {
+            panic!("expected http transport")
+        }
     };
     assert!(transport2.auth.is_none());
 }

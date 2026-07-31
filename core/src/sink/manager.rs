@@ -1372,6 +1372,13 @@ impl SinkManager {
                             .await?;
                         Some(NodeSigner::new(node))
                     }
+                    SinkTransportConfig::Grpc(grpc) if grpc.signature => {
+                        let node = ctx
+                            .system()
+                            .get_actor::<Node>(&ActorPath::from("/user/node"))
+                            .await?;
+                        Some(NodeSigner::new(node))
+                    }
                     _ => None,
                 };
                 let worker = SinkWorker::new(
@@ -2133,6 +2140,36 @@ impl SinkManager {
 
         let signer = match &server.transport {
             SinkTransportConfig::Http(http) if http.signature => {
+                match ctx
+                    .system()
+                    .get_actor::<Node>(&ActorPath::from("/user/node"))
+                    .await
+                {
+                    Ok(node) => Some(NodeSigner::new(node)),
+                    Err(e) => {
+                        return Err(format!(
+                            "failed to get node actor for sink test: {}",
+                            e
+                        ));
+                    }
+                }
+            }
+            SinkTransportConfig::Kafka(kafka) if kafka.signature => {
+                match ctx
+                    .system()
+                    .get_actor::<Node>(&ActorPath::from("/user/node"))
+                    .await
+                {
+                    Ok(node) => Some(NodeSigner::new(node)),
+                    Err(e) => {
+                        return Err(format!(
+                            "failed to get node actor for sink test: {}",
+                            e
+                        ));
+                    }
+                }
+            }
+            SinkTransportConfig::Grpc(grpc) if grpc.signature => {
                 match ctx
                     .system()
                     .get_actor::<Node>(&ActorPath::from("/user/node"))

@@ -14,7 +14,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 borsh = { workspace = true }
-ave-common = { workspace = true }
+ave-common = { workspace = true, features = ["sink-grpc"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
 json-patch = "4.2.0"
 ave-actors = { workspace = true }
@@ -41,11 +41,14 @@ futures = { workspace = true }
 rdkafka = { workspace = true }
 httpdate = "1"
 flate2 = "1"
+tonic = { workspace = true }
+tonic-health = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-stream = "0.1"
 ave-network = { workspace = true, features = ["test"] }
 futures = { workspace = true }
 axum = { workspace = true }

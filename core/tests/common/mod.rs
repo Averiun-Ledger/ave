@@ -67,6 +67,8 @@ impl Drop for TempEnvVar {
 }
 
 #[allow(dead_code)]
+pub mod grpc_test_sink;
+#[allow(dead_code)]
 pub mod kafka_setup;
 #[allow(dead_code)]
 pub mod oidc_idp;

@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+// Public contract of the ave gRPC sink. Versioned as ave.sink.v1; only
+// additive changes are allowed within v1 (new fields with new numbers, new
+// RPCs). Breaking changes require a v2 package.
+package ave.sink.v1;
+
+// Delivery endpoint implemented by event receivers.
+service EventSink {
+  // Delivers a batch (1..N events) with a single response. Success is the
+  // OK status; failures are reported with the gRPC status codes documented
+  // in the node repository (UNAVAILABLE/RESOURCE_EXHAUSTED = transient,
+  // UNAUTHENTICATED = auth, INVALID_ARGUMENT/PERMISSION_DENIED/etc. =
+  // permanent rejection).
+  rpc Deliver(DeliverRequest) returns (DeliverResponse);
+  // Non-persistent test delivery: exercises reachability, authentication and
+  // signature with the same configuration as real deliveries, without
+  // advancing any cursor or altering persisted state.
+  rpc Test(TestRequest) returns (TestResponse);
+}
+
+// Routing and idempotency metadata of one event. Receivers filter/route on
+// these fields; the payload itself is the canonical JSON document.
+message EventMeta {
+  string subject_id = 1;
+  uint64 sn = 2;
+  // SinkTypes category, lowercase: "create" | "fact" | "transfer" |
+  // "confirm" | "reject" | "eol". Both ledger fact variants (FactFull and
+  // FactOpaque) report "fact"; the exact variant and its fields are in the
+  // JSON payload (same convention as the HTTP sink's X-Ave-Event-Type).
+  string event_type = 3;
+  string schema_id = 4;
+  string governance_id = 5;
+  // Idempotency key: "{subject_id}-{sn}". Receivers must deduplicate on it.
+  string idempotency_key = 6;
+  // True when the payload is a light projection (event type not covered by
+  // the sink's `events` filter).
+  bool light = 7;
+}
+
+// The canonical JSON payload plus its optional Ed25519 signature.
+message SignedPayload {
+  // Canonical JSON bytes (identical to the HTTP sink body): a single event
+  // object, or a JSON array when the sink uses batch delivery.
+  bytes payload = 1;
+  // Ed25519 signature of the canonical v2 payload (critical headers +
+  // body), hex-encoded. Empty when the sink has `signature = false`.
+  string signature = 2;
+  // Signature timestamp in nanoseconds (same as X-Ave-Signature-Timestamp).
+  uint64 signature_timestamp = 3;
+  // Node public key that produced the signature. Empty when unsigned.
+  string public_key = 4;
+}
+
+message DeliverRequest {
+  // Unique id of this delivery attempt (correlates logs and, in v1.1+,
+  // stream acknowledgements).
+  string request_id = 1;
+  // Absent on batch deliveries (the array elements carry their own
+  // subject/sn/type) and on test deliveries.
+  EventMeta meta = 2;
+  SignedPayload body = 3;
+}
+
+message DeliverResponse {}
+
+message TestRequest {
+  string request_id = 1;
+  SignedPayload body = 2;
+}
+
+message TestResponse {}
