@@ -457,6 +457,98 @@ async fn grpc_transport_oauth2_idp_failure_is_auth_error() {
     );
 }
 
+/// `ResourceExhausted` surfaces the server's backoff hint on both paths:
+/// `google.rpc.RetryInfo` details (unary, parity with HTTP `Retry-After`)
+/// and `DeliverAck.retry_after_ms` (stream).
+#[test(tokio::test)]
+async fn grpc_transport_retry_info_drives_backoff_hint() {
+    for unary_only in [true, false] {
+        let sink = if unary_only {
+            GrpcTestSink::start_unary_only().await
+        } else {
+            GrpcTestSink::start().await
+        };
+        sink.set_mode(GrpcResponseMode::AlwaysStatusRetryInfo {
+            code: Code::ResourceExhausted,
+            retry_after_ms: 60_000,
+        });
+        let config = GrpcSinkConfig {
+            max_retries: 0,
+            ..grpc_config(&sink.endpoint())
+        };
+        let transport = build_transport(&sink.endpoint(), config).await;
+
+        let result = transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await;
+        match result {
+            Err(SinkError::Delivery {
+                retryable: true,
+                retry_after_ms: Some(60_000),
+                ..
+            }) => {}
+            other => panic!(
+                "the backoff hint must surface (unary_only={unary_only}), got {other:?}"
+            ),
+        }
+    }
+}
+
+/// `warm_up` opens the delivery stream eagerly so the first delivery does
+/// not pay the handshake.
+#[test(tokio::test)]
+async fn grpc_transport_warm_up_opens_stream_eagerly() {
+    let sink = GrpcTestSink::start().await;
+    let transport =
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+            .await;
+
+    assert_eq!(sink.stream_opens(), 0);
+    transport.warm_up().await.unwrap();
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "warm_up must open the stream eagerly"
+    );
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "the first delivery must reuse the warm stream"
+    );
+}
+
+/// Best-effort batch delivery (Pause/Stop teardown): a single attempt, no
+/// retries — the cursor guarantees re-delivery via catch-up.
+#[test(tokio::test)]
+async fn grpc_transport_best_effort_is_single_attempt() {
+    let sink = GrpcTestSink::start().await;
+    sink.set_mode(GrpcResponseMode::AlwaysStatus(Code::Unavailable));
+    let config = GrpcSinkConfig {
+        retry_base_delay_ms: 1,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    let events = vec![IncomingSinkEvent::Full(Arc::new(
+        example_data_to_sink(SUBJECT_ID, SCHEMA_ID),
+    ))];
+    let result = transport.send_batch_best_effort(events).await;
+    assert!(
+        matches!(result, Err(SinkError::Delivery { retryable: true, .. })),
+        "expected a retryable delivery error, got {result:?}"
+    );
+    assert_eq!(
+        sink.deliveries().len(),
+        1,
+        "best-effort delivery must not retry"
+    );
+}
+
 /// Configured auth with a missing environment secret is a build error.
 #[test(tokio::test)]
 async fn grpc_transport_auth_missing_secret_is_build_error() {
@@ -1812,5 +1904,200 @@ async fn grpc_node_oauth2_refresh_after_unauthenticated() {
         sns,
         vec![0, 1, 2],
         "the event must arrive exactly once after the refresh; got {sns:?}"
+    );
+}
+
+/// `warm_up` at the node level: the sink worker opens the delivery stream
+/// eagerly on startup, before any subject produces events (no delivery is
+/// needed for the stream to exist).
+#[test(tokio::test)]
+async fn grpc_node_warm_up_opens_stream_before_events() {
+    let sink = GrpcTestSink::start().await;
+
+    // Node with a governance and the schema, but NO subject: nothing will
+    // ever be delivered to the sink.
+    let (owner, dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    // The worker must open the stream eagerly on startup (poll pattern, no
+    // fixed sleeps).
+    let mut attempts = 0;
+    loop {
+        if sink.stream_opens() >= 1 {
+            break;
+        }
+        if attempts > 100 {
+            panic!("the sink worker did not open the stream on startup");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        attempts += 1;
+    }
+    assert!(
+        sink.deliveries().is_empty(),
+        "no delivery is needed for the stream to exist"
+    );
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+}
+
+/// Graceful shutdown with an in-flight delivery: stopping the node while a
+/// delivery waits for an ack that never comes completes in bounded time —
+/// the pending attempt drains with its own request timeout and nothing
+/// hangs (the §6.8 scenario of the production plan).
+#[test(tokio::test)]
+async fn grpc_node_shutdown_with_in_flight_delivery() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let config = GrpcSinkConfig {
+        request_timeout_ms: 1_000,
+        retry_base_delay_ms: 100,
+        ..grpc_config(&sink.endpoint())
+    };
+    let (mut owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    sink.wait_for_accepted(2).await;
+
+    // A live delivery goes in flight with the consumer stalled: its ack
+    // will not arrive until long after the shutdown starts.
+    sink.pause_streams();
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The shutdown must complete in bounded time (3 attempts x 1s ack
+    // timeout + backoff + teardown is a few seconds; 20s is the outer
+    // bound that catches a real deadlock even on loaded machines).
+    owner.token.cancel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        join_all(owner.handler.iter_mut()),
+    )
+    .await
+    .expect("node shutdown must complete with an in-flight delivery");
+}
+
+/// Graceful shutdown drains in-flight deliveries (does not drop them):
+/// stopping the node while a delivery waits for its (slow) ack lets the
+/// handler drain to completion, so the cursor advances and a restart
+/// re-delivers nothing.
+#[test(tokio::test)]
+async fn grpc_node_shutdown_drains_in_flight_delivery() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let (mut owner, mut dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+    sink.wait_for_accepted(2).await;
+
+    // Live event: the server reads it (recorded) but the ack is delayed.
+    sink.set_stream_ack_delay(1_000);
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_deliveries(3).await;
+
+    // Shutdown while the ack is pending: bounded completion that drains
+    // the in-flight delivery instead of dropping it.
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        join_all(owner.handler.iter_mut()),
+    )
+    .await
+    .expect("node shutdown must complete while draining a delivery");
+
+    // If the delivery drained, its cursor advanced: a restart on the same
+    // databases re-delivers nothing and sn 2 stays delivered exactly once.
+    sink.set_stream_ack_delay(0);
+    let (owner, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![make_grpc_sink_entry(
+            "grpc-node-sink",
+            &sink.endpoint(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            false,
+        )],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&owner.api).await.unwrap();
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "the drained delivery must advance the cursor (no re-delivery); got {sns:?}"
     );
 }

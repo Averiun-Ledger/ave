@@ -136,7 +136,19 @@ impl GrpcTransport {
                 ))
             })?;
         endpoint = endpoint
-            .connect_timeout(Duration::from_millis(config.connect_timeout_ms));
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .http2_keep_alive_interval(Duration::from_secs(
+                config.http2_keepalive_interval_secs,
+            ))
+            .keep_alive_timeout(Duration::from_secs(
+                config.http2_keepalive_timeout_secs,
+            ))
+            // Streams can stay idle between events: keep them alive too.
+            .keep_alive_while_idle(true);
+        if let Some(secs) = config.tcp_keepalive_secs {
+            endpoint =
+                endpoint.tcp_keepalive(Some(Duration::from_secs(secs)));
+        }
 
         if config.tls.is_some() || config.endpoint.starts_with("https://") {
             let tls_config =
@@ -670,7 +682,33 @@ impl SinkTransport for GrpcTransport {
         if matches!(self.auth, Some(GrpcAuth::OAuth2(_))) {
             self.bearer_token().await?;
         }
+        // Open the delivery stream eagerly so the first delivery does not
+        // pay the handshake either; a unary-only server just latches the
+        // fallback.
+        if !self.unary_only.load(Ordering::Acquire) {
+            match self.stream_handle().await {
+                Ok(_) => {}
+                Err(StreamFailure::Unimplemented) => {
+                    self.unary_only.store(true, Ordering::Release);
+                }
+                Err(StreamFailure::Delivery(e)) => return Err(e),
+            }
+        }
         Ok(())
+    }
+
+    async fn send_batch_best_effort(
+        &self,
+        events: Vec<ave_common::IncomingSinkEvent>,
+    ) -> Result<(), SinkError> {
+        // A single attempt, no retries (mirrors the Kafka transport):
+        // blocking on backoff would delay actor shutdown, and the cursor
+        // guarantees re-delivery via catch-up. When the worker stops, the
+        // transport is dropped and the stream half-closes naturally, letting
+        // the server drain the in-flight messages.
+        let payload = serialize_json_payload(&events)?;
+        let body = self.build_signed_payload(payload, None).await?;
+        self.deliver_once(body, None).await
     }
 }
 
@@ -730,12 +768,24 @@ fn map_ack(ack: &pb::DeliverAck) -> Result<(), SinkError> {
 
 /// Map a gRPC status to the shared sink error taxonomy (see the MVP plan):
 /// transient statuses retry with backoff, auth statuses drive the token
-/// path, everything else is a permanent rejection.
+/// path, everything else is a permanent rejection. A `ResourceExhausted`
+/// carrying `google.rpc.RetryInfo` surfaces the server's exact backoff
+/// hint (parity with HTTP's `Retry-After`).
 fn map_status(status: &Status) -> SinkError {
+    let retry_after_ms = (status.code() == Code::ResourceExhausted)
+        .then(|| {
+            tonic_types::StatusExt::get_details_retry_info(status)
+                .and_then(|info| {
+                    info.retry_delay.map(|delay| {
+                        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)
+                    })
+                })
+        })
+        .flatten();
     map_code(
         status.code(),
         format!("gRPC {}: {}", status.code(), status.message()),
-        None,
+        retry_after_ms,
     )
 }
 

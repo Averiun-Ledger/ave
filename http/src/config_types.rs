@@ -1342,6 +1342,12 @@ pub struct GrpcSinkConfigHttp {
     /// Maximum number of unacknowledged deliveries in flight on the delivery
     /// stream (backpressure window).
     pub max_in_flight_batches: usize,
+    /// TCP keepalive of the sink connection. `null` disables it.
+    pub tcp_keepalive_secs: Option<u64>,
+    /// Interval between HTTP/2 PING frames on the connection.
+    pub http2_keepalive_interval_secs: u64,
+    /// Time without a PING ack after which the connection is declared dead.
+    pub http2_keepalive_timeout_secs: u64,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1525,6 +1531,11 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     max_encoding_message_bytes: grpc
                         .max_encoding_message_bytes,
                     max_in_flight_batches: grpc.max_in_flight_batches,
+                    tcp_keepalive_secs: grpc.tcp_keepalive_secs,
+                    http2_keepalive_interval_secs: grpc
+                        .http2_keepalive_interval_secs,
+                    http2_keepalive_timeout_secs: grpc
+                        .http2_keepalive_timeout_secs,
                 }))
             }
         };

@@ -1039,6 +1039,11 @@ mod tests {
         assert!(matches!(cfg.compression, HttpCompression::None));
         assert_eq!(cfg.max_decoding_message_bytes, 4 * 1024 * 1024);
         assert_eq!(cfg.max_encoding_message_bytes, 16 * 1024 * 1024);
+        assert_eq!(cfg.max_in_flight_batches, 8);
+        assert_eq!(cfg.tcp_keepalive_secs, Some(60));
+        assert_eq!(cfg.http2_keepalive_interval_secs, 30);
+        assert_eq!(cfg.http2_keepalive_timeout_secs, 10);
+        assert_eq!(cfg.token_refresh_margin_secs, 30);
     }
 
     #[test]
@@ -1099,6 +1104,48 @@ mod tests {
             },
             "GrpcSinkConfig.max_encoding_message_bytes",
         );
+        assert_rejects(
+            &GrpcSinkConfig {
+                max_in_flight_batches: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.max_in_flight_batches",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                tcp_keepalive_secs: Some(0),
+                ..base()
+            },
+            "GrpcSinkConfig.tcp_keepalive_secs",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                http2_keepalive_interval_secs: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.http2_keepalive_interval_secs",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                http2_keepalive_timeout_secs: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.http2_keepalive_timeout_secs",
+        );
+        assert_rejects(
+            &GrpcSinkConfig {
+                token_refresh_margin_secs: 0,
+                ..base()
+            },
+            "GrpcSinkConfig.token_refresh_margin_secs",
+        );
+        // `null` TCP keepalive disables it and is valid.
+        GrpcSinkConfig {
+            tcp_keepalive_secs: None,
+            ..base()
+        }
+        .validate()
+        .expect("disabled TCP keepalive must validate");
         // mTLS certificate without key.
         assert_rejects(
             &GrpcSinkConfig {
@@ -2528,6 +2575,13 @@ pub struct GrpcSinkConfig {
     /// stream. When the window is full, senders wait: real backpressure
     /// towards the sink workers, bounding memory by construction.
     pub max_in_flight_batches: usize,
+    /// TCP keepalive of the sink connection (detects dead peers behind
+    /// NATs/LBs). `null` disables it.
+    pub tcp_keepalive_secs: Option<u64>,
+    /// Interval between HTTP/2 PING frames on the connection.
+    pub http2_keepalive_interval_secs: u64,
+    /// Time without a PING ack after which the connection is declared dead.
+    pub http2_keepalive_timeout_secs: u64,
 }
 
 impl Default for GrpcSinkConfig {
@@ -2550,6 +2604,9 @@ impl Default for GrpcSinkConfig {
             max_decoding_message_bytes: 4 * 1024 * 1024,
             max_encoding_message_bytes: 16 * 1024 * 1024,
             max_in_flight_batches: 8,
+            tcp_keepalive_secs: Some(60),
+            http2_keepalive_interval_secs: 30,
+            http2_keepalive_timeout_secs: 10,
         }
     }
 }
@@ -2638,6 +2695,17 @@ impl GrpcSinkConfig {
                 reason: "must be greater than zero".to_string(),
             });
         }
+        if let Some(secs) = self.tcp_keepalive_secs {
+            require_positive_u64("GrpcSinkConfig.tcp_keepalive_secs", secs)?;
+        }
+        require_positive_u64(
+            "GrpcSinkConfig.http2_keepalive_interval_secs",
+            self.http2_keepalive_interval_secs,
+        )?;
+        require_positive_u64(
+            "GrpcSinkConfig.http2_keepalive_timeout_secs",
+            self.http2_keepalive_timeout_secs,
+        )?;
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }

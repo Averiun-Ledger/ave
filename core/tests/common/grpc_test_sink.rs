@@ -29,12 +29,29 @@ pub enum GrpcResponseMode {
     Accept,
     /// Fails every request with the given status code.
     AlwaysStatus(Code),
+    /// Fails every request with the given status code plus a backoff hint
+    /// (`google.rpc.RetryInfo` details on unary, `DeliverAck.retry_after_ms`
+    /// on the stream).
+    AlwaysStatusRetryInfo { code: Code, retry_after_ms: u64 },
     /// Fails the first `remaining` requests with the given code, then
     /// accepts (drives the transport's retry path).
     FailTimes {
         code: Code,
         remaining: Arc<AtomicUsize>,
     },
+}
+
+/// Build a rejection status carrying `google.rpc.RetryInfo` details.
+fn retry_info_status(code: Code, retry_after_ms: u64) -> Status {
+    use tonic_types::StatusExt as _;
+
+    Status::with_error_details(
+        code,
+        "test server rejecting",
+        tonic_types::ErrorDetails::with_retry_info(Some(
+            std::time::Duration::from_millis(retry_after_ms),
+        )),
+    )
 }
 
 /// One recorded `Deliver` RPC.
@@ -353,6 +370,10 @@ impl EventSink for TestEventSink {
             GrpcResponseMode::AlwaysStatus(code) => {
                 Err(Status::new(code, "test server rejecting"))
             }
+            GrpcResponseMode::AlwaysStatusRetryInfo {
+                code,
+                retry_after_ms,
+            } => Err(retry_info_status(code, retry_after_ms)),
             GrpcResponseMode::FailTimes { code, remaining } => {
                 if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
                     Err(Status::new(code, "test server rejecting"))
@@ -465,16 +486,25 @@ impl EventSink for TestEventSink {
                             .unwrap_or(GrpcResponseMode::Accept),
                     )
                 };
-                let (error_code, error_message) = match &mode {
-                    GrpcResponseMode::Accept => (0, String::new()),
+                let (error_code, error_message, ack_retry_after_ms) = match &mode
+                {
+                    GrpcResponseMode::Accept => (0, String::new(), 0),
                     GrpcResponseMode::AlwaysStatus(code) => {
-                        (*code as i32, "test server rejecting".to_owned())
+                        (*code as i32, "test server rejecting".to_owned(), 0)
                     }
+                    GrpcResponseMode::AlwaysStatusRetryInfo {
+                        code,
+                        retry_after_ms,
+                    } => (
+                        *code as i32,
+                        "test server rejecting".to_owned(),
+                        *retry_after_ms,
+                    ),
                     GrpcResponseMode::FailTimes { code, remaining } => {
                         if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
-                            (*code as i32, "test server rejecting".to_owned())
+                            (*code as i32, "test server rejecting".to_owned(), 0)
                         } else {
-                            (0, String::new())
+                            (0, String::new(), 0)
                         }
                     }
                 };
@@ -500,7 +530,7 @@ impl EventSink for TestEventSink {
                     request_id: message.request_id,
                     error_code,
                     error_message,
-                    retry_after_ms: 0,
+                    retry_after_ms: ack_retry_after_ms,
                 };
                 if tx.send(Ok(ack)).await.is_err() {
                     return;
