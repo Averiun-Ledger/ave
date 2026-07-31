@@ -16,7 +16,9 @@ use ave_common::{
         BLAKE3_HASHER, DigestIdentifier, Hash as _, PublicKey,
         SignatureIdentifier, TimeStamp, keys::KeyPair,
     },
-    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent},
+    sink::{
+        DataToSink, DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig,
+    },
 };
 use ave_core::config::{
     GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, SinkConfigEntry,
@@ -27,11 +29,13 @@ use ave_core::sink::SinkTransport;
 use ave_core::sink::delivery::{DeliveryMeta, canonical_payload};
 use ave_core::sink::grpc::GrpcTransport;
 use ave_network::NodeType;
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use futures::future::join_all;
 use std::str::FromStr;
 use tonic::Code;
 use test_log::test;
 use common::grpc_test_sink::{GrpcResponseMode, GrpcTestSink};
+use common::test_sink::TestSink;
 use common::{
     CreateNodeConfig, NodeData, PORT_COUNTER, TempEnvVar,
     create_and_authorize_governance, create_node, create_subject, emit_fact,
@@ -270,6 +274,186 @@ async fn grpc_transport_sends_api_key_metadata() {
     assert_eq!(
         deliveries[1].authorization.as_deref(),
         Some("Bearer token-secret")
+    );
+}
+
+/// Basic auth: the password is read from the environment and sent as
+/// `authorization: Basic base64(username:password)` metadata on every RPC.
+#[test(tokio::test)]
+async fn grpc_transport_sends_basic_auth_metadata() {
+    let sink = GrpcTestSink::start().await;
+    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "pass-secret");
+
+    let config = GrpcSinkConfig {
+        auth: Some(GrpcAuthConfig::Basic {
+            username: "alice".to_owned(),
+        }),
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 1);
+    let expected = format!(
+        "Basic {}",
+        BASE64_STANDARD.encode("alice:pass-secret")
+    );
+    assert_eq!(deliveries[0].authorization.as_deref(), Some(expected.as_str()));
+}
+
+/// OAuth2 (parity with the HTTP sink): the first delivery fetches and
+/// caches the token from a real IdP, later deliveries reuse the cache, and
+/// an UNAUTHENTICATED ack forces a refresh and an immediate retry.
+#[test(tokio::test)]
+async fn grpc_transport_oauth2_fetches_caches_and_refreshes_token() {
+    let idp = TestSink::start().await;
+    let sink = GrpcTestSink::start().await;
+    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "oauth-secret");
+
+    let config = GrpcSinkConfig {
+        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+            auth_url: idp.auth_url(),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        })),
+        retry_base_delay_ms: 1,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    // First delivery: fetches the token and caches it.
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(idp.auth_requests().await.len(), 1);
+
+    // Second delivery: the cached token is reused, no new fetch.
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(
+        idp.auth_requests().await.len(),
+        1,
+        "a valid cached token must not be refetched"
+    );
+    for delivery in sink.deliveries() {
+        assert_eq!(
+            delivery.authorization.as_deref(),
+            Some("Bearer test-access-token")
+        );
+    }
+
+    // The server rejects the token once: the transport refreshes it and
+    // retries immediately, delivering without error.
+    sink.set_mode(GrpcResponseMode::FailTimes {
+        code: Code::Unauthenticated,
+        remaining: Arc::new(AtomicUsize::new(1)),
+    });
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(
+        idp.auth_requests().await.len(),
+        2,
+        "an UNAUTHENTICATED ack must force a token refresh"
+    );
+    assert_eq!(sink.accepted_deliveries().len(), 3);
+}
+
+/// OAuth2 proactive refresh: a cached token inside the refresh margin
+/// (expiring soon) is renewed on the next RPC instead of being used until
+/// it fails. With a margin larger than the IdP's `expires_in`, every RPC
+/// refreshes (deterministic with the fixed 3600s test token).
+///
+/// Runs against a unary-only server on purpose: the delivery stream
+/// carries the token in its open-time metadata, so per-RPC freshness is
+/// only observable over unary deliveries (mid-stream freshness is the
+/// reactive UNAUTHENTICATED path, covered by the refresh test).
+#[test(tokio::test)]
+async fn grpc_transport_oauth2_proactive_refresh_near_expiry() {
+    let idp = TestSink::start().await;
+    let sink = GrpcTestSink::start_unary_only().await;
+    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "oauth-secret");
+
+    let config = GrpcSinkConfig {
+        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+            auth_url: idp.auth_url(),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        })),
+        token_refresh_margin_secs: 4_000,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    // First delivery: establishes the unary fallback and primes the cache.
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    let baseline = idp.auth_requests().await.len();
+
+    // Every later RPC must proactively refresh the near-expiry token.
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(
+        idp.auth_requests().await.len(),
+        baseline + 1,
+        "a token inside the refresh margin must be renewed proactively"
+    );
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    assert_eq!(
+        idp.auth_requests().await.len(),
+        baseline + 2,
+        "every RPC must refresh a token inside the refresh margin"
+    );
+    assert_eq!(sink.accepted_deliveries().len(), 3);
+}
+
+/// OAuth2 with a failing IdP (invalid credentials): the token cannot be
+/// obtained, the delivery fails with an `Auth` error and nothing reaches
+/// the server.
+#[test(tokio::test)]
+async fn grpc_transport_oauth2_idp_failure_is_auth_error() {
+    let idp = TestSink::start().await;
+    idp.set_auth_mode(common::test_sink::AuthResponseMode::TokenFailure)
+        .await;
+    let sink = GrpcTestSink::start().await;
+    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "wrong-secret");
+
+    let config = GrpcSinkConfig {
+        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+            auth_url: idp.auth_url(),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        })),
+        retry_base_delay_ms: 1,
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    let result = transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await;
+    assert!(
+        matches!(result, Err(SinkError::Auth { .. })),
+        "expected an auth error, got {result:?}"
+    );
+    assert!(
+        sink.deliveries().is_empty(),
+        "no delivery may reach the server without a token"
     );
 }
 
@@ -1486,5 +1670,147 @@ async fn grpc_node_stalled_consumer_recovers() {
         sns,
         vec![0, 1, 2],
         "the stalled event must arrive exactly once after resuming; got {sns:?}"
+    );
+}
+
+/// OAuth2 at the node level (parity with `sink_auth_token_refresh` of the
+/// HTTP sink): the worker prefetches the token eagerly on startup
+/// (`warm_up`), deliveries carry it as Bearer metadata and the cache is
+/// reused — no extra fetches per event.
+#[test(tokio::test)]
+async fn grpc_node_oauth2_eager_fetch_and_delivery() {
+    let idp = TestSink::start().await;
+    let sink = GrpcTestSink::start().await;
+    let _guard =
+        TempEnvVar::set("AVE_SINK_PASSWORD_GRPC_OAUTH_SINK", "oauth-secret");
+
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let config = GrpcSinkConfig {
+        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+            auth_url: idp.auth_url(),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        })),
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-oauth-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    // The worker prefetches the token eagerly on startup (same poll
+    // pattern as the HTTP eager-fetch assertions, no fixed sleeps).
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while idp.auth_requests().await.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("worker should fetch a token eagerly on startup");
+
+    wait_for_sink_caught_up(&owner.api, "grpc-oauth-sink").await;
+    sink.wait_for_accepted(2).await;
+
+    // Live event: delivered with the cached token, no extra fetch.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_accepted(3).await;
+
+    assert_eq!(
+        idp.auth_requests().await.len(),
+        1,
+        "the cached token must be reused for every delivery"
+    );
+    for delivery in sink.accepted_deliveries() {
+        assert_eq!(
+            delivery.authorization.as_deref(),
+            Some("Bearer test-access-token"),
+            "every delivery must carry the OAuth2 bearer token"
+        );
+    }
+}
+
+/// OAuth2 refresh at the node level (full parity with
+/// `sink_auth_token_refresh` of the HTTP sink): the server rejects the
+/// token once, the transport refreshes it and retries immediately — the
+/// event arrives exactly once, the sink never goes lagging, and the stream
+/// is torn down and reopened with the fresh token.
+#[test(tokio::test)]
+async fn grpc_node_oauth2_refresh_after_unauthenticated() {
+    let idp = TestSink::start().await;
+    let sink = GrpcTestSink::start().await;
+    let _guard =
+        TempEnvVar::set("AVE_SINK_PASSWORD_GRPC_OAUTH_SINK", "oauth-secret");
+
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let config = GrpcSinkConfig {
+        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+            auth_url: idp.auth_url(),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        })),
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-oauth-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-oauth-sink").await;
+    sink.wait_for_accepted(2).await;
+    assert_eq!(idp.auth_requests().await.len(), 1);
+
+    // The server rejects the token once: refresh + immediate retry.
+    sink.set_mode(GrpcResponseMode::FailTimes {
+        code: Code::Unauthenticated,
+        remaining: Arc::new(AtomicUsize::new(1)),
+    });
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_accepted(3).await;
+    wait_for_sink_caught_up(&owner.api, "grpc-oauth-sink").await;
+
+    assert_eq!(
+        idp.auth_requests().await.len(),
+        2,
+        "the UNAUTHENTICATED ack must force exactly one token refresh"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        2,
+        "the stale-token stream must be torn down and reopened"
+    );
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "the event must arrive exactly once after the refresh; got {sns:?}"
     );
 }

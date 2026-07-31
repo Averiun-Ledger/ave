@@ -1283,6 +1283,13 @@ pub enum GrpcAuthConfigHttp {
     BearerToken,
     /// `x-api-key: <key>` metadata on every RPC.
     ApiKey,
+    /// `authorization: Basic base64(username:password)` metadata on every RPC.
+    Basic {
+        /// Username of the basic credentials.
+        username: String,
+    },
+    /// OAuth2 with token cache and refresh on UNAUTHENTICATED.
+    OAuth2(SinkAuthConfigHttp),
 }
 
 #[derive(Debug, Default, Serialize, Clone, ToSchema, Deserialize)]
@@ -1305,6 +1312,8 @@ pub struct GrpcSinkConfigHttp {
     pub tls: Option<GrpcTlsConfigHttp>,
     /// Whether deliveries are signed with the node identity (canonical v2).
     pub signature: bool,
+    /// Seconds before token expiry at which an OAuth2 token is refreshed.
+    pub token_refresh_margin_secs: u64,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     /// Maximum transient retries per delivery.
@@ -1403,19 +1412,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             ave_bridge::SinkTransportConfig::Http(http) => {
                 SinkTransportConfigHttp::Http(Box::new(HttpSinkConfigHttp {
                     url: http.url,
-                    auth: http.auth.map(|a| SinkAuthConfigHttp {
-                        auth_url: a.auth_url,
-                        username: a.username,
-                        // Never expose the configured API key through the API.
-                        api_key: if a.api_key.is_empty() {
-                            String::new()
-                        } else {
-                            "***".to_owned()
-                        },
-                        grant_type: a.grant_type.into(),
-                        client_id: a.client_id,
-                        scope: a.scope,
-                    }),
+                    auth: http.auth.map(sink_auth_to_http),
                     connect_timeout_ms: http.connect_timeout_ms,
                     request_timeout_ms: http.request_timeout_ms,
                     max_retries: http.max_retries,
@@ -1498,6 +1495,14 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         ave_bridge::ave_common::sink::GrpcAuthConfig::ApiKey => {
                             GrpcAuthConfigHttp::ApiKey
                         }
+                        ave_bridge::ave_common::sink::GrpcAuthConfig::Basic {
+                            username,
+                        } => GrpcAuthConfigHttp::Basic { username },
+                        ave_bridge::ave_common::sink::GrpcAuthConfig::OAuth2(
+                            auth,
+                        ) => {
+                            GrpcAuthConfigHttp::OAuth2(sink_auth_to_http(auth))
+                        }
                     }),
                     tls: grpc.tls.map(|t| GrpcTlsConfigHttp {
                         ca_certificate: t.ca_certificate,
@@ -1505,6 +1510,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                         client_key: t.client_key,
                     }),
                     signature: grpc.signature,
+                    token_refresh_margin_secs: grpc.token_refresh_margin_secs,
                     connect_timeout_ms: grpc.connect_timeout_ms,
                     request_timeout_ms: grpc.request_timeout_ms,
                     max_retries: grpc.max_retries,
@@ -1538,6 +1544,24 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             startup_healthcheck_delay_secs: value
                 .startup_healthcheck_delay_secs,
         }
+    }
+}
+
+fn sink_auth_to_http(
+    value: ave_bridge::ave_common::sink::SinkAuthConfig,
+) -> SinkAuthConfigHttp {
+    SinkAuthConfigHttp {
+        auth_url: value.auth_url,
+        username: value.username,
+        // Never expose the configured API key through the API.
+        api_key: if value.api_key.is_empty() {
+            String::new()
+        } else {
+            "***".to_owned()
+        },
+        grant_type: value.grant_type.into(),
+        client_id: value.client_id,
+        scope: value.scope,
     }
 }
 

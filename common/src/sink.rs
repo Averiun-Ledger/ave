@@ -2388,8 +2388,9 @@ impl KafkaSinkConfig {
 /// Authentication mode for the gRPC transport.
 ///
 /// Secrets are never stored in the configuration: the bearer token is read
-/// from `AVE_SINK_TOKEN_{{SERVER}}` and the API key from
-/// `AVE_SINK_APIKEY_{{SERVER}}` (where `{{SERVER}}` is the sink name
+/// from `AVE_SINK_TOKEN_{{SERVER}}`, the API key from
+/// `AVE_SINK_APIKEY_{{SERVER}}` and the basic/OAuth2 password from
+/// `AVE_SINK_PASSWORD_{{SERVER}}` (where `{{SERVER}}` is the sink name
 /// upper-cased with non-alphanumeric characters replaced by `_`), the same
 /// pattern used by the other transports.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2402,6 +2403,39 @@ pub enum GrpcAuthConfig {
     BearerToken,
     /// `x-api-key: <key>` metadata on every RPC.
     ApiKey,
+    /// `authorization: Basic base64(username:password)` metadata on every
+    /// RPC; the password is read from `AVE_SINK_PASSWORD_{{SERVER}}`.
+    Basic {
+        /// Username of the basic credentials.
+        username: String,
+    },
+    /// OAuth2 (`password` or `client_credentials` grant): the token is
+    /// fetched from the auth endpoint, cached with a refresh margin and
+    /// refreshed on UNAUTHENTICATED, traveling as
+    /// `authorization: Bearer <token>` metadata. The secret (password or
+    /// client secret) is read from `AVE_SINK_PASSWORD_{{SERVER}}`.
+    OAuth2(SinkAuthConfig),
+}
+
+impl GrpcAuthConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::BearerToken | Self::ApiKey => Ok(()),
+            Self::Basic { username } if username.is_empty() => {
+                Err(Error::InvalidConfiguration {
+                    component: "GrpcAuthConfig.Basic.username".to_string(),
+                    reason: "must not be empty".to_string(),
+                })
+            }
+            Self::Basic { .. } => Ok(()),
+            Self::OAuth2(auth) => {
+                auth.validate().map_err(|e| Error::InvalidConfiguration {
+                    component: "GrpcAuthConfig.OAuth2".to_string(),
+                    reason: e.to_string(),
+                })
+            }
+        }
+    }
 }
 
 /// TLS configuration for the gRPC transport.
@@ -2460,6 +2494,9 @@ pub struct GrpcSinkConfig {
     /// the same algorithm as the HTTP sink) and send it inside the
     /// `SignedPayload` message.
     pub signature: bool,
+    /// Seconds before token expiry at which an OAuth2 token is refreshed
+    /// (only used with `auth: OAuth2`).
+    pub token_refresh_margin_secs: u64,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     /// Maximum transient retries per delivery.
@@ -2500,6 +2537,7 @@ impl Default for GrpcSinkConfig {
             auth: None,
             tls: None,
             signature: false,
+            token_refresh_margin_secs: 30,
             connect_timeout_ms: 2_000,
             request_timeout_ms: 5_000,
             max_retries: 2,
@@ -2536,6 +2574,13 @@ impl GrpcSinkConfig {
                 ),
             });
         }
+        if let Some(auth) = &self.auth {
+            auth.validate()?;
+        }
+        require_positive_u64(
+            "GrpcSinkConfig.token_refresh_margin_secs",
+            self.token_refresh_margin_secs,
+        )?;
         require_positive_u64(
             "GrpcSinkConfig.connect_timeout_ms",
             self.connect_timeout_ms,
