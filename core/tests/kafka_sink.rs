@@ -1,6 +1,5 @@
 // `RedpandaEnv` must stay alive until each test ends: its `Drop` stops the
 // container, so tightening its lifetime would break the test, not improve it.
-#![allow(clippy::significant_drop_tightening)]
 
 mod common;
 

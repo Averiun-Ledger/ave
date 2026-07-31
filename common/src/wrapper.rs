@@ -322,7 +322,6 @@ mod tests {
 
     // Basic serialization round-trip: f64 numbers
     #[test]
-    #[allow(clippy::approx_constant)]
     fn test_value_wrapper_number_f64() {
         let value =
             ValueWrapper(Value::Number(Number::from_f64(3.14).unwrap()));
@@ -882,7 +881,6 @@ mod tests {
 
     // Tests push_f64: serializes floating point numbers correctly
     #[test]
-    #[allow(clippy::approx_constant)]
     fn accepts_f64_number_via_push_f64() {
         let mut bytes = Vec::new();
         push_u8(&mut bytes, 1); // Type: Number

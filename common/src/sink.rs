@@ -165,15 +165,12 @@ impl DataToSinkEvent {
 ///
 /// Single source of truth of the gRPC sink contract: the node builds its
 /// transport on it and external backends implement `event_sink_server` from
-/// this same module, without copying the `.proto` file. Lints are disabled:
-/// this is prost-generated code, not hand-written.
+/// this same module, without copying the `.proto` file.
 ///
 /// Only available with the `sink-grpc` feature: tonic does not compile for
 /// the wasm32 target used by the contract SDK.
 #[cfg(feature = "sink-grpc")]
 pub mod pb {
-    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
-
     tonic::include_proto!("ave.sink.v1");
 }
 

@@ -10,7 +10,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // any protoc invocation and read only by prost-build.
         unsafe { std::env::set_var("PROTOC", protoc) };
         tonic_build::configure()
+            // The messages carry only Eq-capable fields (no floats); deriving
+            // Eq keeps the generated code free of
+            // `clippy::derive_partial_eq_without_eq` warnings.
+            .type_attribute(".", "#[derive(Eq)]")
             .compile_protos(&["proto/ave/sink/v1/sink.proto"], &["proto"])?;
+
+        // tonic-build (even 0.14) does not emit the server's message-size
+        // builder methods as `const fn`, which trips
+        // `clippy::missing_const_for_fn`. Their bodies are const-compatible
+        // (the client's same-named methods delegate to `self.inner` and are
+        // not, so the replacement pins the exact const-compatible body). If
+        // a future tonic-build changes the emitted code the replacement
+        // becomes a no-op and the warning reappears — visible, never silent
+        // breakage.
+        let generated =
+            std::path::Path::new(&std::env::var("OUT_DIR")?).join("ave.sink.v1.rs");
+        let code = std::fs::read_to_string(&generated)?;
+        let code = code
+            .replace(
+                "pub fn max_decoding_message_size(mut self, limit: usize) -> Self {\n            self.max_decoding_message_size = Some(limit);",
+                "pub const fn max_decoding_message_size(mut self, limit: usize) -> Self {\n            self.max_decoding_message_size = Some(limit);",
+            )
+            .replace(
+                "pub fn max_encoding_message_size(mut self, limit: usize) -> Self {\n            self.max_encoding_message_size = Some(limit);",
+                "pub const fn max_encoding_message_size(mut self, limit: usize) -> Self {\n            self.max_encoding_message_size = Some(limit);",
+            );
+        std::fs::write(&generated, code)?;
     }
     Ok(())
 }

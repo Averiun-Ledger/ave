@@ -258,6 +258,18 @@ impl std::fmt::Debug for KafkaTransport {
     }
 }
 
+/// One message to produce, grouping the arguments shared by
+/// `produce_once` and `produce_attempt`.
+struct ProduceMessage<'a> {
+    topic: &'a str,
+    key: Option<&'a str>,
+    payload: &'a [u8],
+    meta: Option<&'a DeliveryMeta>,
+    additional_headers: Option<OwnedHeaders>,
+    signature_headers: &'a Option<crate::sink::delivery::SignatureHeaders>,
+    request_id: &'a str,
+}
+
 impl KafkaTransport {
     pub async fn new(
         sink_name: String,
@@ -532,15 +544,15 @@ impl KafkaTransport {
             }
 
             match self
-                .produce_once(
+                .produce_once(ProduceMessage {
                     topic,
                     key,
                     payload,
                     meta,
-                    additional_headers.clone(),
-                    &signature_headers,
+                    additional_headers: additional_headers.clone(),
+                    signature_headers: &signature_headers,
                     request_id,
-                )
+                })
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -560,29 +572,12 @@ impl KafkaTransport {
     /// One produce attempt with request-duration metrics, so every transport
     /// reports `core_sink_request_duration_seconds` with the same labels.
     /// Used by `produce` (retry loop) and by best-effort batch delivery.
-    #[allow(clippy::too_many_arguments)]
     async fn produce_once(
         &self,
-        topic: &str,
-        key: Option<&str>,
-        payload: &[u8],
-        meta: Option<&DeliveryMeta>,
-        additional_headers: Option<OwnedHeaders>,
-        signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
-        request_id: &str,
+        message: ProduceMessage<'_>,
     ) -> Result<(), SinkError> {
-        timed_sink_request(&self.sink_name, || {
-            self.produce_attempt(
-                topic,
-                key,
-                payload,
-                meta,
-                additional_headers,
-                signature_headers,
-                request_id,
-            )
-        })
-        .await
+        timed_sink_request(&self.sink_name, || self.produce_attempt(message))
+            .await
     }
 
     /// A single produce attempt: optional transaction, one send, optional
@@ -590,17 +585,19 @@ impl KafkaTransport {
     /// failure aborts the previous one and starts over. Aborting ignores the
     /// result intentionally: the producer may already be in a fatal state,
     /// and the next begin_transaction would surface that.
-    #[allow(clippy::too_many_arguments)]
     async fn produce_attempt(
         &self,
-        topic: &str,
-        key: Option<&str>,
-        payload: &[u8],
-        meta: Option<&DeliveryMeta>,
-        additional_headers: Option<OwnedHeaders>,
-        signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
-        request_id: &str,
+        message: ProduceMessage<'_>,
     ) -> Result<(), SinkError> {
+        let ProduceMessage {
+            topic,
+            key,
+            payload,
+            meta,
+            additional_headers,
+            signature_headers,
+            request_id,
+        } = message;
         let transactional = self.config.transactional;
         if transactional {
             self.producer.begin_transaction().map_err(|e| {
@@ -913,15 +910,15 @@ impl SinkTransport for KafkaTransport {
                 continue;
             };
             let signature_headers = self.sign_payload(&payload, None).await?;
-            self.produce_once(
-                &topic,
-                key.as_deref(),
-                &payload,
-                None,
-                None,
-                &signature_headers,
-                &request_id,
-            )
+            self.produce_once(ProduceMessage {
+                topic: &topic,
+                key: key.as_deref(),
+                payload: &payload,
+                meta: None,
+                additional_headers: None,
+                signature_headers: &signature_headers,
+                request_id: &request_id,
+            })
             .await?;
         }
 
