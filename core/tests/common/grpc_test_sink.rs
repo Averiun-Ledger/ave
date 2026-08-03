@@ -5,6 +5,7 @@
 //! Every RPC is recorded so tests can assert on payloads, metadata and
 //! attempt counts; response behavior is driven by [`GrpcResponseMode`].
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,6 +55,21 @@ fn retry_info_status(code: Code, retry_after_ms: u64) -> Status {
     )
 }
 
+/// Collect the ASCII metadata entries of an RPC into a plain map
+/// (keys are already lowercased by tonic).
+fn metadata_map(metadata: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|kv| match kv {
+            tonic::metadata::KeyAndValueRef::Ascii(key, value) => value
+                .to_str()
+                .ok()
+                .map(|v| (key.as_str().to_owned(), v.to_owned())),
+            tonic::metadata::KeyAndValueRef::Binary(..) => None,
+        })
+        .collect()
+}
+
 /// One recorded `Deliver` RPC.
 #[derive(Debug, Clone)]
 pub struct RecordedDelivery {
@@ -64,6 +80,9 @@ pub struct RecordedDelivery {
     pub authorization: Option<String>,
     /// Value of the `x-api-key` metadata, when present.
     pub api_key: Option<String>,
+    /// All ASCII metadata entries received with the RPC (lowercased keys),
+    /// so tests can assert on custom headers and reserved-header filtering.
+    pub metadata: HashMap<String, String>,
     /// `true` when the server answered the RPC with success; rejected
     /// attempts (retryable or not) are recorded with `false`.
     pub accepted: bool,
@@ -180,7 +199,10 @@ impl GrpcTestSink {
         if let Some(tls) = tls {
             server = server.tls_config(tls).expect("test TLS config is valid");
         }
-        let router = server.add_service(EventSinkServer::new(service));
+        let router = server.add_service(
+            EventSinkServer::new(service)
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip),
+        );
         let (router, health_reporter) = if with_health {
             let (reporter, health_service) =
                 tonic_health::server::health_reporter();
@@ -354,14 +376,9 @@ impl EventSink for TestEventSink {
         request: Request<DeliverRequest>,
     ) -> Result<Response<DeliverResponse>, Status> {
         let (metadata, _, message) = request.into_parts();
-        let authorization = metadata
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let api_key = metadata
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
+        let metadata = metadata_map(&metadata);
+        let authorization = metadata.get("authorization").cloned();
+        let api_key = metadata.get("x-api-key").cloned();
 
         let mut state = self.state.lock().expect("state lock");
         let response = match state.mode.clone().unwrap_or(GrpcResponseMode::Accept)
@@ -389,6 +406,7 @@ impl EventSink for TestEventSink {
             body: message.body.clone(),
             authorization,
             api_key,
+            metadata,
             accepted: response.is_ok(),
         });
 
@@ -416,14 +434,9 @@ impl EventSink for TestEventSink {
         request: Request<tonic::Streaming<DeliverRequest>>,
     ) -> Result<Response<Self::DeliverStreamStream>, Status> {
         let (metadata, _, mut streaming) = request.into_parts();
-        let authorization = metadata
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let api_key = metadata
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
+        let metadata = metadata_map(&metadata);
+        let authorization = metadata.get("authorization").cloned();
+        let api_key = metadata.get("x-api-key").cloned();
 
         {
             let mut state = self.state.lock().expect("state lock");
@@ -516,6 +529,7 @@ impl EventSink for TestEventSink {
                         body: message.body.clone(),
                         authorization: authorization.clone(),
                         api_key: api_key.clone(),
+                        metadata: metadata.clone(),
                         accepted: error_code == 0,
                     },
                 );

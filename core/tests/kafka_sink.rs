@@ -1089,6 +1089,204 @@ async fn kafka_node_emits_all_event_types() {
     assert_sink_contains_eol(&events, &subject_id_str, 7);
 }
 
+/// End-to-end with `events: {Create}`: the create event is delivered as a
+/// full payload while facts are delivered as lightweight events, both in
+/// the startup catch-up and in live delivery (mirrors the HTTP and gRPC
+/// sinks).
+#[traced_test]
+#[tokio::test]
+async fn kafka_node_light_events_for_non_subscribed_types() {
+    let env = RedpandaEnv::start().await;
+    let topic = "light-node-{{schema-id}}";
+
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with a sink subscribed to Create only: catch-up must deliver
+    // the create full and the fact as a lightweight event.
+    let keys: KeyPair = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        sinks: vec![make_kafka_sink_entry(
+            "kafka-light-sink",
+            env.bootstrap_servers.clone(),
+            topic,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "kafka-light-sink").await;
+    let messages = env.consume_string("light-node-Example", 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2, "create + one fact");
+
+    let subject_id_str = subject_id.to_string();
+    assert!(
+        messages.iter().all(|(key, _)| key == &subject_id_str),
+        "all Kafka message keys must be the subject id"
+    );
+
+    let first: IncomingSinkEvent =
+        serde_json::from_str(&messages[0].1).expect("create payload");
+    assert!(
+        matches!(first, IncomingSinkEvent::Full(_)),
+        "the create event must be delivered full"
+    );
+
+    let second: IncomingSinkEvent =
+        serde_json::from_str(&messages[1].1).expect("fact payload");
+    let IncomingSinkEvent::Light(light) = second else {
+        panic!("facts must be delivered as lightweight events");
+    };
+    assert_eq!(light.subject_id, subject_id_str);
+    assert_eq!(light.sn, 1);
+    assert_eq!(light.event_type, SinkTypes::Fact);
+    assert!(light.success);
+
+    // A live fact also travels as a lightweight event.
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let messages = env.consume_string("light-node-Example", 3, TIMEOUT).await;
+    assert_eq!(messages.len(), 3, "create + two facts");
+    let third: IncomingSinkEvent =
+        serde_json::from_str(&messages[2].1).expect("live fact payload");
+    let IncomingSinkEvent::Light(light) = third else {
+        panic!("live facts must be delivered as lightweight events");
+    };
+    assert_eq!(light.sn, 2);
+    assert_eq!(light.event_type, SinkTypes::Fact);
+}
+
+/// End-to-end with a governance sink (`schema_id: "governance"`): the
+/// governance's own events (create + facts) are delivered to Kafka with
+/// the governance id as subject and message key (mirrors the HTTP and gRPC
+/// governance sinks).
+#[traced_test]
+#[tokio::test]
+async fn kafka_node_governance_sink_receives_governance_events() {
+    let env = RedpandaEnv::start().await;
+    let topic = "gov-node-sink";
+
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        sinks: vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "governance".to_owned(),
+                governance_id: None,
+            },
+            servers: vec![SinkServer {
+                server: "kafka-gov-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    kafka_sink_config(&env.bootstrap_servers, topic),
+                )),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&node.api, "kafka-gov-sink").await;
+    let messages = env.consume_string(topic, 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2, "governance create + one fact");
+
+    let gov_id = governance_id.to_string();
+    assert!(
+        messages.iter().all(|(key, _)| key == &gov_id),
+        "all Kafka message keys must be the governance id"
+    );
+
+    let events: Vec<IncomingSinkEvent> = messages
+        .iter()
+        .map(|(_, payload)| serde_json::from_str(payload).unwrap())
+        .collect();
+    assert_sink_contains_create(&events, &gov_id, 0);
+    assert_sink_contains_fact_full(
+        &events,
+        &gov_id,
+        1,
+        true,
+        Some(example_schema_governance_fact()),
+    );
+}
+
 /// Batch delivery: without `{{event-type}}` in the topic template the whole
 /// batch is delivered as a single Kafka message with a JSON array body, even
 /// when it mixes event types, using the topic template and the subject id as

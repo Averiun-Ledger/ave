@@ -6,12 +6,13 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ave_common::{
     LightEvent, SchemaType, SinkTarget, SinkTypes,
+    bridge::request::{SinkReplayItem, SinkReplayRequest},
     identity::{
         BLAKE3_HASHER, DigestIdentifier, Hash as _, PublicKey,
         SignatureIdentifier, TimeStamp, keys::KeyPair,
@@ -21,8 +22,8 @@ use ave_common::{
     },
 };
 use ave_core::config::{
-    GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, SinkConfigEntry,
-    SinkServer, SinkTransportConfig,
+    GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
+    SinkConfigEntry, SinkServer, SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
 use ave_core::sink::SinkTransport;
@@ -90,7 +91,18 @@ async fn build_transport(
     endpoint: &str,
     config: GrpcSinkConfig,
 ) -> GrpcTransport {
-    GrpcTransport::new("test".to_owned(), config, None)
+    build_transport_named("test", endpoint, config).await
+}
+
+/// Like [`build_transport`] with an explicit sink name, so tests that read
+/// credentials from the environment use a per-test variable and never race
+/// with each other in the shared process environment.
+async fn build_transport_named(
+    name: &str,
+    endpoint: &str,
+    config: GrpcSinkConfig,
+) -> GrpcTransport {
+    GrpcTransport::new(name.to_owned(), config, None)
         .await
         .unwrap_or_else(|e| {
             panic!("transport should build for {endpoint}: {e}")
@@ -166,6 +178,79 @@ async fn grpc_transport_batch_delivery() {
         serde_json::from_slice(&body.payload).expect("payload is JSON");
     assert!(payload.is_array(), "batch payload must be a JSON array");
     assert_eq!(payload.as_array().unwrap().len(), 2);
+}
+
+/// Gzip compression: the client sends compressed payloads and the server
+/// decompresses them transparently; payload bytes arrive intact.
+#[test(tokio::test)]
+async fn grpc_transport_gzip_compression() {
+    let sink = GrpcTestSink::start().await;
+    let config = GrpcSinkConfig {
+        endpoint: sink.endpoint(),
+        compression: HttpCompression::Gzip,
+        ..GrpcSinkConfig::default()
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    transport
+        .send_batch(vec![
+            IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+                SUBJECT_ID, SCHEMA_ID,
+            ))),
+            IncomingSinkEvent::Light(example_light_event(SUBJECT_ID, SCHEMA_ID)),
+        ])
+        .await
+        .unwrap();
+
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 2);
+    assert!(deliveries.iter().all(|d| d.accepted));
+
+    let single = &deliveries[0];
+    let meta = single.meta.as_ref().expect("full event carries meta");
+    assert_eq!(meta.subject_id, SUBJECT_ID);
+    let body = single.body.as_ref().expect("delivery carries a body");
+    let payload: serde_json::Value = serde_json::from_slice(&body.payload)
+        .expect("gzip payload decompresses to JSON");
+    assert_eq!(payload["payload"]["event"], "create");
+
+    let batch_body =
+        deliveries[1].body.as_ref().expect("batch carries a body");
+    let batch: serde_json::Value = serde_json::from_slice(&batch_body.payload)
+        .expect("gzip batch payload decompresses to JSON");
+    assert!(batch.is_array(), "batch payload must be a JSON array");
+    assert_eq!(batch.as_array().unwrap().len(), 2);
+
+    // The wire must actually be compressed (`grpc-encoding: gzip`), not
+    // just decompressible: tonic would accept plaintext transparently.
+    assert!(
+        deliveries
+            .iter()
+            .all(|d| d.metadata.get("grpc-encoding").map(String::as_str)
+                == Some("gzip")),
+        "compressed transports must send grpc-encoding: gzip on every RPC"
+    );
+
+    // Contrast: an uncompressed transport sends no grpc-encoding metadata.
+    let plain = build_transport(
+        &sink.endpoint(),
+        grpc_config(&sink.endpoint()),
+    )
+    .await;
+    plain
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 3);
+    assert!(
+        !deliveries[2].metadata.contains_key("grpc-encoding"),
+        "uncompressed transports must not send grpc-encoding"
+    );
 }
 
 /// A transient status (UNAVAILABLE) is retried until the server accepts.
@@ -282,7 +367,8 @@ async fn grpc_transport_sends_api_key_metadata() {
 #[test(tokio::test)]
 async fn grpc_transport_sends_basic_auth_metadata() {
     let sink = GrpcTestSink::start().await;
-    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "pass-secret");
+    let _guard =
+        TempEnvVar::set("AVE_SINK_PASSWORD_TEST_BASIC_AUTH", "pass-secret");
 
     let config = GrpcSinkConfig {
         auth: Some(GrpcAuthConfig::Basic {
@@ -290,7 +376,9 @@ async fn grpc_transport_sends_basic_auth_metadata() {
         }),
         ..grpc_config(&sink.endpoint())
     };
-    let transport = build_transport(&sink.endpoint(), config).await;
+    let transport =
+        build_transport_named("test-basic-auth", &sink.endpoint(), config)
+            .await;
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
         .await
@@ -305,6 +393,46 @@ async fn grpc_transport_sends_basic_auth_metadata() {
     assert_eq!(deliveries[0].authorization.as_deref(), Some(expected.as_str()));
 }
 
+/// Custom static metadata: user headers reach the server on every RPC,
+/// while keys reserved by the sink contract are silently filtered so the
+/// delivery contract cannot be broken by configuration.
+#[test(tokio::test)]
+async fn grpc_transport_custom_headers_and_reserved_filtering() {
+    let sink = GrpcTestSink::start().await;
+
+    let config = GrpcSinkConfig {
+        headers: HashMap::from([
+            ("x-team".to_owned(), "ledger".to_owned()),
+            ("x-ave-sn".to_owned(), "999".to_owned()),
+            ("authorization".to_owned(), "evil".to_owned()),
+            ("x-api-key".to_owned(), "evil".to_owned()),
+        ]),
+        ..grpc_config(&sink.endpoint())
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 1);
+    let metadata = &deliveries[0].metadata;
+    assert_eq!(metadata.get("x-team").map(String::as_str), Some("ledger"));
+    assert!(
+        !metadata.contains_key("x-ave-sn"),
+        "reserved x-ave-* headers must be filtered"
+    );
+    assert_eq!(
+        deliveries[0].authorization, None,
+        "reserved authorization header must be filtered"
+    );
+    assert_eq!(
+        deliveries[0].api_key, None,
+        "reserved x-api-key header must be filtered"
+    );
+}
+
 /// OAuth2 (parity with the HTTP sink): the first delivery fetches and
 /// caches the token from a real IdP, later deliveries reuse the cache, and
 /// an UNAUTHENTICATED ack forces a refresh and an immediate retry.
@@ -312,7 +440,10 @@ async fn grpc_transport_sends_basic_auth_metadata() {
 async fn grpc_transport_oauth2_fetches_caches_and_refreshes_token() {
     let idp = TestSink::start().await;
     let sink = GrpcTestSink::start().await;
-    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "oauth-secret");
+    let _guard = TempEnvVar::set(
+        "AVE_SINK_PASSWORD_TEST_OAUTH2_FETCH",
+        "oauth-secret",
+    );
 
     let config = GrpcSinkConfig {
         auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
@@ -323,7 +454,9 @@ async fn grpc_transport_oauth2_fetches_caches_and_refreshes_token() {
         retry_base_delay_ms: 1,
         ..grpc_config(&sink.endpoint())
     };
-    let transport = build_transport(&sink.endpoint(), config).await;
+    let transport =
+        build_transport_named("test-oauth2-fetch", &sink.endpoint(), config)
+            .await;
 
     // First delivery: fetches the token and caches it.
     transport
@@ -380,7 +513,10 @@ async fn grpc_transport_oauth2_fetches_caches_and_refreshes_token() {
 async fn grpc_transport_oauth2_proactive_refresh_near_expiry() {
     let idp = TestSink::start().await;
     let sink = GrpcTestSink::start_unary_only().await;
-    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "oauth-secret");
+    let _guard = TempEnvVar::set(
+        "AVE_SINK_PASSWORD_TEST_OAUTH2_PROACTIVE",
+        "oauth-secret",
+    );
 
     let config = GrpcSinkConfig {
         auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
@@ -391,7 +527,12 @@ async fn grpc_transport_oauth2_proactive_refresh_near_expiry() {
         token_refresh_margin_secs: 4_000,
         ..grpc_config(&sink.endpoint())
     };
-    let transport = build_transport(&sink.endpoint(), config).await;
+    let transport = build_transport_named(
+        "test-oauth2-proactive",
+        &sink.endpoint(),
+        config,
+    )
+    .await;
 
     // First delivery: establishes the unary fallback and primes the cache.
     transport
@@ -431,7 +572,10 @@ async fn grpc_transport_oauth2_idp_failure_is_auth_error() {
     idp.set_auth_mode(common::test_sink::AuthResponseMode::TokenFailure)
         .await;
     let sink = GrpcTestSink::start().await;
-    let _guard = TempEnvVar::set("AVE_SINK_PASSWORD_TEST", "wrong-secret");
+    let _guard = TempEnvVar::set(
+        "AVE_SINK_PASSWORD_TEST_OAUTH2_IDP_FAIL",
+        "wrong-secret",
+    );
 
     let config = GrpcSinkConfig {
         auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
@@ -442,7 +586,12 @@ async fn grpc_transport_oauth2_idp_failure_is_auth_error() {
         retry_base_delay_ms: 1,
         ..grpc_config(&sink.endpoint())
     };
-    let transport = build_transport(&sink.endpoint(), config).await;
+    let transport = build_transport_named(
+        "test-oauth2-idp-fail",
+        &sink.endpoint(),
+        config,
+    )
+    .await;
 
     let result = transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1098,6 +1247,425 @@ async fn grpc_node_emits_events_end_to_end() {
     );
 }
 
+/// End-to-end with `events: {Create}`: the create event travels as a full
+/// event while facts travel as lightweight events (light flag, `fact`
+/// event type and the LightEvent JSON body), both in catch-up and live.
+#[test(tokio::test)]
+async fn grpc_node_light_events_for_non_subscribed_types() {
+    let sink = GrpcTestSink::start().await;
+
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with a sink subscribed to Create only: catch-up must deliver
+    // the create full and the fact as a lightweight event.
+    let sink_endpoint = sink.endpoint();
+    let mut owner = owner;
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![make_grpc_sink_entry(
+            "grpc-light-sink",
+            &sink_endpoint,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+            false,
+        )],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "grpc-light-sink").await;
+    sink.wait_for_deliveries(2).await;
+
+    let deliveries = sink.deliveries();
+    let create = &deliveries[0];
+    let create_meta = create.meta.as_ref().expect("create carries meta");
+    assert_eq!(create_meta.sn, 0);
+    assert_eq!(create_meta.event_type, "create");
+    assert!(!create_meta.light, "the create event must be delivered full");
+    let create_body = create.body.as_ref().expect("full event carries a body");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&create_body.payload).expect("payload is JSON");
+    assert_eq!(payload["payload"]["event"], "create");
+
+    let fact = &deliveries[1];
+    let fact_meta = fact.meta.as_ref().expect("fact carries meta");
+    assert_eq!(fact_meta.sn, 1);
+    assert_eq!(fact_meta.event_type, "fact");
+    assert!(fact_meta.light, "facts must travel as light events");
+    assert_eq!(fact_meta.subject_id, subject_id.to_string());
+    let fact_body = fact.body.as_ref().expect("light event carries a body");
+    let light: serde_json::Value = serde_json::from_slice(&fact_body.payload)
+        .expect("light payload is JSON");
+    assert_eq!(light["subject_id"], subject_id.to_string());
+    assert_eq!(light["sn"], 1);
+
+    // A live fact also travels as a lightweight event.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_deliveries(3).await;
+    let deliveries = sink.deliveries();
+    let live_meta = deliveries[2].meta.as_ref().expect("live fact carries meta");
+    assert_eq!(live_meta.sn, 2);
+    assert_eq!(live_meta.event_type, "fact");
+    assert!(live_meta.light, "live facts must travel as light events");
+}
+
+/// End-to-end with a governance sink (`schema_id: "governance"`): the
+/// governance's own events (create + facts) are delivered with the
+/// governance id as subject.
+#[test(tokio::test)]
+async fn grpc_node_governance_sink_receives_governance_events() {
+    let sink = GrpcTestSink::start().await;
+
+    let (owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        sinks: vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "governance".to_owned(),
+                governance_id: None,
+            },
+            servers: vec![SinkServer {
+                server: "grpc-gov-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Grpc(Box::new(
+                    grpc_config(&sink.endpoint()),
+                )),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "grpc-gov-sink").await;
+    sink.wait_for_deliveries(2).await;
+
+    let deliveries = sink.deliveries();
+    let gov_id = governance_id.to_string();
+    let sns: Vec<u64> = deliveries
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(sns, vec![0, 1], "governance events must arrive in order");
+
+    let create_meta = deliveries[0].meta.as_ref().expect("create carries meta");
+    assert_eq!(create_meta.subject_id, gov_id);
+    assert_eq!(create_meta.schema_id, "governance");
+    assert_eq!(create_meta.event_type, "create");
+    assert!(!create_meta.light);
+
+    let fact_meta = deliveries[1].meta.as_ref().expect("fact carries meta");
+    assert_eq!(fact_meta.subject_id, gov_id);
+    assert_eq!(fact_meta.event_type, "fact");
+    assert!(!fact_meta.light);
+}
+
+/// End-to-end with `compression: gzip` and custom headers in the node's
+/// sink config: both options reach the wire on real ledger deliveries
+/// (catch-up and live), and reserved keys stay filtered.
+#[test(tokio::test)]
+async fn grpc_node_gzip_and_custom_headers_end_to_end() {
+    let sink = GrpcTestSink::start().await;
+
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
+            .await
+            .unwrap();
+
+    // Restart with the gzip + headers sink: catch-up delivers the history.
+    let sink_endpoint = sink.endpoint();
+    let mut owner = owner;
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: SCHEMA_ID.to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![SinkServer {
+                server: "grpc-gzip-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Grpc(Box::new(
+                    GrpcSinkConfig {
+                        endpoint: sink_endpoint,
+                        compression: HttpCompression::Gzip,
+                        headers: HashMap::from([
+                            ("x-team".to_owned(), "ledger".to_owned()),
+                            ("x-ave-sn".to_owned(), "999".to_owned()),
+                        ]),
+                        ..GrpcSinkConfig::default()
+                    },
+                )),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "grpc-gzip-sink").await;
+    // Live event after the sink is up.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_deliveries(2).await;
+
+    let deliveries = sink.deliveries();
+    for delivery in &deliveries {
+        assert_eq!(
+            delivery.metadata.get("grpc-encoding").map(String::as_str),
+            Some("gzip"),
+            "every RPC must be gzip-compressed on the wire"
+        );
+        assert_eq!(
+            delivery.metadata.get("x-team").map(String::as_str),
+            Some("ledger"),
+            "custom headers must reach the server"
+        );
+        assert!(
+            !delivery.metadata.contains_key("x-ave-sn"),
+            "reserved headers must stay filtered"
+        );
+        let body = delivery.body.as_ref().expect("delivery carries a body");
+        serde_json::from_slice::<serde_json::Value>(&body.payload)
+            .expect("gzip payload decompresses to JSON");
+    }
+}
+
+/// End-to-end replay: after the initial catch-up, `replay_sink_events`
+/// re-delivers the subject history through the gRPC sink, in order,
+/// without touching the cursor (mirrors the HTTP replay coverage).
+#[test(tokio::test)]
+async fn grpc_node_replay_redelivers_history() {
+    let sink = GrpcTestSink::start().await;
+
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
+            .await
+            .unwrap();
+    for i in 0..2 {
+        emit_fact(
+            &owner.api,
+            subject_id.clone(),
+            serde_json::json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Restart with the gRPC sink: catch-up delivers the 3-event history.
+    let sink_endpoint = sink.endpoint();
+    let mut owner = owner;
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![make_grpc_sink_entry(
+            "grpc-replay-sink",
+            &sink_endpoint,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            false,
+        )],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "grpc-replay-sink").await;
+    sink.wait_for_deliveries(3).await;
+
+    // Replay the whole history: the sink must receive sns 0..=2 again.
+    let response = owner
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "grpc-replay-sink".to_owned(),
+                subject_id: subject_id.to_string(),
+                from_sn: 0,
+            }],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.processed.len(), 1);
+    assert!(response.errors.is_empty());
+    let processed = &response.processed[0];
+    assert_eq!(processed.sink, "grpc-replay-sink");
+    assert_eq!(processed.subject_id, subject_id.to_string());
+    assert_eq!(processed.from_sn, 0);
+
+    wait_for_sink_caught_up(&owner.api, "grpc-replay-sink").await;
+    sink.wait_for_deliveries(6).await;
+    let sns: Vec<u64> = sink
+        .deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2, 0, 1, 2],
+        "replay must re-deliver the history in order; got {sns:?}"
+    );
+}
+
 /// End-to-end with `signature = true`: every delivery carries the node's
 /// Ed25519 signature over the canonical v2 payload, verifiable with the
 /// node's public key (and rejected when the payload is tampered).
@@ -1207,6 +1775,140 @@ async fn grpc_node_delivers_signed_events() {
         node_key
             .verify(content_hash.hash_bytes(), &signature_id)
             .expect("delivery signature must verify");
+
+        // A tampered payload must not verify.
+        let tampered = (b"tampered".to_vec(), timestamp);
+        let tampered_hash = BLAKE3_HASHER
+            .hash(&borsh::to_vec(&tampered).expect("borsh serialization"));
+        assert!(
+            node_key
+                .verify(tampered_hash.hash_bytes(), &signature_id)
+                .is_err(),
+            "signature must not verify for a tampered payload"
+        );
+    }
+}
+
+/// End-to-end with `events: {Create}` and `signature = true`: light events
+/// are signed as well — the signature covers the light payload and the
+/// routing metadata, and verifies against the node's public key (mirrors
+/// the HTTP sink's signed light events).
+#[test(tokio::test)]
+async fn grpc_node_signs_light_events() {
+    let sink = GrpcTestSink::start().await;
+
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &owner.api,
+            subject_id.clone(),
+            serde_json::json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let sink_endpoint = sink.endpoint();
+    let mut owner = owner;
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![make_grpc_sink_entry(
+            "grpc-signed-light-sink",
+            &sink_endpoint,
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+            true,
+        )],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    // Catch-up: create full (sn 0) plus the two facts as light events.
+    wait_for_sink_caught_up(&owner.api, "grpc-signed-light-sink").await;
+    sink.wait_for_deliveries(3).await;
+
+    let node_key =
+        PublicKey::from_str(owner.api.public_key()).expect("node public key");
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 3, "create + two facts");
+    assert!(
+        !deliveries[0].meta.as_ref().expect("create carries meta").light,
+        "the create event must be delivered full"
+    );
+    assert!(
+        deliveries[1..]
+            .iter()
+            .all(|d| d.meta.as_ref().expect("fact carries meta").light),
+        "facts must be delivered as light events"
+    );
+
+    for delivery in &deliveries {
+        let meta = delivery.meta.as_ref().expect("deliveries carry meta");
+        let body = delivery.body.as_ref().expect("deliveries carry a body");
+
+        assert!(!body.signature.is_empty(), "signed delivery");
+        assert_eq!(body.public_key, owner.api.public_key());
+        assert!(body.signature_timestamp > 0);
+
+        let delivery_meta = DeliveryMeta {
+            subject_id: meta.subject_id.clone(),
+            sn: meta.sn,
+            event_type: meta.event_type.clone(),
+        };
+        let canonical =
+            canonical_payload(&body.payload, 2, &[], Some(&delivery_meta));
+        let timestamp = TimeStamp::from_nanos(body.signature_timestamp);
+        let payload_bytes = borsh::to_vec(&(canonical, timestamp))
+            .expect("borsh serialization");
+        let content_hash = BLAKE3_HASHER.hash(&payload_bytes);
+        let signature_id = SignatureIdentifier::from_str(&body.signature)
+            .expect("signature must parse");
+
+        node_key
+            .verify(content_hash.hash_bytes(), &signature_id)
+            .expect("light event signature must verify");
 
         // A tampered payload must not verify.
         let tampered = (b"tampered".to_vec(), timestamp);
@@ -1851,6 +2553,95 @@ async fn grpc_node_stalled_consumer_recovers() {
     );
 }
 
+/// Regression test for the child-shutdown reap: server acks slower than
+/// the subject worker's idle reap timeout (2s by default) must not abort
+/// an in-flight catch-up — the child is working, not idle. Before the fix
+/// the child was reaped mid-catch-up, the abort went unnoticed by the
+/// manager and recovery came ~20s later through a second worker (breaking
+/// exactly-once-per-worker assumptions like `stream_opens == 1`).
+#[test(tokio::test)]
+async fn grpc_node_catch_up_with_slow_acks_completes_without_restart() {
+    let sink = GrpcTestSink::start().await;
+    // 3s per ack: longer than the 2s child reap, shorter than the 5s
+    // request timeout (so no retry fires either).
+    sink.set_stream_ack_delay(3_000);
+    let (owner, dirs, governance_id, _) = start_node_with_history(2).await;
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-slow-ack-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-slow-ack-sink").await;
+    sink.wait_for_deliveries(3).await;
+
+    let sns: Vec<u64> = sink
+        .deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "catch-up must deliver the whole history in order; got {sns:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "a slow ack must not cost a worker restart"
+    );
+}
+
+/// A live delivery whose ack takes longer than the subject worker's reap
+/// timeout must still arrive exactly once and in order: the cursor only
+/// advances after the ack, so even if the child is reaped afterwards the
+/// event is never duplicated nor lost.
+#[test(tokio::test)]
+async fn grpc_node_live_delivery_slow_ack_arrives_once() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(0).await;
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-live-slow-ack-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-live-slow-ack-sink").await;
+    sink.wait_for_deliveries(1).await;
+
+    // Slow the acks down after the catch-up: each live fact takes 3s.
+    sink.set_stream_ack_delay(3_000);
+    for i in 1..=2 {
+        emit_fact(
+            &owner.api,
+            subject_id.clone(),
+            serde_json::json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_deliveries(3).await;
+    let sns: Vec<u64> = sink
+        .deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "live events with slow acks must arrive exactly once, in order; got {sns:?}"
+    );
+}
+
 /// OAuth2 at the node level (parity with `sink_auth_token_refresh` of the
 /// HTTP sink): the worker prefetches the token eagerly on startup
 /// (`warm_up`), deliveries carry it as Bearer metadata and the cache is
@@ -1859,8 +2650,10 @@ async fn grpc_node_stalled_consumer_recovers() {
 async fn grpc_node_oauth2_eager_fetch_and_delivery() {
     let idp = TestSink::start().await;
     let sink = GrpcTestSink::start().await;
-    let _guard =
-        TempEnvVar::set("AVE_SINK_PASSWORD_GRPC_OAUTH_SINK", "oauth-secret");
+    let _guard = TempEnvVar::set(
+        "AVE_SINK_PASSWORD_GRPC_OAUTH_EAGER_SINK",
+        "oauth-secret",
+    );
 
     let (owner, dirs, governance_id, subject_id) =
         start_node_with_history(1).await;
@@ -1875,7 +2668,7 @@ async fn grpc_node_oauth2_eager_fetch_and_delivery() {
     let (owner, _dirs) = restart_with_grpc_sink(
         owner,
         dirs,
-        "grpc-oauth-sink",
+        "grpc-oauth-eager-sink",
         config,
         &governance_id,
     )
@@ -1891,7 +2684,7 @@ async fn grpc_node_oauth2_eager_fetch_and_delivery() {
     .await
     .expect("worker should fetch a token eagerly on startup");
 
-    wait_for_sink_caught_up(&owner.api, "grpc-oauth-sink").await;
+    wait_for_sink_caught_up(&owner.api, "grpc-oauth-eager-sink").await;
     sink.wait_for_accepted(2).await;
 
     // Live event: delivered with the cached token, no extra fetch.
@@ -1928,8 +2721,10 @@ async fn grpc_node_oauth2_eager_fetch_and_delivery() {
 async fn grpc_node_oauth2_refresh_after_unauthenticated() {
     let idp = TestSink::start().await;
     let sink = GrpcTestSink::start().await;
-    let _guard =
-        TempEnvVar::set("AVE_SINK_PASSWORD_GRPC_OAUTH_SINK", "oauth-secret");
+    let _guard = TempEnvVar::set(
+        "AVE_SINK_PASSWORD_GRPC_OAUTH_REFRESH_SINK",
+        "oauth-secret",
+    );
 
     let (owner, dirs, governance_id, subject_id) =
         start_node_with_history(1).await;
@@ -1944,13 +2739,13 @@ async fn grpc_node_oauth2_refresh_after_unauthenticated() {
     let (owner, _dirs) = restart_with_grpc_sink(
         owner,
         dirs,
-        "grpc-oauth-sink",
+        "grpc-oauth-refresh-sink",
         config,
         &governance_id,
     )
     .await;
 
-    wait_for_sink_caught_up(&owner.api, "grpc-oauth-sink").await;
+    wait_for_sink_caught_up(&owner.api, "grpc-oauth-refresh-sink").await;
     sink.wait_for_accepted(2).await;
     assert_eq!(idp.auth_requests().await.len(), 1);
 
@@ -1969,7 +2764,7 @@ async fn grpc_node_oauth2_refresh_after_unauthenticated() {
     .unwrap();
 
     sink.wait_for_accepted(3).await;
-    wait_for_sink_caught_up(&owner.api, "grpc-oauth-sink").await;
+    wait_for_sink_caught_up(&owner.api, "grpc-oauth-refresh-sink").await;
 
     assert_eq!(
         idp.auth_requests().await.len(),
@@ -2185,5 +2980,142 @@ async fn grpc_node_shutdown_drains_in_flight_delivery() {
         sns,
         vec![0, 1, 2],
         "the drained delivery must advance the cursor (no re-delivery); got {sns:?}"
+    );
+}
+
+/// mTLS at the node level (§6.4 of the production plan): a real worker
+/// delivers catch-up and live events to a server that REQUIRES a client
+/// certificate, with the node's `tls` paths (CA + client identity).
+#[test(tokio::test)]
+async fn grpc_node_mtls_end_to_end() {
+    let (sink, material) = GrpcTestSink::start_tls(true).await;
+    let tls_dir = tempfile::tempdir().expect("tls dir");
+    let ca_path = tls_dir.path().join("ca.pem");
+    let client_cert_path = tls_dir.path().join("client.pem");
+    let client_key_path = tls_dir.path().join("client.key");
+    std::fs::write(&ca_path, &material.ca_pem).expect("write CA pem");
+    std::fs::write(&client_cert_path, &material.client_cert_pem)
+        .expect("write client cert pem");
+    std::fs::write(&client_key_path, &material.client_key_pem)
+        .expect("write client key pem");
+
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(1).await;
+    let config = GrpcSinkConfig {
+        tls: Some(GrpcTlsConfig {
+            ca_certificate: ca_path.to_string_lossy().into_owned(),
+            client_certificate: client_cert_path.to_string_lossy().into_owned(),
+            client_key: client_key_path.to_string_lossy().into_owned(),
+        }),
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-mtls-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-mtls-sink").await;
+    sink.wait_for_accepted(2).await;
+
+    // Live event over the same mTLS channel.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_accepted(3).await;
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "every event must arrive over the mTLS channel; got {sns:?}"
+    );
+}
+
+/// mTLS misconfiguration at the node level (parity with
+/// `sink_tls_missing_ca_fails` of the HTTP sink): the server requires a
+/// client certificate and the node has none, so the handshake fails, no
+/// request reaches the server and the subject goes lagging; configuring
+/// the client identity and restarting recovers delivery.
+#[test(tokio::test)]
+async fn grpc_node_mtls_missing_client_cert_lags() {
+    let (sink, material) = GrpcTestSink::start_tls(true).await;
+    let tls_dir = tempfile::tempdir().expect("tls dir");
+    let ca_path = tls_dir.path().join("ca.pem");
+    let client_cert_path = tls_dir.path().join("client.pem");
+    let client_key_path = tls_dir.path().join("client.key");
+    std::fs::write(&ca_path, &material.ca_pem).expect("write CA pem");
+    std::fs::write(&client_cert_path, &material.client_cert_pem)
+        .expect("write client cert pem");
+    std::fs::write(&client_key_path, &material.client_key_pem)
+        .expect("write client key pem");
+
+    let (owner, dirs, governance_id, _subject_id) =
+        start_node_with_history(1).await;
+    // Only the CA: no client identity, so the server aborts the handshake.
+    let config = GrpcSinkConfig {
+        tls: Some(GrpcTlsConfig {
+            ca_certificate: ca_path.to_string_lossy().into_owned(),
+            ..GrpcTlsConfig::default()
+        }),
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-mtls-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_lagging_subjects(&owner.api, "grpc-mtls-sink", 1).await;
+    assert!(
+        sink.deliveries().is_empty(),
+        "no request may survive a failed handshake"
+    );
+
+    // Fix the configuration (client identity) and restart: catch-up
+    // delivers the pending events.
+    let config = GrpcSinkConfig {
+        tls: Some(GrpcTlsConfig {
+            ca_certificate: ca_path.to_string_lossy().into_owned(),
+            client_certificate: client_cert_path.to_string_lossy().into_owned(),
+            client_key: client_key_path.to_string_lossy().into_owned(),
+        }),
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-mtls-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-mtls-sink").await;
+    sink.wait_for_accepted(2).await;
+    let sns: Vec<u64> = sink
+        .accepted_deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1],
+        "the pending events must arrive after fixing the client identity; got {sns:?}"
     );
 }

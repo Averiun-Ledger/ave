@@ -705,7 +705,16 @@ impl Handler<Self> for SinkWorker {
                         return Ok(SinkWorkerResponse::Ok);
                     }
                 }
-                self.in_catch_up.remove(&subject_id);
+                // A child with an in-flight catch-up is not idle: lifting a
+                // cold subject or a slow ack can legitimately take longer
+                // than the reap timeout. Stopping it here would abort the
+                // catch-up silently (the manager keeps its in-flight mark
+                // and does not retry), so leave it alone: the catch-up ends
+                // through its own bounded paths (progress, completion or a
+                // reported error) and the child becomes reapable then.
+                if self.in_catch_up.contains_key(&subject_id) {
+                    return Ok(SinkWorkerResponse::Ok);
+                }
                 if let Some(child_ref) =
                     self.active_subject_workers.remove(&subject_id)
                 {

@@ -238,6 +238,101 @@ behind it until the underlying cause is fixed and the sink is unblocked.
 There is no dead-letter queue yet; watch `core_sink_blocked{sink}` and the
 sink status API for the blocked reason.
 
+## gRPC sink: receiver guide
+
+How to implement a backend that receives events from a gRPC sink.
+
+### Contract
+
+The protobuf contract lives in `common/proto/ave/sink/v1/sink.proto` and is
+the single source of truth. Rust receivers depend on `ave-common` with the
+`sink-grpc` feature and implement the server from
+`ave_common::sink::pb::event_sink_server` — no `.proto` copying. Within
+`ave.sink.v1` only additive changes are allowed (new fields with new
+numbers, new RPCs); breaking changes require a `v2` package.
+
+The service has three RPCs:
+
+- `Deliver(DeliverRequest) -> DeliverResponse` — unary delivery. Required.
+- `Test(TestRequest) -> TestResponse` — non-persistent connectivity test
+  (node test button and health fallback). Required.
+- `DeliverStream(stream DeliverRequest) -> stream DeliverAck` — persistent
+  pipelined stream. Optional but recommended; nodes fall back to unary
+  `Deliver` when it answers `UNIMPLEMENTED`.
+
+Implementing `grpc.health.v1` for the service name `ave.sink.v1.EventSink`
+is optional: without it, the node health-checks through `Test`.
+
+### Status semantics
+
+Every event is delivered **at least once**. Your response decides what the
+node does next:
+
+| Outcome | Unary status | Stream ack | Node behavior |
+|---|---|---|---|
+| Accepted | `OK` | `error_code = 0` | Cursor advances |
+| Transient failure | `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `DEADLINE_EXCEEDED`, `INTERNAL`, `ABORTED`, ... | same codes in `error_code` | Retries with backoff, then lagging + automatic catch-up |
+| Auth failure | `UNAUTHENTICATED` | `16` | Token refresh and immediate retry (OAuth2 sinks) |
+| Permanent rejection | `INVALID_ARGUMENT`, `PERMISSION_DENIED`, `FAILED_PRECONDITION`, `UNIMPLEMENTED`, ... | same codes in `error_code` | Sink blocked until an operator unblocks it |
+
+On the stream, per-message failures travel inside `DeliverAck` (the stream
+survives); only a terminal stream status forces the node to reconnect.
+Backpressure hints are honored both ways: `google.rpc.RetryInfo` details on
+unary `RESOURCE_EXHAUSTED` and `DeliverAck.retry_after_ms` on the stream.
+
+### Idempotency
+
+Duplicates are expected (retries, reconnections, catch-up replays).
+Deduplicate on `EventMeta.idempotency_key` (`{subject_id}-{sn}`) before
+applying an event. `DeliverRequest.request_id` identifies the delivery
+**attempt**, not the event: use it for log correlation and stream acks,
+never for dedup.
+
+### Payloads
+
+`SignedPayload.payload` is the canonical JSON document, byte-identical to
+the HTTP sink body (same parsers work for both). It deserializes into
+`ave_common::DataToSink` (full events) or `ave_common::LightEvent`
+(`meta.light = true`). On batch deliveries (`batch_delivery: true`) `meta`
+is absent and the payload is a JSON array of events.
+
+### Signature verification
+
+With `signature: true` every delivery carries an Ed25519 signature in
+`SignedPayload` (`signature`, `signature_timestamp`, `public_key`) over the
+canonical v2 content: the critical delivery headers in lexicographic order
+(`content-type`, the idempotency/event headers, plus `content-encoding`
+when compressed) followed by the payload bytes. The reference
+implementation of the canonical form is `canonical_payload` in
+`core/src/sink/delivery.rs`, and `grpc_node_delivers_signed_events` in
+`core/tests/grpc_sink.rs` shows full verification (including a tampered
+payload that must not verify).
+
+### Auth and TLS
+
+Auth travels as gRPC metadata: `authorization: Bearer <token>` (OAuth2 or
+static token), `authorization: Basic <base64>` or `x-api-key: <key>`,
+depending on the sink configuration. TLS uses the system roots by default;
+the sink may add a custom CA and/or require a client certificate (mTLS).
+Connections are kept alive with TCP and HTTP/2 keepalives.
+
+### Metrics to watch
+
+- `core_sink_grpc_stream_reconnects_total{sink}` — stream reconnections;
+  sustained growth means an unstable network or an overloaded receiver.
+- `core_sink_grpc_in_flight_batches{sink}` — unacked deliveries; sustained
+  values at the configured window mean the receiver is the bottleneck.
+- `core_sink_grpc_ack_roundtrip_seconds{sink}` — delivery-to-ack latency.
+- `core_sink_request_duration_seconds{sink,result}` and
+  `core_sink_events_total{sink,result}` — per-attempt latency and outcomes,
+  shared with the other transports.
+
+### Reference implementation
+
+`core/tests/common/grpc_test_sink.rs` is a complete in-process receiver
+(~250 lines): unary and stream delivery, per-message acks, TLS/mTLS, health
+service and response-mode injection. Start there.
+
 ## Crate layout
 
 Public modules are grouped by responsibility:
