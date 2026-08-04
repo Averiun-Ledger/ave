@@ -1666,6 +1666,159 @@ async fn grpc_node_replay_redelivers_history() {
     );
 }
 
+/// Regression test: a replay that rewinds a subject whose catch-up is still
+/// QUEUED in the sink worker (catch-up concurrency saturated by another
+/// subject) must restart that queued catch-up from the lower SN. The worker
+/// used to deduplicate pending catch-ups by subject, keeping the first
+/// `from_sn`: the manager's restart with the lower `from_sn` was swallowed
+/// and the events between the replay floor and the queued `from_sn` were
+/// never re-delivered, while the manager's cursor advanced past them.
+///
+/// Scenario: two subjects with cursor at sn 1 and `max_catch_up_concurrency:
+/// 1`. A replay from sn 1 leaves one catch-up active and the other pending
+/// (from_sn 1); a second replay from sn 0 while the active one is still
+/// running must rewind BOTH. The pending one used to keep from_sn 1, so its
+/// sn 0 never arrived again. Whichever subject ends up active vs pending is
+/// nondeterministic, so both are replayed and both are asserted.
+#[test(tokio::test)]
+async fn grpc_node_replay_rewinds_pending_catch_up() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_a) =
+        start_node_with_history(1).await;
+    let (subject_b, _) =
+        create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &owner.api,
+        subject_b.clone(),
+        serde_json::json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with the sink and a single catch-up slot.
+    let sink_endpoint = sink.endpoint();
+    let mut owner = owner;
+    let mut dirs = dirs;
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: SCHEMA_ID.to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![SinkServer {
+                server: "grpc-pending-replay-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Grpc(Box::new(
+                    grpc_config(&sink_endpoint),
+                )),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 1,
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    // Initial catch-up: sns 0 and 1 of both subjects (cursors at 1).
+    wait_for_sink_caught_up(&owner.api, "grpc-pending-replay-sink").await;
+    sink.wait_for_deliveries(4).await;
+    let base = sink.deliveries().len();
+
+    // Slow the acks so the active catch-up stays in flight while the second
+    // replay arrives; the other subject waits in the pending queue.
+    sink.set_stream_ack_delay(2_000);
+
+    // First replay from sn 1: one catch-up goes active, the other pends
+    // with from_sn 1.
+    let response = owner
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![
+                SinkReplayItem {
+                    sink: "grpc-pending-replay-sink".to_owned(),
+                    subject_id: subject_a.to_string(),
+                    from_sn: 1,
+                },
+                SinkReplayItem {
+                    sink: "grpc-pending-replay-sink".to_owned(),
+                    subject_id: subject_b.to_string(),
+                    from_sn: 1,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.processed.len(), 2);
+    assert!(response.errors.is_empty());
+
+    // The active catch-up is delivering: the pending queue now holds the
+    // other subject. Rewind BOTH to sn 0 before it completes.
+    sink.wait_for_deliveries(base + 1).await;
+    let response = owner
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![
+                SinkReplayItem {
+                    sink: "grpc-pending-replay-sink".to_owned(),
+                    subject_id: subject_a.to_string(),
+                    from_sn: 0,
+                },
+                SinkReplayItem {
+                    sink: "grpc-pending-replay-sink".to_owned(),
+                    subject_id: subject_b.to_string(),
+                    from_sn: 0,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.processed.len(), 2);
+    assert!(response.errors.is_empty());
+
+    wait_for_sink_caught_up(&owner.api, "grpc-pending-replay-sink").await;
+
+    // The replay from sn 0 must re-deliver sn 0 of BOTH subjects: the
+    // original delivery plus the replayed one.
+    let accepted = sink.accepted_deliveries();
+    for subject_id in [subject_a, subject_b] {
+        let sn0_count = accepted
+            .iter()
+            .filter(|d| {
+                d.meta.as_ref().is_some_and(|m| {
+                    m.subject_id == subject_id.to_string() && m.sn == 0
+                })
+            })
+            .count();
+        assert_eq!(
+            sn0_count, 2,
+            "subject {subject_id} must receive sn 0 twice (original + \
+             replay); the rewind of a pending catch-up must not be swallowed"
+        );
+    }
+}
+
 /// End-to-end with `signature = true`: every delivery carries the node's
 /// Ed25519 signature over the canonical v2 payload, verifiable with the
 /// node's public key (and rejected when the payload is tampered).
@@ -2203,6 +2356,61 @@ async fn grpc_node_permanent_rejection_blocks_and_unblock_recovers() {
         vec![0, 1],
         "the rejected event must be redelivered after unblocking; got {sns:?}"
     );
+}
+
+/// Regression test: after a manual unblock the worker's healthcheck chain
+/// must resume. `ClearBlocked` used to cancel the pending healthcheck
+/// without scheduling the next one, and since the chain is self-sustaining
+/// (every `HealthCheck` message schedules the following one) the worker was
+/// left with no healthchecks at all after an unblock. The idle check only
+/// runs inside the `HealthCheck` handler, so the worker never reported idle
+/// again — the manager could never idle-kill it — and the sink lost health
+/// monitoring until the next delivery failure. The test sink runs without
+/// the `grpc.health.v1` service, so every healthcheck falls back to the
+/// `Test` RPC and is observable through `wait_for_tests`.
+#[test(tokio::test)]
+async fn grpc_node_unblock_resumes_healthchecks() {
+    let sink = GrpcTestSink::start_without_health_service().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(0).await;
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-unblock-hc-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-unblock-hc-sink").await;
+    sink.wait_for_deliveries(1).await;
+    // The periodic chain is alive: healthchecks arrive via the fallback.
+    sink.wait_for_tests(1).await;
+
+    // Block the sink with a permanent rejection, then fix the server and
+    // unblock manually: catch-up redelivers the rejected event.
+    sink.set_mode(GrpcResponseMode::AlwaysStatus(Code::InvalidArgument));
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_blocked(&owner.api, "grpc-unblock-hc-sink").await;
+    sink.set_mode(GrpcResponseMode::Accept);
+    owner
+        .api
+        .unblock_sink("grpc-unblock-hc-sink".to_owned())
+        .await
+        .unwrap();
+    sink.wait_for_accepted(2).await;
+
+    // The healthcheck chain must resume after the unblock: more Test RPCs
+    // must arrive. Before the fix none ever did.
+    let baseline = sink.tests().len();
+    sink.wait_for_tests(baseline + 2).await;
 }
 
 /// Bearer auth at the node level: the worker reads the secret from the

@@ -552,12 +552,23 @@ impl Handler<Self> for SinkWorker {
                 if self.in_catch_up.len()
                     >= self.server.max_catch_up_concurrency
                 {
-                    if !self
+                    // Already queued: a lower from_sn (e.g. a replay that
+                    // rewound the cursor) must rewind the queued catch-up
+                    // too, like the in-flight restart above — otherwise the
+                    // events below the queued from_sn are never delivered
+                    // while the manager's cursor advances past them.
+                    match self
                         .pending_catch_ups
-                        .iter()
-                        .any(|(id, _)| id == &subject_id)
+                        .iter_mut()
+                        .find(|(id, _)| id == &subject_id)
                     {
-                        self.pending_catch_ups.push_back((subject_id, from_sn));
+                        Some((_, queued_from)) => {
+                            *queued_from = (*queued_from).min(from_sn);
+                        }
+                        None => {
+                            self.pending_catch_ups
+                                .push_back((subject_id, from_sn));
+                        }
                     }
                     return Ok(SinkWorkerResponse::Ok);
                 }
@@ -779,14 +790,23 @@ impl Handler<Self> for SinkWorker {
             SinkWorkerMessage::ClearBlocked => {
                 self.blocked = None;
                 // A manual unblock means the operator considers the sink ready to
-                // retry.  Clear the unhealthy state and any pending healthcheck
-                // so that catch-up requests sent after unblocking are accepted
-                // immediately instead of being ignored until a healthcheck runs.
+                // retry.  Clear the unhealthy state so that catch-up requests
+                // sent after unblocking are accepted immediately instead of
+                // being ignored until a healthcheck runs, and restart the
+                // healthcheck chain: while blocked it dies (a successful check
+                // does not reschedule), and without a fresh schedule the worker
+                // would never run the idle check again — the manager could not
+                // idle-kill it — nor monitor the sink's health.
                 self.healthcheck_state = HealthcheckState::Healthy;
                 self.healthcheck_failures = 0;
-                if let Some(key) = self.pending_healthcheck.take() {
-                    ctx.cancel_timer(key);
-                }
+                let delay_secs = self
+                    .server
+                    .healthcheck_intervals_secs
+                    .first()
+                    .copied()
+                    .unwrap_or(60);
+                let delay_secs = crate::sink::add_jitter(delay_secs);
+                self.schedule_healthcheck(ctx, delay_secs);
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::Stop => {
