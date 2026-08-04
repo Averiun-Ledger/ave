@@ -94,6 +94,9 @@ pub enum SinkSubjectWorkerError {
         /// `true` when the failure happened during catch-up, which requires
         /// removing the subject from `in_catch_up`.
         from_catch_up: bool,
+        /// Events covered by the failed delivery (batch size, 1 for single
+        /// deliveries); used to settle the live in-flight accounting.
+        count: u64,
     },
     /// Authentication failed and the event could not be delivered.
     AuthFailed {
@@ -102,6 +105,8 @@ pub enum SinkSubjectWorkerError {
         error: String,
         /// `true` when the failure happened during catch-up.
         from_catch_up: bool,
+        /// Events covered by the failed delivery (see `DeliveryFailed`).
+        count: u64,
     },
     /// The sink is blocked due to a permanent error.
     Blocked {
@@ -160,6 +165,14 @@ pub struct SinkWorker {
     /// `from_sn` (e.g. a replay that rewound the cursor) restarts the
     /// in-flight catch-up so events are re-delivered in order.
     in_catch_up: HashMap<String, u64>,
+    /// Live events dispatched to each subject worker but not yet reported
+    /// back (success or failure). A subject worker handling these events is
+    /// working, not idle: the child shutdown timer and the worker's own
+    /// idle report must not treat it as inactive. Entries are decremented
+    /// by every terminal report (`DeliveryResult`, delivery/auth errors)
+    /// and cleared wholesale when the sink goes unhealthy or blocked — the
+    /// events they covered are then recovered through lagging + catch-up.
+    live_in_flight: HashMap<String, u64>,
     blocked: Option<String>,
     /// Number of times the sink has "recovered" via healthcheck without
     /// a successful delivery.  Used to detect flapping sinks (LEV-2).
@@ -334,6 +347,7 @@ impl Handler<Self> for SinkWorker {
                     return Err(e);
                 }
 
+                *self.live_in_flight.entry(subject_id.clone()).or_insert(0) += 1;
                 self.schedule_child_shutdown(ctx, subject_id.clone());
 
                 Ok(SinkWorkerResponse::Ok)
@@ -391,6 +405,7 @@ impl Handler<Self> for SinkWorker {
                                 .await;
                                 self.active_subject_workers.clear();
                                 self.in_catch_up.clear();
+                                self.live_in_flight.clear();
                                 match ctx.get_parent::<SinkManager>().await {
                                     Ok(parent) => {
                                         if let Err(e) = parent
@@ -467,6 +482,12 @@ impl Handler<Self> for SinkWorker {
                                 HealthcheckState::Unhealthy {
                                     next_interval_idx: (idx + 1).min(last_idx),
                                 };
+                            // Paused children silently drop queued events and
+                            // a best-effort flush failure reports nothing, so
+                            // live accounting can no longer be settled per
+                            // report: abandon it here. Every event covered is
+                            // re-delivered through lagging + catch-up.
+                            self.live_in_flight.clear();
                             self.broadcast_to_children(
                                 crate::sink::subject_worker::SinkSubjectWorkerMessage::Pause,
                                 ctx,
@@ -574,6 +595,14 @@ impl Handler<Self> for SinkWorker {
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
                 self.cancel_child_shutdown(ctx, &subject_id);
+                if let Some(in_flight) =
+                    self.live_in_flight.get_mut(&subject_id)
+                {
+                    *in_flight = in_flight.saturating_sub(count);
+                    if *in_flight == 0 {
+                        self.live_in_flight.remove(&subject_id);
+                    }
+                }
                 if matches!(result, SendResult::Success) {
                     self.recoveries_after_failure = 0;
                     if matches!(
@@ -715,6 +744,14 @@ impl Handler<Self> for SinkWorker {
                 if self.in_catch_up.contains_key(&subject_id) {
                     return Ok(SinkWorkerResponse::Ok);
                 }
+                // Same for live deliveries: a slow ack may outlast the reap
+                // timeout with more events already queued in the child's
+                // mailbox. Stopping the child would discard them silently
+                // (they are not critical) and they would only come back
+                // through the death-watch recovery ~20s later.
+                if self.live_in_flight.contains_key(&subject_id) {
+                    return Ok(SinkWorkerResponse::Ok);
+                }
                 if let Some(child_ref) =
                     self.active_subject_workers.remove(&subject_id)
                 {
@@ -770,9 +807,17 @@ impl Handler<Self> for SinkWorker {
                 sn,
                 reason,
                 from_catch_up,
+                count,
             } => {
                 if from_catch_up {
                     self.in_catch_up.remove(&subject_id);
+                } else if let Some(in_flight) =
+                    self.live_in_flight.get_mut(&subject_id)
+                {
+                    *in_flight = in_flight.saturating_sub(count);
+                    if *in_flight == 0 {
+                        self.live_in_flight.remove(&subject_id);
+                    }
                 }
                 if self.blocked.is_none()
                     && !matches!(
@@ -817,6 +862,7 @@ impl Handler<Self> for SinkWorker {
                 sn,
                 error,
                 from_catch_up,
+                count,
             } => {
                 if from_catch_up {
                     self.in_catch_up.remove(&subject_id);
@@ -837,6 +883,13 @@ impl Handler<Self> for SinkWorker {
                             .unwrap_or(30);
                         let delay_secs = crate::sink::add_jitter(delay_secs);
                         self.schedule_healthcheck(ctx, delay_secs);
+                    }
+                } else if let Some(in_flight) =
+                    self.live_in_flight.get_mut(&subject_id)
+                {
+                    *in_flight = in_flight.saturating_sub(count);
+                    if *in_flight == 0 {
+                        self.live_in_flight.remove(&subject_id);
                     }
                 }
                 self.schedule_child_shutdown(ctx, subject_id.clone());
@@ -872,6 +925,7 @@ impl Handler<Self> for SinkWorker {
                 .await;
                 self.active_subject_workers.clear();
                 self.in_catch_up.clear();
+                self.live_in_flight.clear();
                 match ctx.get_parent::<SinkManager>().await {
                     Ok(parent) => {
                         if let Err(e) = parent
@@ -899,6 +953,8 @@ impl Handler<Self> for SinkWorker {
                 if from_catch_up {
                     self.in_catch_up.remove(&subject_id);
                 }
+                // A deleted subject can have no live work in flight.
+                self.live_in_flight.remove(&subject_id);
                 self.schedule_child_shutdown(ctx, subject_id.clone());
                 match ctx.get_parent::<SinkManager>().await {
                     Ok(parent) => {
@@ -1126,6 +1182,7 @@ impl SinkWorker {
             idle_reported: false,
             healthcheck_state: HealthcheckState::Healthy,
             in_catch_up: HashMap::new(),
+            live_in_flight: HashMap::new(),
             blocked: None,
             recoveries_after_failure: 0,
             pending_healthcheck: None,
@@ -1172,7 +1229,10 @@ impl SinkWorker {
     /// per idle period to avoid duplicate shutdown timers while the manager is
     /// stopping the worker.
     async fn report_idle(&mut self, ctx: &ActorContext<Self>) {
-        if !self.pending_catch_ups.is_empty() || !self.in_catch_up.is_empty() {
+        if !self.pending_catch_ups.is_empty()
+            || !self.in_catch_up.is_empty()
+            || !self.live_in_flight.is_empty()
+        {
             return;
         }
         if self.idle_reported {

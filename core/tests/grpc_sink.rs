@@ -2596,9 +2596,9 @@ async fn grpc_node_catch_up_with_slow_acks_completes_without_restart() {
 }
 
 /// A live delivery whose ack takes longer than the subject worker's reap
-/// timeout must still arrive exactly once and in order: the cursor only
-/// advances after the ack, so even if the child is reaped afterwards the
-/// event is never duplicated nor lost.
+/// timeout must still arrive exactly once and in order: the child is
+/// working, not idle, so the reap must leave it alone, and the cursor
+/// only advances after the ack, so no event is ever duplicated nor lost.
 #[test(tokio::test)]
 async fn grpc_node_live_delivery_slow_ack_arrives_once() {
     let sink = GrpcTestSink::start().await;
@@ -2639,6 +2639,168 @@ async fn grpc_node_live_delivery_slow_ack_arrives_once() {
         sns,
         vec![0, 1, 2],
         "live events with slow acks must arrive exactly once, in order; got {sns:?}"
+    );
+}
+
+/// Regression test for the live-delivery reap: with acks slower than the
+/// subject worker's idle reap timeout (2s by default), a burst of live
+/// events must be delivered by the SAME worker. The reap timer is re-armed
+/// on every dispatch and every progress report, but progress only arrives
+/// after the ack — so with `ack_delay > reap_timeout + burst spacing` the
+/// timer fires while the child is blocked mid-delivery with the next event
+/// still queued in its mailbox. The stop discards that queued event (it is
+/// not critical), the cursor stalls and the event only comes back ~20s
+/// later through the death-watch recovery — with a second worker and a
+/// second stream.
+#[test(tokio::test)]
+async fn grpc_node_live_burst_slow_ack_no_worker_restart() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, subject_id) =
+        start_node_with_history(0).await;
+    // 10s request timeout: the 4s ack can never die of timeout, so the
+    // delivery succeeds and only the child reap can interfere.
+    let config = GrpcSinkConfig {
+        request_timeout_ms: 10_000,
+        ..grpc_config(&sink.endpoint())
+    };
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-burst-slow-ack-sink",
+        config,
+        &governance_id,
+    )
+    .await;
+
+    wait_for_sink_caught_up(&owner.api, "grpc-burst-slow-ack-sink").await;
+    sink.wait_for_deliveries(1).await;
+
+    // 4s per ack: the reap timer (2s after the last dispatch) fires while
+    // the first delivery is still blocked and the second fact is queued in
+    // the child's mailbox.
+    sink.set_stream_ack_delay(4_000);
+    for i in 1..=2 {
+        emit_fact(
+            &owner.api,
+            subject_id.clone(),
+            serde_json::json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_deliveries(3).await;
+    let sns: Vec<u64> = sink
+        .deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1, 2],
+        "the burst must arrive exactly once, in order; got {sns:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "a slow ack must not discard queued events nor cost a worker restart"
+    );
+}
+
+/// Regression test for the sink-worker idle kill: with an ack slower than
+/// `sink_worker_idle_timeout_ms`, the worker used to report itself idle in
+/// the middle of a live delivery (in-flight live events were not tracked as
+/// activity), so the manager shut it down ~one idle timeout later. The
+/// shutdown drained the in-flight delivery, the cursor never advanced and
+/// the death-watch recovery spawned a second worker with a second stream,
+/// re-delivering the event. The fix accounts live deliveries in flight, so
+/// the worker is never idle while one is pending and the event arrives
+/// exactly once through the original stream.
+#[test(tokio::test)]
+async fn grpc_node_slow_live_delivery_no_idle_kill() {
+    let sink = GrpcTestSink::start().await;
+    let (mut owner, mut dirs, governance_id, subject_id) =
+        start_node_with_history(0).await;
+
+    // Inline restart: the sink worker idle timeout is set to 5s so the buggy
+    // idle report fires at ~5s and the kill lands at ~10s, while the 12s ack
+    // keeps the live delivery in flight across both (the 15s request timeout
+    // can never abort it).
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: SCHEMA_ID.to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![SinkServer {
+                server: "grpc-idle-kill-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Grpc(Box::new(
+                    GrpcSinkConfig {
+                        endpoint: sink.endpoint(),
+                        request_timeout_ms: 15_000,
+                        ..GrpcSinkConfig::default()
+                    },
+                )),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                sink_worker_idle_timeout_ms: 5_000,
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "grpc-idle-kill-sink").await;
+    sink.wait_for_deliveries(1).await;
+
+    // 12s per ack: the delivery outlives the idle report (~5s) and the
+    // scheduled worker shutdown (~10s).
+    sink.set_stream_ack_delay(12_000);
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    sink.wait_for_deliveries(2).await;
+    let sns: Vec<u64> = sink
+        .deliveries()
+        .iter()
+        .filter_map(|d| d.meta.as_ref().map(|m| m.sn))
+        .collect();
+    assert_eq!(
+        sns,
+        vec![0, 1],
+        "the slow live event must arrive exactly once; got {sns:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "a worker busy with a live delivery must never be killed as idle"
     );
 }
 

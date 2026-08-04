@@ -176,7 +176,7 @@ impl Handler<Self> for SinkSubjectWorker {
                         self.report_success(ctx, subject_id, sn, false, 1).await
                     }
                     Err(e) => {
-                        self.report_error(ctx, subject_id, sn, e, false).await
+                        self.report_error(ctx, subject_id, sn, e, false, 1).await
                     }
                 }
 
@@ -270,7 +270,7 @@ impl Handler<Self> for SinkSubjectWorker {
                     Err(e) => {
                         // The whole chain stops on failure: the subject goes
                         // back to lagging and catch-up retries it later.
-                        self.report_error(ctx, subject_id, sn, e, true).await;
+                        self.report_error(ctx, subject_id, sn, e, true, 1).await;
                     }
                 }
 
@@ -430,7 +430,7 @@ impl SinkSubjectWorker {
                     }
                 }
                 Err(e) => {
-                    self.report_error(ctx, subject_id, first_sn, e, true).await;
+                    self.report_error(ctx, subject_id, first_sn, e, true, count).await;
                 }
             }
             return Ok(());
@@ -514,7 +514,7 @@ impl SinkSubjectWorker {
                         .await
                 }
                 Err(e) => {
-                    self.report_error(ctx, subject_id, first_sn, e, false).await
+                    self.report_error(ctx, subject_id, first_sn, e, false, count).await
                 }
             }
         }
@@ -562,7 +562,9 @@ impl SinkSubjectWorker {
     /// Report a delivery failure to the parent worker following the sink
     /// error taxonomy: auth failures send the subject to lagging, retryable
     /// network failures are retried via catch-up and permanent failures
-    /// block the sink.
+    /// block the sink. `count` is the number of events covered by the
+    /// failed delivery (batch size for batch flushes, 1 for individual
+    /// deliveries), used to settle the parent's live in-flight accounting.
     async fn report_error(
         &self,
         ctx: &ActorContext<Self>,
@@ -570,6 +572,7 @@ impl SinkSubjectWorker {
         sn: u64,
         error: SinkError,
         from_catch_up: bool,
+        count: u64,
     ) {
         let worker_error = match error {
             e @ SinkError::Auth { .. } => SinkSubjectWorkerError::AuthFailed {
@@ -577,6 +580,7 @@ impl SinkSubjectWorker {
                 sn,
                 error: e.to_string(),
                 from_catch_up,
+                count,
             },
             e @ SinkError::Delivery {
                 retryable: true, ..
@@ -585,6 +589,7 @@ impl SinkSubjectWorker {
                 sn,
                 reason: e.to_string(),
                 from_catch_up,
+                count,
             },
             // Delivery { retryable: false } | ClientBuild | Rejected | Shutdown
             e => SinkSubjectWorkerError::Blocked {
