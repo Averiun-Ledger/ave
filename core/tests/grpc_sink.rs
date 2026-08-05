@@ -22,7 +22,7 @@ use ave_common::{
     },
 };
 use ave_core::config::{
-    GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
+    SinkAuthMethod, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
     SinkConfigEntry, SinkServer, SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
@@ -253,6 +253,59 @@ async fn grpc_transport_gzip_compression() {
     );
 }
 
+/// Zstd compression: the client sends compressed payloads and the server
+/// decompresses them transparently; payload bytes arrive intact.
+#[test(tokio::test)]
+async fn grpc_transport_zstd_compression() {
+    let sink = GrpcTestSink::start().await;
+    let config = GrpcSinkConfig {
+        endpoint: sink.endpoint(),
+        compression: HttpCompression::Zstd,
+        ..GrpcSinkConfig::default()
+    };
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    transport
+        .send_batch(vec![
+            IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+                SUBJECT_ID, SCHEMA_ID,
+            ))),
+            IncomingSinkEvent::Light(example_light_event(SUBJECT_ID, SCHEMA_ID)),
+        ])
+        .await
+        .unwrap();
+
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 2);
+    assert!(deliveries.iter().all(|d| d.accepted));
+
+    let single = &deliveries[0];
+    let body = single.body.as_ref().expect("delivery carries a body");
+    let payload: serde_json::Value = serde_json::from_slice(&body.payload)
+        .expect("zstd payload decompresses to JSON");
+    assert_eq!(payload["payload"]["event"], "create");
+
+    let batch_body =
+        deliveries[1].body.as_ref().expect("batch carries a body");
+    let batch: serde_json::Value = serde_json::from_slice(&batch_body.payload)
+        .expect("zstd batch payload decompresses to JSON");
+    assert_eq!(batch.as_array().expect("batch is an array").len(), 2);
+
+    // The wire must actually be compressed (`grpc-encoding: zstd`), not
+    // just decompressible: tonic would accept plaintext transparently.
+    assert!(
+        deliveries
+            .iter()
+            .all(|d| d.metadata.get("grpc-encoding").map(String::as_str)
+                == Some("zstd")),
+        "compressed transports must send grpc-encoding: zstd on every RPC"
+    );
+}
+
 /// A transient status (UNAVAILABLE) is retried until the server accepts.
 #[test(tokio::test)]
 async fn grpc_transport_retries_transient_status() {
@@ -330,7 +383,7 @@ async fn grpc_transport_sends_api_key_metadata() {
     let _guard2 = TempEnvVar::set("AVE_SINK_APIKEY_TEST", "key-secret");
 
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::ApiKey),
+        auth: Some(SinkAuthMethod::ApiKey),
         ..grpc_config(&sink.endpoint())
     };
     let transport = build_transport(&sink.endpoint(), config).await;
@@ -345,7 +398,7 @@ async fn grpc_transport_sends_api_key_metadata() {
 
     // Bearer token auth: `authorization: Bearer <token>` metadata.
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::BearerToken),
+        auth: Some(SinkAuthMethod::BearerToken),
         ..grpc_config(&sink.endpoint())
     };
     let transport = build_transport(&sink.endpoint(), config).await;
@@ -371,7 +424,7 @@ async fn grpc_transport_sends_basic_auth_metadata() {
         TempEnvVar::set("AVE_SINK_PASSWORD_TEST_BASIC_AUTH", "pass-secret");
 
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::Basic {
+        auth: Some(SinkAuthMethod::Basic {
             username: "alice".to_owned(),
         }),
         ..grpc_config(&sink.endpoint())
@@ -446,7 +499,7 @@ async fn grpc_transport_oauth2_fetches_caches_and_refreshes_token() {
     );
 
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+        auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url: idp.auth_url(),
             username: "test-user".to_owned(),
             ..SinkAuthConfig::default()
@@ -519,7 +572,7 @@ async fn grpc_transport_oauth2_proactive_refresh_near_expiry() {
     );
 
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+        auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url: idp.auth_url(),
             username: "test-user".to_owned(),
             ..SinkAuthConfig::default()
@@ -578,7 +631,7 @@ async fn grpc_transport_oauth2_idp_failure_is_auth_error() {
     );
 
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+        auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url: idp.auth_url(),
             username: "test-user".to_owned(),
             ..SinkAuthConfig::default()
@@ -789,7 +842,7 @@ async fn grpc_transport_exposes_stream_metrics() {
 async fn grpc_transport_auth_missing_secret_is_build_error() {
     let sink = GrpcTestSink::start().await;
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::BearerToken),
+        auth: Some(SinkAuthMethod::BearerToken),
         ..grpc_config(&sink.endpoint())
     };
     let result =
@@ -1550,6 +1603,110 @@ async fn grpc_node_gzip_and_custom_headers_end_to_end() {
         let body = delivery.body.as_ref().expect("delivery carries a body");
         serde_json::from_slice::<serde_json::Value>(&body.payload)
             .expect("gzip payload decompresses to JSON");
+    }
+}
+
+/// End-to-end with `compression: zstd` in the node's sink config: real
+/// ledger deliveries (catch-up and live) reach the wire zstd-compressed.
+#[test(tokio::test)]
+async fn grpc_node_zstd_end_to_end() {
+    let sink = GrpcTestSink::start().await;
+
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
+            .await
+            .unwrap();
+
+    // Restart with the zstd sink: catch-up delivers the history.
+    let sink_endpoint = sink.endpoint();
+    let mut owner = owner;
+    let owner_keys: KeyPair = owner.keys.clone();
+    let owner_local_db = dirs[0].path().to_path_buf();
+    let owner_ext_db = dirs[1].path().to_path_buf();
+    owner.token.cancel();
+    join_all(owner.handler.iter_mut()).await;
+
+    let (owner, mut owner_dirs2) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(owner_keys),
+        local_db: Some(owner_local_db),
+        ext_db: Some(owner_ext_db),
+        sinks: vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: SCHEMA_ID.to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![SinkServer {
+                server: "grpc-zstd-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: SinkTransportConfig::Grpc(Box::new(
+                    GrpcSinkConfig {
+                        endpoint: sink_endpoint,
+                        compression: HttpCompression::Zstd,
+                        ..GrpcSinkConfig::default()
+                    },
+                )),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                max_catch_up_concurrency: 2,
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut owner_dirs2);
+    node_running(&owner.api).await.unwrap();
+
+    wait_for_sink_caught_up(&owner.api, "grpc-zstd-sink").await;
+    // Live event after the sink is up.
+    emit_fact(
+        &owner.api,
+        subject_id.clone(),
+        serde_json::json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_deliveries(2).await;
+
+    let deliveries = sink.deliveries();
+    for delivery in &deliveries {
+        assert_eq!(
+            delivery.metadata.get("grpc-encoding").map(String::as_str),
+            Some("zstd"),
+            "every RPC must be zstd-compressed on the wire"
+        );
+        let body = delivery.body.as_ref().expect("delivery carries a body");
+        serde_json::from_slice::<serde_json::Value>(&body.payload)
+            .expect("zstd payload decompresses to JSON");
     }
 }
 
@@ -2425,7 +2582,7 @@ async fn grpc_node_delivers_with_bearer_auth() {
     let (owner, dirs, governance_id, _subject_id) =
         start_node_with_history(1).await;
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::BearerToken),
+        auth: Some(SinkAuthMethod::BearerToken),
         ..grpc_config(&sink.endpoint())
     };
     let (owner, _dirs) = restart_with_grpc_sink(
@@ -3028,7 +3185,7 @@ async fn grpc_node_oauth2_eager_fetch_and_delivery() {
     let (owner, dirs, governance_id, subject_id) =
         start_node_with_history(1).await;
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+        auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url: idp.auth_url(),
             username: "test-user".to_owned(),
             ..SinkAuthConfig::default()
@@ -3099,7 +3256,7 @@ async fn grpc_node_oauth2_refresh_after_unauthenticated() {
     let (owner, dirs, governance_id, subject_id) =
         start_node_with_history(1).await;
     let config = GrpcSinkConfig {
-        auth: Some(GrpcAuthConfig::OAuth2(SinkAuthConfig {
+        auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url: idp.auth_url(),
             username: "test-user".to_owned(),
             ..SinkAuthConfig::default()

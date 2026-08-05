@@ -856,9 +856,6 @@ pub struct SinkAuthConfigHttp {
     pub auth_url: String,
     /// Username for the token endpoint
     pub username: String,
-    /// API key for Api-Key header authentication. Always redacted (`"***"`)
-    /// in API responses; the real value never leaves the node.
-    pub api_key: String,
     /// OAuth2 grant type. Defaults to `password` for backwards compatibility.
     #[serde(default)]
     pub grant_type: OAuth2GrantTypeHttp,
@@ -868,6 +865,29 @@ pub struct SinkAuthConfigHttp {
     /// Optional OAuth2 scope(s) requested when obtaining a token
     #[serde(default)]
     pub scope: String,
+}
+
+/// Authentication mode of a sink delivery transport (HTTP and gRPC).
+///
+/// Secrets are never stored in the configuration: they are read from the
+/// `AVE_SINK_TOKEN_{{SERVER}}`, `AVE_SINK_APIKEY_{{SERVER}}` and
+/// `AVE_SINK_PASSWORD_{{SERVER}}` environment variables.
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkAuthMethodHttp {
+    /// `Authorization: Bearer <token>` on every delivery.
+    BearerToken,
+    /// API key on every delivery (`Api-Key` header in HTTP, `x-api-key`
+    /// metadata in gRPC).
+    ApiKey,
+    /// `Authorization: Basic base64(username:password)` on every delivery.
+    Basic {
+        /// Username of the basic credentials.
+        username: String,
+    },
+    /// OAuth2 with token cache and refresh on 401 / UNAUTHENTICATED.
+    #[serde(rename = "oauth2")]
+    OAuth2(SinkAuthConfigHttp),
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
@@ -924,6 +944,8 @@ pub enum HttpCompressionHttp {
     None,
     /// gzip compression (`Content-Encoding: gzip`).
     Gzip,
+    /// zstd compression (`Content-Encoding: zstd`).
+    Zstd,
 }
 
 impl From<ave_bridge::ave_common::sink::HttpCompression>
@@ -933,6 +955,7 @@ impl From<ave_bridge::ave_common::sink::HttpCompression>
         match value {
             ave_bridge::ave_common::sink::HttpCompression::None => Self::None,
             ave_bridge::ave_common::sink::HttpCompression::Gzip => Self::Gzip,
+            ave_bridge::ave_common::sink::HttpCompression::Zstd => Self::Zstd,
         }
     }
 }
@@ -944,7 +967,7 @@ pub struct HttpSinkConfigHttp {
     /// and `{{event-type}}` placeholders.
     pub url: String,
     /// Per-sink authentication configuration
-    pub auth: Option<SinkAuthConfigHttp>,
+    pub auth: Option<SinkAuthMethodHttp>,
     /// TCP connect timeout in milliseconds
     pub connect_timeout_ms: u64,
     /// Request timeout in milliseconds
@@ -1276,22 +1299,6 @@ pub struct KafkaSinkConfigHttp {
     pub kerberos: Option<KafkaKerberosConfigHttp>,
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GrpcAuthConfigHttp {
-    /// `authorization: Bearer <token>` metadata on every RPC.
-    BearerToken,
-    /// `x-api-key: <key>` metadata on every RPC.
-    ApiKey,
-    /// `authorization: Basic base64(username:password)` metadata on every RPC.
-    Basic {
-        /// Username of the basic credentials.
-        username: String,
-    },
-    /// OAuth2 with token cache and refresh on UNAUTHENTICATED.
-    OAuth2(SinkAuthConfigHttp),
-}
-
 #[derive(Debug, Default, Serialize, Clone, ToSchema, Deserialize)]
 pub struct GrpcTlsConfigHttp {
     /// Path to an additional PEM-encoded root CA certificate to trust.
@@ -1307,7 +1314,7 @@ pub struct GrpcSinkConfigHttp {
     /// Server endpoint (`http://host:port`, `https://host:port` or `dns:///host:port`).
     pub endpoint: String,
     /// Per-RPC authentication.
-    pub auth: Option<GrpcAuthConfigHttp>,
+    pub auth: Option<SinkAuthMethodHttp>,
     /// TLS customization: additional root CA and mTLS identity.
     pub tls: Option<GrpcTlsConfigHttp>,
     /// Whether deliveries are signed with the node identity (canonical v2).
@@ -1418,7 +1425,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             ave_bridge::SinkTransportConfig::Http(http) => {
                 SinkTransportConfigHttp::Http(Box::new(HttpSinkConfigHttp {
                     url: http.url,
-                    auth: http.auth.map(sink_auth_to_http),
+                    auth: http.auth.map(sink_auth_method_to_http),
                     connect_timeout_ms: http.connect_timeout_ms,
                     request_timeout_ms: http.request_timeout_ms,
                     max_retries: http.max_retries,
@@ -1494,22 +1501,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             ave_bridge::SinkTransportConfig::Grpc(grpc) => {
                 SinkTransportConfigHttp::Grpc(Box::new(GrpcSinkConfigHttp {
                     endpoint: grpc.endpoint,
-                    auth: grpc.auth.map(|a| match a {
-                        ave_bridge::ave_common::sink::GrpcAuthConfig::BearerToken => {
-                            GrpcAuthConfigHttp::BearerToken
-                        }
-                        ave_bridge::ave_common::sink::GrpcAuthConfig::ApiKey => {
-                            GrpcAuthConfigHttp::ApiKey
-                        }
-                        ave_bridge::ave_common::sink::GrpcAuthConfig::Basic {
-                            username,
-                        } => GrpcAuthConfigHttp::Basic { username },
-                        ave_bridge::ave_common::sink::GrpcAuthConfig::OAuth2(
-                            auth,
-                        ) => {
-                            GrpcAuthConfigHttp::OAuth2(sink_auth_to_http(auth))
-                        }
-                    }),
+                    auth: grpc.auth.map(sink_auth_method_to_http),
                     tls: grpc.tls.map(|t| GrpcTlsConfigHttp {
                         ca_certificate: t.ca_certificate,
                         client_certificate: t.client_certificate,
@@ -1564,15 +1556,28 @@ fn sink_auth_to_http(
     SinkAuthConfigHttp {
         auth_url: value.auth_url,
         username: value.username,
-        // Never expose the configured API key through the API.
-        api_key: if value.api_key.is_empty() {
-            String::new()
-        } else {
-            "***".to_owned()
-        },
         grant_type: value.grant_type.into(),
         client_id: value.client_id,
         scope: value.scope,
+    }
+}
+
+fn sink_auth_method_to_http(
+    value: ave_bridge::ave_common::sink::SinkAuthMethod,
+) -> SinkAuthMethodHttp {
+    match value {
+        ave_bridge::ave_common::sink::SinkAuthMethod::BearerToken => {
+            SinkAuthMethodHttp::BearerToken
+        }
+        ave_bridge::ave_common::sink::SinkAuthMethod::ApiKey => {
+            SinkAuthMethodHttp::ApiKey
+        }
+        ave_bridge::ave_common::sink::SinkAuthMethod::Basic {
+            username,
+        } => SinkAuthMethodHttp::Basic { username },
+        ave_bridge::ave_common::sink::SinkAuthMethod::OAuth2(auth) => {
+            SinkAuthMethodHttp::OAuth2(sink_auth_to_http(auth))
+        }
     }
 }
 
@@ -1606,17 +1611,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The API key configured for a sink must never appear in the HTTP
-    /// representation exposed through the API: it is redacted to `"***"`.
-    /// TLS and signature settings must survive the conversion.
+    /// The auth method of a sink must survive the conversion to the HTTP
+    /// representation with its tagged shape. TLS and signature settings
+    /// must survive the conversion as well.
     #[test]
-    fn sink_server_http_redacts_api_key() {
+    fn sink_server_http_maps_auth_method() {
         let server: ave_bridge::SinkServer = serde_json::from_value(json!({
             "server": "secure-sink",
             "transport": {
                 "type": "http",
                 "url": "https://sink.example.com/events",
-                "auth": { "auth_url": "", "username": "", "api_key": "real-secret-key" },
+                "auth": { "type": "basic", "username": "ave" },
                 "tls": { "ca_certificate": "/etc/ave/ca.pem" },
                 "signature": true
             }
@@ -1627,24 +1632,29 @@ mod tests {
             .expect("sink server should serialize");
 
         assert!(
-            !json.contains("real-secret-key"),
-            "the API key must never be exposed: {json}"
+            json.contains("\"type\":\"basic\""),
+            "the auth method must keep its tagged shape: {json}"
         );
-        assert!(json.contains("***"), "the API key must be redacted: {json}");
+        assert!(json.contains("\"username\":\"ave\""), "{json}");
         assert!(json.contains("/etc/ave/ca.pem"));
         assert!(json.contains("\"signature\":true"));
     }
 
-    /// An empty API key stays empty instead of being redacted, so the
-    /// response does not suggest a key is configured when it is not.
+    /// The inner OAuth2 fields of an auth method are carried over by the
+    /// conversion.
     #[test]
-    fn sink_server_http_keeps_empty_api_key_empty() {
+    fn sink_server_http_maps_oauth2_auth() {
         let server: ave_bridge::SinkServer = serde_json::from_value(json!({
-            "server": "plain-sink",
+            "server": "oauth-sink",
             "transport": {
                 "type": "http",
                 "url": "http://sink.example.com/events",
-                "auth": { "auth_url": "", "username": "", "api_key": "" }
+                "auth": {
+                    "type": "oauth2",
+                    "auth_url": "https://idp.example.com/token",
+                    "username": "sink-user",
+                    "grant_type": "password"
+                }
             }
         }))
         .expect("sink server should deserialize");
@@ -1654,8 +1664,14 @@ mod tests {
         else {
             panic!("expected HTTP transport");
         };
-        let auth = http.auth.expect("auth config should be present");
-        assert!(auth.api_key.is_empty());
+        let SinkAuthMethodHttp::OAuth2(auth) =
+            http.auth.expect("auth config should be present")
+        else {
+            panic!("expected OAuth2 auth method");
+        };
+        assert_eq!(auth.auth_url, "https://idp.example.com/token");
+        assert_eq!(auth.username, "sink-user");
+        assert_eq!(auth.grant_type, OAuth2GrantTypeHttp::Password);
     }
 
     /// The HTTP mirror must expose every effective knob of the sink config:

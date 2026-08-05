@@ -225,8 +225,8 @@ fn log_effective_configuration(
 
 /// Config keys whose values must never appear in logs. Non-empty values are
 /// replaced with `"***"`; empty values are kept so "not configured" stays
-/// visible. (`api_key` is already redacted by `SinkAuthConfig` itself; the
-/// rest are redacted here.)
+/// visible. (Sink credentials are not in the config by design — they are
+/// read from environment variables — so only node-level secrets land here.)
 const REDACTED_CONFIG_KEYS: [&str; 3] = ["api_key", "password", "superadmin"];
 
 /// Builds the effective-configuration dump: one `(section, lines)` pair per
@@ -742,7 +742,7 @@ async fn redirect_http_to_https(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ave_bridge::ave_common::sink::SinkAuthConfig;
+    use ave_bridge::ave_common::sink::{SinkAuthConfig, SinkAuthMethod};
     use ave_bridge::{
         HttpSinkConfig, KafkaSinkConfig, SinkConfigEntry, SinkServer,
         SinkTarget, SinkTransportConfig,
@@ -764,10 +764,12 @@ mod tests {
                     transport: SinkTransportConfig::Http(Box::new(
                         HttpSinkConfig {
                             url: "https://sink.example.com".to_string(),
-                            auth: Some(SinkAuthConfig {
-                                api_key: "top-secret-key".to_string(),
+                            auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
+                                auth_url: "https://idp.example.com/token"
+                                    .to_string(),
+                                username: "sink-user".to_string(),
                                 ..SinkAuthConfig::default()
-                            }),
+                            })),
                             ..HttpSinkConfig::default()
                         },
                     )),
@@ -851,7 +853,8 @@ mod tests {
     const CRITICAL_DUMP_PATHS: &[&str] = &[
         "auth.superadmin: \"***\"",
         "sinks[0].servers[0].transport.url: \"https://sink.example.com\"",
-        "sinks[0].servers[0].transport.auth.api_key: \"***\"",
+        "sinks[0].servers[0].transport.auth.type: \"oauth2\"",
+        "sinks[0].servers[0].transport.auth.auth_url: \"https://idp.example.com/token\"",
         "sinks[0].servers[0].transport.retry_base_delay_ms: 500",
         "sinks[0].servers[0].transport.health_check_url: null",
         "sinks[0].servers[0].transport.token_refresh_margin_secs: 30",
@@ -910,16 +913,13 @@ mod tests {
                 !line.contains("superadmin-secret-name"),
                 "superadmin leaks in: {line}"
             );
-            assert!(
-                !line.contains("top-secret-key"),
-                "sink api_key leaks in: {line}"
-            );
         }
 
         // Any leaf key whose final segment looks like a secret must be
-        // redacted (either by REDACTED_CONFIG_KEYS or by a custom Serialize
-        // such as `SinkAuthConfig.api_key`). Checking only the last segment
-        // avoids false positives on non-secret fields like `api_key.prefix`.
+        // redacted (REDACTED_CONFIG_KEYS; sink configs carry no secrets by
+        // design — credentials live in environment variables). Checking
+        // only the last segment avoids false positives on non-secret
+        // fields like `api_key.prefix`.
         let secret_words =
             ["password", "secret", "token", "api_key", "credential"];
         for line in &lines {

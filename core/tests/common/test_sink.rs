@@ -651,6 +651,22 @@ impl TestSink {
                     }
                 }
             }
+            Some("zstd") => {
+                match zstd::bulk::decompress(body.as_ref(), 16 * 1024 * 1024)
+                {
+                    Ok(buf) => {
+                        decoded = buf;
+                        &decoded
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("invalid zstd body: {}", e),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             _ => &body,
         };
 

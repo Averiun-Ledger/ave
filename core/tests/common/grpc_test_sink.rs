@@ -201,7 +201,8 @@ impl GrpcTestSink {
         }
         let router = server.add_service(
             EventSinkServer::new(service)
-                .accept_compressed(tonic::codec::CompressionEncoding::Gzip),
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .accept_compressed(tonic::codec::CompressionEncoding::Zstd),
         );
         let (router, health_reporter) = if with_health {
             let (reporter, health_service) =

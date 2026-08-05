@@ -10,10 +10,10 @@ use ave_common::Error;
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 
 pub use ave_common::sink::{
-    GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
-    HttpSinkConfig, HttpTlsVersion, KafkaAcks,
-    KafkaCompression, KafkaKerberosConfig, KafkaKeyStrategy,
-    KafkaSaslMechanism, KafkaSecurityConfig, KafkaSinkConfig, KafkaTlsConfig,
+    GrpcSinkConfig, GrpcTlsConfig, HttpCompression, HttpSinkConfig,
+    HttpTlsVersion, KafkaAcks, KafkaCompression, KafkaKerberosConfig,
+    KafkaKeyStrategy, KafkaSaslMechanism, KafkaSecurityConfig,
+    KafkaSinkConfig, KafkaTlsConfig, SinkAuthConfig, SinkAuthMethod,
     SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
 };
 use ave_network::Config as NetworkConfig;

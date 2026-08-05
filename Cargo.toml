@@ -94,7 +94,7 @@ subtle = "2.6"
 lru = "0.18.1"
 rdkafka = { version = "0.39.0", features = ["tokio", "ssl", "zstd"] }
 testcontainers = { version = "0.27.3", default-features = false, features = ["blocking"] }
-tonic = { version = "0.13", default-features = false, features = ["transport", "channel", "router", "prost", "codegen", "tls-aws-lc", "tls-native-roots", "gzip"] }
+tonic = { version = "0.13", default-features = false, features = ["transport", "channel", "router", "prost", "codegen", "tls-aws-lc", "tls-native-roots", "gzip", "zstd"] }
 tonic-health = "0.13"
 tonic-types = "0.13"
 prost = "0.13"

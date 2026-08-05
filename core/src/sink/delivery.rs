@@ -220,7 +220,7 @@ pub fn load_required_secret(
     let secret = std::env::var(env_var).unwrap_or_default();
     if secret.is_empty() {
         return Err(SinkError::ClientBuild(format!(
-            "{purpose} configured for sink '{sink_name}' but password environment variable {env_var} is not set"
+            "{purpose} configured for sink '{sink_name}' but environment variable {env_var} is not set"
         )));
     }
     Ok(secret)
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "SASL configured for sink 'my-sink' but password environment variable {env_var} is not set"
+                "SASL configured for sink 'my-sink' but environment variable {env_var} is not set"
             )
         );
     }

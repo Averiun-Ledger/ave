@@ -32,13 +32,15 @@ use crate::sink::delivery::{
     generate_request_id, group_events_by_type, is_sink_reserved_header,
     load_required_secret, serialize_json_payload, sign_delivery,
     sink_apikey_env_var, sink_password_env_var, sink_proxy_password_env_var,
-    test_delivery_payload, timed_sink_request,
+    sink_token_env_var, test_delivery_payload, timed_sink_request,
 };
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
 use ave_common::{
-    DataToSink, IncomingSinkEvent, LightEvent, SinkTypes, sink::SinkAuthConfig,
+    DataToSink, IncomingSinkEvent, LightEvent, SinkTypes,
+    sink::{SinkAuthConfig, SinkAuthMethod},
 };
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 
 /// TLS certificate pinning verifier. Pinning **replaces** normal CA / WebPKI
 /// verification: the operator explicitly trusts this exact certificate, so
@@ -407,10 +409,14 @@ pub struct HttpTransport {
     sink_name: String,
     config: HttpSinkConfig,
     url_template: CompiledTemplate,
-    /// Password loaded from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`.
+    /// Bearer token loaded from `AVE_SINK_TOKEN_{{SERVER}}`
+    /// (`SinkAuthMethod::BearerToken`).
+    bearer_token: String,
+    /// Password loaded from `AVE_SINK_PASSWORD_{{SERVER}}`
+    /// (`SinkAuthMethod::Basic` / `OAuth2`).
     password: String,
-    /// API key: the `AVE_SINK_APIKEY_{{SERVER}}` environment variable takes
-    /// precedence over the config value.
+    /// API key loaded from `AVE_SINK_APIKEY_{{SERVER}}`
+    /// (`SinkAuthMethod::ApiKey`).
     api_key: String,
     cached_token: RwLock<Option<TokenResponse>>,
     /// Node identity signer; required when `config.signature` is enabled.
@@ -425,36 +431,45 @@ impl HttpTransport {
     ) -> Result<Self, SinkError> {
         let client = build_http_client(&sink_name, &config).await?;
 
-        let mut password = std::env::var(sink_password_env_var(&sink_name))
-            .unwrap_or_default();
-        let api_key = std::env::var(sink_apikey_env_var(&sink_name))
-            .ok()
-            .filter(|k| !k.is_empty())
-            .or_else(|| {
-                config.auth.as_ref().and_then(|a| {
-                    if a.api_key.is_empty() {
-                        None
-                    } else {
-                        Some(a.api_key.clone())
-                    }
-                })
-            })
-            .unwrap_or_default();
-
+        let mut bearer_token = String::new();
+        let mut password = String::new();
+        let mut api_key = String::new();
         if let Some(auth) = &config.auth {
-            if oauth2_credentials_ready(auth) {
-                // If OAuth2 is configured, the password environment variable must exist.
-                password = load_required_secret(
-                    &sink_name,
-                    &sink_password_env_var(&sink_name),
-                    "OAuth2",
-                )?;
-            } else if api_key.is_empty() {
-                return Err(SinkError::ClientBuild(format!(
-                    "API key authentication configured for sink '{}' but neither 'api_key' nor environment variable {} is set",
-                    sink_name,
-                    sink_apikey_env_var(&sink_name)
-                )));
+            match auth {
+                SinkAuthMethod::BearerToken => {
+                    bearer_token = load_required_secret(
+                        &sink_name,
+                        &sink_token_env_var(&sink_name),
+                        "bearer token",
+                    )?;
+                }
+                SinkAuthMethod::ApiKey => {
+                    api_key = load_required_secret(
+                        &sink_name,
+                        &sink_apikey_env_var(&sink_name),
+                        "API key",
+                    )?;
+                }
+                SinkAuthMethod::Basic { .. } => {
+                    password = load_required_secret(
+                        &sink_name,
+                        &sink_password_env_var(&sink_name),
+                        "basic auth",
+                    )?;
+                }
+                SinkAuthMethod::OAuth2(oauth) => {
+                    if !oauth2_credentials_ready(oauth) {
+                        return Err(SinkError::ClientBuild(format!(
+                            "OAuth2 authentication configured for sink '{}' but the credentials are incomplete",
+                            sink_name
+                        )));
+                    }
+                    password = load_required_secret(
+                        &sink_name,
+                        &sink_password_env_var(&sink_name),
+                        "OAuth2",
+                    )?;
+                }
             }
         }
 
@@ -468,6 +483,7 @@ impl HttpTransport {
         Ok(Self {
             client,
             url_template: CompiledTemplate::new(&config.url),
+            bearer_token,
             password,
             api_key,
             cached_token: RwLock::new(None),
@@ -694,44 +710,52 @@ impl HttpTransport {
             None => return Ok(None),
         };
 
-        if !self.api_key.is_empty() {
-            return Ok(Some(format!("Api-Key {}", self.api_key)));
-        }
-
-        let margin = self.config.token_refresh_margin_secs;
-
-        // Check cached token
-        {
-            let guard = self.cached_token.read().await;
-            if let Some(token) = guard.as_ref()
-                && !token.is_expired_or_expiring_soon(margin)
-            {
-                return Ok(Some(format!("Bearer {}", token.access_token)));
+        match auth {
+            SinkAuthMethod::BearerToken => {
+                Ok(Some(format!("Bearer {}", self.bearer_token)))
             }
-            // Token is missing, expired or expiring soon; fall through to obtain new token
+            SinkAuthMethod::ApiKey => {
+                Ok(Some(format!("Api-Key {}", self.api_key)))
+            }
+            SinkAuthMethod::Basic { username } => {
+                let encoded = BASE64_STANDARD
+                    .encode(format!("{}:{}", username, self.password));
+                Ok(Some(format!("Basic {encoded}")))
+            }
+            SinkAuthMethod::OAuth2(oauth) => {
+                let margin = self.config.token_refresh_margin_secs;
+
+                // Check cached token
+                {
+                    let guard = self.cached_token.read().await;
+                    if let Some(token) = guard.as_ref()
+                        && !token.is_expired_or_expiring_soon(margin)
+                    {
+                        return Ok(Some(format!(
+                            "Bearer {}",
+                            token.access_token
+                        )));
+                    }
+                    // Token is missing, expired or expiring soon; fall
+                    // through to obtain a new token.
+                }
+
+                // Refresh the token outside the write lock so other
+                // deliveries are not blocked while the auth endpoint is
+                // failing or slow.
+                let token = crate::sink::obtain_token_with_retry(
+                    &self.client,
+                    oauth,
+                    &self.password,
+                    self.config.retry_base_delay_ms,
+                )
+                .await?;
+
+                let header = format!("Bearer {}", token.access_token);
+                *self.cached_token.write().await = Some(token);
+                Ok(Some(header))
+            }
         }
-
-        if oauth2_credentials_ready(auth) && !self.password.is_empty() {
-            // Refresh the token outside the write lock so other deliveries are
-            // not blocked while the auth endpoint is failing or slow.
-            let token = crate::sink::obtain_token_with_retry(
-                &self.client,
-                auth,
-                &self.password,
-                self.config.retry_base_delay_ms,
-            )
-            .await?;
-
-            let header = format!("Bearer {}", token.access_token);
-            *self.cached_token.write().await = Some(token);
-            return Ok(Some(header));
-        }
-
-        Err(SinkError::Auth {
-            message: "auth configured but no API key and incomplete OAuth2 credentials"
-                .to_owned(),
-            retry_after_ms: None,
-        })
     }
 
     /// Prepare one batch group for delivery: rendered URL and encoded JSON
@@ -758,29 +782,42 @@ impl HttpTransport {
 
     /// Serialize and, when configured, compress the delivery body.
     /// Signing happens on the encoded bytes (the exact wire payload).
-    /// Compression runs in `spawn_blocking` because `GzEncoder` is CPU-bound
-    /// and batches can be large.
+    /// Compression runs in `spawn_blocking` because the encoders are
+    /// CPU-bound and batches can be large.
     async fn encode_body<T: serde::Serialize + Sync + ?Sized>(
         &self,
         body: &T,
     ) -> Result<Vec<u8>, SinkError> {
         let raw = serialize_json_payload(body)?;
 
-        if matches!(self.config.compression, HttpCompression::None) {
+        let compression = self.config.compression.clone();
+        if matches!(compression, HttpCompression::None) {
             return Ok(raw);
         }
 
-        tokio::task::spawn_blocking(move || {
-            let mut encoder =
-                GzEncoder::new(Vec::new(), Compression::default());
-            encoder
-                .write_all(&raw)
-                .and_then(|()| encoder.finish())
-                .map_err(|e| SinkError::Delivery {
-                    message: format!("gzip compression failed: {}", e),
-                    retryable: false,
-                    retry_after_ms: None,
+        tokio::task::spawn_blocking(move || match compression {
+            HttpCompression::None => Ok(raw),
+            HttpCompression::Gzip => {
+                let mut encoder =
+                    GzEncoder::new(Vec::new(), Compression::default());
+                encoder
+                    .write_all(&raw)
+                    .and_then(|()| encoder.finish())
+                    .map_err(|e| SinkError::Delivery {
+                        message: format!("gzip compression failed: {}", e),
+                        retryable: false,
+                        retry_after_ms: None,
+                    })
+            }
+            HttpCompression::Zstd => {
+                zstd::bulk::compress(&raw, 0).map_err(|e| {
+                    SinkError::Delivery {
+                        message: format!("zstd compression failed: {}", e),
+                        retryable: false,
+                        retry_after_ms: None,
+                    }
                 })
+            }
         })
         .await
         .map_err(|e| SinkError::Delivery {
@@ -1002,13 +1039,10 @@ impl SinkTransport for HttpTransport {
 
     /// If the sink has OAuth2 auth config, obtain a token eagerly on startup.
     async fn warm_up(&self) -> Result<(), SinkError> {
-        if let Some(ref auth) = self.config.auth
-            && oauth2_credentials_ready(auth)
-            && !self.password.is_empty()
-        {
+        if let Some(SinkAuthMethod::OAuth2(oauth)) = &self.config.auth {
             let token = crate::sink::obtain_token_with_retry(
                 &self.client,
-                auth,
+                oauth,
                 &self.password,
                 self.config.retry_base_delay_ms,
             )
@@ -1262,18 +1296,15 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     }
 
     #[tokio::test]
-    async fn api_key_env_var_takes_precedence_over_config() {
-        let env_var = "AVE_SINK_APIKEY_UNIT_ENV_PRECEDENCE";
+    async fn api_key_reads_the_secret_env_var() {
+        let env_var = "AVE_SINK_APIKEY_UNIT_ENV_KEY";
         unsafe {
             std::env::set_var(env_var, "env-key");
         }
         let mut config = base_config();
-        config.auth = Some(SinkAuthConfig {
-            api_key: "config-key".to_owned(),
-            ..SinkAuthConfig::default()
-        });
+        config.auth = Some(SinkAuthMethod::ApiKey);
         let transport =
-            HttpTransport::new("unit-env-precedence".to_owned(), config, None)
+            HttpTransport::new("unit-env-key".to_owned(), config, None)
                 .await
                 .unwrap();
         let header = transport.build_auth_header().await.unwrap();
@@ -1284,24 +1315,82 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     }
 
     #[tokio::test]
-    async fn api_key_from_config_when_env_not_set() {
+    async fn bearer_token_reads_the_secret_env_var() {
+        let env_var = "AVE_SINK_TOKEN_UNIT_BEARER";
+        unsafe {
+            std::env::set_var(env_var, "env-token");
+        }
         let mut config = base_config();
-        config.auth = Some(SinkAuthConfig {
-            api_key: "config-key".to_owned(),
-            ..SinkAuthConfig::default()
-        });
+        config.auth = Some(SinkAuthMethod::BearerToken);
         let transport =
-            HttpTransport::new("unit-config-key".to_owned(), config, None)
+            HttpTransport::new("unit-bearer".to_owned(), config, None)
                 .await
                 .unwrap();
         let header = transport.build_auth_header().await.unwrap();
-        assert_eq!(header.as_deref(), Some("Api-Key config-key"));
+        unsafe {
+            std::env::remove_var(env_var);
+        }
+        assert_eq!(header.as_deref(), Some("Bearer env-token"));
     }
 
     #[tokio::test]
-    async fn auth_without_any_credential_fails() {
+    async fn basic_auth_reads_the_password_env_var() {
+        let env_var = "AVE_SINK_PASSWORD_UNIT_BASIC";
+        unsafe {
+            std::env::set_var(env_var, "s3cret");
+        }
         let mut config = base_config();
-        config.auth = Some(SinkAuthConfig::default());
+        config.auth = Some(SinkAuthMethod::Basic {
+            username: "ave".to_owned(),
+        });
+        let transport =
+            HttpTransport::new("unit-basic".to_owned(), config, None)
+                .await
+                .unwrap();
+        let header = transport.build_auth_header().await.unwrap();
+        unsafe {
+            std::env::remove_var(env_var);
+        }
+        let expected = BASE64_STANDARD.encode("ave:s3cret");
+        assert_eq!(header.as_deref(), Some(format!("Basic {expected}").as_str()));
+    }
+
+    #[tokio::test]
+    async fn bearer_token_without_env_var_fails() {
+        let mut config = base_config();
+        config.auth = Some(SinkAuthMethod::BearerToken);
+        let err = client_build_error(
+            HttpTransport::new("unit-no-bearer".to_owned(), config, None)
+                .await,
+        );
+        assert!(
+            err.contains("AVE_SINK_TOKEN_UNIT_NO_BEARER"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn basic_auth_without_password_env_var_fails() {
+        let mut config = base_config();
+        config.auth = Some(SinkAuthMethod::Basic {
+            username: "ave".to_owned(),
+        });
+        let err = client_build_error(
+            HttpTransport::new("unit-no-basic".to_owned(), config, None)
+                .await,
+        );
+        assert!(
+            err.contains("AVE_SINK_PASSWORD_UNIT_NO_BASIC"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_without_env_var_fails() {
+        let mut config = base_config();
+        config.auth = Some(SinkAuthMethod::ApiKey);
         let err = client_build_error(
             HttpTransport::new("unit-missing-key".to_owned(), config, None)
                 .await,
@@ -1535,11 +1624,11 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let auth_url = start_oauth2_server("fresh-token").await;
 
         let mut config = base_config();
-        config.auth = Some(SinkAuthConfig {
+        config.auth = Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url,
             username: "unit-user".to_owned(),
             ..SinkAuthConfig::default()
-        });
+        }));
 
         let transport =
             HttpTransport::new("unit-refresh-expired".to_owned(), config, None)
@@ -1585,12 +1674,12 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let auth_url = start_oauth2_server("cc-token").await;
 
         let mut config = base_config();
-        config.auth = Some(SinkAuthConfig {
+        config.auth = Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url,
             grant_type: ave_common::sink::OAuth2GrantType::ClientCredentials,
             client_id: "unit-client".to_owned(),
             ..SinkAuthConfig::default()
-        });
+        }));
 
         let transport = HttpTransport::new(
             "unit-client-credentials".to_owned(),

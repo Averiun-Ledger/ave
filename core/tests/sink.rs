@@ -16,7 +16,7 @@ use ave_common::{
     },
     sink::{
         DataToSinkEvent, HttpCompression, HttpProxyConfig, HttpTlsConfig,
-        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig,
+        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig, SinkAuthMethod,
         SinkTransportConfig,
     },
 };
@@ -6177,8 +6177,8 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 /// > - `TestSink` supports `UnauthorizedOnce` (401 on first delivery, then 200)
 /// >   and `UnauthorizedAlways` (persistent 401) modes to exercise OAuth2
 /// >   refresh and auth failures.
-/// > - `make_sink_entry_with_auth` allows configuring `SinkAuthConfig` (API key
-/// >   or OAuth2) in tests.
+/// > - `make_sink_entry_with_auth` allows configuring `SinkAuthMethod`
+/// >   (bearer, API key, basic or OAuth2) in tests.
 #[traced_test]
 #[tokio::test]
 async fn sink_auth_token_refresh() {
@@ -6230,6 +6230,8 @@ async fn sink_auth_token_refresh() {
     let api_key_sink = TestSink::start().await;
     api_key_sink.set_mode(ResponseMode::ServerError).await;
     let api_key = "secret-key".to_owned();
+    // The API key travels in `AVE_SINK_APIKEY_{{SERVER}}` (never in config).
+    let _api_key_guard = TempEnvVar::set("AVE_SINK_APIKEY_AUTH_SINK", &api_key);
     let initial_keys = node.keys.clone();
     let initial_local_db = dirs[0].path().to_path_buf();
     let initial_ext_db = dirs[1].path().to_path_buf();
@@ -6247,10 +6249,7 @@ async fn sink_auth_token_refresh() {
             api_key_sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
-                api_key: api_key.clone(),
-                ..SinkAuthConfig::default()
-            },
+            SinkAuthMethod::ApiKey,
         )],
     ))
     .await;
@@ -6290,10 +6289,7 @@ async fn sink_auth_token_refresh() {
             api_key_sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
-                api_key: api_key.clone(),
-                ..SinkAuthConfig::default()
-            },
+            SinkAuthMethod::ApiKey,
         )],
     ))
     .await;
@@ -6359,11 +6355,11 @@ async fn sink_auth_token_refresh() {
             oauth_sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
                 auth_url: oauth_sink.auth_url(),
                 username: "test-user".to_owned(),
                 ..SinkAuthConfig::default()
-            },
+            }),
         )],
     ))
     .await;
@@ -6474,13 +6470,12 @@ async fn sink_auth_token_refresh() {
 ///
 /// **Flow:**
 /// 1. Create governance, schema and a subject.
-/// 2. Restart with an `envkey-sink` whose `SinkAuthConfig` only carries a
-///    placeholder config key; the real key comes from the environment.
+/// 2. Restart with an `envkey-sink` with `SinkAuthMethod::ApiKey`; the key
+///    is only read from the environment.
 /// 3. Startup catch-up delivers the subject's create event.
 ///
 /// **Verifications:**
 /// - The delivery carries `Authorization: Api-Key <env value>`.
-/// - The environment variable takes precedence over the config value.
 ///
 /// > **Implementation note:** the sink is named `envkey-sink`, so the
 /// > environment variable is `AVE_SINK_APIKEY_ENVKEY_SINK`. The name must
@@ -6523,7 +6518,7 @@ async fn sink_api_key_from_env_var() {
     join_all(node.handler.iter_mut()).await;
 
     let sink = TestSink::start().await;
-    // The environment variable must win over the config value.
+    // The API key is read from the environment (never from the config).
     let api_key_env = "AVE_SINK_APIKEY_ENVKEY_SINK";
     let _api_key_guard = TempEnvVar::set(api_key_env, "env-secret-key");
 
@@ -6538,10 +6533,7 @@ async fn sink_api_key_from_env_var() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
-                api_key: "config-key".to_owned(),
-                ..SinkAuthConfig::default()
-            },
+            SinkAuthMethod::ApiKey,
         )],
     ))
     .await;
@@ -6560,9 +6552,245 @@ async fn sink_api_key_from_env_var() {
             .any(|h| h == "Api-Key env-secret-key"),
         "deliveries must carry the API key from the environment variable"
     );
+}
+
+/// Static credentials (parity with the gRPC sink): a sink with
+/// `SinkAuthMethod::BearerToken` sends `Authorization: Bearer <token>` and a
+/// sink with `SinkAuthMethod::Basic` sends `Authorization: Basic
+/// base64(username:password)`, both read from the environment.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with two sinks, `bearer-sink` and `basic-sink`, whose secrets
+///    live in `AVE_SINK_TOKEN_BEARER_SINK` and
+///    `AVE_SINK_PASSWORD_BASIC_SINK`.
+/// 3. Startup catch-up delivers the subject's create event to both.
+///
+/// **Verifications:**
+/// - The bearer sink receives `Authorization: Bearer <env token>`.
+/// - The basic sink receives `Authorization: Basic base64(user:pass)`.
+#[traced_test]
+#[tokio::test]
+async fn sink_bearer_and_basic_auth() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let bearer_sink = TestSink::start().await;
+    let basic_sink = TestSink::start().await;
+    let _token_guard =
+        TempEnvVar::set("AVE_SINK_TOKEN_BEARER_SINK", "static-token");
+    let _password_guard =
+        TempEnvVar::set("AVE_SINK_PASSWORD_BASIC_SINK", "basic-secret");
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![
+            make_sink_entry_with_auth(
+                "bearer-sink",
+                bearer_sink.url(),
+                Some(governance_id.to_string()),
+                BTreeSet::from([SinkTypes::All]),
+                SinkAuthMethod::BearerToken,
+            ),
+            make_sink_entry_with_auth(
+                "basic-sink",
+                basic_sink.url(),
+                Some(governance_id.to_string()),
+                BTreeSet::from([SinkTypes::All]),
+                SinkAuthMethod::Basic {
+                    username: "sink-user".to_owned(),
+                },
+            ),
+        ],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "bearer-sink").await;
+    wait_for_sink_caught_up(&node.api, "basic-sink").await;
+    bearer_sink.wait_for_count(1, true).await;
+    basic_sink.wait_for_count(1, true).await;
+
+    let bearer_headers = bearer_sink.authorization_headers().await;
     assert!(
-        !headers.iter().flatten().any(|h| h == "Api-Key config-key"),
-        "the config API key must not be used when the environment variable is set"
+        bearer_headers
+            .iter()
+            .flatten()
+            .any(|h| h == "Bearer static-token"),
+        "deliveries must carry the bearer token from the environment"
+    );
+
+    let expected_basic = {
+        use base64::{Engine as _, prelude::BASE64_STANDARD};
+        format!("Basic {}", BASE64_STANDARD.encode("sink-user:basic-secret"))
+    };
+    let basic_headers = basic_sink.authorization_headers().await;
+    assert!(
+        basic_headers.iter().flatten().any(|h| h == &expected_basic),
+        "deliveries must carry the basic credentials from the environment"
+    );
+}
+
+/// Credential rotation for static auth: a bearer sink whose token is wrong
+/// gets persistent 401s and the subject stays lagging; after rotating the
+/// token in the environment and restarting the node (env secrets are read
+/// when the transport is built), catch-up recovers and deliveries carry the
+/// new token.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with `rotation-sink` (wrong token) against a sink that always
+///    answers 401: the subject goes lagging and attempts carry the wrong
+///    token.
+/// 3. Rotate the env token, switch the sink to accept and restart again:
+///    catch-up delivers the pending event with the new token.
+///
+/// **Verifications:**
+/// - Phase 1: lagging subject; attempts carry `Bearer wrong-token`.
+/// - Phase 2: caught up; deliveries carry `Bearer good-token`.
+///
+/// > **Implementation note:** the sink name must stay unique in this file —
+/// > the env var derived from it is process-global and tests run in
+/// > parallel (a collision with another test's sink name flips the token).
+#[traced_test]
+#[tokio::test]
+async fn sink_bearer_token_rotation() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::UnauthorizedAlways).await;
+    let token_env = "AVE_SINK_TOKEN_ROTATION_SINK";
+    let wrong_guard = TempEnvVar::set(token_env, "wrong-token");
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "rotation-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::BearerToken,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Every attempt is rejected: the subject goes lagging.
+    wait_for_sink_lagging_subjects(&node.api, "rotation-sink", 1).await;
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers.iter().flatten().any(|h| h == "Bearer wrong-token"),
+        "attempts must carry the wrong token from the environment"
+    );
+
+    // Rotate the token and restart: the worker reads the new secret when
+    // the transport is rebuilt, and catch-up recovers the pending event.
+    drop(wrong_guard);
+    let _good_guard = TempEnvVar::set(token_env, "good-token");
+    sink.set_mode(ResponseMode::Accept).await;
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "rotation-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::BearerToken,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "rotation-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers.iter().flatten().any(|h| h == "Bearer good-token"),
+        "deliveries after the rotation must carry the new token"
     );
 }
 
@@ -6714,6 +6942,182 @@ async fn sink_signature_headers_verify() {
             .verify(hash.hash_bytes(), &signature)
             .expect("delivery signature must verify against the received body");
     }
+}
+
+/// Signature v2 over a zstd-compressed delivery: the signature must bind
+/// the exact wire bytes (the compressed body) and the canonical headers,
+/// including `content-encoding: zstd`. A receiver that verifies against
+/// the decompressed body — or without the encoding header — must fail.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink configured with `signature: true`,
+///    `signature_version: 2` and `compression: zstd`.
+/// 3. Startup catch-up delivers the subject's create event.
+///
+/// **Verifications:**
+/// - `Content-Encoding: zstd` on the wire; the raw body is zstd and
+///   decompresses to the event JSON.
+/// - The signature verifies against the canonical v2 payload rebuilt from
+///   the recorded headers and the COMPRESSED body.
+/// - Verification against the decompressed body fails (the signature binds
+///   the compressed wire payload).
+#[traced_test]
+#[tokio::test]
+async fn sink_signature_v2_zstd_verify() {
+    use ave_common::identity::{
+        BLAKE3_HASHER, Hash as _, PublicKey, SignatureIdentifier, TimeStamp,
+    };
+    use ave_core::sink::delivery::{DeliveryMeta, canonical_payload};
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "Example".to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![ave_core::config::SinkServer {
+                server: "signed-zstd-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: ave_core::config::SinkTransportConfig::Http(
+                    Box::new(ave_core::config::HttpSinkConfig {
+                        url: sink.url(),
+                        signature: true,
+                        signature_version: 2,
+                        compression: HttpCompression::Zstd,
+                        max_retries: 0,
+                        request_timeout_ms: 2000,
+                        connect_timeout_ms: 1000,
+                        ..Default::default()
+                    }),
+                ),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                ..Default::default()
+            }],
+        }],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "signed-zstd-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    let signature_headers = sink.signature_headers().await;
+    let idempotency_headers = sink.idempotency_headers().await;
+    let content_encodings = sink.content_encodings().await;
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(raw_bodies.len(), 1);
+
+    assert_eq!(content_encodings[0].as_deref(), Some("zstd"));
+    let body = &raw_bodies[0];
+    assert!(
+        body.len() > 4
+            && body[0] == 0x28
+            && body[1] == 0xb5
+            && body[2] == 0x2f
+            && body[3] == 0xfd,
+        "the wire body must be zstd-compressed"
+    );
+    let decompressed = zstd::bulk::decompress(body, 1024 * 1024)
+        .expect("the body must be valid zstd");
+    serde_json::from_slice::<serde_json::Value>(&decompressed)
+        .expect("the decompressed body must be JSON");
+
+    let headers = &signature_headers[0];
+    let signature = headers
+        .signature
+        .as_ref()
+        .expect("X-Ave-Signature header must be present");
+    let timestamp = headers
+        .timestamp
+        .as_ref()
+        .expect("X-Ave-Signature-Timestamp header must be present");
+    let public_key = headers
+        .public_key
+        .as_ref()
+        .expect("X-Ave-Public-Key header must be present");
+
+    let idem = &idempotency_headers[0];
+    let meta = DeliveryMeta {
+        subject_id: idem.subject_id.clone().expect("subject id header"),
+        sn: idem
+            .sn
+            .as_ref()
+            .expect("sn header")
+            .parse()
+            .expect("sn is a number"),
+        event_type: idem.event_type.clone().expect("event type header"),
+    };
+    assert_eq!(meta.subject_id, subject_id.to_string());
+
+    // The signature binds the canonical v2 headers (with content-encoding)
+    // and the COMPRESSED wire body.
+    let canonical =
+        canonical_payload(body, 2, &[("content-encoding", "zstd")], Some(&meta));
+    let timestamp =
+        TimeStamp::from_nanos(timestamp.parse().expect("nanos timestamp"));
+    let payload_bytes = borsh::to_vec(&(canonical, timestamp)).unwrap();
+    let hash = BLAKE3_HASHER.hash(&payload_bytes);
+    let signer = PublicKey::from_str(public_key).unwrap();
+    let signature = SignatureIdentifier::from_str(signature).unwrap();
+    signer
+        .verify(hash.hash_bytes(), &signature)
+        .expect("signature must verify against the compressed wire body");
+
+    // Verifying against the decompressed body must fail.
+    let wrong_canonical = canonical_payload(
+        &decompressed,
+        2,
+        &[("content-encoding", "zstd")],
+        Some(&meta),
+    );
+    let wrong_bytes = borsh::to_vec(&(wrong_canonical, timestamp)).unwrap();
+    let wrong_hash = BLAKE3_HASHER.hash(&wrong_bytes);
+    assert!(
+        signer.verify(wrong_hash.hash_bytes(), &signature).is_err(),
+        "the signature must not verify against the decompressed body"
+    );
 }
 
 /// Poll `condition` until it returns `true`. Panics on timeout.
@@ -9221,6 +9625,108 @@ async fn sink_batch_delivery_gzip() {
     assert_eq!(events.len(), 4, "the batch must contain the four events");
 }
 
+/// Batch delivery with zstd: with `compression = "zstd"` the batch body is
+/// sent zstd-compressed with the `Content-Encoding: zstd` header.
+///
+/// **Flow:**
+/// Same as `sink_batch_delivery_gzip` with zstd compression enabled.
+///
+/// **Verifications:**
+/// - The request carries `Content-Encoding: zstd`.
+/// - The raw body is zstd (magic bytes) and decompresses to the JSON array
+///   of the four events.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_zstd() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-zstd-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpCompression::Zstd,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "batch-zstd-sink").await;
+    sink.wait_for_count(4, true).await;
+
+    let content_encodings = sink.content_encodings().await;
+    assert_eq!(content_encodings.len(), 1);
+    assert_eq!(content_encodings[0].as_deref(), Some("zstd"));
+
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(raw_bodies.len(), 1);
+    let body = &raw_bodies[0];
+    assert!(
+        body.len() > 4
+            && body[0] == 0x28
+            && body[1] == 0xb5
+            && body[2] == 0x2f
+            && body[3] == 0xfd,
+        "the body must be zstd-compressed"
+    );
+
+    let decompressed = zstd::bulk::decompress(body, 1024 * 1024)
+        .expect("the body must be valid zstd");
+    let events: Vec<serde_json::Value> = serde_json::from_slice(&decompressed)
+        .expect("the decompressed body must be a JSON array");
+    assert_eq!(events.len(), 4, "the batch must contain the four events");
+}
+
 /// Batch delivery of live events: in `batch_delivery` mode, events emitted
 /// while the node runs are buffered and flushed as JSON arrays (on size or
 /// delay), never as individual POSTs.
@@ -10088,13 +10594,13 @@ async fn sink_client_credentials_oauth2() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
                 auth_url,
                 grant_type: OAuth2GrantType::ClientCredentials,
                 client_id: "cc-client-id".to_owned(),
                 scope: "events:read".to_owned(),
                 ..SinkAuthConfig::default()
-            },
+            }),
         )],
     ))
     .await;

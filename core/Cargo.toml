@@ -41,6 +41,7 @@ futures = { workspace = true }
 rdkafka = { workspace = true }
 httpdate = "1"
 flate2 = "1"
+zstd = "0.13"
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-types = { workspace = true }

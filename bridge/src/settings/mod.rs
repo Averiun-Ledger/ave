@@ -139,7 +139,7 @@ events = ["create", "all"]
 [sinks.servers.transport]
 type = "http"
 url = "https://sink.one"
-auth = { auth_url = "https://auth.service", username = "sink-user" }
+auth = { type = "oauth2", auth_url = "https://auth.service", username = "sink-user" }
 connect_timeout_ms = 5000
 request_timeout_ms = 30000
 max_retries = 5
@@ -307,7 +307,7 @@ sinks:
         transport:
           type: http
           url: https://sink.one
-          auth: { auth_url: https://auth.service, username: sink-user }
+          auth: { type: oauth2, auth_url: https://auth.service, username: sink-user }
           connect_timeout_ms: 5000
           request_timeout_ms: 30000
           max_retries: 5
@@ -489,7 +489,7 @@ http:
           "transport": {
             "type": "http",
             "url": "https://sink.one",
-            "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
+            "auth": { "type": "oauth2", "auth_url": "https://auth.service", "username": "sink-user" },
             "connect_timeout_ms": 5000,
             "request_timeout_ms": 30000,
             "max_retries": 5
@@ -791,7 +791,7 @@ http:
         assert_eq!(logging.max_files, 5);
         assert_eq!(logging.level, "debug");
 
-        use ave_common::sink::SinkAuthConfig;
+        use ave_common::sink::{SinkAuthConfig, SinkAuthMethod};
         let expected_sinks = vec![SinkConfigEntry {
             target: SinkTarget::Schema {
                 schema_id: "primary".to_owned(),
@@ -804,11 +804,11 @@ http:
                     transport: SinkTransportConfig::Http(Box::new(
                         HttpSinkConfig {
                             url: "https://sink.one".to_owned(),
-                            auth: Some(SinkAuthConfig {
+                            auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
                                 auth_url: "https://auth.service".to_owned(),
                                 username: "sink-user".to_owned(),
                                 ..SinkAuthConfig::default()
-                            }),
+                            })),
                             connect_timeout_ms: 5_000,
                             request_timeout_ms: 30_000,
                             max_retries: 5,

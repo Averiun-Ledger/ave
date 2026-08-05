@@ -4,7 +4,7 @@ use ave_common::{
     IncomingSinkEvent, SinkTypes,
     sink::{
         DataToSink, DataToSinkEvent, HttpCompression, HttpProxyConfig,
-        HttpTlsConfig, SinkAuthConfig,
+        HttpTlsConfig, SinkAuthMethod,
     },
 };
 use ave_core::{
@@ -119,7 +119,7 @@ pub fn make_sink_entry_with_auth(
     url: String,
     governance_id: Option<String>,
     events: BTreeSet<SinkTypes>,
-    auth: SinkAuthConfig,
+    auth: SinkAuthMethod,
 ) -> SinkConfigEntry {
     SinkConfigEntry {
         target: SinkTarget::Schema {

@@ -2208,7 +2208,7 @@ fn test_sink_server_http_fields() {
         "transport": {
             "type": "http",
             "url": "https://test.sink",
-            "auth": { "auth_url": "https://auth", "username": "u", "api_key": "k" },
+            "auth": { "type": "oauth2", "auth_url": "https://auth", "username": "u" },
             "connect_timeout_ms": 5000,
             "request_timeout_ms": 30000,
             "max_retries": 5

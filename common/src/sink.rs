@@ -621,20 +621,88 @@ mod tests {
     }
 
     #[test]
-    fn test_sink_auth_config_validate_allows_empty_for_env_api_key() {
-        // All fields empty: the API key is injected through
-        // `AVE_SINK_APIKEY_{{SERVER}}` at worker startup.
+    fn test_sink_auth_config_validate_allows_empty() {
+        // All fields empty: OAuth2 is not configured (the pair checks pass
+        // vacuously); `SinkAuthMethod::OAuth2` rejects incomplete pairs.
         let auth = SinkAuthConfig::default();
         assert!(auth.validate().is_ok());
     }
 
     #[test]
-    fn test_sink_auth_config_validate_allows_api_key_only() {
-        let auth = SinkAuthConfig {
-            api_key: "secret".to_owned(),
-            ..SinkAuthConfig::default()
-        };
-        assert!(auth.validate().is_ok());
+    fn test_sink_auth_method_validate() {
+        assert!(SinkAuthMethod::BearerToken.validate().is_ok());
+        assert!(SinkAuthMethod::ApiKey.validate().is_ok());
+        assert!(
+            SinkAuthMethod::Basic {
+                username: "ave".to_owned()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            SinkAuthMethod::Basic {
+                username: String::new()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
+                auth_url: "https://auth.example.com/token".to_owned(),
+                username: "ave".to_owned(),
+                ..SinkAuthConfig::default()
+            })
+            .validate()
+            .is_ok()
+        );
+        // Incomplete OAuth2 pairs are rejected through the method.
+        assert!(
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
+                auth_url: "https://auth.example.com/token".to_owned(),
+                ..SinkAuthConfig::default()
+            })
+            .validate()
+            .is_err()
+        );
+        // An empty endpoint means OAuth2 is not configured at all.
+        assert!(
+            SinkAuthMethod::OAuth2(SinkAuthConfig::default())
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_sink_auth_method_serde_tagged() {
+        let bearer: SinkAuthMethod =
+            serde_json::from_str(r#"{"type": "bearer_token"}"#).unwrap();
+        assert_eq!(bearer, SinkAuthMethod::BearerToken);
+        let basic: SinkAuthMethod =
+            serde_json::from_str(r#"{"type": "basic", "username": "ave"}"#)
+                .unwrap();
+        assert_eq!(
+            basic,
+            SinkAuthMethod::Basic {
+                username: "ave".to_owned()
+            }
+        );
+        let json = serde_json::to_string(&SinkAuthMethod::ApiKey).unwrap();
+        assert_eq!(json, r#"{"type":"api_key"}"#);
+        // The OAuth2 variant serializes with the same wire name the gRPC
+        // sink has always used (`oauth2`).
+        let json = serde_json::to_string(&SinkAuthMethod::OAuth2(
+            SinkAuthConfig::default(),
+        ))
+        .unwrap();
+        assert!(
+            json.contains(r#""type":"oauth2""#),
+            "unexpected OAuth2 wire name: {json}"
+        );
+        let oauth: SinkAuthMethod = serde_json::from_str(
+            r#"{"type": "oauth2", "auth_url": "", "username": ""}"#,
+        )
+        .unwrap();
+        assert_eq!(oauth, SinkAuthMethod::OAuth2(SinkAuthConfig::default()));
     }
 
     #[test]
@@ -693,20 +761,6 @@ mod tests {
         assert!(cfg.client_id.is_empty());
         assert!(cfg.scope.is_empty());
         assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn test_sink_auth_config_api_key_serializes_redacted() {
-        let auth = SinkAuthConfig {
-            api_key: "super-secret".to_owned(),
-            ..SinkAuthConfig::default()
-        };
-        let json = serde_json::to_string(&auth).unwrap();
-        assert!(!json.contains("super-secret"));
-        assert!(json.contains("***"));
-        // Empty keys serialize as empty, not redacted.
-        let empty = SinkAuthConfig::default();
-        assert!(!serde_json::to_string(&empty).unwrap().contains("***"));
     }
 
     #[test]
@@ -1449,25 +1503,20 @@ impl OAuth2GrantType {
     }
 }
 
-/// Per-sink authentication configuration.
-/// When present, the sink requires authentication for delivery and health-check.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+/// OAuth2 configuration of a sink (used by [`SinkAuthMethod::OAuth2`]).
+///
+/// The password or client secret is never stored in the configuration: it is
+/// read from the `AVE_SINK_PASSWORD_{{SERVER}}` environment variable.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
-#[derive(Default)]
 pub struct SinkAuthConfig {
     /// OAuth2 / token endpoint URL. Must be set together with `username` for
     /// the `password` grant, or with `client_id` for `client_credentials`.
     pub auth_url: String,
     /// Username for the token endpoint. Required for the `password` grant.
     pub username: String,
-    /// API key for Api-Key header authentication (alternative to OAuth2).
-    /// May be empty when the key is provided through the environment variable
-    /// `AVE_SINK_APIKEY_{{SERVER}}`, which is the recommended option and
-    /// takes precedence over this field. Always serialized redacted.
-    #[serde(default)]
-    pub api_key: String,
     /// OAuth2 grant type. Defaults to `password` for backwards compatibility.
     #[serde(default)]
     pub grant_type: OAuth2GrantType,
@@ -1477,29 +1526,6 @@ pub struct SinkAuthConfig {
     /// Optional OAuth2 scope(s) requested when obtaining a token.
     #[serde(default)]
     pub scope: String,
-}
-
-
-// Manual `Serialize` impl instead of `serialize_with`: ts-rs cannot parse
-// that attribute and warns on every build. The emitted JSON is identical,
-// with `api_key` always redacted so it never leaks through API responses.
-impl Serialize for SinkAuthConfig {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-
-        let mut state = serializer.serialize_struct("SinkAuthConfig", 6)?;
-        state.serialize_field("auth_url", &self.auth_url)?;
-        state.serialize_field("username", &self.username)?;
-        let api_key = if self.api_key.is_empty() { "" } else { "***" };
-        state.serialize_field("api_key", api_key)?;
-        state.serialize_field("grant_type", &self.grant_type)?;
-        state.serialize_field("client_id", &self.client_id)?;
-        state.serialize_field("scope", &self.scope)?;
-        state.end()
-    }
 }
 
 impl SinkAuthConfig {
@@ -1531,6 +1557,69 @@ impl SinkAuthConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// Authentication mode of a sink delivery transport (HTTP and gRPC).
+///
+/// Secrets are never stored in the configuration: the bearer token is read
+/// from `AVE_SINK_TOKEN_{{SERVER}}`, the API key from
+/// `AVE_SINK_APIKEY_{{SERVER}}` and the basic/OAuth2 password from
+/// `AVE_SINK_PASSWORD_{{SERVER}}` (where `{{SERVER}}` is the sink name
+/// upper-cased with non-alphanumeric characters replaced by `_`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkAuthMethod {
+    /// `Authorization: Bearer <token>` on every delivery.
+    BearerToken,
+    /// API key on every delivery (`Api-Key` header in HTTP, `x-api-key`
+    /// metadata in gRPC).
+    ApiKey,
+    /// `Authorization: Basic base64(username:password)` on every delivery;
+    /// the password is read from `AVE_SINK_PASSWORD_{{SERVER}}`.
+    Basic {
+        /// Username of the basic credentials.
+        username: String,
+    },
+    /// OAuth2 (`password` or `client_credentials` grant): the token is
+    /// fetched from the auth endpoint, cached with a refresh margin and
+    /// refreshed on 401 / UNAUTHENTICATED, traveling as
+    /// `Authorization: Bearer <token>`. The secret (password or client
+    /// secret) is read from `AVE_SINK_PASSWORD_{{SERVER}}`.
+    #[serde(rename = "oauth2")]
+    OAuth2(SinkAuthConfig),
+}
+
+impl SinkAuthMethod {
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::BearerToken | Self::ApiKey => Ok(()),
+            Self::Basic { username } if username.is_empty() => {
+                Err(Error::InvalidConfiguration {
+                    component: "SinkAuthMethod.Basic.username".to_string(),
+                    reason: "must not be empty".to_string(),
+                })
+            }
+            Self::Basic { .. } => Ok(()),
+            Self::OAuth2(auth) => {
+                // Selecting the OAuth2 method means OAuth2 IS configured:
+                // reject an empty endpoint here instead of failing later,
+                // when the transport is built.
+                if auth.auth_url.is_empty() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "SinkAuthMethod.OAuth2.auth_url".to_string(),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+                auth.validate().map_err(|e| Error::InvalidConfiguration {
+                    component: "SinkAuthMethod.OAuth2".to_string(),
+                    reason: e.to_string(),
+                })
+            }
+        }
     }
 }
 
@@ -1647,6 +1736,8 @@ pub enum HttpCompression {
     None,
     /// gzip compression (`Content-Encoding: gzip`).
     Gzip,
+    /// zstd compression (`Content-Encoding: zstd`).
+    Zstd,
 }
 
 impl HttpCompression {
@@ -1656,6 +1747,7 @@ impl HttpCompression {
         match self {
             Self::None => None,
             Self::Gzip => Some("gzip"),
+            Self::Zstd => Some("zstd"),
         }
     }
 }
@@ -1671,12 +1763,12 @@ pub struct HttpSinkConfig {
     /// and `{{event-type}}` placeholders (values are percent-encoded as URL
     /// path segments).
     pub url: String,
-    /// Per-sink authentication. When `Some`, the worker will load the
-    /// password from the environment variable `AVE_SINK_PASSWORD_{{SERVER}}`
-    /// and the API key from `AVE_SINK_APIKEY_{{SERVER}}` (where `{{SERVER}}`
-    /// is the sink name upper-cased with non-alphanumeric characters replaced
-    /// by `_`).
-    pub auth: Option<SinkAuthConfig>,
+    /// Per-sink authentication. Secrets are never stored here: they are
+    /// read from the `AVE_SINK_TOKEN_{{SERVER}}`, `AVE_SINK_APIKEY_{{SERVER}}`
+    /// and `AVE_SINK_PASSWORD_{{SERVER}}` environment variables (where
+    /// `{{SERVER}}` is the sink name upper-cased with non-alphanumeric
+    /// characters replaced by `_`).
+    pub auth: Option<SinkAuthMethod>,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub max_retries: usize,
@@ -2432,59 +2524,6 @@ impl KafkaSinkConfig {
     }
 }
 
-/// Authentication mode for the gRPC transport.
-///
-/// Secrets are never stored in the configuration: the bearer token is read
-/// from `AVE_SINK_TOKEN_{{SERVER}}`, the API key from
-/// `AVE_SINK_APIKEY_{{SERVER}}` and the basic/OAuth2 password from
-/// `AVE_SINK_PASSWORD_{{SERVER}}` (where `{{SERVER}}` is the sink name
-/// upper-cased with non-alphanumeric characters replaced by `_`), the same
-/// pattern used by the other transports.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[cfg_attr(feature = "typescript", derive(TS))]
-#[cfg_attr(feature = "typescript", ts(export))]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GrpcAuthConfig {
-    /// `authorization: Bearer <token>` metadata on every RPC.
-    BearerToken,
-    /// `x-api-key: <key>` metadata on every RPC.
-    ApiKey,
-    /// `authorization: Basic base64(username:password)` metadata on every
-    /// RPC; the password is read from `AVE_SINK_PASSWORD_{{SERVER}}`.
-    Basic {
-        /// Username of the basic credentials.
-        username: String,
-    },
-    /// OAuth2 (`password` or `client_credentials` grant): the token is
-    /// fetched from the auth endpoint, cached with a refresh margin and
-    /// refreshed on UNAUTHENTICATED, traveling as
-    /// `authorization: Bearer <token>` metadata. The secret (password or
-    /// client secret) is read from `AVE_SINK_PASSWORD_{{SERVER}}`.
-    OAuth2(SinkAuthConfig),
-}
-
-impl GrpcAuthConfig {
-    pub fn validate(&self) -> Result<(), Error> {
-        match self {
-            Self::BearerToken | Self::ApiKey => Ok(()),
-            Self::Basic { username } if username.is_empty() => {
-                Err(Error::InvalidConfiguration {
-                    component: "GrpcAuthConfig.Basic.username".to_string(),
-                    reason: "must not be empty".to_string(),
-                })
-            }
-            Self::Basic { .. } => Ok(()),
-            Self::OAuth2(auth) => {
-                auth.validate().map_err(|e| Error::InvalidConfiguration {
-                    component: "GrpcAuthConfig.OAuth2".to_string(),
-                    reason: e.to_string(),
-                })
-            }
-        }
-    }
-}
-
 /// TLS configuration for the gRPC transport.
 ///
 /// Certificates are referenced by filesystem path; the client private key
@@ -2533,8 +2572,8 @@ pub struct GrpcSinkConfig {
     /// `dns:///host:port`). A single HTTP/2 connection is multiplexed for
     /// every delivery of this sink.
     pub endpoint: String,
-    /// Per-RPC authentication (see [`GrpcAuthConfig`]).
-    pub auth: Option<GrpcAuthConfig>,
+    /// Per-RPC authentication (see [`SinkAuthMethod`]).
+    pub auth: Option<SinkAuthMethod>,
     /// TLS customization: additional root CA and mTLS identity.
     pub tls: Option<GrpcTlsConfig>,
     /// Sign each delivery with the node's Ed25519 identity (canonical v2,

@@ -37,8 +37,9 @@ use crate::{
         NetworkConfigHttp, NodeTypeHttp, OAuth2GrantTypeHttp, ProxyConfigHttp,
         RateLimitConfigHttp, RebootSyncConfigHttp, RoutingConfigHttp,
         RoutingNodeHttp, SelfSignedCertConfigHttp, SessionConfigHttp,
-        SinkAuthConfigHttp, SinkConfigEntryHttp, SinkConfigHttp,
-        SinkServerHttp, SinkTargetHttp, SinkTransportConfigHttp,
+        SinkAuthConfigHttp, SinkAuthMethodHttp, SinkConfigEntryHttp,
+        SinkConfigHttp, SinkServerHttp, SinkTargetHttp,
+        SinkTransportConfigHttp,
         SyncConfigHttp, TrackerSyncConfigHttp, UpdateSyncConfigHttp,
     },
 };
@@ -402,6 +403,7 @@ impl Modify for SecurityAddon {
             KafkaSinkConfigHttp,
             KafkaTlsConfigHttp,
             SinkAuthConfigHttp,
+            SinkAuthMethodHttp,
             AveStoreConfigHttp,
             MachineSpecHttp
         )

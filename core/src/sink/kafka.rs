@@ -406,7 +406,6 @@ impl KafkaTransport {
                         auth: ave_common::sink::SinkAuthConfig {
                             auth_url: token_url,
                             username: String::new(),
-                            api_key: String::new(),
                             grant_type:
                                 ave_common::sink::OAuth2GrantType::ClientCredentials,
                             client_id: username.clone(),
@@ -1052,7 +1051,6 @@ mod tests {
                 auth: ave_common::sink::SinkAuthConfig {
                     auth_url: format!("http://{addr}/token"),
                     username: String::new(),
-                    api_key: String::new(),
                     grant_type:
                         ave_common::sink::OAuth2GrantType::ClientCredentials,
                     client_id: "client-1".to_owned(),
@@ -1313,7 +1311,6 @@ mod tests {
         let auth = ave_common::sink::SinkAuthConfig {
             auth_url: format!("https://{addr}/token"),
             username: String::new(),
-            api_key: String::new(),
             grant_type: ave_common::sink::OAuth2GrantType::ClientCredentials,
             client_id: "client-1".to_owned(),
             scope: String::new(),

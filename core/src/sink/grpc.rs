@@ -8,8 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_common::sink::pb;
 use ave_common::sink::{
-    GrpcAuthConfig, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
-    SinkAuthConfig,
+    GrpcSinkConfig, GrpcTlsConfig, HttpCompression, SinkAuthConfig,
+    SinkAuthMethod,
 };
 use ave_common::{DataToSink, LightEvent};
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
@@ -178,9 +178,17 @@ impl GrpcTransport {
         let mut client = EventSinkClient::new(channel.clone())
             .max_decoding_message_size(config.max_decoding_message_bytes)
             .max_encoding_message_size(config.max_encoding_message_bytes);
-        if matches!(config.compression, HttpCompression::Gzip) {
-            client = client
-                .send_compressed(tonic::codec::CompressionEncoding::Gzip);
+        let compression = match config.compression {
+            HttpCompression::None => None,
+            HttpCompression::Gzip => {
+                Some(tonic::codec::CompressionEncoding::Gzip)
+            }
+            HttpCompression::Zstd => {
+                Some(tonic::codec::CompressionEncoding::Zstd)
+            }
+        };
+        if let Some(encoding) = compression {
+            client = client.send_compressed(encoding);
         }
 
         Ok(Self {
@@ -898,7 +906,7 @@ const fn retry_after_of(err: &SinkError) -> Option<u64> {
 /// configuration error (same behavior as the HTTP sink).
 async fn build_auth(
     sink_name: &str,
-    auth: Option<&GrpcAuthConfig>,
+    auth: Option<&SinkAuthMethod>,
     tls: Option<&GrpcTlsConfig>,
     request_timeout_ms: u64,
 ) -> Result<Option<GrpcAuth>, SinkError> {
@@ -906,7 +914,7 @@ async fn build_auth(
         return Ok(None);
     };
     match auth {
-        GrpcAuthConfig::BearerToken => {
+        SinkAuthMethod::BearerToken => {
             let env_var = sink_token_env_var(sink_name);
             let secret = read_secret(sink_name, &env_var)?;
             Ok(Some(GrpcAuth::Static(auth_metadata_pair(
@@ -915,14 +923,14 @@ async fn build_auth(
                 format!("Bearer {secret}"),
             )?)))
         }
-        GrpcAuthConfig::ApiKey => {
+        SinkAuthMethod::ApiKey => {
             let env_var = sink_apikey_env_var(sink_name);
             let secret = read_secret(sink_name, &env_var)?;
             Ok(Some(GrpcAuth::Static(auth_metadata_pair(
                 sink_name, "x-api-key", secret,
             )?)))
         }
-        GrpcAuthConfig::Basic { username } => {
+        SinkAuthMethod::Basic { username } => {
             let env_var = sink_password_env_var(sink_name);
             let password = read_secret(sink_name, &env_var)?;
             let encoded =
@@ -933,7 +941,7 @@ async fn build_auth(
                 format!("Basic {encoded}"),
             )?)))
         }
-        GrpcAuthConfig::OAuth2(config) => {
+        SinkAuthMethod::OAuth2(config) => {
             let env_var = sink_password_env_var(sink_name);
             let secret = read_secret(sink_name, &env_var)?;
             let token_client =
@@ -1138,15 +1146,15 @@ mod tests {
 
     #[tokio::test]
     async fn auth_metadata_requires_the_secret_env_var() {
-        let oauth = GrpcAuthConfig::OAuth2(SinkAuthConfig {
+        let oauth = SinkAuthMethod::OAuth2(SinkAuthConfig {
             auth_url: "http://127.0.0.1:1/token".to_owned(),
             username: "user".to_owned(),
             ..SinkAuthConfig::default()
         });
         for auth in [
-            GrpcAuthConfig::BearerToken,
-            GrpcAuthConfig::ApiKey,
-            GrpcAuthConfig::Basic {
+            SinkAuthMethod::BearerToken,
+            SinkAuthMethod::ApiKey,
+            SinkAuthMethod::Basic {
                 username: "user".to_owned(),
             },
             oauth,
