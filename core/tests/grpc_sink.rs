@@ -22,7 +22,7 @@ use ave_common::{
     },
 };
 use ave_core::config::{
-    SinkAuthMethod, GrpcSinkConfig, GrpcTlsConfig, HttpCompression,
+    SinkAuthMethod, GrpcSinkConfig, GrpcTlsConfig, SinkCompression,
     SinkConfigEntry, SinkServer, SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
@@ -187,7 +187,7 @@ async fn grpc_transport_gzip_compression() {
     let sink = GrpcTestSink::start().await;
     let config = GrpcSinkConfig {
         endpoint: sink.endpoint(),
-        compression: HttpCompression::Gzip,
+        compression: SinkCompression::Gzip,
         ..GrpcSinkConfig::default()
     };
     let transport = build_transport(&sink.endpoint(), config).await;
@@ -260,7 +260,7 @@ async fn grpc_transport_zstd_compression() {
     let sink = GrpcTestSink::start().await;
     let config = GrpcSinkConfig {
         endpoint: sink.endpoint(),
-        compression: HttpCompression::Zstd,
+        compression: SinkCompression::Zstd,
         ..GrpcSinkConfig::default()
     };
     let transport = build_transport(&sink.endpoint(), config).await;
@@ -1552,7 +1552,7 @@ async fn grpc_node_gzip_and_custom_headers_end_to_end() {
                 transport: SinkTransportConfig::Grpc(Box::new(
                     GrpcSinkConfig {
                         endpoint: sink_endpoint,
-                        compression: HttpCompression::Gzip,
+                        compression: SinkCompression::Gzip,
                         headers: HashMap::from([
                             ("x-team".to_owned(), "ledger".to_owned()),
                             ("x-ave-sn".to_owned(), "999".to_owned()),
@@ -1669,7 +1669,7 @@ async fn grpc_node_zstd_end_to_end() {
                 transport: SinkTransportConfig::Grpc(Box::new(
                     GrpcSinkConfig {
                         endpoint: sink_endpoint,
-                        compression: HttpCompression::Zstd,
+                        compression: SinkCompression::Zstd,
                         ..GrpcSinkConfig::default()
                     },
                 )),

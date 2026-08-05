@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(cfg.retry_max_delay_ms, 30_000);
         assert!(!cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
-        assert_eq!(cfg.compression, HttpCompression::None);
+        assert_eq!(cfg.compression, SinkCompression::None);
         assert_eq!(cfg.max_error_body_bytes, 4_096);
         assert_eq!(cfg.tcp_keepalive_secs, Some(60));
         assert_eq!(cfg.pool_idle_timeout_secs, 90);
@@ -921,12 +921,12 @@ mod tests {
             r#"{"url": "https://example.com", "compression": "gzip"}"#,
         )
         .unwrap();
-        assert_eq!(cfg.compression, HttpCompression::Gzip);
+        assert_eq!(cfg.compression, SinkCompression::Gzip);
         let cfg: HttpSinkConfig = serde_json::from_str(
             r#"{"url": "https://example.com", "compression": "none"}"#,
         )
         .unwrap();
-        assert_eq!(cfg.compression, HttpCompression::None);
+        assert_eq!(cfg.compression, SinkCompression::None);
         // Unknown values are rejected at deserialization time.
         assert!(
             serde_json::from_str::<HttpSinkConfig>(
@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(cfg.retry_max_delay_ms, 30_000);
         assert!(!cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
-        assert!(matches!(cfg.compression, HttpCompression::None));
+        assert!(matches!(cfg.compression, SinkCompression::None));
         assert_eq!(cfg.max_decoding_message_bytes, 4 * 1024 * 1024);
         assert_eq!(cfg.max_encoding_message_bytes, 16 * 1024 * 1024);
         assert_eq!(cfg.max_in_flight_batches, 8);
@@ -1724,13 +1724,14 @@ impl HttpProxyConfig {
     }
 }
 
-/// Body compression applied to HTTP deliveries.
+/// Body compression applied to sink deliveries (HTTP and gRPC; Kafka uses
+/// its own codec set, `KafkaCompression`).
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "lowercase")]
-pub enum HttpCompression {
+pub enum SinkCompression {
     /// No compression (default).
     #[default]
     None,
@@ -1740,7 +1741,7 @@ pub enum HttpCompression {
     Zstd,
 }
 
-impl HttpCompression {
+impl SinkCompression {
     /// `Content-Encoding` header value for this compression, or `None` when
     /// no compression is applied (the header must then be omitted).
     pub const fn content_encoding(&self) -> Option<&'static str> {
@@ -1802,9 +1803,9 @@ pub struct HttpSinkConfig {
     /// flushed. Batches are also flushed when they reach `batch_size`
     /// events. Only used when `batch_delivery` is enabled.
     pub batch_max_delay_ms: u64,
-    /// Body compression for deliveries: `none` (default) or `gzip`
+    /// Body compression for deliveries: `none` (default), `gzip` or `zstd`
     /// (`Content-Encoding: gzip`).
-    pub compression: HttpCompression,
+    pub compression: SinkCompression,
     /// Custom static headers added to every delivery and health-check request.
     /// Headers that collide with the sink's own headers (`Content-Type`,
     /// `Content-Encoding`, `Authorization`, `X-Ave-*`, `Idempotency-Key`, etc.)
@@ -1847,7 +1848,7 @@ impl Default for HttpSinkConfig {
             retry_max_delay_ms: 30_000,
             batch_delivery: false,
             batch_max_delay_ms: 100,
-            compression: HttpCompression::None,
+            compression: SinkCompression::None,
             headers: HashMap::new(),
             max_error_body_bytes: 4_096,
             tcp_keepalive_secs: Some(60),
@@ -2598,8 +2599,8 @@ pub struct GrpcSinkConfig {
     /// Maximum time a live event waits for a batch to fill before it is
     /// flushed. Only used when `batch_delivery` is enabled.
     pub batch_max_delay_ms: u64,
-    /// Message compression for deliveries: `none` (default) or `gzip`.
-    pub compression: HttpCompression,
+    /// Message compression for deliveries: `none` (default), `gzip` or `zstd`.
+    pub compression: SinkCompression,
     /// Custom static metadata added to every RPC. Keys reserved by the sink
     /// contract (`authorization`, `x-api-key`, `x-ave-*`, `grpc-*`) are
     /// ignored so the delivery contract is never broken.
@@ -2638,7 +2639,7 @@ impl Default for GrpcSinkConfig {
             retry_max_delay_ms: 30_000,
             batch_delivery: false,
             batch_max_delay_ms: 100,
-            compression: HttpCompression::None,
+            compression: SinkCompression::None,
             headers: HashMap::new(),
             max_decoding_message_bytes: 4 * 1024 * 1024,
             max_encoding_message_bytes: 16 * 1024 * 1024,

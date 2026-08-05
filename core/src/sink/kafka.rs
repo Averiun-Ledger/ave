@@ -525,25 +525,15 @@ impl KafkaTransport {
         additional_headers: Option<OwnedHeaders>,
         request_id: &str,
     ) -> Result<(), SinkError> {
-        let mut last_err = None;
         let signature_headers = self.sign_payload(payload, meta).await?;
 
-        for attempt in 0..=self.config.max_retries {
-            if attempt > 0 {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_sink_retry(&self.sink_name);
-                }
-                let delay = crate::sink::retry_delay_ms(
-                    self.config.retry_base_delay_ms,
-                    self.config.retry_max_delay_ms,
-                    attempt,
-                    None,
-                );
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-            }
-
-            match self
-                .produce_once(ProduceMessage {
+        crate::sink::deliver_with_retries(
+            &self.sink_name,
+            self.config.max_retries,
+            self.config.retry_base_delay_ms,
+            self.config.retry_max_delay_ms,
+            || {
+                self.produce_once(ProduceMessage {
                     topic,
                     key,
                     payload,
@@ -552,20 +542,12 @@ impl KafkaTransport {
                     signature_headers: &signature_headers,
                     request_id,
                 })
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) if crate::sink::is_permanent_error(&e) => {
-                    // Permanent error: no retries.
-                    return Err(e);
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(crate::sink::max_retries_exceeded_error))
+            },
+            // Kafka auth is handled by librdkafka (SASL/OIDC); auth errors
+            // are retried with the standard backoff.
+            || async { crate::sink::AuthRetryDecision::Backoff },
+        )
+        .await
     }
 
     /// One produce attempt with request-duration metrics, so every transport

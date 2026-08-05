@@ -9,7 +9,6 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures::StreamExt;
 use reqwest::{Client, Identity, tls::Version};
-use tokio::sync::RwLock;
 use tracing::debug;
 
 use rustls::client::danger::{
@@ -20,19 +19,18 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
 use crate::config::{
-    HttpCompression, HttpSinkConfig, HttpTlsVersion, TokenResponse,
+    SinkCompression, HttpSinkConfig, HttpTlsVersion,
 };
-use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
 use crate::sink::read_tls_file;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, batch_group_schema_id,
-    generate_request_id, group_events_by_type, is_sink_reserved_header,
-    load_required_secret, serialize_json_payload, sign_delivery,
-    sink_apikey_env_var, sink_password_env_var, sink_proxy_password_env_var,
-    sink_token_env_var, test_delivery_payload, timed_sink_request,
+    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, StaticAuth,
+    batch_group_schema_id, generate_request_id, group_events_by_type,
+    is_sink_reserved_header, load_required_secret, resolve_static_auth,
+    serialize_json_payload, sign_delivery, sink_password_env_var,
+    sink_proxy_password_env_var, test_delivery_payload, timed_sink_request,
 };
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
@@ -40,7 +38,6 @@ use ave_common::{
     DataToSink, IncomingSinkEvent, LightEvent, SinkTypes,
     sink::{SinkAuthConfig, SinkAuthMethod},
 };
-use base64::{Engine as _, prelude::BASE64_STANDARD};
 
 /// TLS certificate pinning verifier. Pinning **replaces** normal CA / WebPKI
 /// verification: the operator explicitly trusts this exact certificate, so
@@ -409,16 +406,13 @@ pub struct HttpTransport {
     sink_name: String,
     config: HttpSinkConfig,
     url_template: CompiledTemplate,
-    /// Bearer token loaded from `AVE_SINK_TOKEN_{{SERVER}}`
-    /// (`SinkAuthMethod::BearerToken`).
-    bearer_token: String,
-    /// Password loaded from `AVE_SINK_PASSWORD_{{SERVER}}`
-    /// (`SinkAuthMethod::Basic` / `OAuth2`).
-    password: String,
-    /// API key loaded from `AVE_SINK_APIKEY_{{SERVER}}`
-    /// (`SinkAuthMethod::ApiKey`).
-    api_key: String,
-    cached_token: RwLock<Option<TokenResponse>>,
+    /// Static credential resolved from the environment
+    /// (`SinkAuthMethod::BearerToken` / `ApiKey` / `Basic`).
+    static_auth: Option<StaticAuth>,
+    /// OAuth2 token cache (`SinkAuthMethod::OAuth2`); the client is shared
+    /// with deliveries so token requests honor the same TLS, proxy and
+    /// pool configuration.
+    oauth2: Option<crate::sink::OAuth2TokenCache>,
     /// Node identity signer; required when `config.signature` is enabled.
     signer: Option<NodeSigner>,
 }
@@ -431,47 +425,31 @@ impl HttpTransport {
     ) -> Result<Self, SinkError> {
         let client = build_http_client(&sink_name, &config).await?;
 
-        let mut bearer_token = String::new();
-        let mut password = String::new();
-        let mut api_key = String::new();
-        if let Some(auth) = &config.auth {
-            match auth {
-                SinkAuthMethod::BearerToken => {
-                    bearer_token = load_required_secret(
-                        &sink_name,
-                        &sink_token_env_var(&sink_name),
-                        "bearer token",
-                    )?;
-                }
-                SinkAuthMethod::ApiKey => {
-                    api_key = load_required_secret(
-                        &sink_name,
-                        &sink_apikey_env_var(&sink_name),
-                        "API key",
-                    )?;
-                }
-                SinkAuthMethod::Basic { .. } => {
-                    password = load_required_secret(
-                        &sink_name,
-                        &sink_password_env_var(&sink_name),
-                        "basic auth",
-                    )?;
-                }
-                SinkAuthMethod::OAuth2(oauth) => {
-                    if !oauth2_credentials_ready(oauth) {
-                        return Err(SinkError::ClientBuild(format!(
-                            "OAuth2 authentication configured for sink '{}' but the credentials are incomplete",
-                            sink_name
-                        )));
-                    }
-                    password = load_required_secret(
-                        &sink_name,
-                        &sink_password_env_var(&sink_name),
-                        "OAuth2",
-                    )?;
-                }
+        let mut oauth2 = None;
+        if let Some(SinkAuthMethod::OAuth2(oauth)) = &config.auth {
+            if !oauth2_credentials_ready(oauth) {
+                return Err(SinkError::ClientBuild(format!(
+                    "OAuth2 authentication configured for sink '{}' but the credentials are incomplete",
+                    sink_name
+                )));
             }
+            let password = load_required_secret(
+                &sink_name,
+                &sink_password_env_var(&sink_name),
+                "OAuth2",
+            )?;
+            oauth2 = Some(crate::sink::OAuth2TokenCache::new(
+                client.clone(),
+                oauth.clone(),
+                password,
+                config.token_refresh_margin_secs,
+                config.retry_base_delay_ms,
+            ));
         }
+        let static_auth = match &config.auth {
+            Some(method) => resolve_static_auth(&sink_name, method)?,
+            None => None,
+        };
 
         if config.signature && signer.is_none() {
             return Err(SinkError::ClientBuild(format!(
@@ -483,10 +461,8 @@ impl HttpTransport {
         Ok(Self {
             client,
             url_template: CompiledTemplate::new(&config.url),
-            bearer_token,
-            password,
-            api_key,
-            cached_token: RwLock::new(None),
+            static_auth,
+            oauth2,
             signer,
             sink_name,
             config,
@@ -517,8 +493,9 @@ impl HttpTransport {
     }
 
     async fn invalidate_cached_token(&self) {
-        let mut guard = self.cached_token.write().await;
-        *guard = None;
+        if let Some(cache) = &self.oauth2 {
+            cache.invalidate().await;
+        }
     }
 
     async fn send_with_retry(
@@ -527,62 +504,27 @@ impl HttpTransport {
         payload: Vec<u8>,
         meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
-        let mut last_err = None;
-        let sink_name = &self.sink_name;
         let signature_headers = self.sign_payload(&payload, meta).await?;
 
-        for attempt in 0..=self.config.max_retries {
-            if attempt > 0 {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_sink_retry(sink_name);
+        crate::sink::deliver_with_retries(
+            &self.sink_name,
+            self.config.max_retries,
+            self.config.retry_base_delay_ms,
+            self.config.retry_max_delay_ms,
+            || self.timed_send_once(url, &payload, &signature_headers, meta),
+            || async {
+                // Auth error on the first attempt: invalidate the cached
+                // token and retry once immediately with fresh credentials.
+                self.invalidate_cached_token().await;
+                if self.build_auth_header().await.is_ok() {
+                    crate::sink::AuthRetryDecision::Retry
+                } else {
+                    // Can't refresh auth; report the original auth error.
+                    crate::sink::AuthRetryDecision::Abort
                 }
-                // The server-provided Retry-After hint is honored when it
-                // exceeds the computed backoff.
-                let delay = crate::sink::retry_delay_ms(
-                    self.config.retry_base_delay_ms,
-                    self.config.retry_max_delay_ms,
-                    attempt,
-                    last_err.as_ref().and_then(retry_after_of),
-                );
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-            }
-
-            match self
-                .timed_send_once(url, &payload, &signature_headers, meta)
-                .await
-            {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(e) if crate::sink::is_permanent_error(&e) => {
-                    // Permanent error: 422, bad config, etc. No retries.
-                    return Err(e);
-                }
-                Err(e @ SinkError::Auth { .. }) if attempt == 0 => {
-                    // Auth error on first attempt: invalidate cache, refresh
-                    // token, retry once immediately.
-                    self.invalidate_cached_token().await;
-                    if self.build_auth_header().await.is_err() {
-                        // Can't refresh auth; report the original auth error.
-                        return Err(e);
-                    }
-                    // Retry once with fresh auth.
-                    return self
-                        .timed_send_once(
-                            url,
-                            &payload,
-                            &signature_headers,
-                            meta,
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(crate::sink::max_retries_exceeded_error))
+            },
+        )
+        .await
     }
 
     async fn timed_send_once(
@@ -711,50 +653,25 @@ impl HttpTransport {
         };
 
         match auth {
-            SinkAuthMethod::BearerToken => {
-                Ok(Some(format!("Bearer {}", self.bearer_token)))
+            SinkAuthMethod::OAuth2(_) => {
+                // Present by construction when the method is OAuth2.
+                let Some(cache) = &self.oauth2 else {
+                    return Err(SinkError::Auth {
+                        message: format!(
+                            "sink '{}': OAuth2 token cache missing",
+                            self.sink_name
+                        ),
+                        retry_after_ms: None,
+                    });
+                };
+                let access_token = cache.token().await?;
+                Ok(Some(format!("Bearer {access_token}")))
             }
-            SinkAuthMethod::ApiKey => {
-                Ok(Some(format!("Api-Key {}", self.api_key)))
-            }
-            SinkAuthMethod::Basic { username } => {
-                let encoded = BASE64_STANDARD
-                    .encode(format!("{}:{}", username, self.password));
-                Ok(Some(format!("Basic {encoded}")))
-            }
-            SinkAuthMethod::OAuth2(oauth) => {
-                let margin = self.config.token_refresh_margin_secs;
-
-                // Check cached token
-                {
-                    let guard = self.cached_token.read().await;
-                    if let Some(token) = guard.as_ref()
-                        && !token.is_expired_or_expiring_soon(margin)
-                    {
-                        return Ok(Some(format!(
-                            "Bearer {}",
-                            token.access_token
-                        )));
-                    }
-                    // Token is missing, expired or expiring soon; fall
-                    // through to obtain a new token.
-                }
-
-                // Refresh the token outside the write lock so other
-                // deliveries are not blocked while the auth endpoint is
-                // failing or slow.
-                let token = crate::sink::obtain_token_with_retry(
-                    &self.client,
-                    oauth,
-                    &self.password,
-                    self.config.retry_base_delay_ms,
-                )
-                .await?;
-
-                let header = format!("Bearer {}", token.access_token);
-                *self.cached_token.write().await = Some(token);
-                Ok(Some(header))
-            }
+            // Static credentials are resolved at construction.
+            _ => Ok(self.static_auth.as_ref().map(|cred| match cred {
+                StaticAuth::Authorization(value) => value.clone(),
+                StaticAuth::ApiKey(key) => format!("Api-Key {key}"),
+            })),
         }
     }
 
@@ -791,13 +708,13 @@ impl HttpTransport {
         let raw = serialize_json_payload(body)?;
 
         let compression = self.config.compression.clone();
-        if matches!(compression, HttpCompression::None) {
+        if matches!(compression, SinkCompression::None) {
             return Ok(raw);
         }
 
         tokio::task::spawn_blocking(move || match compression {
-            HttpCompression::None => Ok(raw),
-            HttpCompression::Gzip => {
+            SinkCompression::None => Ok(raw),
+            SinkCompression::Gzip => {
                 let mut encoder =
                     GzEncoder::new(Vec::new(), Compression::default());
                 encoder
@@ -809,7 +726,7 @@ impl HttpTransport {
                         retry_after_ms: None,
                     })
             }
-            HttpCompression::Zstd => {
+            SinkCompression::Zstd => {
                 zstd::bulk::compress(&raw, 0).map_err(|e| {
                     SinkError::Delivery {
                         message: format!("zstd compression failed: {}", e),
@@ -1039,26 +956,10 @@ impl SinkTransport for HttpTransport {
 
     /// If the sink has OAuth2 auth config, obtain a token eagerly on startup.
     async fn warm_up(&self) -> Result<(), SinkError> {
-        if let Some(SinkAuthMethod::OAuth2(oauth)) = &self.config.auth {
-            let token = crate::sink::obtain_token_with_retry(
-                &self.client,
-                oauth,
-                &self.password,
-                self.config.retry_base_delay_ms,
-            )
-            .await?;
-            let mut guard = self.cached_token.write().await;
-            *guard = Some(token);
+        if let Some(cache) = &self.oauth2 {
+            cache.token().await?;
         }
         Ok(())
-    }
-}
-
-/// Extract the `Retry-After` hint carried by a delivery error, if any.
-const fn retry_after_of(err: &SinkError) -> Option<u64> {
-    match err {
-        SinkError::Delivery { retry_after_ms, .. } => *retry_after_ms,
-        _ => None,
     }
 }
 
@@ -1335,6 +1236,8 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
     #[tokio::test]
     async fn basic_auth_reads_the_password_env_var() {
+        use base64::{Engine as _, prelude::BASE64_STANDARD};
+
         let env_var = "AVE_SINK_PASSWORD_UNIT_BASIC";
         unsafe {
             std::env::set_var(env_var, "s3cret");
@@ -1526,7 +1429,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
     #[tokio::test]
     async fn encode_body_gzip_roundtrip() {
         let mut config = base_config();
-        config.compression = HttpCompression::Gzip;
+        config.compression = SinkCompression::Gzip;
         let transport =
             HttpTransport::new("unit-gzip".to_owned(), config, None)
                 .await
@@ -1636,7 +1539,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                 .expect("transport should build");
 
         // Seed an expired token; the next call must obtain a fresh one.
-        let expired_token = TokenResponse {
+        let expired_token = crate::config::TokenResponse {
             access_token: "expired-token".to_owned(),
             token_type: "Bearer".to_owned(),
             expires_in: 1,
@@ -1647,7 +1550,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             ),
         };
         {
-            let mut guard = transport.cached_token.write().await;
+            let cache =
+                transport.oauth2.as_ref().expect("OAuth2 cache present");
+            let mut guard = cache.cached.write().await;
             *guard = Some(expired_token);
         }
 

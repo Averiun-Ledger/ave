@@ -226,6 +226,67 @@ pub fn load_required_secret(
     Ok(secret)
 }
 
+/// Static credential of an auth method, resolved from the environment and
+/// ready for the wire.
+///
+/// Shared by the HTTP and gRPC transports so the secret of each
+/// [`SinkAuthMethod`] variant is read from the same environment variable
+/// and formatted identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaticAuth {
+    /// Value ready for the `Authorization` header (HTTP) or the
+    /// `authorization` metadata (gRPC): `Bearer <token>` or
+    /// `Basic base64(username:password)`.
+    Authorization(String),
+    /// Raw API key: HTTP wraps it as `Api-Key <key>` in the `Authorization`
+    /// header, gRPC sends it as `x-api-key` metadata.
+    ApiKey(String),
+}
+
+/// Resolve the static credential of an auth method, reading its secret
+/// from the environment.
+///
+/// Returns `None` for
+/// [`SinkAuthMethod::OAuth2`](ave_common::sink::SinkAuthMethod::OAuth2),
+/// whose token flow is handled separately (token cache + refresh).
+pub fn resolve_static_auth(
+    sink_name: &str,
+    method: &ave_common::sink::SinkAuthMethod,
+) -> Result<Option<StaticAuth>, SinkError> {
+    use ave_common::sink::SinkAuthMethod;
+    use base64::{Engine as _, prelude::BASE64_STANDARD};
+
+    match method {
+        SinkAuthMethod::BearerToken => {
+            let token = load_required_secret(
+                sink_name,
+                &sink_token_env_var(sink_name),
+                "bearer token",
+            )?;
+            Ok(Some(StaticAuth::Authorization(format!("Bearer {token}"))))
+        }
+        SinkAuthMethod::ApiKey => {
+            let key = load_required_secret(
+                sink_name,
+                &sink_apikey_env_var(sink_name),
+                "API key",
+            )?;
+            Ok(Some(StaticAuth::ApiKey(key)))
+        }
+        SinkAuthMethod::Basic { username } => {
+            let password = load_required_secret(
+                sink_name,
+                &sink_password_env_var(sink_name),
+                "basic auth",
+            )?;
+            let encoded =
+                BASE64_STANDARD.encode(format!("{username}:{password}"));
+            Ok(Some(StaticAuth::Authorization(format!("Basic {encoded}"))))
+        }
+        SinkAuthMethod::OAuth2(_) => Ok(None),
+    }
+}
+
 /// The non-persistent test payload sent by `SinkTransport::test` on every
 /// transport, so receivers can recognize sink checks by content as well as
 /// by the [`TEST_HEADER`] header.

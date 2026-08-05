@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, collections::HashMap, time::Duration};
 use ave_common::{
     IncomingSinkEvent, SinkTypes,
     sink::{
-        DataToSink, DataToSinkEvent, HttpCompression, HttpProxyConfig,
+        DataToSink, DataToSinkEvent, SinkCompression, HttpProxyConfig,
         HttpTlsConfig, SinkAuthMethod,
     },
 };
@@ -233,7 +233,7 @@ pub fn make_sink_entry_batch(
     url: String,
     governance_id: Option<String>,
     events: BTreeSet<SinkTypes>,
-    compression: HttpCompression,
+    compression: SinkCompression,
 ) -> SinkConfigEntry {
     SinkConfigEntry {
         target: SinkTarget::Schema {

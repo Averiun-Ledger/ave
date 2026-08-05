@@ -15,7 +15,7 @@ use ave_common::{
         keys::{Ed25519Signer, KeyPair},
     },
     sink::{
-        DataToSinkEvent, HttpCompression, HttpProxyConfig, HttpTlsConfig,
+        DataToSinkEvent, SinkCompression, HttpProxyConfig, HttpTlsConfig,
         IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig, SinkAuthMethod,
         SinkTransportConfig,
     },
@@ -354,7 +354,7 @@ async fn sink_batch_event_type_url_groups_by_type() {
             format!("{}/{{{{event-type}}}}", sink.url()),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            HttpCompression::None,
+            SinkCompression::None,
         )],
     ))
     .await;
@@ -7023,7 +7023,7 @@ async fn sink_signature_v2_zstd_verify() {
                         url: sink.url(),
                         signature: true,
                         signature_version: 2,
-                        compression: HttpCompression::Zstd,
+                        compression: SinkCompression::Zstd,
                         max_retries: 0,
                         request_timeout_ms: 2000,
                         connect_timeout_ms: 1000,
@@ -9484,7 +9484,7 @@ async fn sink_batch_delivery_catch_up() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            HttpCompression::None,
+            SinkCompression::None,
         )],
     ))
     .await;
@@ -9593,7 +9593,7 @@ async fn sink_batch_delivery_gzip() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            HttpCompression::Gzip,
+            SinkCompression::Gzip,
         )],
     ))
     .await;
@@ -9694,7 +9694,7 @@ async fn sink_batch_delivery_zstd() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            HttpCompression::Zstd,
+            SinkCompression::Zstd,
         )],
     ))
     .await;
@@ -9782,7 +9782,7 @@ async fn sink_batch_delivery_live() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            HttpCompression::None,
+            SinkCompression::None,
         )],
     ))
     .await;
@@ -9896,7 +9896,7 @@ async fn sink_batch_delivery_burst_single_post() {
         sink.url(),
         Some(governance_id.to_string()),
         BTreeSet::from([SinkTypes::All]),
-        HttpCompression::None,
+        SinkCompression::None,
     );
     // One batch for the whole burst; the timer must not fire during the test.
     entry.servers[0].batch_delivery_size = 5;
@@ -10332,7 +10332,7 @@ async fn sink_batch_delivery_failure_retries_whole_batch() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            HttpCompression::None,
+            SinkCompression::None,
         )],
     ))
     .await;
@@ -10439,7 +10439,7 @@ async fn sink_batch_delivery_mixed_full_light() {
             sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::Create]),
-            HttpCompression::None,
+            SinkCompression::None,
         )],
     ))
     .await;

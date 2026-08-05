@@ -37,7 +37,7 @@ mod tests {
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::config::{
         AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-        HttpCompression, HttpSinkConfig, LoggingOutput, LoggingRotation,
+        SinkCompression, HttpSinkConfig, LoggingOutput, LoggingRotation,
         MachineSpec, SinkConfigEntry, SinkServer, SinkTarget,
         SinkTransportConfig,
     };
@@ -821,7 +821,7 @@ http:
                             retry_max_delay_ms: 30_000,
                             batch_delivery: false,
                             batch_max_delay_ms: 100,
-                            compression: HttpCompression::None,
+                            compression: SinkCompression::None,
                             max_error_body_bytes: 4_096,
                             tcp_keepalive_secs: Some(60),
                             pool_idle_timeout_secs: 90,
@@ -858,7 +858,7 @@ http:
                             retry_max_delay_ms: 30_000,
                             batch_delivery: false,
                             batch_max_delay_ms: 100,
-                            compression: HttpCompression::None,
+                            compression: SinkCompression::None,
                             max_error_body_bytes: 4_096,
                             tcp_keepalive_secs: Some(60),
                             pool_idle_timeout_secs: 90,

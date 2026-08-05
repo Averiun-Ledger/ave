@@ -939,7 +939,7 @@ pub struct HttpProxyConfigHttp {
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum HttpCompressionHttp {
+pub enum SinkCompressionHttp {
     /// No compression.
     None,
     /// gzip compression (`Content-Encoding: gzip`).
@@ -948,14 +948,14 @@ pub enum HttpCompressionHttp {
     Zstd,
 }
 
-impl From<ave_bridge::ave_common::sink::HttpCompression>
-    for HttpCompressionHttp
+impl From<ave_bridge::ave_common::sink::SinkCompression>
+    for SinkCompressionHttp
 {
-    fn from(value: ave_bridge::ave_common::sink::HttpCompression) -> Self {
+    fn from(value: ave_bridge::ave_common::sink::SinkCompression) -> Self {
         match value {
-            ave_bridge::ave_common::sink::HttpCompression::None => Self::None,
-            ave_bridge::ave_common::sink::HttpCompression::Gzip => Self::Gzip,
-            ave_bridge::ave_common::sink::HttpCompression::Zstd => Self::Zstd,
+            ave_bridge::ave_common::sink::SinkCompression::None => Self::None,
+            ave_bridge::ave_common::sink::SinkCompression::Gzip => Self::Gzip,
+            ave_bridge::ave_common::sink::SinkCompression::Zstd => Self::Zstd,
         }
     }
 }
@@ -990,8 +990,8 @@ pub struct HttpSinkConfigHttp {
     pub batch_delivery: bool,
     /// Maximum time a live event waits for a batch to fill, in milliseconds
     pub batch_max_delay_ms: u64,
-    /// Body compression for deliveries: `none` or `"gzip"`
-    pub compression: HttpCompressionHttp,
+    /// Body compression for deliveries: `none`, `"gzip"` or `"zstd"`
+    pub compression: SinkCompressionHttp,
     /// Custom health-check URL; when absent the delivery URL is used
     pub health_check_url: Option<String>,
     /// Margin in seconds before token expiry to trigger a refresh
@@ -1029,7 +1029,7 @@ impl Default for HttpSinkConfigHttp {
             retry_max_delay_ms: 30_000,
             batch_delivery: false,
             batch_max_delay_ms: 100,
-            compression: HttpCompressionHttp::None,
+            compression: SinkCompressionHttp::None,
             health_check_url: None,
             token_refresh_margin_secs: 30,
             max_error_body_bytes: 4_096,
@@ -1335,8 +1335,8 @@ pub struct GrpcSinkConfigHttp {
     /// Maximum time a live event waits for a batch to fill before it is
     /// flushed. Only used when `batch_delivery` is enabled.
     pub batch_max_delay_ms: u64,
-    /// Message compression for deliveries: `none` (default) or `gzip`.
-    pub compression: HttpCompressionHttp,
+    /// Message compression for deliveries: `none` (default), `gzip` or `zstd`.
+    pub compression: SinkCompressionHttp,
     /// Custom static metadata added to every RPC.
     /// Internal sink metadata (`authorization`, `x-api-key`, `x-ave-*`, `grpc-*`)
     /// takes precedence.

@@ -8,29 +8,27 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_common::sink::pb;
 use ave_common::sink::{
-    GrpcSinkConfig, GrpcTlsConfig, HttpCompression, SinkAuthConfig,
+    GrpcSinkConfig, GrpcTlsConfig, SinkCompression,
     SinkAuthMethod,
 };
 use ave_common::{DataToSink, LightEvent};
-use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use futures::StreamExt as _;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::{Ascii, MetadataKey, MetadataValue};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Code, Request, Status};
 
-use crate::config::TokenResponse;
 use crate::metrics::try_core_metrics;
 use crate::sink::delivery::{
-    DeliveryMeta, SignatureHeaders, generate_request_id, is_sink_reserved_header,
-    serialize_json_payload, sign_delivery, sink_apikey_env_var,
-    sink_password_env_var, sink_token_env_var, test_delivery_payload,
-    timed_sink_request,
+    DeliveryMeta, SignatureHeaders, StaticAuth, generate_request_id,
+    is_sink_reserved_header, load_required_secret, resolve_static_auth,
+    serialize_json_payload, sign_delivery, sink_password_env_var,
+    test_delivery_payload, timed_sink_request,
 };
 use crate::sink::error::SinkError;
 use crate::sink::transport::{NodeSigner, SinkTransport};
-use crate::sink::{read_tls_file, retry_delay_ms};
+use crate::sink::read_tls_file;
 
 use pb::event_sink_client::EventSinkClient;
 
@@ -62,24 +60,15 @@ enum StreamFailure {
 /// Metadata key/value pair attached to outgoing RPCs (auth or custom).
 type MetadataPair = (MetadataKey<Ascii>, MetadataValue<Ascii>);
 
-/// OAuth2 client state: the token is fetched from the auth endpoint, cached
-/// with a refresh margin and refreshed on UNAUTHENTICATED (mirrors the HTTP
-/// sink's token flow).
-struct GrpcOAuthState {
-    config: SinkAuthConfig,
-    /// HTTP client used only for token requests (honors the sink CA).
-    token_client: reqwest::Client,
-    /// Password or client secret read from the environment.
-    secret: String,
-    cached_token: RwLock<Option<TokenResponse>>,
-}
-
 /// Authentication state of the transport, resolved at construction.
 enum GrpcAuth {
     /// Static per-RPC metadata (bearer token, API key, basic credentials).
     Static(MetadataPair),
-    /// OAuth2 client (boxed: much larger than the static variant).
-    OAuth2(Box<GrpcOAuthState>),
+    /// OAuth2 token flow through the shared cache (fetched from the auth
+    /// endpoint, cached with a refresh margin, refreshed on
+    /// UNAUTHENTICATED — the same flow as the HTTP sink). Boxed: much
+    /// larger than the static variant.
+    OAuth2(Box<crate::sink::OAuth2TokenCache>),
 }
 
 /// gRPC delivery transport: protobuf over a single multiplexed HTTP/2
@@ -165,13 +154,7 @@ impl GrpcTransport {
             })?;
         }
 
-        let auth = build_auth(
-            &sink_name,
-            config.auth.as_ref(),
-            config.tls.as_ref(),
-            config.request_timeout_ms,
-        )
-        .await?;
+        let auth = build_auth(&sink_name, &config).await?;
         let custom_metadata = build_custom_metadata(&config.headers);
 
         let channel = endpoint.connect_lazy();
@@ -179,11 +162,11 @@ impl GrpcTransport {
             .max_decoding_message_size(config.max_decoding_message_bytes)
             .max_encoding_message_size(config.max_encoding_message_bytes);
         let compression = match config.compression {
-            HttpCompression::None => None,
-            HttpCompression::Gzip => {
+            SinkCompression::None => None,
+            SinkCompression::Gzip => {
                 Some(tonic::codec::CompressionEncoding::Gzip)
             }
-            HttpCompression::Zstd => {
+            SinkCompression::Zstd => {
                 Some(tonic::codec::CompressionEncoding::Zstd)
             }
         };
@@ -271,11 +254,10 @@ impl GrpcTransport {
         Ok(())
     }
 
-    /// Resolve a valid OAuth2 access token: cached while fresh (with the
-    /// configured margin), otherwise fetched from the auth endpoint outside
-    /// any lock (mirrors the HTTP sink's `build_auth_header`).
+    /// Resolve a valid OAuth2 access token through the shared cache (the
+    /// same flow as the HTTP sink).
     async fn bearer_token(&self) -> Result<String, SinkError> {
-        let Some(GrpcAuth::OAuth2(state)) = &self.auth else {
+        let Some(GrpcAuth::OAuth2(cache)) = &self.auth else {
             return Err(SinkError::Auth {
                 message: format!(
                     "sink '{}': bearer token requested without OAuth2 auth",
@@ -284,42 +266,15 @@ impl GrpcTransport {
                 retry_after_ms: None,
             });
         };
-        let GrpcOAuthState {
-            config,
-            token_client,
-            secret,
-            cached_token,
-        } = state.as_ref();
-
-        {
-            let guard = cached_token.read().await;
-            if let Some(token) = guard.as_ref()
-                && !token.is_expired_or_expiring_soon(
-                    self.config.token_refresh_margin_secs,
-                )
-            {
-                return Ok(token.access_token.clone());
-            }
-        }
-
-        let token = crate::sink::obtain_token_with_retry(
-            token_client,
-            config,
-            secret,
-            self.config.retry_base_delay_ms,
-        )
-        .await?;
-        let access_token = token.access_token.clone();
-        *cached_token.write().await = Some(token);
-        Ok(access_token)
+        cache.token().await
     }
 
     /// Drop the cached OAuth2 token and the delivery stream (its metadata
     /// carries the stale token), so the next attempt re-authenticates from
     /// scratch.
     async fn reset_auth(&self) {
-        if let Some(GrpcAuth::OAuth2(state)) = &self.auth {
-            *state.cached_token.write().await = None;
+        if let Some(GrpcAuth::OAuth2(cache)) = &self.auth {
+            cache.invalidate().await;
         }
         *self.stream.lock().await = None;
     }
@@ -357,47 +312,26 @@ impl GrpcTransport {
         sign_meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
         let body = self.build_signed_payload(payload, sign_meta).await?;
-        let sink_name = &self.sink_name;
-        let mut last_err: Option<SinkError> = None;
 
-        for attempt in 0..=self.config.max_retries {
-            if attempt > 0 {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_sink_retry(sink_name);
-                }
-                let delay = retry_delay_ms(
-                    self.config.retry_base_delay_ms,
-                    self.config.retry_max_delay_ms,
-                    attempt,
-                    last_err.as_ref().and_then(retry_after_of),
-                );
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-            }
-
-            match self.deliver_once(body.clone(), meta.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(e) if crate::sink::is_permanent_error(&e) => return Err(e),
-                Err(SinkError::Auth { .. })
-                    if attempt == 0
-                        && matches!(
-                            self.auth,
-                            Some(GrpcAuth::OAuth2(_))
-                        ) =>
-                {
-                    // Auth error on the first attempt with OAuth2: drop the
-                    // stale token (and the stream, which carries it) and
-                    // retry once immediately with a fresh one (mirrors the
-                    // HTTP sink).
+        crate::sink::deliver_with_retries(
+            &self.sink_name,
+            self.config.max_retries,
+            self.config.retry_base_delay_ms,
+            self.config.retry_max_delay_ms,
+            || self.deliver_once(body.clone(), meta.clone()),
+            || async {
+                // Auth error on the first attempt with OAuth2: drop the
+                // stale token (and the stream, which carries it) and retry
+                // once immediately with a fresh one.
+                if matches!(self.auth, Some(GrpcAuth::OAuth2(_))) {
                     self.reset_auth().await;
-                    return self.deliver_once(body, meta).await;
+                    crate::sink::AuthRetryDecision::Retry
+                } else {
+                    crate::sink::AuthRetryDecision::Backoff
                 }
-                Err(e) => last_err = Some(e),
-            }
-        }
-
-        // Mirror the HTTP sink: surface the last real error (the worker
-        // needs the original Auth/Delivery kind to drive its state machine).
-        Err(last_err.unwrap_or_else(crate::sink::max_retries_exceeded_error))
+            },
+        )
+        .await
     }
 
     /// One delivery attempt over the stream (with unary fallback), timed
@@ -891,67 +825,53 @@ const fn map_code(
     }
 }
 
-/// `retry_after_ms` extractor for the shared backoff, mirroring the HTTP
-/// helper (`retry_after_of` in `http.rs`).
-const fn retry_after_of(err: &SinkError) -> Option<u64> {
-    match err {
-        SinkError::Delivery { retry_after_ms, .. }
-        | SinkError::Auth { retry_after_ms, .. } => *retry_after_ms,
-        _ => None,
-    }
-}
-
 /// Resolve the authentication state for the transport. Secrets are read
 /// from the environment; a configured auth mode with a missing secret is a
 /// configuration error (same behavior as the HTTP sink).
 async fn build_auth(
     sink_name: &str,
-    auth: Option<&SinkAuthMethod>,
-    tls: Option<&GrpcTlsConfig>,
-    request_timeout_ms: u64,
+    config: &GrpcSinkConfig,
 ) -> Result<Option<GrpcAuth>, SinkError> {
-    let Some(auth) = auth else {
+    let Some(auth) = config.auth.as_ref() else {
         return Ok(None);
     };
     match auth {
-        SinkAuthMethod::BearerToken => {
-            let env_var = sink_token_env_var(sink_name);
-            let secret = read_secret(sink_name, &env_var)?;
-            Ok(Some(GrpcAuth::Static(auth_metadata_pair(
+        SinkAuthMethod::OAuth2(oauth) => {
+            let secret = load_required_secret(
                 sink_name,
-                "authorization",
-                format!("Bearer {secret}"),
-            )?)))
-        }
-        SinkAuthMethod::ApiKey => {
-            let env_var = sink_apikey_env_var(sink_name);
-            let secret = read_secret(sink_name, &env_var)?;
-            Ok(Some(GrpcAuth::Static(auth_metadata_pair(
-                sink_name, "x-api-key", secret,
-            )?)))
-        }
-        SinkAuthMethod::Basic { username } => {
-            let env_var = sink_password_env_var(sink_name);
-            let password = read_secret(sink_name, &env_var)?;
-            let encoded =
-                BASE64_STANDARD.encode(format!("{username}:{password}"));
-            Ok(Some(GrpcAuth::Static(auth_metadata_pair(
+                &sink_password_env_var(sink_name),
+                "OAuth2",
+            )?;
+            let token_client = build_token_client(
                 sink_name,
-                "authorization",
-                format!("Basic {encoded}"),
-            )?)))
+                config.tls.as_ref(),
+                config.request_timeout_ms,
+            )
+            .await?;
+            Ok(Some(GrpcAuth::OAuth2(Box::new(
+                crate::sink::OAuth2TokenCache::new(
+                    token_client,
+                    oauth.clone(),
+                    secret,
+                    config.token_refresh_margin_secs,
+                    config.retry_base_delay_ms,
+                ),
+            ))))
         }
-        SinkAuthMethod::OAuth2(config) => {
-            let env_var = sink_password_env_var(sink_name);
-            let secret = read_secret(sink_name, &env_var)?;
-            let token_client =
-                build_token_client(sink_name, tls, request_timeout_ms).await?;
-            Ok(Some(GrpcAuth::OAuth2(Box::new(GrpcOAuthState {
-                config: config.clone(),
-                token_client,
-                secret,
-                cached_token: RwLock::new(None),
-            }))))
+        // Static credentials: same resolution as the HTTP sink.
+        static_method => {
+            let Some(credential) =
+                resolve_static_auth(sink_name, static_method)?
+            else {
+                return Ok(None);
+            };
+            let (key, value) = match credential {
+                StaticAuth::Authorization(value) => ("authorization", value),
+                StaticAuth::ApiKey(key) => ("x-api-key", key),
+            };
+            Ok(Some(GrpcAuth::Static(auth_metadata_pair(
+                sink_name, key, value,
+            )?)))
         }
     }
 }
@@ -1003,17 +923,6 @@ async fn build_token_client(
             "sink '{sink_name}': failed to build OAuth token client: {e}"
         ))
     })
-}
-
-/// Read a required secret from the environment.
-fn read_secret(sink_name: &str, env_var: &str) -> Result<String, SinkError> {
-    match std::env::var(env_var) {
-        Ok(value) if !value.is_empty() => Ok(value),
-        _ => Err(SinkError::ClientBuild(format!(
-            "sink '{}': authentication configured but environment variable {} is not set",
-            sink_name, env_var
-        ))),
-    }
 }
 
 /// Parse the user-provided static metadata, dropping keys reserved by the
@@ -1081,6 +990,7 @@ async fn build_tls_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ave_common::sink::SinkAuthConfig;
 
     fn status(code: Code, message: &str) -> Status {
         Status::new(code, message)
@@ -1159,8 +1069,12 @@ mod tests {
             },
             oauth,
         ] {
-            let result = build_auth("no-such-sink", Some(&auth), None, 1000)
-                .await;
+            let config = GrpcSinkConfig {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                auth: Some(auth.clone()),
+                ..GrpcSinkConfig::default()
+            };
+            let result = build_auth("no-such-sink", &config).await;
             assert!(
                 matches!(result, Err(SinkError::ClientBuild(_))),
                 "missing env secret must be a build error for {auth:?}"

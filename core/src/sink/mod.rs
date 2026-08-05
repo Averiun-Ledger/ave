@@ -112,6 +112,80 @@ pub fn max_retries_exceeded_error() -> SinkError {
     }
 }
 
+/// Extract the server-provided retry hint carried by an error, if any.
+/// Shared by every transport so the retry policy cannot diverge.
+pub const fn retry_after_of(err: &SinkError) -> Option<u64> {
+    match err {
+        SinkError::Delivery { retry_after_ms, .. }
+        | SinkError::Auth { retry_after_ms, .. } => *retry_after_ms,
+        _ => None,
+    }
+}
+
+/// What to do when the first delivery attempt fails with an auth error.
+pub enum AuthRetryDecision {
+    /// Retry once immediately: the credentials were refreshed.
+    Retry,
+    /// Abort with the original auth error: the credentials cannot be
+    /// refreshed.
+    Abort,
+    /// Treat the auth error as transient: back off and keep retrying.
+    Backoff,
+}
+
+/// Run a sink delivery with the shared retry policy.
+///
+/// Exponential backoff with jitter between attempts (honoring the
+/// server-provided hint), permanent errors abort immediately, and a
+/// first-attempt auth error is delegated to `on_auth_error` (credential
+/// refresh plus a single immediate retry). Shared by every transport so
+/// the retry policy cannot diverge.
+pub async fn deliver_with_retries<A, AFut, R, RFut>(
+    sink_name: &str,
+    max_retries: usize,
+    retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
+    mut attempt: A,
+    mut on_auth_error: R,
+) -> Result<(), SinkError>
+where
+    A: FnMut() -> AFut,
+    AFut: std::future::Future<Output = Result<(), SinkError>>,
+    R: FnMut() -> RFut,
+    RFut: std::future::Future<Output = AuthRetryDecision>,
+{
+    let mut last_err = None;
+    for attempt_n in 0..=max_retries {
+        if attempt_n > 0 {
+            if let Some(metrics) = crate::metrics::try_core_metrics() {
+                metrics.observe_sink_retry(sink_name);
+            }
+            let delay = retry_delay_ms(
+                retry_base_delay_ms,
+                retry_max_delay_ms,
+                attempt_n,
+                last_err.as_ref().and_then(retry_after_of),
+            );
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(e) if is_permanent_error(&e) => return Err(e),
+            Err(e @ SinkError::Auth { .. }) if attempt_n == 0 => {
+                match on_auth_error().await {
+                    AuthRetryDecision::Retry => return attempt().await,
+                    AuthRetryDecision::Abort => return Err(e),
+                    AuthRetryDecision::Backoff => last_err = Some(e),
+                }
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    // Surface the last real error (the worker needs the original
+    // Auth/Delivery kind to drive its state machine).
+    Err(last_err.unwrap_or_else(max_retries_exceeded_error))
+}
+
 /// Extract the sequence number from a `DataToSink` event.
 pub const fn extract_sn(data: &DataToSink) -> u64 {
     match &data.payload {
@@ -231,6 +305,72 @@ pub async fn obtain_token_with_retry(
         message: "token refresh failed".to_owned(),
         retry_after_ms: None,
     }))
+}
+
+/// OAuth2 access-token cache shared by the sink transports (HTTP and gRPC).
+///
+/// `token()` returns the cached token while it is fresh (with the
+/// configured refresh margin) and otherwise fetches a new one, running the
+/// fetch outside any lock so concurrent deliveries are never blocked while
+/// the auth endpoint is slow or down. `invalidate()` forces the next call
+/// to re-authenticate (used after a 401 / UNAUTHENTICATED).
+#[derive(Debug)]
+pub struct OAuth2TokenCache {
+    client: reqwest::Client,
+    auth: SinkAuthConfig,
+    secret: String,
+    margin_secs: u64,
+    retry_base_delay_ms: u64,
+    /// `pub(crate)` so transport tests can seed an expired token.
+    pub(crate) cached: tokio::sync::RwLock<Option<TokenResponse>>,
+}
+
+impl OAuth2TokenCache {
+    pub fn new(
+        client: reqwest::Client,
+        auth: SinkAuthConfig,
+        secret: String,
+        margin_secs: u64,
+        retry_base_delay_ms: u64,
+    ) -> Self {
+        Self {
+            client,
+            auth,
+            secret,
+            margin_secs,
+            retry_base_delay_ms,
+            cached: tokio::sync::RwLock::new(None),
+        }
+    }
+
+    /// A valid access token: cached while fresh, otherwise freshly fetched.
+    pub async fn token(&self) -> Result<String, SinkError> {
+        {
+            let guard = self.cached.read().await;
+            if let Some(token) = guard.as_ref()
+                && !token.is_expired_or_expiring_soon(self.margin_secs)
+            {
+                return Ok(token.access_token.clone());
+            }
+            // Missing, expired or expiring soon; fall through to fetch.
+        }
+
+        let token = obtain_token_with_retry(
+            &self.client,
+            &self.auth,
+            &self.secret,
+            self.retry_base_delay_ms,
+        )
+        .await?;
+        let access_token = token.access_token.clone();
+        *self.cached.write().await = Some(token);
+        Ok(access_token)
+    }
+
+    /// Drop the cached token so the next `token()` re-authenticates.
+    pub async fn invalidate(&self) {
+        *self.cached.write().await = None;
+    }
 }
 
 /// Read a PEM file referenced by the TLS configuration asynchronously.
