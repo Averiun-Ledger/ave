@@ -6,6 +6,7 @@ use crate::auth::middleware::uuid::Uuid;
 
 use super::database::{AuthDatabase, DatabaseError};
 use super::http_api::request_result_from_status;
+use super::http_api::rate_limit_error_response;
 use super::models::{AuthContext, ErrorResponse};
 use super::request_meta;
 use ave_bridge::ProxyConfig;
@@ -44,6 +45,13 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
+        // If a previous layer already authenticated this request, reuse its
+        // context instead of re-running the full pipeline (database auth,
+        // rate limiting and quota consumption must happen once per request).
+        if parts.extensions.get::<Arc<AuthContext>>().is_some() {
+            return Ok(Self);
+        }
+
         // Check if auth database is available
         let auth_db = parts.extensions.get::<Arc<AuthDatabase>>().cloned();
 
@@ -96,25 +104,21 @@ where
             })
             .await;
         pre_auth_result.map_err(|e| {
-            db.record_request_metrics(
-                "api_key_auth",
-                "rate_limited",
-                request_started.elapsed(),
-            );
-            {
+            if matches!(e, DatabaseError::RateLimitExceeded(_)) {
                 warn!(
                     target: TARGET,
                     ip = ?ip_address,
                     error = %e,
                     "pre-auth rate limit exceeded"
                 );
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: format!("Rate limit exceeded: {}", e),
-                    }),
-                )
             }
+            let response = rate_limit_error_response(e);
+            db.record_request_metrics(
+                "api_key_auth",
+                request_result_from_status(response.0),
+                request_started.elapsed(),
+            );
+            response
         })?;
 
         let request_path = parts.uri.path().to_string();

@@ -2,11 +2,13 @@ use ave_http::config_types::{
     ConfigHttp, HashAlgorithmHttp, KeyPairAlgorithmHttp, LoggingRotationHttp,
     MemoryLimitsConfigHttp, NodeTypeHttp,
 };
+use ave_http::doc::ApiDoc;
 use std::{
     collections::{BTreeSet, HashSet},
     time::Duration,
 };
 use test_log::test;
+use utoipa::OpenApi;
 
 use ave_bridge::ave_common::{
     DataToSinkEvent, SchemaType,
@@ -2018,6 +2020,16 @@ async fn test_system_info_deserialization() {
     let (status, body) =
         make_request(&client, &server.url("/config"), "GET", None, None).await;
     assert!(status.is_success());
+    // The superadmin bootstrap username must never be exposed through the API
+    assert!(
+        body.pointer("/auth/superadmin").is_none(),
+        "superadmin username must not leak in /config response: {body}"
+    );
+    assert_eq!(
+        body.pointer("/auth/superadmin_configured"),
+        Some(&serde_json::Value::Bool(true)),
+        "/config must only report whether a superadmin is configured"
+    );
     let config: ConfigHttp = serde_json::from_value(body).unwrap();
 
     let expected_contracts_path = dirs[2].path().to_string_lossy().to_string();
@@ -2114,7 +2126,7 @@ async fn test_system_info_deserialization() {
 
     assert!(!config.auth.enable);
     assert_eq!(config.auth.database_path, expected_auth_db_path);
-    assert_eq!(config.auth.superadmin, "admin");
+    assert!(config.auth.superadmin_configured);
     assert_eq!(config.auth.api_key.default_ttl_seconds, 3600);
     assert_eq!(config.auth.api_key.max_keys_per_user, 20);
     assert_eq!(config.auth.lockout.max_attempts, 3);
@@ -2294,4 +2306,18 @@ fn bridge_info_tests_cover_declared_main_http_routes() {
             );
         }
     });
+}
+
+#[test]
+fn openapi_json_snapshot_is_up_to_date() {
+    let generated: Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap())
+            .unwrap();
+    let committed: Value =
+        serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    assert_eq!(
+        generated, committed,
+        "http/openapi.json is stale; regenerate it with \
+         `cargo run -p ave-http --example dump_openapi > http/openapi.json`"
+    );
 }

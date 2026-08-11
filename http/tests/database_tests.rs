@@ -2113,3 +2113,39 @@ async fn test_endpoint_specific_rate_limiting() {
         "Different IP should have independent /login limit"
     );
 }
+
+#[test(tokio::test)]
+async fn test_concurrent_failed_logins_increment_attempts_atomically() {
+    let (db, _dirs) = create_test_db();
+    let db = Arc::new(db);
+    let user = db
+        .create_user("concurrent_lockout_user", "TestPass123!", None, None, None)
+        .unwrap();
+
+    // create_test_db configures lockout after 5 failed attempts
+    let max_attempts = 5;
+    let mut handles = Vec::new();
+    for _ in 0..max_attempts {
+        let db = db.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            db.verify_credentials("concurrent_lockout_user", "WrongPass123!")
+        }));
+    }
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(
+            matches!(result, Err(DatabaseError::PermissionDenied(_))),
+            "failed login must be a generic permission error: {result:?}"
+        );
+    }
+
+    let locked = db.get_user_by_id(user.id).unwrap();
+    assert_eq!(
+        locked.failed_login_attempts, max_attempts,
+        "every failed login must be counted exactly once (no lost updates)"
+    );
+    assert!(
+        locked.locked_until.is_some(),
+        "account must lock exactly at the configured threshold"
+    );
+}

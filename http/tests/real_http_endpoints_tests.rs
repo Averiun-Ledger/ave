@@ -981,3 +981,180 @@ fn real_http_endpoint_tests_cover_declared_auth_routes() {
         }
     });
 }
+
+// =============================================================================
+// QUOTA ENFORCEMENT TESTS
+// =============================================================================
+
+/// A service key with a monthly quota of 10 must succeed on exactly 10
+/// requests and be rejected on the 11th. This also guards against the
+/// authentication pipeline consuming quota more than once per request
+/// (the layer and the handler both extracting `ApiKeyAuthNew`).
+#[test(tokio::test)]
+async fn test_service_key_monthly_quota_enforced_once_per_request() {
+    let (app, _dir) = TestApp::build(true, true, None).await;
+    let mgmt_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
+
+    // Plan with a monthly quota of 10 events
+    let (status, body) = make_app_request(
+        &app,
+        "/admin/usage-plans",
+        "POST",
+        Some(&mgmt_key),
+        Some(json!({
+            "id": "plan_quota_10",
+            "name": "plan_quota_10",
+            "monthly_events": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "plan creation: {body}");
+
+    // Service key for the admin user
+    let (status, body) = make_app_request(
+        &app,
+        "/me/api-keys",
+        "POST",
+        Some(&mgmt_key),
+        Some(json!({"name": "quota_service"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "service key creation: {body}");
+    let service_key = body["api_key"].as_str().unwrap().to_string();
+    let service_key_id = body["key_info"]["id"].as_str().unwrap().to_string();
+
+    // Assign the plan to the service key
+    let (status, body) = make_app_request(
+        &app,
+        &format!("/admin/api-keys/{service_key_id}/plan"),
+        "PUT",
+        Some(&mgmt_key),
+        Some(json!({"plan_id": "plan_quota_10"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "plan assignment: {body}");
+
+    // Exactly 10 requests must succeed, one quota unit per request
+    for i in 1..=10 {
+        let (status, body) =
+            make_app_request(&app, "/peer-id", "GET", Some(&service_key), None)
+                .await;
+        assert_eq!(status, StatusCode::OK, "request {i} must succeed: {body}");
+    }
+
+    // The 11th request exceeds the monthly quota
+    let (status, body) =
+        make_app_request(&app, "/peer-id", "GET", Some(&service_key), None).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "request 11 must be rejected: {body}"
+    );
+
+    // Usage must reflect exactly 10 consumed events
+    let (status, body) = make_app_request(
+        &app,
+        &format!("/admin/api-keys/{service_key_id}/quota"),
+        "GET",
+        Some(&mgmt_key),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "quota status: {body}");
+    assert_eq!(
+        body["used_events"].as_i64(),
+        Some(10),
+        "each request must consume exactly one quota unit"
+    );
+}
+
+// =============================================================================
+// PASSWORD CHANGE AUDIT TESTS
+// =============================================================================
+
+/// A password change (success or failure) must be written to the audit log
+/// in the same transaction as the change itself.
+#[test(tokio::test)]
+async fn test_change_password_writes_audit_events() {
+    let (app, _dir) = TestApp::build(true, true, None).await;
+    let mgmt_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
+
+    // User with a pending forced password change
+    let (status, body) = make_app_request(
+        &app,
+        "/admin/users",
+        "POST",
+        Some(&mgmt_key),
+        Some(json!({
+            "username": "audit_pw_user",
+            "password": "OldPass123!",
+            "must_change_password": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create user: {body}");
+    let user_id = body["id"].as_i64().unwrap();
+
+    // Failed attempt: wrong current password
+    let (status, body) = make_app_request(
+        &app,
+        "/change-password",
+        "POST",
+        None,
+        Some(json!({
+            "username": "audit_pw_user",
+            "current_password": "WrongPass123!",
+            "new_password": "NewPass123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong password: {body}");
+
+    // Successful change
+    let (status, body) = make_app_request(
+        &app,
+        "/change-password",
+        "POST",
+        None,
+        Some(json!({
+            "username": "audit_pw_user",
+            "current_password": "OldPass123!",
+            "new_password": "NewPass123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "password change: {body}");
+
+    // The failure must be audited
+    let (status, body) = make_app_request(
+        &app,
+        "/admin/audit-logs?endpoint=/change-password&success=false",
+        "GET",
+        Some(&mgmt_key),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "audit query failed: {body}");
+    let items = body["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|i| i["action_type"] == "password_change_failed"),
+        "missing password_change_failed audit event: {body}"
+    );
+
+    // The success must be audited and attributed to the user
+    let (status, body) = make_app_request(
+        &app,
+        "/admin/audit-logs?endpoint=/change-password&success=true",
+        "GET",
+        Some(&mgmt_key),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "audit query success: {body}");
+    let items = body["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|i| i["action_type"] == "password_changed"
+            && i["user_id"] == user_id),
+        "missing password_changed audit event for user {user_id}: {body}"
+    );
+}

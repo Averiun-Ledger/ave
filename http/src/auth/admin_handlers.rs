@@ -392,16 +392,18 @@ pub async fn update_user(
             }
         }
 
-        if let Some(role_ids) = &req.role_ids {
-            if !auth_ctx_for_db.is_superadmin()
-                && is_admin_account(&db, &target_user)?
-            {
-                return Err(DatabaseError::PermissionDenied(
-                    "Only superadmin can modify roles of other admins"
-                        .to_string(),
-                ));
-            }
+        if !auth_ctx_for_db.is_superadmin()
+            && (req.password.is_some()
+                || req.is_active.is_some()
+                || req.role_ids.is_some())
+            && is_admin_account(&db, &target_user)?
+        {
+            return Err(DatabaseError::PermissionDenied(
+                "Only superadmin can modify admin accounts".to_string(),
+            ));
+        }
 
+        if let Some(role_ids) = &req.role_ids {
             let superadmin_role_id = get_superadmin_role_id(&db)?;
             if let Some(sa_role_id) = superadmin_role_id {
                 let is_target_currently_superadmin =
@@ -496,6 +498,13 @@ pub async fn reset_user_password(
             ));
         }
 
+        if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+            return Err(DatabaseError::PermissionDenied(
+                "Only superadmin can reset password of other admins"
+                    .to_string(),
+            ));
+        }
+
         db.admin_reset_password_transactional(
             user_id,
             &req.password,
@@ -558,6 +567,12 @@ pub async fn delete_user(
         if is_superadmin_user(&db, &target_user)? {
             return Err(DatabaseError::PermissionDenied(
                 "Cannot delete superadmin account".to_string(),
+            ));
+        }
+
+        if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+            return Err(DatabaseError::PermissionDenied(
+                "Only superadmin can delete other admins".to_string(),
             ));
         }
 
@@ -1120,6 +1135,14 @@ pub async fn set_user_permission(
             ));
         }
 
+        if !auth_ctx_for_db.is_superadmin()
+            && !auth_ctx_for_db.has_permission(&resource, &action)
+        {
+            return Err(DatabaseError::PermissionDenied(
+                "Cannot modify a permission you do not have".to_string(),
+            ));
+        }
+
         db.set_user_permission_transactional(
             user_id,
             &resource,
@@ -1199,6 +1222,14 @@ pub async fn remove_user_permission(
             return Err(DatabaseError::PermissionDenied(
                 "Only superadmin can modify permissions of other admins"
                     .to_string(),
+            ));
+        }
+
+        if !auth_ctx_for_db.is_superadmin()
+            && !auth_ctx_for_db.has_permission(&resource, &action)
+        {
+            return Err(DatabaseError::PermissionDenied(
+                "Cannot modify a permission you do not have".to_string(),
             ));
         }
 

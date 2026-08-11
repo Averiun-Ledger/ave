@@ -8,7 +8,7 @@ use crate::{
         system_handlers,
     },
     config_types::ConfigHttp,
-    error::HttpError,
+    error::{GovernanceHasTrackersError, HttpError},
 };
 
 use ave_bridge::ave_common::{
@@ -991,6 +991,7 @@ pub async fn post_update_subject(
     responses(
         (status = 200, description = "Subject deletion accepted", body = String),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 409, description = "Governance still has trackers", body = GovernanceHasTrackersError),
         (status = 503, description = "Safe mode required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),

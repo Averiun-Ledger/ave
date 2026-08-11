@@ -78,7 +78,9 @@ pub struct AuthConfigHttp {
     pub enable: bool,
     pub durability: bool,
     pub database_path: String,
-    pub superadmin: String,
+    /// Whether a superadmin bootstrap account is configured. The username
+    /// itself is never exposed through the API.
+    pub superadmin_configured: bool,
     pub api_key: ApiKeyConfigHttp,
     pub lockout: LockoutConfigHttp,
     pub rate_limit: RateLimitConfigHttp,
@@ -90,7 +92,7 @@ impl From<AuthConfig> for AuthConfigHttp {
         Self {
             enable: value.enable,
             database_path: value.database_path.to_string_lossy().to_string(),
-            superadmin: value.superadmin,
+            superadmin_configured: !value.superadmin.is_empty(),
             durability: value.durability,
             api_key: ApiKeyConfigHttp::from(value.api_key),
             lockout: LockoutConfigHttp::from(value.lockout),

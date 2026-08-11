@@ -3,6 +3,9 @@ use super::models::{ErrorResponse, PaginationQuery};
 use axum::{Json, http::StatusCode};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::error;
+
+const TARGET: &str = "ave::http::auth";
 
 pub type HttpErrorResponse = (StatusCode, Json<ErrorResponse>);
 
@@ -49,10 +52,40 @@ pub fn db_error_to_response(
         DatabaseError::PasswordChangeRequired(msg) => {
             (mapping.password_change_required, msg)
         }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        other => {
+            // Never leak internal database details to clients
+            error!(target: TARGET, error = %other, "unmapped database error");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        }
     };
 
     (status, Json(ErrorResponse { error: message }))
+}
+
+/// Map a pre-auth rate limit check failure to an HTTP error response.
+///
+/// A genuine `RateLimitExceeded` produces 429; any other (internal) error
+/// produces a generic 500 so database details are never leaked to clients.
+pub fn rate_limit_error_response(err: DatabaseError) -> HttpErrorResponse {
+    match err {
+        DatabaseError::RateLimitExceeded(msg) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse { error: msg }),
+        ),
+        other => {
+            error!(target: TARGET, error = %other, "rate limit check failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error while checking rate limit"
+                        .to_string(),
+                }),
+            )
+        }
+    }
 }
 
 pub const fn request_result_from_status(status: StatusCode) -> &'static str {
@@ -144,5 +177,42 @@ where
             );
             Err(response)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_error_response_never_leaks_internal_details() {
+        let (status, Json(body)) = db_error_to_response(
+            DatabaseError::Query(
+                "near \"SELECT\": syntax error".to_string(),
+            ),
+            DatabaseErrorMapping::admin(),
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.error, "Internal server error");
+    }
+
+    #[test]
+    fn rate_limit_response_keeps_quota_message() {
+        let (status, Json(body)) = rate_limit_error_response(
+            DatabaseError::RateLimitExceeded(
+                "Rate limit exceeded: 100 requests in 60 seconds".to_string(),
+            ),
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(body.error.contains("Rate limit exceeded"));
+    }
+
+    #[test]
+    fn rate_limit_response_hides_internal_errors() {
+        let (status, Json(body)) = rate_limit_error_response(
+            DatabaseError::Query("database is locked".to_string()),
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.error, "Internal error while checking rate limit");
     }
 }

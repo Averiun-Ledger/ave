@@ -5,7 +5,7 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::http_api::{
     DatabaseErrorMapping, db_error_to_response as shared_db_error_to_response,
-    request_result_from_status,
+    rate_limit_error_response, request_result_from_status,
 };
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use super::request_meta;
@@ -65,17 +65,13 @@ pub async fn login(
     })
     .await
     .map_err(|e| {
+        let response = rate_limit_error_response(e);
         db.record_request_metrics(
             "login",
-            "rate_limited",
+            request_result_from_status(response.0),
             request_started.elapsed(),
         );
-        (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error: format!("Rate limit exceeded: {}", e),
-            }),
-        )
+        response
     })?;
 
     let login_username = req.username.clone();
@@ -188,6 +184,7 @@ pub async fn change_password(
     let request_meta =
         request_meta::extract_request_meta(&headers, addr, &proxy);
     let ip_address = request_meta.ip_address;
+    let user_agent = request_meta.user_agent;
     let request_started = Instant::now();
 
     // SECURITY FIX: Check rate limit BEFORE credential verification
@@ -202,27 +199,25 @@ pub async fn change_password(
     })
     .await
     .map_err(|e| {
+        let response = rate_limit_error_response(e);
         db.record_request_metrics(
             "change_password",
-            "rate_limited",
+            request_result_from_status(response.0),
             request_started.elapsed(),
         );
-        (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error: format!("Rate limit exceeded: {}", e),
-            }),
-        )
+        response
     })?;
 
     let username = req.username.clone();
     let current_password = req.current_password.clone();
     let new_password = req.new_password.clone();
     db.run_blocking("change_password_with_credentials", move |db| {
-        db.change_password_with_credentials(
+        db.change_password_with_credentials_transactional(
             &username,
             &current_password,
             &new_password,
+            ip_address.as_deref(),
+            user_agent.as_deref(),
         )
     })
     .await

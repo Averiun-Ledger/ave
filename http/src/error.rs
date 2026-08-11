@@ -6,12 +6,23 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use utoipa::ToSchema;
 
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     trackers: Option<Vec<String>>,
+}
+
+/// Error body returned when a governance cannot be deleted because it
+/// still has trackers attached (HTTP 409).
+#[derive(Serialize, ToSchema)]
+pub struct GovernanceHasTrackersError {
+    /// Human-readable error message
+    pub error: String,
+    /// Identifiers of the trackers that must be deleted first
+    pub trackers: Vec<String>,
 }
 
 /// HTTP error type for the Axum API layer.

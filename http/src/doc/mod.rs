@@ -1,4 +1,5 @@
 use crate::config_types::MachineSpecHttp;
+use crate::error::GovernanceHasTrackersError;
 use crate::server::{self};
 use crate::{
     auth::{
@@ -228,6 +229,9 @@ impl Modify for SecurityAddon {
         server::delete_sink_cursors,
         server::replay_sink_events,
 
+        // ── Maintenance ─────────────────────────────────────────
+        server::delete_subject,
+
         // ── Observability ───────────────────────────────────────
         server::get_metrics,
     ),
@@ -235,6 +239,7 @@ impl Modify for SecurityAddon {
         schemas(
             // ── Error ───────────────────────────────────────────
             ErrorResponse,
+            GovernanceHasTrackersError,
 
             // ── Authentication ──────────────────────────────────
             LoginRequest,

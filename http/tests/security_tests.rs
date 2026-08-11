@@ -14,19 +14,20 @@ use std::{sync::Arc, time::Duration};
 use ave_http::auth::{
     AuthDatabase,
     admin_handlers::{
-        RemovePermissionQuery, assign_role, remove_role,
-        remove_role_permission, remove_user_permission, set_role_permission,
-        set_user_permission, update_user,
+        RemovePermissionQuery, ResetPasswordRequest, assign_role, delete_user,
+        remove_role, remove_role_permission, remove_user_permission,
+        reset_user_password, set_role_permission, set_user_permission,
+        update_user,
     },
-    middleware::AuthContextExtractor,
+    middleware::{ApiKeyAuthNew, AuthContextExtractor},
     models::{
         AuthContext, Permission, SetPermissionRequest, SystemConfigValue,
-        UpdateUserRequest,
+        UpdateUserRequest, User,
     },
 };
 use axum::{
     Extension, Json,
-    extract::{Path, Query},
+    extract::{FromRequestParts, Path, Query},
     http::StatusCode,
 };
 use std::collections::BTreeSet;
@@ -732,6 +733,362 @@ async fn non_superadmin_cannot_remove_permissions_of_admin_via_role_inheritance(
     .await;
 
     assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+}
+
+// =============================================================================
+// ADMIN ESCALATION GUARDS
+// =============================================================================
+
+/// Build an AuthContext for a persisted user with its effective permissions
+fn auth_ctx_for_user(db: &AuthDatabase, user: &User) -> Arc<AuthContext> {
+    let permissions = db.get_effective_permissions(user.id).unwrap();
+    let roles = db.get_user_roles(user.id).unwrap();
+    Arc::new(AuthContext {
+        user_id: user.id,
+        username: user.username.clone(),
+        roles,
+        permissions,
+        api_key_id: "test-key".to_string(),
+        is_management_key: true,
+        ip_address: None,
+    })
+}
+
+/// Create a role holding `admin_users:all` plus the given extra permissions
+fn create_admin_role(
+    db: &AuthDatabase,
+    name: &str,
+    extra: &[(&str, &str)],
+) -> i64 {
+    let role = db.create_role(name, Some("Test admin role")).unwrap();
+    db.set_role_permission(role.id, "admin_users", "all", true)
+        .unwrap();
+    for (resource, action) in extra {
+        db.set_role_permission(role.id, resource, action, true)
+            .unwrap();
+    }
+    role.id
+}
+
+fn create_user_with_role(
+    db: &AuthDatabase,
+    username: &str,
+    role_id: i64,
+) -> User {
+    db.create_user(username, "Password123!", Some(vec![role_id]), None, None)
+        .unwrap()
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_grant_permission_they_do_not_have() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "escalation_grant_actor", &[]);
+    let actor = create_user_with_role(&db, "escalation_grant_actor", role_id);
+    let target = db
+        .create_user("escalation_grant_puppet", "Password123!", None, None, None)
+        .unwrap();
+
+    let result = set_user_permission(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(Permission {
+            resource: "node_sink".to_string(),
+            action: "all".to_string(),
+            allowed: true,
+            is_system: None,
+            source: None,
+            role_name: None,
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    assert!(
+        !db.get_effective_permissions(target.id)
+            .unwrap()
+            .iter()
+            .any(|p| p.resource == "node_sink" && p.allowed),
+        "puppet must not gain permissions the granter does not have"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_can_grant_permission_they_have() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(
+        &db,
+        "delegation_actor",
+        &[("node_subject", "get")],
+    );
+    let actor = create_user_with_role(&db, "delegation_actor", role_id);
+    let target = db
+        .create_user("delegation_target", "Password123!", None, None, None)
+        .unwrap();
+
+    let result = set_user_permission(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(Permission {
+            resource: "node_subject".to_string(),
+            action: "get".to_string(),
+            allowed: true,
+            is_system: None,
+            source: None,
+            role_name: None,
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(StatusCode::OK)));
+    assert!(
+        db.get_effective_permissions(target.id)
+            .unwrap()
+            .iter()
+            .any(|p| p.resource == "node_subject"
+                && p.action == "get"
+                && p.allowed),
+        "legitimate delegation must persist the override"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_remove_permission_they_do_not_have() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "escalation_remove_actor", &[]);
+    let actor = create_user_with_role(&db, "escalation_remove_actor", role_id);
+    let target = db
+        .create_user(
+            "escalation_remove_target",
+            "Password123!",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    db.set_user_permission(
+        target.id,
+        "node_subject",
+        "get",
+        true,
+        Some(actor.id),
+    )
+    .unwrap();
+
+    let result = remove_user_permission(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Query(RemovePermissionQuery {
+            resource: "node_subject".to_string(),
+            action: "get".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    assert!(
+        db.get_effective_permissions(target.id)
+            .unwrap()
+            .iter()
+            .any(|p| p.resource == "node_subject"
+                && p.action == "get"
+                && p.allowed),
+        "override must survive an unauthorized removal attempt"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_reset_password_of_admin() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "reset_guard_role", &[]);
+    let actor = create_user_with_role(&db, "reset_guard_actor", role_id);
+    let target = create_user_with_role(&db, "reset_guard_target", role_id);
+
+    let result = reset_user_password(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(ResetPasswordRequest {
+            password: "NewPass123!".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_delete_admin() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "delete_guard_role", &[]);
+    let actor = create_user_with_role(&db, "delete_guard_actor", role_id);
+    let target = create_user_with_role(&db, "delete_guard_target", role_id);
+
+    let result = delete_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    assert!(
+        db.get_user_by_id(target.id).is_ok(),
+        "admin target must survive an unauthorized delete attempt"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_update_admin_account() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "update_guard_role", &[]);
+    let actor = create_user_with_role(&db, "update_guard_actor", role_id);
+    let target = create_user_with_role(&db, "update_guard_target", role_id);
+
+    // Deactivation attempt
+    let result = update_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(UpdateUserRequest {
+            password: None,
+            is_active: Some(false),
+            role_ids: None,
+        }),
+    )
+    .await;
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+
+    // Password change attempt
+    let result = update_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(UpdateUserRequest {
+            password: Some("NewPass123!".to_string()),
+            is_active: None,
+            role_ids: None,
+        }),
+    )
+    .await;
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+
+    let persisted = db.get_user_by_id(target.id).unwrap();
+    assert!(persisted.is_active, "admin target must stay active");
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_can_manage_regular_users() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "regular_admin_role", &[]);
+    let actor = create_user_with_role(&db, "regular_admin_actor", role_id);
+    let target = db
+        .create_user("regular_admin_target", "Password123!", None, None, None)
+        .unwrap();
+
+    let result = reset_user_password(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(ResetPasswordRequest {
+            password: "NewPass123!".to_string(),
+        }),
+    )
+    .await;
+    assert!(matches!(result, Ok(StatusCode::OK)));
+
+    let result = update_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+        Json(UpdateUserRequest {
+            password: None,
+            is_active: Some(true),
+            role_ids: None,
+        }),
+    )
+    .await;
+    assert!(result.is_ok(), "admin must update regular users: {result:?}");
+
+    let result = delete_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        Path(target.id),
+    )
+    .await;
+    assert!(matches!(result, Ok(StatusCode::NO_CONTENT)));
+}
+
+// =============================================================================
+// API KEY EXTRACTOR
+// =============================================================================
+
+#[test(tokio::test)]
+async fn api_key_extractor_reuses_auth_context_from_previous_layer() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let build_parts = |with_previous_context: bool| {
+        let request = axum::http::Request::builder()
+            .uri("/peer-id")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        parts.extensions.insert(db.clone());
+        if with_previous_context {
+            // Simulates the authentication layer having already validated
+            // the request (the handler-level extraction must reuse it)
+            parts.extensions.insert(Arc::new(AuthContext {
+                user_id: 1,
+                username: "layer-authenticated".to_string(),
+                roles: vec![],
+                permissions: vec![],
+                api_key_id: "test-key".to_string(),
+                is_management_key: true,
+                ip_address: None,
+            }));
+        }
+        parts
+    };
+
+    // Without a previous layer context, the extractor runs the full pipeline
+    // and rejects the missing credentials
+    let mut parts = build_parts(false);
+    let result =
+        <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
+            &mut parts,
+            &(),
+        )
+        .await;
+    assert!(matches!(result, Err((StatusCode::UNAUTHORIZED, _))));
+
+    // With a context already authenticated by the layer, the extractor must
+    // not re-run the pipeline: no credentials required, no extra DB auth,
+    // rate-limit or quota consumption
+    let mut parts = build_parts(true);
+    let result =
+        <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
+            &mut parts,
+            &(),
+        )
+        .await;
+    assert!(result.is_ok());
 }
 
 #[test(tokio::test)]
