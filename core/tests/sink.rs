@@ -482,7 +482,7 @@ async fn sink_last_error_is_reported_after_delivery_failure() {
 
 #[traced_test]
 #[tokio::test]
-async fn delete_sink_cursors_fails_outside_safe_mode() {
+async fn reset_sink_cursors_fails_outside_safe_mode() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
@@ -495,7 +495,7 @@ async fn delete_sink_cursors_fails_outside_safe_mode() {
 
     let err = node
         .api
-        .delete_sink_cursors("gov-sink".to_owned())
+        .reset_sink_cursors("gov-sink".to_owned())
         .await
         .unwrap_err();
     assert!(
@@ -5560,7 +5560,7 @@ async fn sink_transient_errors_and_fast_events() {
 /// **Cases covered:** adding a sink in config between restarts, removing a sink
 /// from config (residual state in `SinkRegistry`), cursor deletion in safe mode,
 /// advanced `get_sinks` filters, ordering, and blocked sink visibility.
-/// Exercises `get_sinks`, `get_sinks_status`, and `delete_sink_cursors`.
+/// Exercises `get_sinks`, `get_sinks_status`, and `reset_sink_cursors`.
 ///
 /// **Setup:**
 /// - Bootstrap node, governance and schema `Example`.
@@ -5609,11 +5609,11 @@ async fn sink_transient_errors_and_fast_events() {
 ///
 /// **Part D — cleanup in safe mode:**
 /// 1. Restart the node in `safe_mode: true`.
-/// 2. Call `api.delete_sink_cursors("missing-sink")` and verify it returns
+/// 2. Call `api.reset_sink_cursors("missing-sink")` and verify it returns
 ///    `Error::SinkNotFound`.
-/// 3. Call `api.delete_sink_cursors("new-sink")` (residual sink) and verify it
+/// 3. Call `api.reset_sink_cursors("new-sink")` (residual sink) and verify it
 ///    disappears from the registry.
-/// 4. Call `api.delete_sink_cursors("gov-sink")` (in-config sink) and verify it
+/// 4. Call `api.reset_sink_cursors("gov-sink")` (in-config sink) and verify it
 ///    still appears in `get_sinks_status` with `lagging_subjects == 0` and
 ///    `blocked: None`.
 /// 5. Restart in normal mode.
@@ -5646,8 +5646,8 @@ async fn sink_transient_errors_and_fast_events() {
 /// - A new in-config sink performs automatic historical catch-up.
 /// - A sink removed from config persists in the registry as residual
 ///   (`in_config: false`).
-/// - `delete_sink_cursors` returns `SinkNotFound` for a non-existent sink.
-/// - `delete_sink_cursors` clears cursors and `lagging` state and, if the sink
+/// - `reset_sink_cursors` returns `SinkNotFound` for a non-existent sink.
+/// - `reset_sink_cursors` clears cursors and `lagging` state and, if the sink
 ///   is not in config, removes it from the registry.
 /// - `get_sinks` distinguishes between in-config and residual sinks and
 ///   supports filters by `name`, `governance_id`, and combinations.
@@ -5968,10 +5968,10 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
-    // delete_sink_cursors on missing sink returns SinkNotFound.
+    // reset_sink_cursors on missing sink returns SinkNotFound.
     let err = node
         .api
-        .delete_sink_cursors("missing-sink".to_owned())
+        .reset_sink_cursors("missing-sink".to_owned())
         .await
         .unwrap_err();
     assert!(
@@ -5980,9 +5980,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         err
     );
 
-    // delete_sink_cursors on residual new-sink removes it from registry.
+    // reset_sink_cursors on residual new-sink removes it from registry.
     node.api
-        .delete_sink_cursors("new-sink".to_owned())
+        .reset_sink_cursors("new-sink".to_owned())
         .await
         .unwrap();
     let residuals = node
@@ -5998,9 +5998,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         "new-sink residual should be removed"
     );
 
-    // delete_sink_cursors on in-config gov-sink keeps it but clears cursors/lagging.
+    // reset_sink_cursors on in-config gov-sink keeps it but clears cursors/lagging.
     node.api
-        .delete_sink_cursors("gov-sink".to_owned())
+        .reset_sink_cursors("gov-sink".to_owned())
         .await
         .unwrap();
     let statuses = node.api.get_sinks_status().await.unwrap();

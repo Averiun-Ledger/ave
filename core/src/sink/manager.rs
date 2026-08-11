@@ -75,8 +75,8 @@ pub enum SinkManagerMessage {
     UnblockSink {
         sink: String,
     },
-    /// Safe Mode only: delete all persisted cursors and transient state for a sink.
-    DeleteSinkCursors {
+    /// Safe Mode only: reset all persisted cursors and transient state for a sink.
+    ResetSinkCursors {
         sink: String,
     },
     GetStatus,
@@ -763,8 +763,8 @@ impl Handler<Self> for SinkManager {
             SinkManagerMessage::UnblockSink { sink } => {
                 self.handle_unblock_sink(sink, ctx).await?;
             }
-            SinkManagerMessage::DeleteSinkCursors { sink } => {
-                self.handle_delete_sink_cursors(sink, ctx).await?;
+            SinkManagerMessage::ResetSinkCursors { sink } => {
+                self.handle_reset_sink_cursors(sink, ctx).await?;
             }
             SinkManagerMessage::GetStatus => {
                 return Ok(SinkManagerResponse::Status(
@@ -2431,7 +2431,7 @@ impl SinkManager {
         Ok(())
     }
 
-    async fn handle_delete_sink_cursors(
+    async fn handle_reset_sink_cursors(
         &mut self,
         sink: String,
         ctx: &mut ActorContext<Self>,
@@ -2452,15 +2452,15 @@ impl SinkManager {
 
         if !safe_mode {
             return Err(ActorError::Functional {
-                description: "DeleteSinkCursors is only available in safe mode"
+                description: "ResetSinkCursors is only available in safe mode"
                     .to_owned(),
             });
         }
 
         info!(
-            msg_type = "DeleteSinkCursors",
+            msg_type = "ResetSinkCursors",
             sink = %sink,
-            "Deleting all sink cursors in Safe Mode"
+            "Resetting all sink cursors in Safe Mode"
         );
 
         let had_cursors = self.cursors.keys().any(|(s, _)| s == &sink);

@@ -1533,16 +1533,16 @@ impl Api {
         Ok(())
     }
 
-    /// Delete all persisted cursors and transient state for a sink.
+    /// Reset all persisted cursors and transient state for a sink.
     ///
     /// This operation is only available while the node is running in safe mode.
     /// The sink manager is located through the sink registry, so callers only
     /// need to provide the unique sink name.
-    pub async fn delete_sink_cursors(
+    pub async fn reset_sink_cursors(
         &self,
         sink_name: String,
     ) -> Result<(), Error> {
-        self.ensure_safe_mode_required("sink cursor deletion")?;
+        self.ensure_safe_mode_required("sink cursor reset")?;
         require_non_empty_str("sink_name", &sink_name)?;
 
         let registration = self.get_sink_registration(&sink_name).await?;
@@ -1558,12 +1558,12 @@ impl Api {
             })?;
 
         manager
-            .tell(SinkManagerMessage::DeleteSinkCursors {
+            .tell(SinkManagerMessage::ResetSinkCursors {
                 sink: sink_name.clone(),
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to delete sink cursors");
+                warn!(error = %e, sink = %sink_name, "Failed to reset sink cursors");
                 actor_communication_error("sink_manager", e)
             })?;
 

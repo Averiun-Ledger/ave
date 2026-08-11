@@ -475,25 +475,25 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
     assert_eq!(status, 503);
 }
 
-/// HTTP Test 5: `DELETE /sinks/{sink_name}` happy path.
+/// HTTP Test 5: `POST /sinks/{sink_name}/reset-cursors` happy path.
 ///
-/// **Objective:** verify cursor deletion in safe mode.
+/// **Objective:** verify cursor reset in safe mode.
 ///
 /// **Setup:** server in safe mode with one in-config sink and one residual
 /// sink (`in_config: false`).
 ///
 /// **Sequence:**
-/// 1. `DELETE /sinks/in-config-sink` -> 200; sink still appears in lists.
-/// 2. `DELETE /sinks/residual-sink` -> 200; sink disappears from
+/// 1. `POST /sinks/in-config-sink/reset-cursors` -> 200; sink still appears in lists.
+/// 2. `POST /sinks/residual-sink/reset-cursors` -> 200; sink disappears from
 ///    `GET /sinks?in_config=false`.
-/// 3. `DELETE /sinks/missing-sink` -> 404.
+/// 3. `POST /sinks/missing-sink/reset-cursors` -> 404.
 ///
 /// **Verifications:**
-/// - In-config sink survives deletion.
+/// - In-config sink survives the reset.
 /// - Residual sink is removed from registry.
 /// - Missing sink returns 404.
 #[test(tokio::test)]
-async fn test_http_delete_sink_cursors() {
+async fn test_http_reset_sink_cursors() {
     let in_config_sink = TestSink::start().await;
     let residual_sink = TestSink::start().await;
 
@@ -550,8 +550,8 @@ async fn test_http_delete_sink_cursors() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/sinks/in-config-sink"),
-        "DELETE",
+        &server.url("/sinks/in-config-sink/reset-cursors"),
+        "POST",
         None,
         None,
     )
@@ -572,8 +572,8 @@ async fn test_http_delete_sink_cursors() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/sinks/residual-sink"),
-        "DELETE",
+        &server.url("/sinks/residual-sink/reset-cursors"),
+        "POST",
         None,
         None,
     )
@@ -594,8 +594,8 @@ async fn test_http_delete_sink_cursors() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/sinks/missing-sink"),
-        "DELETE",
+        &server.url("/sinks/missing-sink/reset-cursors"),
+        "POST",
         None,
         None,
     )
@@ -603,9 +603,9 @@ async fn test_http_delete_sink_cursors() {
     assert_eq!(status, 404);
 }
 
-/// HTTP Test 6: `DELETE /sinks/{sink_name}` permissions and safe mode.
+/// HTTP Test 6: `POST /sinks/{sink_name}/reset-cursors` permissions and safe mode.
 ///
-/// **Objective:** verify `node_sink:delete` and the safe-mode requirement.
+/// **Objective:** verify `node_sink:post` and the safe-mode requirement.
 ///
 /// **Setup:**
 /// - Server with auth and a sink.
@@ -617,7 +617,7 @@ async fn test_http_delete_sink_cursors() {
 /// 2. Superadmin outside safe mode -> 503.
 /// 3. Superadmin in safe mode -> 200.
 #[test(tokio::test)]
-async fn test_http_delete_sink_cursors_permissions_and_safe_mode() {
+async fn test_http_reset_sink_cursors_permissions_and_safe_mode() {
     let sink = TestSink::start().await;
     let sinks_json = format!(
         r#"
@@ -647,8 +647,8 @@ async fn test_http_delete_sink_cursors_permissions_and_safe_mode() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/sinks/example-sink"),
-        "DELETE",
+        &server.url("/sinks/example-sink/reset-cursors"),
+        "POST",
         Some(&sink_key),
         None,
     )
@@ -657,8 +657,8 @@ async fn test_http_delete_sink_cursors_permissions_and_safe_mode() {
 
     let (status, _body) = make_request(
         &client,
-        &server.url("/sinks/example-sink"),
-        "DELETE",
+        &server.url("/sinks/example-sink/reset-cursors"),
+        "POST",
         Some(&admin_key),
         None,
     )
@@ -683,13 +683,109 @@ async fn test_http_delete_sink_cursors_permissions_and_safe_mode() {
         .expect("admin login in safe mode");
     let (status, _body) = make_request(
         &client,
-        &server.url("/sinks/example-sink"),
-        "DELETE",
+        &server.url("/sinks/example-sink/reset-cursors"),
+        "POST",
         Some(&admin_key2),
         None,
     )
     .await;
     assert_eq!(status, 200);
+}
+
+/// HTTP Test 6a: the legacy `DELETE /sinks/{sink_name}` route is not mounted.
+///
+/// **Objective:** the cursor reset operation moved to
+/// `POST /sinks/{sink_name}/reset-cursors`; the old route must be gone.
+#[test(tokio::test)]
+async fn test_http_legacy_delete_sink_route_is_not_mounted() {
+    let (server, _dirs) = TestServer::build_with_options(TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        ..Default::default()
+    })
+    .await
+    .expect("server should build");
+
+    let client = Client::new();
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/example-sink"),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "legacy DELETE /sinks/{{sink_name}} must not be mounted"
+    );
+}
+
+/// HTTP Test 6b: `POST /sinks/{sink_name}/reset-cursors` requires `node_sink:post`.
+///
+/// **Objective:** the permission action moved from `delete` to `post` together
+/// with the route. A role holding `node_sink:post` must pass the permission
+/// layer (failing later with 503 outside safe mode), while a role holding
+/// only `node_sink:delete` must be rejected with 403.
+#[test(tokio::test)]
+async fn test_http_reset_sink_cursors_requires_post_permission() {
+    let (server, _dirs) = TestServer::build_with_options(TestServerOptions {
+        enable_auth: true,
+        always_accept: true,
+        ..Default::default()
+    })
+    .await
+    .expect("server should build");
+
+    let client = Client::new();
+    let admin_key = login(&server, &client, "admin", "AdminPass123!")
+        .await
+        .expect("admin login");
+
+    // A role holding node_sink:post passes the permission layer and reaches
+    // the safe-mode gate (503 outside safe mode)
+    let post_key = create_user_with_sink_action(
+        &server,
+        &client,
+        &admin_key,
+        "sink_poster",
+        "post",
+    )
+    .await;
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks/example-sink/reset-cursors"),
+        "POST",
+        Some(&post_key),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 503,
+        "node_sink:post must pass permissions and hit the safe-mode gate: {body}"
+    );
+
+    // A role holding only node_sink:delete must not gain access
+    let delete_key = create_user_with_sink_action(
+        &server,
+        &client,
+        &admin_key,
+        "sink_deleter",
+        "delete",
+    )
+    .await;
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks/example-sink/reset-cursors"),
+        "POST",
+        Some(&delete_key),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "node_sink:delete alone must not grant access to reset-cursors: {body}"
+    );
 }
 
 /// HTTP Test 7: `POST /sinks/replay` happy path and functional errors.
@@ -1079,7 +1175,7 @@ async fn test_http_get_sink_events_permissions() {
 /// 2. `GET /sinks/status` -> 200.
 /// 3. `GET /sink-events/<subject>` -> 200/404.
 /// 4. `POST /sinks/example-sink/unblock` -> 403.
-/// 5. `DELETE /sinks/example-sink` -> 403.
+/// 5. `POST /sinks/example-sink/reset-cursors` -> 403.
 /// 6. `POST /sinks/replay` -> 403.
 #[test(tokio::test)]
 async fn test_http_sink_role_endpoints() {
@@ -1117,7 +1213,7 @@ async fn test_http_sink_role_endpoints() {
         ("GET", "/sinks/status", 200),
         ("GET", &format!("/sink-events/{}", unknown_subject), 404),
         ("POST", "/sinks/example-sink/unblock", 403),
-        ("DELETE", "/sinks/example-sink", 403),
+        ("POST", "/sinks/example-sink", 403),
         ("POST", "/sinks/replay", 403),
     ] {
         let body = if path == "/sinks/replay" {
@@ -1172,7 +1268,7 @@ async fn test_http_sinks_require_auth() {
         ("GET", "/sinks/status", None),
         ("GET", &format!("/sink-events/{}", dummy_subject), None),
         ("POST", "/sinks/example-sink/unblock", None),
-        ("DELETE", "/sinks/example-sink", None),
+        ("POST", "/sinks/example-sink", None),
         (
             "POST",
             "/sinks/replay",
@@ -1398,4 +1494,61 @@ async fn get_role_id(
         .find(|r| r["name"] == name)
         .map(|r| r["id"].as_i64().unwrap())
         .unwrap_or_else(|| panic!("role {} not found", name))
+}
+
+/// Create a role holding `node_sink:{action}`, a user with that role, and
+/// return the user's management API key
+async fn create_user_with_sink_action(
+    server: &TestServer,
+    client: &Client,
+    admin_key: &str,
+    username: &str,
+    action: &str,
+) -> String {
+    let (status, body) = make_request(
+        client,
+        &server.url("/admin/roles"),
+        "POST",
+        Some(admin_key),
+        Some(json!({
+            "name": format!("{username}_role"),
+            "description": "test role"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "create role: {body}");
+    let role_id = body["id"].as_i64().unwrap();
+
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/admin/roles/{role_id}/permissions")),
+        "POST",
+        Some(admin_key),
+        Some(json!({
+            "resource": "node_sink",
+            "action": action,
+            "allowed": true
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "set role permission: {body}");
+
+    let (status, body) = make_request(
+        client,
+        &server.url("/admin/users"),
+        "POST",
+        Some(admin_key),
+        Some(json!({
+            "username": username,
+            "password": "SinkPass123!",
+            "role_ids": [role_id],
+            "must_change_password": false
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "create user: {body}");
+
+    login(server, client, username, "SinkPass123!")
+        .await
+        .expect("user login")
 }

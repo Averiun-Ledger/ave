@@ -38,7 +38,7 @@ fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
             | ("post", "/sinks/replay")
             | ("post", "/sinks/{sink_name}/unblock")
             | ("post", "/sinks/{sink_name}/test")
-            | ("delete", "/sinks/{sink_name}")
+            | ("post", "/sinks/{sink_name}/reset-cursors")
     )
 }
 

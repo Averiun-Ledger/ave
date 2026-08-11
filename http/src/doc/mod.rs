@@ -94,7 +94,7 @@ impl Modify for SecurityAddon {
 #[openapi(
     info(
         title = "Ave HTTP API",
-        description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.",
+        description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.\n\nProtected endpoints return `401 Unauthorized` when the API key is missing or invalid, and `403 Forbidden` when the key does not hold the permission required by the endpoint.\nEndpoints that mutate node state return `503 Service Unavailable` while the node is running in safe mode.",
         version = "0.12.0",
         contact(
             name = "Averiun",
@@ -226,7 +226,7 @@ impl Modify for SecurityAddon {
         server::get_sinks_status,
         server::unblock_sink,
         server::test_sink,
-        server::delete_sink_cursors,
+        server::reset_sink_cursors,
         server::replay_sink_events,
 
         // ── Maintenance ─────────────────────────────────────────
@@ -431,7 +431,7 @@ impl Modify for SecurityAddon {
         (name = "My Account", description = "Self-service endpoints for the authenticated user."),
         (name = "System", description = "System resources, actions, and configuration (admin only)."),
         (name = "Audit Logs", description = "Query and analyze audit log entries (admin only)."),
-        (name = "Sink", description = "Manage and inspect external sinks (HTTP, Kafka)."),
+        (name = "Sink", description = "Manage and inspect external sinks (HTTP, Kafka, gRPC)."),
     )
 )]
 pub struct ApiDoc;

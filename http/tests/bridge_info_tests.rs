@@ -27,7 +27,8 @@ use crate::common::{
     TestServer, add_example_schema_to_governance,
     add_governance_member_as_witness, create_governance, create_subject,
     make_request, materialize_role_test_path, role_test_request_body,
-    server_main_route_catalog, wait_request_finish,
+    server_auth_route_catalog, server_main_route_catalog,
+    server_public_auth_route_catalog, wait_request_finish,
 };
 
 pub mod common;
@@ -2319,5 +2320,61 @@ fn openapi_json_snapshot_is_up_to_date() {
         generated, committed,
         "http/openapi.json is stale; regenerate it with \
          `cargo run -p ave-http --example dump_openapi > http/openapi.json`"
+    );
+}
+
+/// Path parameter names may differ between the route catalog and the
+/// OpenAPI document (`{key_id}` vs `{id}`); compare shapes, not names
+fn normalize_route_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                "{}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[test]
+fn openapi_covers_every_declared_route() {
+    let mut catalog = server_main_route_catalog();
+    catalog.extend(server_auth_route_catalog());
+    catalog.extend(server_public_auth_route_catalog());
+
+    let spec = ApiDoc::openapi();
+    let mut documented = BTreeSet::new();
+    for (path, item) in &spec.paths.paths {
+        for (method, operation) in [
+            ("get", &item.get),
+            ("post", &item.post),
+            ("put", &item.put),
+            ("delete", &item.delete),
+            ("patch", &item.patch),
+        ] {
+            if operation.is_some() {
+                documented
+                    .insert((method.to_string(), normalize_route_path(path)));
+            }
+        }
+    }
+
+    let declared: BTreeSet<(String, String)> = catalog
+        .iter()
+        .map(|(method, path)| (method.clone(), normalize_route_path(path)))
+        .collect();
+
+    let missing: Vec<_> = declared.difference(&documented).collect();
+    assert!(
+        missing.is_empty(),
+        "routes missing from the OpenAPI document: {missing:?}"
+    );
+
+    let stale: Vec<_> = documented.difference(&declared).collect();
+    assert!(
+        stale.is_empty(),
+        "OpenAPI documents routes that are not mounted: {stale:?}"
     );
 }

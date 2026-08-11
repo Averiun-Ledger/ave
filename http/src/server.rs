@@ -577,32 +577,33 @@ pub async fn test_sink(
     Ok(StatusCode::OK)
 }
 
-/// Delete a sink's persisted cursors
+/// Reset a sink's persisted cursors
 ///
 /// Removes all cursors, lagging tracking and blocked state for the given sink.
 /// The sink manager is located through the sink registry, so only the sink
 /// name is required. Only available while the node is running in safe mode.
 #[utoipa::path(
-    delete,
-    path = "/sinks/{sink_name}",
-    operation_id = "deleteSinkCursors",
+    post,
+    path = "/sinks/{sink_name}/reset-cursors",
+    operation_id = "resetSinkCursors",
     tag = "Sink",
     params(
         ("sink_name" = String, Path, description = "Sink name")
     ),
     responses(
-        (status = 200, description = "Sink cursors deleted successfully"),
+        (status = 200, description = "Sink cursors reset successfully"),
         (status = 404, description = "Sink not found in registry", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Node is not running in safe mode", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
-pub async fn delete_sink_cursors(
+pub async fn reset_sink_cursors(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(sink_name): Path<String>,
 ) -> Result<StatusCode, HttpError> {
-    bridge.delete_sink_cursors(sink_name).await?;
+    bridge.reset_sink_cursors(sink_name).await?;
     Ok(StatusCode::OK)
 }
 
@@ -1435,7 +1436,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
         $callback!($($args)*, post, "/sinks/{sink_name}/test", test_sink, require NodeSink Post);
-        $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);
+        $callback!($($args)*, post, "/sinks/{sink_name}/reset-cursors", reset_sink_cursors, require NodeSink Post);
         $callback!($($args)*, post, "/sinks/replay", replay_sink_events, require NodeSink Post);
         $callback!($($args)*, put, "/governances/{subject_id}/authorize", authorize_governance, require NodeSubject Put);
         $callback!($($args)*, delete, "/governances/{subject_id}/authorize", disauthorize_governance, require NodeSubject Delete);

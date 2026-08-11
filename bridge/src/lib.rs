@@ -356,14 +356,14 @@ impl Bridge {
             .map_err(BridgeError::Core)
     }
 
-    pub async fn delete_sink_cursors(
+    pub async fn reset_sink_cursors(
         &self,
         sink_name: String,
     ) -> Result<(), BridgeError> {
         Self::require_non_empty_str("sink_name", &sink_name)?;
 
         self.api
-            .delete_sink_cursors(sink_name)
+            .reset_sink_cursors(sink_name)
             .await
             .map_err(BridgeError::Core)
     }
