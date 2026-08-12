@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 async fn run_db<T, F>(
     db: &Arc<AuthDatabase>,
@@ -117,9 +117,7 @@ pub async fn create_api_key_for_user(
     path = "/admin/api-keys",
     operation_id = "listAllApiKeys",
     tag = "API Key Management",
-    params(
-        ("include_revoked" = Option<bool>, Query, description = "Include revoked keys")
-    ),
+    params(ListApiKeysQuery),
     responses(
         (status = 200, description = "List of API keys", body = Vec<ApiKeyInfo>),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -143,8 +141,10 @@ pub async fn list_all_api_keys(
     Ok(Json(keys))
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListApiKeysQuery {
+    /// Include revoked keys
     pub include_revoked: Option<bool>,
 }
 
@@ -156,7 +156,7 @@ pub struct ListApiKeysQuery {
     tag = "API Key Management",
     params(
         ("user_id" = i64, Path, description = "User ID"),
-        ("include_revoked" = Option<bool>, Query, description = "Include revoked keys")
+        ListApiKeysQuery
     ),
     responses(
         (status = 200, description = "List of user API keys", body = Vec<ApiKeyInfo>),
@@ -186,11 +186,11 @@ pub async fn list_user_api_keys_admin(
 /// Get API key info (admin)
 #[utoipa::path(
     get,
-    path = "/admin/api-keys/{id}",
+    path = "/admin/api-keys/{key_id}",
     operation_id = "getApiKey",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API Key ID (UUID)")
+        ("key_id" = String, Path, description = "API Key ID (UUID)")
     ),
     responses(
         (status = 200, description = "API key information", body = ApiKeyInfo),
@@ -216,15 +216,16 @@ pub async fn get_api_key(
 /// Revoke API key (admin)
 #[utoipa::path(
     delete,
-    path = "/admin/api-keys/{id}",
+    path = "/admin/api-keys/{key_id}",
     operation_id = "revokeApiKey",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API Key ID (UUID)")
+        ("key_id" = String, Path, description = "API Key ID (UUID)")
     ),
     request_body(content = RevokeApiKeyRequest, description = "Optional revocation reason", content_type = "application/json"),
     responses(
         (status = 204, description = "API key revoked successfully"),
+        (status = 400, description = "Cannot revoke the currently used API key", body = ErrorResponse),
         (status = 403, description = "Permission denied", body = ErrorResponse),
         (status = 404, description = "API key not found", body = ErrorResponse),
     ),
@@ -303,11 +304,11 @@ pub async fn revoke_api_key(
 /// Rotate an existing API key (admin)
 #[utoipa::path(
     post,
-    path = "/admin/api-keys/{id}/rotate",
+    path = "/admin/api-keys/{key_id}/rotate",
     operation_id = "rotateApiKey",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API Key ID (UUID)")
+        ("key_id" = String, Path, description = "API Key ID (UUID)")
     ),
     request_body = RotateApiKeyRequest,
     responses(
@@ -607,11 +608,11 @@ pub async fn delete_usage_plan(
 /// Assign (or clear) usage plan from API key (admin)
 #[utoipa::path(
     put,
-    path = "/admin/api-keys/{id}/plan",
+    path = "/admin/api-keys/{key_id}/plan",
     operation_id = "assignApiKeyPlan",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API key id")
+        ("key_id" = String, Path, description = "API key id")
     ),
     request_body = AssignApiKeyPlanRequest,
     responses(
@@ -659,20 +660,22 @@ pub async fn assign_api_key_plan(
     Ok(Json(updated))
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct QuotaStatusQuery {
+    /// UTC month in YYYY-MM (default: current month)
     pub usage_month: Option<String>,
 }
 
 /// Get monthly quota status for API key (admin)
 #[utoipa::path(
     get,
-    path = "/admin/api-keys/{id}/quota",
+    path = "/admin/api-keys/{key_id}/quota",
     operation_id = "getApiKeyQuotaStatus",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API key id"),
-        ("usage_month" = Option<String>, Query, description = "UTC month in YYYY-MM")
+        ("key_id" = String, Path, description = "API key id"),
+        QuotaStatusQuery
     ),
     responses(
         (status = 200, description = "API key quota status", body = ApiKeyQuotaStatus),
@@ -701,11 +704,11 @@ pub async fn get_api_key_quota_status(
 /// Add monthly quota extension for API key (admin)
 #[utoipa::path(
     post,
-    path = "/admin/api-keys/{id}/quota-extensions",
+    path = "/admin/api-keys/{key_id}/quota-extensions",
     operation_id = "addApiKeyQuotaExtension",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API key id")
+        ("key_id" = String, Path, description = "API key id")
     ),
     request_body = CreateQuotaExtensionRequest,
     responses(
@@ -778,6 +781,7 @@ pub async fn add_api_key_quota_extension(
     responses(
         (status = 201, description = "API key created successfully", body = CreateApiKeyResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 403, description = "Only management keys with user_api_key permission can create service keys", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
@@ -851,11 +855,10 @@ pub async fn create_my_api_key(
     path = "/me/api-keys",
     operation_id = "listMyApiKeys",
     tag = "My Account",
-    params(
-        ("include_revoked" = Option<bool>, Query, description = "Include revoked keys")
-    ),
+    params(ListApiKeysQuery),
     responses(
         (status = 200, description = "List of own API keys", body = Vec<ApiKeyInfo>),
+        (status = 403, description = "Only management keys with user_api_key permission can list service keys", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
@@ -904,6 +907,7 @@ pub async fn list_my_api_keys(
     request_body = RevokeApiKeyRequest,
     responses(
         (status = 204, description = "API key revoked successfully"),
+        (status = 400, description = "Cannot revoke the currently used or the management API key", body = ErrorResponse),
         (status = 403, description = "Cannot revoke other user's key", body = ErrorResponse),
         (status = 404, description = "API key not found", body = ErrorResponse),
     ),

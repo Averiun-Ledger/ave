@@ -327,21 +327,15 @@ impl Bridge {
         &self,
         query: SinksQuery,
     ) -> Result<Vec<SinkInfo>, BridgeError> {
-        Self::validate_sinks_query(&query)?;
+        ave_core::validate_sinks_query(&query)?;
 
-        self.api
-            .get_sinks(query)
-            .await
-            .map_err(|e| BridgeError::Api(e.to_string()))
+        Ok(self.api.get_sinks(query).await?)
     }
 
     pub async fn get_sinks_status(
         &self,
     ) -> Result<Vec<SinkStatusInfo>, BridgeError> {
-        self.api
-            .get_sinks_status()
-            .await
-            .map_err(|e| BridgeError::Api(e.to_string()))
+        Ok(self.api.get_sinks_status().await?)
     }
 
     pub async fn unblock_sink(
@@ -372,7 +366,7 @@ impl Bridge {
         &self,
         request: SinkReplayRequest,
     ) -> Result<SinkReplayResponse, BridgeError> {
-        Self::validate_sink_replay_request(&request)?;
+        ave_core::validate_sink_replay_request(&request)?;
 
         self.api
             .replay_sink_events(request)
@@ -586,7 +580,7 @@ impl Bridge {
         query: EventsQuery,
     ) -> Result<PaginatorEvents, BridgeError> {
         let subject_id = Self::parse_subject_id(subject_id)?;
-        Self::validate_events_query(&query)?;
+        ave_core::validate_events_query(&query)?;
 
         Ok(self.api.get_events(subject_id, query).await?)
     }
@@ -597,7 +591,7 @@ impl Bridge {
         query: SinkEventsQuery,
     ) -> Result<SinkEventsPage, BridgeError> {
         let subject_id = Self::parse_subject_id(subject_id)?;
-        Self::validate_sink_events_query(&query)?;
+        ave_core::validate_sink_events_query(&query)?;
 
         Ok(self.api.get_sink_events(subject_id, query).await?)
     }
@@ -608,7 +602,7 @@ impl Bridge {
         query: AbortsQuery,
     ) -> Result<PaginatorAborts, BridgeError> {
         let subject_id = Self::parse_subject_id(subject_id)?;
-        Self::validate_aborts_query(&query)?;
+        ave_core::validate_aborts_query(&query)?;
 
         Ok(self.api.get_aborts(subject_id, query).await?)
     }
@@ -720,79 +714,6 @@ impl Bridge {
         keys.into_iter()
             .map(|key| Self::parse_public_key_labeled(label, key))
             .collect()
-    }
-
-    fn validate_sinks_query(query: &SinksQuery) -> Result<(), BridgeError> {
-        if let Some(name) = query.name.as_deref() {
-            Self::require_non_empty_str("name", name)?;
-        }
-        if let Some(target) = query.target.as_deref() {
-            Self::require_non_empty_str("target", target)?;
-        }
-        if let Some(schema_id) = query.schema_id.as_deref() {
-            Self::require_non_empty_str("schema_id", schema_id)?;
-        }
-        if let Some(governance_id) = query.governance_id.as_deref() {
-            Self::require_non_empty_str("governance_id", governance_id)?;
-        }
-        Ok(())
-    }
-
-    fn validate_events_query(query: &EventsQuery) -> Result<(), BridgeError> {
-        if let Some(quantity) = query.quantity {
-            Self::require_positive_u64("quantity", quantity)?;
-        }
-        Ok(())
-    }
-
-    fn validate_sink_events_query(
-        query: &SinkEventsQuery,
-    ) -> Result<(), BridgeError> {
-        if let Some(limit) = query.limit
-            && limit == 0
-        {
-            return Err(BridgeError::Core(Error::InvalidQueryParams(
-                "Replay limit must be greater than zero".to_owned(),
-            )));
-        }
-        if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn)
-            && from_sn > to_sn
-        {
-            return Err(BridgeError::Core(Error::InvalidQueryParams(
-                "Replay range requires from_sn <= to_sn".to_owned(),
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_aborts_query(query: &AbortsQuery) -> Result<(), BridgeError> {
-        if let Some(request_id) = query.request_id.as_deref() {
-            Self::require_non_empty_str("request_id", request_id)?;
-            DigestIdentifier::from_str(request_id).map_err(|e| {
-                BridgeError::Core(Error::InvalidQueryParams(format!(
-                    "request_id is invalid: {e}"
-                )))
-            })?;
-        }
-        if let Some(quantity) = query.quantity {
-            Self::require_positive_u64("quantity", quantity)?;
-        }
-        Ok(())
-    }
-
-    fn validate_sink_replay_request(
-        request: &SinkReplayRequest,
-    ) -> Result<(), BridgeError> {
-        if request.requests.is_empty() {
-            return Err(BridgeError::Core(Error::InvalidQueryParams(
-                "requests must not be empty".to_owned(),
-            )));
-        }
-        for item in &request.requests {
-            Self::require_non_empty_str("sink", &item.sink)?;
-            Self::require_non_empty_str("subject_id", &item.subject_id)?;
-        }
-        Ok(())
     }
 
     fn require_non_empty_str(

@@ -1457,7 +1457,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     pool_idle_timeout_secs: http.pool_idle_timeout_secs,
                     pool_max_idle_per_host: http.pool_max_idle_per_host,
                     max_redirects: http.max_redirects,
-                    headers: http.headers,
+                    headers: redact_sensitive_headers(http.headers),
                 }))
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
@@ -1493,7 +1493,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     queue_buffering_max_messages: kafka
                         .queue_buffering_max_messages,
                     statistics_interval_ms: kafka.statistics_interval_ms,
-                    headers: kafka.headers,
+                    headers: redact_sensitive_headers(kafka.headers),
                     partitioner: kafka.partitioner,
                     oauth_token_url: kafka.oauth_token_url,
                     oauth_scope: kafka.oauth_scope,
@@ -1519,11 +1519,9 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     batch_delivery: grpc.batch_delivery,
                     batch_max_delay_ms: grpc.batch_max_delay_ms,
                     compression: grpc.compression.into(),
-                    headers: grpc.headers,
-                    max_decoding_message_bytes: grpc
-                        .max_decoding_message_bytes,
-                    max_encoding_message_bytes: grpc
-                        .max_encoding_message_bytes,
+                    headers: redact_sensitive_headers(grpc.headers),
+                    max_decoding_message_bytes: grpc.max_decoding_message_bytes,
+                    max_encoding_message_bytes: grpc.max_encoding_message_bytes,
                     max_in_flight_batches: grpc.max_in_flight_batches,
                     tcp_keepalive_secs: grpc.tcp_keepalive_secs,
                     http2_keepalive_interval_secs: grpc
@@ -1574,9 +1572,9 @@ fn sink_auth_method_to_http(
         ave_bridge::ave_common::sink::SinkAuthMethod::ApiKey => {
             SinkAuthMethodHttp::ApiKey
         }
-        ave_bridge::ave_common::sink::SinkAuthMethod::Basic {
-            username,
-        } => SinkAuthMethodHttp::Basic { username },
+        ave_bridge::ave_common::sink::SinkAuthMethod::Basic { username } => {
+            SinkAuthMethodHttp::Basic { username }
+        }
         ave_bridge::ave_common::sink::SinkAuthMethod::OAuth2(auth) => {
             SinkAuthMethodHttp::OAuth2(sink_auth_to_http(auth))
         }
@@ -1606,6 +1604,42 @@ fn kafka_security_to_http(
             username,
         },
     }
+}
+
+/// Case-insensitive match for header names that typically carry credentials.
+/// Custom sink header names are operator-defined, so they cannot be covered
+/// by a fixed key list
+pub(crate) fn is_sensitive_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "auth",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "api-key",
+        "apikey",
+        "api_key",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+}
+
+/// Redacts the values of credential-ish custom sink headers for API
+/// responses (`GET /config`): the names stay visible, the values do not
+fn redact_sensitive_headers(
+    headers: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    headers
+        .into_iter()
+        .map(|(name, value)| {
+            if is_sensitive_header(&name) && !value.is_empty() {
+                (name, "***".to_string())
+            } else {
+                (name, value)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

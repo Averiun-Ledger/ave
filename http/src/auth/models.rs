@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 fn serialize_ts<S>(ts: &i64, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -43,9 +43,12 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PaginationQuery {
+    /// Maximum number of results
     pub limit: Option<i64>,
+    /// Offset for pagination
     pub offset: Option<i64>,
 }
 
@@ -355,23 +358,39 @@ pub struct AuditLog {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AuditLogQuery {
+    /// Filter by user ID
     pub user_id: Option<i64>,
+    /// Filter by API key ID
     pub api_key_id: Option<String>,
+    /// Filter by endpoint path
     pub endpoint: Option<String>,
+    /// Filter by HTTP method
     pub http_method: Option<String>,
+    /// Filter by IP address
     pub ip_address: Option<String>,
+    /// Filter by User-Agent
     pub user_agent: Option<String>,
+    /// Filter by success status
     pub success: Option<bool>,
+    /// Start timestamp (Unix)
     pub start_timestamp: Option<i64>,
+    /// End timestamp (Unix)
     pub end_timestamp: Option<i64>,
+    /// Maximum number of results
     pub limit: Option<i64>,
+    /// Offset for pagination
     pub offset: Option<i64>,
     // Exclusion filters (NOT conditions)
+    /// Exclude entries for this user ID
     pub exclude_user_id: Option<i64>,
+    /// Exclude entries for this API key ID
     pub exclude_api_key_id: Option<String>,
+    /// Exclude entries from this IP address
     pub exclude_ip_address: Option<String>,
+    /// Exclude entries for this endpoint path
     pub exclude_endpoint: Option<String>,
 }
 

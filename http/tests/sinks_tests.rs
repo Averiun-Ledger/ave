@@ -343,13 +343,15 @@ async fn test_http_unblock_sink() {
 ///
 /// **Setup:**
 /// - Server with `enable_auth: true` and a sink configured.
-/// - Users with roles `sink` (read-only) and `superadmin` (all).
+/// - Users with roles `sink` (`node_sink:all`), `data` (no `node_sink`) and
+///   `superadmin` (all).
 /// - Variant of the server in safe mode.
 ///
 /// **Sequence:**
-/// 1. User with role `sink` -> 403.
-/// 2. Superadmin outside safe mode -> 200.
-/// 3. Superadmin in safe mode -> 503.
+/// 1. User with role `sink` -> 200.
+/// 2. User with role `data` -> 403.
+/// 3. Superadmin outside safe mode -> 200.
+/// 4. Superadmin in safe mode -> 503.
 ///
 /// **Verifications:**
 /// - Missing permission returns 403.
@@ -381,49 +383,31 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
         .await
         .expect("admin login");
 
-    // Create a user with the read-only `sink` role.
-    let (status, roles) = make_request(
-        &client,
-        &server.url("/admin/roles"),
-        "GET",
-        Some(&admin_key),
-        None,
-    )
-    .await;
-    assert_eq!(status, 200);
-    let sink_role_id = roles
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "sink")
-        .map(|r| r["id"].as_i64().unwrap())
-        .expect("sink role exists");
-
-    let (status, _body) = make_request(
-        &client,
-        &server.url("/admin/users"),
-        "POST",
-        Some(&admin_key),
-        Some(json!({
-            "username": "sink_user",
-            "password": "SinkPass123!",
-            "is_superadmin": false,
-            "role_ids": [sink_role_id],
-            "must_change_password": false
-        })),
-    )
-    .await;
-    assert_eq!(status, 201);
-
-    let sink_key = login(&server, &client, "sink_user", "SinkPass123!")
-        .await
-        .expect("sink user login");
+    // The `sink` role has full control of its domain (node_sink:all).
+    let sink_key =
+        create_sink_user_and_login(&server, &client, &admin_key).await;
 
     let (status, _body) = make_request(
         &client,
         &server.url("/sinks/example-sink/unblock"),
         "POST",
         Some(&sink_key),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // A role without node_sink permissions is still rejected.
+    let data_key = create_role_user_and_login(
+        &server, &client, &admin_key, "data", "data_user",
+    )
+    .await;
+
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/example-sink/unblock"),
+        "POST",
+        Some(&data_key),
         None,
     )
     .await;
@@ -483,12 +467,15 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
 /// sink (`in_config: false`).
 ///
 /// **Sequence:**
-/// 1. `POST /sinks/in-config-sink/reset-cursors` -> 200; sink still appears in lists.
-/// 2. `POST /sinks/residual-sink/reset-cursors` -> 200; sink disappears from
+/// 1. `GET /sinks/status` -> 200; includes the residual sink with
+///    `in_config: false` alongside the in-config one.
+/// 2. `POST /sinks/in-config-sink/reset-cursors` -> 200; sink still appears in lists.
+/// 3. `POST /sinks/residual-sink/reset-cursors` -> 200; sink disappears from
 ///    `GET /sinks?in_config=false`.
-/// 3. `POST /sinks/missing-sink/reset-cursors` -> 404.
+/// 4. `POST /sinks/missing-sink/reset-cursors` -> 404.
 ///
 /// **Verifications:**
+/// - `/sinks/status` exposes residual sinks.
 /// - In-config sink survives the reset.
 /// - Residual sink is removed from registry.
 /// - Missing sink returns 404.
@@ -547,6 +534,37 @@ async fn test_http_reset_sink_cursors() {
     .expect("server should reopen");
 
     let client = Client::new();
+
+    // `/sinks/status` must include the residual sink (in_config: false), not
+    // only the ones present in the current config. Poll until the registry
+    // reflects the persisted state instead of assuming startup timing.
+    let mut statuses: Vec<Value> = Vec::new();
+    for _ in 0..100 {
+        let (status, body) = make_request(
+            &client,
+            &server.url("/sinks/status"),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        statuses = serde_json::from_value(body).unwrap();
+        if statuses.iter().any(|s| s["name"] == "residual-sink") {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    }
+    let residual = statuses
+        .iter()
+        .find(|s| s["name"] == "residual-sink")
+        .expect("residual sink must appear in /sinks/status");
+    assert_eq!(residual["in_config"], false);
+    let in_config = statuses
+        .iter()
+        .find(|s| s["name"] == "in-config-sink")
+        .expect("in-config sink must appear in /sinks/status");
+    assert_eq!(in_config["in_config"], true);
 
     let (status, _body) = make_request(
         &client,
@@ -613,7 +631,7 @@ async fn test_http_reset_sink_cursors() {
 /// - Variant outside safe mode.
 ///
 /// **Sequence:**
-/// 1. `sink` user -> 403.
+/// 1. `sink` user -> 503 (passes permissions, hits the safe-mode gate).
 /// 2. Superadmin outside safe mode -> 503.
 /// 3. Superadmin in safe mode -> 200.
 #[test(tokio::test)]
@@ -653,7 +671,7 @@ async fn test_http_reset_sink_cursors_permissions_and_safe_mode() {
         None,
     )
     .await;
-    assert_eq!(status, 403);
+    assert_eq!(status, 503);
 
     let (status, _body) = make_request(
         &client,
@@ -931,9 +949,10 @@ async fn test_http_replay_sink_events() {
 /// - Variant in safe mode.
 ///
 /// **Sequence:**
-/// 1. `sink` user -> 403.
-/// 2. Superadmin in safe mode -> 400/503.
-/// 3. Superadmin outside safe mode -> 200.
+/// 1. `sink` user -> 200 (`node_sink:all`); role without `node_sink` -> 403.
+/// 2. Malformed `subject_id` -> 400 (rejected before execution).
+/// 3. Superadmin in safe mode -> 400/503.
+/// 4. Superadmin outside safe mode -> 200.
 #[test(tokio::test)]
 async fn test_http_replay_sink_events_permissions_and_safe_mode() {
     let sink = TestSink::start().await;
@@ -975,6 +994,21 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
         body.clone(),
     )
     .await;
+    assert_eq!(status, 200);
+
+    // A role without node_sink permissions is still rejected.
+    let data_key = create_role_user_and_login(
+        &server, &client, &admin_key, "data", "data_user",
+    )
+    .await;
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/replay"),
+        "POST",
+        Some(&data_key),
+        body.clone(),
+    )
+    .await;
     assert_eq!(status, 403);
 
     let (status, _body) = make_request(
@@ -986,6 +1020,20 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
     )
     .await;
     assert_eq!(status, 200);
+
+    // A malformed subject_id is rejected up front (400), not reported as a
+    // per-item error inside a 200 response.
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/replay"),
+        "POST",
+        Some(&admin_key),
+        Some(json!({
+            "requests": [{ "sink": "gov-sink", "subject_id": "not-a-valid-digest", "from_sn": 0 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, 400);
 
     server.shutdown().await;
     let persistence = TestPersistencePaths::from_tempdirs(&_dirs);
@@ -1030,8 +1078,9 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
 /// 2. `GET /sink-events/<governance>?from_sn=0&limit=1` -> 200.
 /// 3. `GET /sink-events/<governance>?from_sn=0&to_sn=0` -> 200.
 /// 4. `GET /sink-events/<governance>?limit=0` -> 400.
-/// 5. `GET /sink-events/<governance>?from_sn=5&to_sn=3` -> 400.
-/// 6. `GET /sink-events/<missing>` -> 404.
+/// 5. `GET /sink-events/<governance>?limit=1000` -> 200; `limit=1001` -> 400 (cap).
+/// 6. `GET /sink-events/<governance>?from_sn=5&to_sn=3` -> 400.
+/// 7. `GET /sink-events/<missing>` -> 404.
 ///
 /// **Verifications:**
 /// - Responses are `SinkEventsPage` with `from_sn`, `to_sn`, `limit`,
@@ -1071,6 +1120,8 @@ async fn test_http_get_sink_events_queries() {
     assert_query(&client, &server, &governance_id, "?from_sn=0&to_sn=0", 200)
         .await;
     assert_query(&client, &server, &governance_id, "?limit=0", 400).await;
+    assert_query(&client, &server, &governance_id, "?limit=1000", 200).await;
+    assert_query(&client, &server, &governance_id, "?limit=1001", 400).await;
     assert_query(&client, &server, &governance_id, "?from_sn=5&to_sn=3", 400)
         .await;
 
@@ -1165,8 +1216,8 @@ async fn test_http_get_sink_events_permissions() {
 
 /// HTTP Test 11: role `sink` endpoints.
 ///
-/// **Objective:** verify that the `sink` role can read sink endpoints but not
-/// mutate them.
+/// **Objective:** verify that the `sink` role can read and operate sink
+/// endpoints (`node_sink:all`) while unmatched paths stay forbidden.
 ///
 /// **Setup:** server with auth, sinks configured, user with role `sink`.
 ///
@@ -1174,9 +1225,9 @@ async fn test_http_get_sink_events_permissions() {
 /// 1. `GET /sinks` -> 200.
 /// 2. `GET /sinks/status` -> 200.
 /// 3. `GET /sink-events/<subject>` -> 200/404.
-/// 4. `POST /sinks/example-sink/unblock` -> 403.
-/// 5. `POST /sinks/example-sink/reset-cursors` -> 403.
-/// 6. `POST /sinks/replay` -> 403.
+/// 4. `POST /sinks/example-sink/unblock` -> 200.
+/// 5. `POST /sinks/example-sink` -> 403 (unmatched route).
+/// 6. `POST /sinks/replay` -> 200.
 #[test(tokio::test)]
 async fn test_http_sink_role_endpoints() {
     let sink = TestSink::start().await;
@@ -1212,9 +1263,9 @@ async fn test_http_sink_role_endpoints() {
         ("GET", "/sinks", 200u16),
         ("GET", "/sinks/status", 200),
         ("GET", &format!("/sink-events/{}", unknown_subject), 404),
-        ("POST", "/sinks/example-sink/unblock", 403),
+        ("POST", "/sinks/example-sink/unblock", 200),
         ("POST", "/sinks/example-sink", 403),
-        ("POST", "/sinks/replay", 403),
+        ("POST", "/sinks/replay", 200),
     ] {
         let body = if path == "/sinks/replay" {
             Some(json!({
@@ -1239,6 +1290,57 @@ async fn test_http_sink_role_endpoints() {
             path
         );
     }
+}
+
+/// HTTP Test 11b: the `sink` role includes the common self-management base.
+///
+/// **Objective:** verify that the `sink` role, like every other functional
+/// role, can call `/me` and manage its own API keys (`user` / `user_api_key`
+/// grants from migration 004).
+///
+/// **Sequence:**
+/// 1. `GET /me` -> 200 with the expected username.
+/// 2. `POST /me/api-keys` -> 201.
+#[test(tokio::test)]
+async fn test_http_sink_role_has_common_base() {
+    let (server, _dirs) = TestServer::build_with_options(TestServerOptions {
+        enable_auth: true,
+        always_accept: true,
+        ..Default::default()
+    })
+    .await
+    .expect("server should build");
+
+    let client = Client::new();
+    let admin_key = login(&server, &client, "admin", "AdminPass123!")
+        .await
+        .expect("admin login");
+    let sink_key =
+        create_sink_user_and_login(&server, &client, &admin_key).await;
+
+    let (status, body) = make_request(
+        &client,
+        &server.url("/me"),
+        "GET",
+        Some(&sink_key),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "sink role must reach /me: {body}");
+    assert_eq!(body["username"], "sink_user");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url("/me/api-keys"),
+        "POST",
+        Some(&sink_key),
+        Some(json!({ "name": "sink_service", "is_management": false })),
+    )
+    .await;
+    assert_eq!(
+        status, 201,
+        "sink role must manage its own API keys: {body}"
+    );
 }
 
 /// HTTP Test 12: authentication is required for all sink endpoints.
@@ -1416,9 +1518,10 @@ async fn wait_for_sink_blocked(
         assert_eq!(status, 200);
         let sinks: Vec<Value> = serde_json::from_value(body).unwrap();
         if let Some(sink) = sinks.iter().find(|s| s["name"] == name)
-            && !sink["blocked"].is_null() {
-                return;
-            }
+            && !sink["blocked"].is_null()
+        {
+            return;
+        }
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     }
     panic!("sink {} did not become blocked in time", name);
@@ -1451,25 +1554,36 @@ async fn create_sink_user_and_login(
     client: &Client,
     admin_key: &str,
 ) -> String {
-    let sink_role_id = get_role_id(server, client, admin_key, "sink").await;
+    create_role_user_and_login(server, client, admin_key, "sink", "sink_user")
+        .await
+}
+
+async fn create_role_user_and_login(
+    server: &TestServer,
+    client: &Client,
+    admin_key: &str,
+    role: &str,
+    username: &str,
+) -> String {
+    let role_id = get_role_id(server, client, admin_key, role).await;
     let (status, _body) = make_request(
         client,
         &server.url("/admin/users"),
         "POST",
         Some(admin_key),
         Some(json!({
-            "username": "sink_user",
-            "password": "SinkPass123!",
+            "username": username,
+            "password": "TestPass123!",
             "is_superadmin": false,
-            "role_ids": [sink_role_id],
+            "role_ids": [role_id],
             "must_change_password": false
         })),
     )
     .await;
     assert_eq!(status, 201);
-    login(server, client, "sink_user", "SinkPass123!")
+    login(server, client, username, "TestPass123!")
         .await
-        .expect("sink user login")
+        .expect("role user login")
 }
 
 async fn get_role_id(

@@ -36,6 +36,19 @@ use tracing::{debug, info, warn};
 const TARGET: &str = "ave::http::auth";
 const BLOCKING_TASK_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Schema migrations as `(version, sql)` pairs, in application order.
+///
+/// `PRAGMA user_version` records the last applied version so only pending
+/// migrations run. Existing databases predate versioning (`user_version = 0`);
+/// every migration is idempotent, so re-applying them once on first boot is
+/// harmless and leaves the database stamped with the latest version.
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../../migrations/001_initial_schema.sql")),
+    (2, include_str!("../../migrations/002_role_permissions.sql")),
+    (3, include_str!("../../migrations/003_usage_plans.sql")),
+    (4, include_str!("../../migrations/004_sink_role_permissions.sql")),
+];
+
 // =============================================================================
 // ERROR TYPE
 // =============================================================================
@@ -1081,25 +1094,32 @@ impl AuthDatabase {
         info!(target: TARGET, "running database migrations");
 
         let conn = self.lock_conn()?;
+        let current_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| {
+                DatabaseError::Migration(format!(
+                    "failed to read schema version: {e}"
+                ))
+            })?;
 
-        // Read and execute migration files
-        let migration_001 =
-            include_str!("../../migrations/001_initial_schema.sql");
-        conn.execute_batch(migration_001).map_err(|e| {
-            DatabaseError::Migration(format!("migration 001 failed: {}", e))
-        })?;
-
-        let migration_002 =
-            include_str!("../../migrations/002_role_permissions.sql");
-        conn.execute_batch(migration_002).map_err(|e| {
-            DatabaseError::Migration(format!("migration 002 failed: {}", e))
-        })?;
-
-        let migration_003 =
-            include_str!("../../migrations/003_usage_plans.sql");
-        conn.execute_batch(migration_003).map_err(|e| {
-            DatabaseError::Migration(format!("migration 003 failed: {}", e))
-        })?;
+        for (version, sql) in MIGRATIONS {
+            if *version <= current_version {
+                continue;
+            }
+            conn.execute_batch(sql).map_err(|e| {
+                DatabaseError::Migration(format!(
+                    "migration {version:03} failed: {e}"
+                ))
+            })?;
+            conn.pragma_update(None, "user_version", *version).map_err(
+                |e| {
+                    DatabaseError::Migration(format!(
+                        "failed to stamp schema version {version}: {e}"
+                    ))
+                },
+            )?;
+            info!(target: TARGET, version = version, "migration applied");
+        }
         drop(conn);
 
         info!(target: TARGET, "database migrations completed");

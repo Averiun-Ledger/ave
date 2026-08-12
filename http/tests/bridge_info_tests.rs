@@ -396,8 +396,7 @@ async fn test_approval_deserialization() {
     // The create request must be fully applied before emitting governance
     // facts: under load the subject is not the node's owner yet and the fact
     // is rejected with "not the owner of subject".
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
@@ -658,8 +657,7 @@ async fn test_update_and_transfer_deserialization() {
     // The create request must be fully applied before operating on the
     // governance: under load the subject is not the node's owner yet and
     // follow-up requests are rejected with "not the owner of subject".
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let (status, _body) = make_request(
         &client,
@@ -2233,7 +2231,8 @@ fn test_sink_server_http_fields() {
     assert_eq!(http.server, "TestSink");
     let transport = match &http.transport {
         SinkTransportConfigHttp::Http(t) => t,
-        SinkTransportConfigHttp::Kafka(_) | SinkTransportConfigHttp::Grpc(_) => {
+        SinkTransportConfigHttp::Kafka(_)
+        | SinkTransportConfigHttp::Grpc(_) => {
             panic!("expected http transport")
         }
     };
@@ -2260,7 +2259,8 @@ fn test_sink_server_http_fields() {
     assert_eq!(http2.server, "S2");
     let transport2 = match &http2.transport {
         SinkTransportConfigHttp::Http(t) => t,
-        SinkTransportConfigHttp::Kafka(_) | SinkTransportConfigHttp::Grpc(_) => {
+        SinkTransportConfigHttp::Kafka(_)
+        | SinkTransportConfigHttp::Grpc(_) => {
             panic!("expected http transport")
         }
     };

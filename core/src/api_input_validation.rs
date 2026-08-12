@@ -16,6 +16,10 @@ use ave_common::schematype::SchemaType;
 
 use crate::error::Error;
 
+/// Maximum number of events a single sink replay/query page may request.
+/// Keeps a malicious or misconfigured client from forcing unbounded reads.
+const MAX_SINK_EVENTS_LIMIT: u64 = 1000;
+
 /// Rejects `0` with a message that names the field.
 pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {
     if value == 0 {
@@ -105,6 +109,13 @@ pub fn validate_sink_events_query(
             "Replay limit must be greater than zero".to_owned(),
         ));
     }
+    if let Some(limit) = query.limit
+        && limit > MAX_SINK_EVENTS_LIMIT
+    {
+        return Err(Error::InvalidQueryParams(format!(
+            "Replay limit must not exceed {MAX_SINK_EVENTS_LIMIT}"
+        )));
+    }
     if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn)
         && from_sn > to_sn
     {
@@ -117,6 +128,9 @@ pub fn validate_sink_events_query(
 
 /// Validates pagination fields of an [`AbortsQuery`].
 pub fn validate_aborts_query(query: &AbortsQuery) -> Result<(), Error> {
+    if let Some(request_id) = query.request_id.as_deref() {
+        parse_request_id(request_id)?;
+    }
     if let Some(quantity) = query.quantity {
         require_positive_u64("quantity", quantity)?;
     }
@@ -153,6 +167,9 @@ pub fn validate_sink_replay_request(
     for item in &request.requests {
         require_non_empty_str("sink", &item.sink)?;
         require_non_empty_str("subject_id", &item.subject_id)?;
+        DigestIdentifier::from_str(&item.subject_id).map_err(|e| {
+            Error::InvalidQueryParams(format!("subject_id is invalid: {e}"))
+        })?;
     }
     Ok(())
 }

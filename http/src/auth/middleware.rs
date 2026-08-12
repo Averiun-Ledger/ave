@@ -5,8 +5,8 @@
 use crate::auth::middleware::uuid::Uuid;
 
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::request_result_from_status;
 use super::http_api::rate_limit_error_response;
+use super::http_api::request_result_from_status;
 use super::models::{AuthContext, ErrorResponse};
 use super::request_meta;
 use ave_bridge::ProxyConfig;
@@ -411,6 +411,105 @@ pub async fn audit_log_middleware(
     }
 
     response
+}
+
+/// Owned request metadata for auditing a rejected request.
+///
+/// Extracted synchronously from the request so the audit future does not
+/// hold a `&Request` across await points (`Request<Body>` is not `Sync`,
+/// which would make the middleware future non-`Send`).
+pub struct RejectionMeta {
+    db: Option<Arc<AuthDatabase>>,
+    method: String,
+    path: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+}
+
+impl RejectionMeta {
+    pub fn new(req: &Request) -> Self {
+        let ip_address = match (
+            req.extensions().get::<ConnectInfo<SocketAddr>>(),
+            req.extensions().get::<Arc<ProxyConfig>>(),
+        ) {
+            (Some(conn), Some(proxy)) => request_meta::resolve_client_ip(
+                req.headers(),
+                conn.0,
+                proxy.as_ref(),
+            )
+            .map(|ip| ip.to_string()),
+            (Some(conn), None) => Some(conn.0.ip().to_string()),
+            _ => None,
+        };
+        Self {
+            db: req.extensions().get::<Arc<AuthDatabase>>().cloned(),
+            method: req.method().to_string(),
+            path: req.uri().path().to_string(),
+            ip_address,
+            user_agent: req
+                .headers()
+                .get("User-Agent")
+                .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
+        }
+    }
+}
+
+/// Audit a request rejected before reaching the audit layer.
+///
+/// Authentication (401) and permission (403) rejections short-circuit the
+/// layer stack and never reach `audit_log_middleware`, so they are written
+/// from the rejection point with the same event shapes used there.
+pub async fn audit_rejected_request(
+    meta: RejectionMeta,
+    auth_ctx: Option<Arc<AuthContext>>,
+    status: StatusCode,
+) {
+    let Some(db) = meta.db else {
+        return;
+    };
+    let method = meta.method;
+    let path = meta.path;
+    let ip_address = meta.ip_address;
+    let user_agent = meta.user_agent;
+    let error_message = format!("HTTP {}", status);
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let result = db
+        .run_blocking("audit_rejected_request", move |db| {
+            let Some(ctx) = auth_ctx else {
+                let details = format!("{} {}", method, path);
+                return db.create_audit_log(
+                    crate::auth::database_audit::AuditLogParams {
+                        user_id: None,
+                        api_key_id: None,
+                        action_type: "unauthenticated_request_failed",
+                        endpoint: Some(&path),
+                        http_method: Some(&method),
+                        ip_address: ip_address.as_deref(),
+                        user_agent: user_agent.as_deref(),
+                        request_id: Some(&request_id),
+                        details: Some(&details),
+                        success: false,
+                        error_message: Some(&error_message),
+                    },
+                );
+            };
+            db.log_api_request(
+                &ctx,
+                crate::auth::database_audit::ApiRequestParams {
+                    path: &path,
+                    method: &method,
+                    ip_address: ip_address.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    request_id: &request_id,
+                    success: false,
+                    error_message: Some(&error_message),
+                },
+            )
+        })
+        .await;
+    if let Err(e) = result {
+        error!(target: TARGET, error = %e, "failed to write rejection audit log");
+    }
 }
 
 // Need to add uuid dependency

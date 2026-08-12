@@ -1044,7 +1044,8 @@ async fn test_service_key_monthly_quota_enforced_once_per_request() {
 
     // The 11th request exceeds the monthly quota
     let (status, body) =
-        make_app_request(&app, "/peer-id", "GET", Some(&service_key), None).await;
+        make_app_request(&app, "/peer-id", "GET", Some(&service_key), None)
+            .await;
     assert_eq!(
         status,
         StatusCode::TOO_MANY_REQUESTS,
@@ -1137,7 +1138,9 @@ async fn test_change_password_writes_audit_events() {
     assert_eq!(status, StatusCode::OK, "audit query failed: {body}");
     let items = body["items"].as_array().unwrap();
     assert!(
-        items.iter().any(|i| i["action_type"] == "password_change_failed"),
+        items
+            .iter()
+            .any(|i| i["action_type"] == "password_change_failed"),
         "missing password_change_failed audit event: {body}"
     );
 
@@ -1157,4 +1160,63 @@ async fn test_change_password_writes_audit_events() {
             && i["user_id"] == user_id),
         "missing password_changed audit event for user {user_id}: {body}"
     );
+}
+
+/// The documented 400s of the revoke endpoints: the key used for the request
+/// cannot be revoked (admin route), and the management key cannot be revoked
+/// through the self-service route.
+#[test(tokio::test)]
+async fn test_revoke_currently_used_key_returns_400() {
+    let (app, _dir) = TestApp::build(true, true, None).await;
+    let mgmt_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
+
+    // Locate the management key in use
+    let (status, body) =
+        make_app_request(&app, "/me/api-keys", "GET", Some(&mgmt_key), None)
+            .await;
+    assert_eq!(status, StatusCode::OK, "list keys: {body}");
+    let management = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["is_management"] == true)
+        .expect("management key in list")
+        .clone();
+    let key_id = management["id"].as_str().unwrap();
+    let key_name = management["name"].as_str().unwrap();
+
+    // Admin route: revoking the key in use is a 400, not a 204
+    let (status, body) = make_app_request(
+        &app,
+        &format!("/admin/api-keys/{key_id}"),
+        "DELETE",
+        Some(&mgmt_key),
+        Some(json!({"reason": "self revocation"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "revoking the key in use must be rejected: {body}"
+    );
+
+    // Self-service route: the management key cannot be revoked either
+    let (status, body) = make_app_request(
+        &app,
+        &format!("/me/api-keys/{key_name}"),
+        "DELETE",
+        Some(&mgmt_key),
+        Some(json!({"reason": "self revocation"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "revoking the management key must be rejected: {body}"
+    );
+
+    // The key must still work after both failed attempts
+    let (status, body) =
+        make_app_request(&app, "/me", "GET", Some(&mgmt_key), None).await;
+    assert_eq!(status, StatusCode::OK, "key must stay active: {body}");
 }

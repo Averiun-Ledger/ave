@@ -839,16 +839,9 @@ impl AuthDatabase {
 
         // Service keys cannot carry admin/panel permissions
         if !is_management {
-            let admin_resources = [
-                "admin_users",
-                "admin_roles",
-                "admin_api_key",
-                "admin_system",
-                "user_api_key",
-                "node_maintenance",
-            ];
-            permissions
-                .retain(|p| !admin_resources.contains(&p.resource.as_str()));
+            permissions.retain(|p| {
+                !super::ADMIN_RESOURCES.contains(&p.resource.as_str())
+            });
         }
 
         Ok(AuthContext {
@@ -875,8 +868,35 @@ impl AuthDatabase {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-            let auth_ctx =
-                self.verify_api_key_with_conn(&tx, api_key, ip_address)?;
+            let auth_ctx = match self
+                .verify_api_key_with_conn(&tx, api_key, ip_address)
+            {
+                Ok(auth_ctx) => auth_ctx,
+                Err(err) => {
+                    // Audit the rejection here: the extractor short-circuits
+                    // the request, so it never reaches the audit layer
+                    Self::create_audit_log_with_conn(
+                        &tx,
+                        self.audit_enabled(),
+                        AuditLogParams {
+                            user_id: None,
+                            api_key_id: None,
+                            action_type: "api_key_auth_failed",
+                            endpoint: Some(endpoint),
+                            http_method: None,
+                            ip_address,
+                            user_agent: None,
+                            request_id: None,
+                            details: Some("API key authentication failed"),
+                            success: false,
+                            error_message: Some(&err.to_string()),
+                        },
+                    )?;
+                    tx.commit()
+                        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+                    return Err(err);
+                }
+            };
 
             self.check_rate_limit_with_conn(
                 &tx,

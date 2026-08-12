@@ -9,19 +9,25 @@ pub struct Args {
     #[arg(short = 'c', long, default_value_t = String::default())]
     pub config_path: String,
 
-    /// Password to be used for the creation of the cryptographic material, if not specified, the password of the environment variable 'AVE_PASSWORD' will be used.
+    /// Password for the node's cryptographic material. If omitted, the
+    /// 'AVE_KEY_PASSWORD' environment variable is used (preferred: CLI flags
+    /// are visible in the process list).
     #[arg(short = 'k', long, default_value_t = String::default())]
     pub key_password: String,
 
-    /// Password to be used for the creation of the cryptographic material, if not specified, the password of the environment variable 'AVE_PASSWORD' will be used.
+    /// Password for the authentication system bootstrap. If omitted, the
+    /// 'AVE_AUTH_PASSWORD' environment variable is used (preferred: CLI flags
+    /// are visible in the process list).
     #[arg(short = 'a', long, default_value_t = String::default())]
     pub auth_password: String,
 
-    /// Password to be used to auth for sinks.
+    /// Password to be used to auth for sinks. If omitted, the
+    /// 'AVE_SINK_PASSWORD' environment variable is used (preferred).
     #[arg(short = 's', long, default_value_t = String::default())]
     pub sink_password: String,
 
     /// API key to be used for sink authentication (alternative to password-based auth).
+    /// If omitted, the 'AVE_SINK_API_KEY' environment variable is used (preferred).
     #[arg(short = 'S', long, default_value_t = String::default())]
     pub sink_api_key: String,
 

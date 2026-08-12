@@ -187,9 +187,7 @@ mod tests {
     #[test]
     fn db_error_response_never_leaks_internal_details() {
         let (status, Json(body)) = db_error_to_response(
-            DatabaseError::Query(
-                "near \"SELECT\": syntax error".to_string(),
-            ),
+            DatabaseError::Query("near \"SELECT\": syntax error".to_string()),
             DatabaseErrorMapping::admin(),
         );
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -198,11 +196,10 @@ mod tests {
 
     #[test]
     fn rate_limit_response_keeps_quota_message() {
-        let (status, Json(body)) = rate_limit_error_response(
-            DatabaseError::RateLimitExceeded(
+        let (status, Json(body)) =
+            rate_limit_error_response(DatabaseError::RateLimitExceeded(
                 "Rate limit exceeded: 100 requests in 60 seconds".to_string(),
-            ),
-        );
+            ));
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert!(body.error.contains("Rate limit exceeded"));
     }

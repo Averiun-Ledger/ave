@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 // =============================================================================
 // ERROR HANDLING
@@ -129,14 +129,7 @@ fn is_admin_account(
         return Ok(true);
     }
 
-    let admin_resources = [
-        "admin_users",
-        "admin_roles",
-        "admin_api_key",
-        "admin_system",
-        "user_api_key",
-        "node_maintenance",
-    ];
+    let admin_resources = super::ADMIN_RESOURCES;
 
     let effective_permissions = db.get_effective_permissions(user.id)?;
 
@@ -244,11 +237,7 @@ pub async fn create_user(
     path = "/admin/users",
     operation_id = "listUsers",
     tag = "User Management",
-    params(
-        ("include_inactive" = Option<bool>, Query, description = "Include inactive users"),
-        ("limit" = Option<i64>, Query, description = "Maximum number of users to return (default: 100, max: 1000)"),
-        ("offset" = Option<i64>, Query, description = "Number of users to skip for pagination (default: 0)")
-    ),
+    params(ListUsersQuery),
     responses(
         (status = 200, description = "List of users", body = Vec<UserInfo>),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -282,8 +271,10 @@ pub async fn list_users(
     Ok(Json(users))
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListUsersQuery {
+    /// Include inactive users
     pub include_inactive: Option<bool>,
     /// Maximum number of users to return (default: 100, max: 1000)
     pub limit: Option<i64>,

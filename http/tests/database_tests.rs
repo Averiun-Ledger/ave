@@ -2119,7 +2119,13 @@ async fn test_concurrent_failed_logins_increment_attempts_atomically() {
     let (db, _dirs) = create_test_db();
     let db = Arc::new(db);
     let user = db
-        .create_user("concurrent_lockout_user", "TestPass123!", None, None, None)
+        .create_user(
+            "concurrent_lockout_user",
+            "TestPass123!",
+            None,
+            None,
+            None,
+        )
         .unwrap();
 
     // create_test_db configures lockout after 5 failed attempts
@@ -2147,5 +2153,37 @@ async fn test_concurrent_failed_logins_increment_attempts_atomically() {
     assert!(
         locked.locked_until.is_some(),
         "account must lock exactly at the configured threshold"
+    );
+}
+
+/// Defensive test: every migration file in `http/migrations/` must be
+/// registered in `MIGRATIONS` and applied, so `PRAGMA user_version` after a
+/// fresh boot matches the file count. Fails when someone adds a migration
+/// file but forgets to register it, which would leave existing databases
+/// silently behind.
+#[test]
+fn every_migration_file_is_registered_and_applied() {
+    let (db, dirs) = create_test_db();
+    drop(db);
+
+    let conn =
+        ave_actors::rusqlite::Connection::open(dirs.path().join("auth.db"))
+            .expect("open auth.db");
+    let version: u32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read schema version");
+
+    let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+    let file_count = std::fs::read_dir(migrations_dir)
+        .expect("read migrations dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().extension().is_some_and(|ext| ext == "sql")
+        })
+        .count();
+
+    assert_eq!(
+        version as usize, file_count,
+        "every migrations/*.sql file must be registered in MIGRATIONS and applied"
     );
 }

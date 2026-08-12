@@ -3,7 +3,10 @@ use std::{collections::HashSet, sync::Arc};
 use crate::{
     auth::{
         AuthDatabase, admin_handlers, apikey_handlers, login_handler,
-        middleware::{ApiKeyAuthNew, audit_log_middleware, check_permission},
+        middleware::{
+            ApiKeyAuthNew, RejectionMeta, audit_log_middleware,
+            audit_rejected_request, check_permission,
+        },
         models::{AuthContext, ErrorResponse},
         system_handlers,
     },
@@ -532,6 +535,7 @@ pub async fn get_sinks_status(
     ),
     responses(
         (status = 200, description = "Sink unblocked successfully"),
+        (status = 404, description = "Sink not found in registry", body = ErrorResponse),
         (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
@@ -562,9 +566,10 @@ pub async fn unblock_sink(
     ),
     responses(
         (status = 200, description = "Sink test succeeded"),
-        (status = 400, description = "Invalid request or safe mode enabled", body = ErrorResponse),
+        (status = 400, description = "Invalid sink name", body = ErrorResponse),
         (status = 404, description = "Sink not found in registry", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
@@ -621,8 +626,9 @@ pub async fn reset_sink_cursors(
     request_body = SinkReplayRequest,
     responses(
         (status = 200, description = "Replay request processed", body = SinkReplayResponse),
-        (status = 400, description = "Invalid request or safe mode enabled", body = ErrorResponse),
+        (status = 400, description = "Invalid replay request", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
@@ -1773,6 +1779,12 @@ pub async fn permission_layer(
         && (req.uri().path().starts_with("/admin")
             || req.uri().path().starts_with("/me/api-keys"))
     {
+        audit_rejected_request(
+            RejectionMeta::new(&req),
+            Some(auth_ctx.clone()),
+            StatusCode::FORBIDDEN,
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -1785,6 +1797,12 @@ pub async fn permission_layer(
 
     match permission_for(req.method(), req.uri().path()) {
         None => {
+            audit_rejected_request(
+                RejectionMeta::new(&req),
+                Some(auth_ctx.clone()),
+                StatusCode::FORBIDDEN,
+            )
+            .await;
             return (
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
@@ -1798,6 +1816,12 @@ pub async fn permission_layer(
             if resource == Resource::NodeMaintenance
                 && !auth_ctx.is_management_key
             {
+                audit_rejected_request(
+                    RejectionMeta::new(&req),
+                    Some(auth_ctx.clone()),
+                    StatusCode::FORBIDDEN,
+                )
+                .await;
                 return (
                     StatusCode::FORBIDDEN,
                     Json(ErrorResponse {
@@ -1811,6 +1835,12 @@ pub async fn permission_layer(
             if let Err(resp) =
                 check_permission(&auth_ctx, resource.as_str(), action.as_str())
             {
+                audit_rejected_request(
+                    RejectionMeta::new(&req),
+                    Some(auth_ctx.clone()),
+                    StatusCode::FORBIDDEN,
+                )
+                .await;
                 return resp.into_response();
             }
         }
@@ -1985,7 +2015,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_role_only_allows_sink_replay_reads() {
+    async fn sink_role_scoped_to_sink_domain() {
         let db = build_db();
         let ctx = auth_ctx_for_role(&db, "sink");
         let app = router();

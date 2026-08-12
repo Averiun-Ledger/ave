@@ -103,6 +103,20 @@ pub(crate) const MAINTENANCE_LIMITS: MaintenanceLimits = MaintenanceLimits {
     expired_api_key_cleanup_batch_size: 500,
 };
 
+/// Resources that only management keys and superadmin-driven flows may use.
+///
+/// Service keys get these filtered out at authentication time
+/// (`database_apikeys`), and admin-account guards use the same list to
+/// protect privileged accounts (`admin_handlers::is_admin_account`).
+pub(crate) const ADMIN_RESOURCES: [&str; 6] = [
+    "admin_users",
+    "admin_roles",
+    "admin_api_key",
+    "admin_system",
+    "user_api_key",
+    "node_maintenance",
+];
+
 pub async fn build_auth(
     auth_config: &AuthConfig,
     password: &str,

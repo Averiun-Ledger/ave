@@ -1407,3 +1407,74 @@ fn role_tests_cover_all_protected_http_route_catalogs() {
         "Role test route matrix is out of sync with protected HTTP route catalogs. Missing: {missing:?}. Stale: {stale:?}"
     );
 }
+
+/// Defensive test: every catalog endpoint must resolve to a permission and be
+/// reachable by at least one seeded non-superadmin role.
+///
+/// Fails when someone adds an endpoint whose `require Resource Action` pair is
+/// granted to no role (the M14 class of bug), or when a catalog entry falls
+/// through `permission_for` (silent 403 for every caller). Endpoints that are
+/// intentionally superadmin-only must be listed explicitly in
+/// `SUPERADMIN_ONLY`, which forces a conscious decision.
+#[test(tokio::test)]
+async fn test_every_endpoint_is_covered_by_a_role() {
+    let (db, _dirs) = common::create_test_db();
+
+    // Permissions granted to seeded roles. Superadmin is excluded: its
+    // role-name short-circuit in `has_permission` would make the check
+    // vacuous.
+    let mut grants: BTreeSet<(String, String)> = BTreeSet::new();
+    for role in db.list_roles().expect("list roles") {
+        if role.name == "superadmin" {
+            continue;
+        }
+        for perm in db.get_role_permissions(role.id).expect("role permissions")
+        {
+            if perm.allowed {
+                grants.insert((perm.resource, perm.action));
+            }
+        }
+    }
+
+    // Endpoints intentionally restricted to superadmin (destructive,
+    // safe-mode-only operations). Each entry needs a justification here.
+    const SUPERADMIN_ONLY: &[(&str, &str)] =
+        &[("delete", "/maintenance/subjects/{subject_id}")];
+
+    let catalog: BTreeSet<(String, String)> = server_main_route_catalog()
+        .into_iter()
+        .chain(server_auth_route_catalog())
+        .collect();
+
+    for (method, path) in &catalog {
+        let http_method =
+            axum::http::Method::from_bytes(method.to_uppercase().as_bytes())
+                .expect("catalog methods are valid HTTP methods");
+        let requirement = ave_http::server::permission_for(&http_method, path);
+        let Some(requirement) = requirement else {
+            panic!(
+                "endpoint {method} {path} has no permission mapping (permission_for returned None)"
+            );
+        };
+        let ave_http::server::PermissionResult::Require(resource, action) =
+            requirement
+        else {
+            // allow_any: admin routes check permissions inline in the handler.
+            continue;
+        };
+        if SUPERADMIN_ONLY.contains(&(method.as_str(), path.as_str())) {
+            continue;
+        }
+
+        // `has_permission` semantics: a grant matches the exact action or the
+        // "all" wildcard on the same resource.
+        let exact = (resource.as_str().to_owned(), action.as_str().to_owned());
+        let wildcard = (resource.as_str().to_owned(), "all".to_owned());
+        assert!(
+            grants.contains(&exact) || grants.contains(&wildcard),
+            "endpoint {method} {path} requires {}:{} but no seeded role grants it",
+            resource.as_str(),
+            action.as_str()
+        );
+    }
+}

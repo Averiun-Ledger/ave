@@ -5602,8 +5602,9 @@ async fn sink_transient_errors_and_fast_events() {
 ///    `gov-sink`).
 /// 2. Call `api.get_sinks(SinksQuery { in_config: Some(false), .. })` and
 ///    verify that `new-sink` still appears with `in_config: false`.
-/// 3. Verify that `api.get_sinks_status()` does not include `new-sink` and that
-///    all returned sinks have `in_config: true`.
+/// 3. Verify that `api.get_sinks_status()` includes `new-sink` flagged with
+///    `in_config: false` (residual sinks must stay visible: they are the ones
+///    that need unblock/reset).
 /// 4. Verify that `api.get_sinks(SinksQuery { running: Some(false), .. })`
 ///    includes `new-sink`.
 ///
@@ -5653,7 +5654,7 @@ async fn sink_transient_errors_and_fast_events() {
 ///   supports filters by `name`, `governance_id`, and combinations.
 /// - `get_sinks` respects ordering by `manager` and `name`.
 /// - `get_sinks` and `get_sinks_status` correctly reflect a blocked sink.
-/// - `get_sinks_status` only shows configured sinks.
+/// - `get_sinks_status` shows residual sinks flagged with `in_config: false`.
 #[traced_test]
 #[tokio::test]
 async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
@@ -5926,15 +5927,18 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     let residual = residuals.iter().find(|s| s.name == "new-sink").unwrap();
     assert!(!residual.in_config);
 
-    // get_sinks_status does not include new-sink (only in_config sinks).
+    // get_sinks_status includes new-sink flagged as residual (in_config=false).
     let statuses = node.api.get_sinks_status().await.unwrap();
-    let status_names: Vec<_> =
-        statuses.iter().map(|s| s.name.as_str()).collect();
-    assert!(!status_names.contains(&"new-sink"));
-    assert!(
-        statuses.iter().all(|s| s.in_config),
-        "get_sinks_status should only return in_config sinks"
-    );
+    let residual_status = statuses
+        .iter()
+        .find(|s| s.name == "new-sink")
+        .expect("residual sink must appear in get_sinks_status");
+    assert!(!residual_status.in_config);
+    let in_config_status = statuses
+        .iter()
+        .find(|s| s.name == "gov-sink")
+        .expect("in-config sink must appear in get_sinks_status");
+    assert!(in_config_status.in_config);
 
     // Filter running=false includes the residual new-sink.
     let not_running = node

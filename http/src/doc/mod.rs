@@ -3,45 +3,44 @@ use crate::error::GovernanceHasTrackersError;
 use crate::server::{self};
 use crate::{
     auth::{
-        admin_handlers::{self, ListUsersQuery, ResetPasswordRequest},
-        apikey_handlers::{self, ListApiKeysQuery, QuotaStatusQuery},
+        admin_handlers::{self, ResetPasswordRequest},
+        apikey_handlers,
         login_handler::{self, ChangePasswordRequest},
         models::{
             Action, ApiKeyInfo, ApiKeyQuotaStatus, AssignApiKeyPlanRequest,
-            AuditApiKeyCount, AuditLog, AuditLogPage, AuditLogQuery,
-            AuditStats, AuditUserCount, AuditValueCount, CreateApiKeyRequest,
+            AuditApiKeyCount, AuditLog, AuditLogPage, AuditStats,
+            AuditUserCount, AuditValueCount, CreateApiKeyRequest,
             CreateApiKeyResponse, CreateQuotaExtensionRequest,
             CreateRoleRequest, CreateUsagePlanRequest, CreateUserRequest,
-            ErrorResponse, LoginRequest, LoginResponse, PaginationQuery,
-            Permission, QuotaExtensionInfo, RateLimitApiKeyStats,
-            RateLimitEndpointStats, RateLimitIpEndpointStats, RateLimitIpStats,
-            RateLimitStats, Resource, RevokeApiKeyRequest, Role, RoleInfo,
-            RotateApiKeyRequest, SetPermissionRequest, SystemConfig,
-            SystemConfigPage, UpdateRoleRequest, UpdateSystemConfigRequest,
+            ErrorResponse, LoginRequest, LoginResponse, Permission,
+            QuotaExtensionInfo, RateLimitApiKeyStats, RateLimitEndpointStats,
+            RateLimitIpEndpointStats, RateLimitIpStats, RateLimitStats,
+            Resource, RevokeApiKeyRequest, Role, RoleInfo, RotateApiKeyRequest,
+            SetPermissionRequest, SystemConfig, SystemConfigPage,
+            UpdateRoleRequest, UpdateSystemConfigRequest,
             UpdateUsagePlanRequest, UpdateUserRequest, UsagePlan, UserInfo,
         },
         system_handlers::{
-            self, AuditStatsQuery, DetailedPermissionsResponse,
-            RolePermissionsInfo,
+            self, DetailedPermissionsResponse, RolePermissionsInfo,
         },
     },
     config_types::{
         ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, AveStoreConfigHttp,
         ConfigHttp, ControlListConfigHttp, CorsConfigHttp,
         EndpointRateLimitHttp, GovernanceSyncConfigHttp, HashAlgorithmHttp,
-        SinkCompressionHttp, HttpConfigHttp, HttpProxyConfigHttp,
-        HttpSinkConfigHttp, HttpTlsConfigHttp, HttpTlsVersionHttp,
-        KafkaAcksHttp, KafkaCompressionHttp, KafkaSaslMechanismHttp,
-        KafkaSecurityConfigHttp, KafkaSinkConfigHttp, KafkaTlsConfigHttp,
-        KeyPairAlgorithmHttp, LockoutConfigHttp, LoggingHttp,
-        LoggingOutputHttp, LoggingRotationHttp, MemoryLimitsConfigHttp,
-        NetworkConfigHttp, NodeTypeHttp, OAuth2GrantTypeHttp, ProxyConfigHttp,
-        RateLimitConfigHttp, RebootSyncConfigHttp, RoutingConfigHttp,
-        RoutingNodeHttp, SelfSignedCertConfigHttp, SessionConfigHttp,
-        SinkAuthConfigHttp, SinkAuthMethodHttp, SinkConfigEntryHttp,
+        HttpConfigHttp, HttpProxyConfigHttp, HttpSinkConfigHttp,
+        HttpTlsConfigHttp, HttpTlsVersionHttp, KafkaAcksHttp,
+        KafkaCompressionHttp, KafkaSaslMechanismHttp, KafkaSecurityConfigHttp,
+        KafkaSinkConfigHttp, KafkaTlsConfigHttp, KeyPairAlgorithmHttp,
+        LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, LoggingRotationHttp,
+        MemoryLimitsConfigHttp, NetworkConfigHttp, NodeTypeHttp,
+        OAuth2GrantTypeHttp, ProxyConfigHttp, RateLimitConfigHttp,
+        RebootSyncConfigHttp, RoutingConfigHttp, RoutingNodeHttp,
+        SelfSignedCertConfigHttp, SessionConfigHttp, SinkAuthConfigHttp,
+        SinkAuthMethodHttp, SinkCompressionHttp, SinkConfigEntryHttp,
         SinkConfigHttp, SinkServerHttp, SinkTargetHttp,
-        SinkTransportConfigHttp,
-        SyncConfigHttp, TrackerSyncConfigHttp, UpdateSyncConfigHttp,
+        SinkTransportConfigHttp, SyncConfigHttp, TrackerSyncConfigHttp,
+        UpdateSyncConfigHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
@@ -84,6 +83,19 @@ impl Modify for SecurityAddon {
                 ))),
             );
         }
+    }
+}
+
+/// Removes paths whose routes only exist when certain cargo features are
+/// enabled, so the generated document always matches the binary.
+struct FeatureGatedPathsAddon;
+
+impl Modify for FeatureGatedPathsAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        #[cfg(not(feature = "prometheus"))]
+        openapi.paths.paths.remove("/metrics");
+        #[cfg(feature = "prometheus")]
+        let _ = openapi;
     }
 }
 
@@ -251,7 +263,6 @@ impl Modify for SecurityAddon {
             CreateUserRequest,
             UpdateUserRequest,
             ResetPasswordRequest,
-            ListUsersQuery,
 
             // ── Role management ─────────────────────────────────
             Role,
@@ -273,7 +284,6 @@ impl Modify for SecurityAddon {
             CreateApiKeyResponse,
             RotateApiKeyRequest,
             RevokeApiKeyRequest,
-            ListApiKeysQuery,
             AssignApiKeyPlanRequest,
             CreateQuotaExtensionRequest,
             QuotaExtensionInfo,
@@ -281,23 +291,19 @@ impl Modify for SecurityAddon {
             UsagePlan,
             CreateUsagePlanRequest,
             UpdateUsagePlanRequest,
-            QuotaStatusQuery,
 
             // ── Audit & system ──────────────────────────────────
             AuditLog,
             AuditLogPage,
-            AuditLogQuery,
             AuditStats,
             AuditValueCount,
             AuditUserCount,
             AuditApiKeyCount,
-            AuditStatsQuery,
             RateLimitStats,
             RateLimitApiKeyStats,
             RateLimitIpStats,
             RateLimitEndpointStats,
             RateLimitIpEndpointStats,
-            PaginationQuery,
             SystemConfig,
             SystemConfigPage,
             UpdateSystemConfigRequest,
@@ -413,7 +419,7 @@ impl Modify for SecurityAddon {
             MachineSpecHttp
         )
     ),
-    modifiers(&SecurityAddon),
+    modifiers(&SecurityAddon, &FeatureGatedPathsAddon),
     tags(
         (name = "Authentication", description = "Login and password management. Use POST /login to obtain an API key."),
         (name = "Node", description = "Node identity, configuration, and network status."),

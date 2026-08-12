@@ -55,6 +55,9 @@ pub enum StartupError {
     #[error("failed to load configuration from '{path}': {message}")]
     ConfigLoad { path: String, message: String },
 
+    #[error("invalid configuration: {0}")]
+    ConfigValidation(String),
+
     #[error("failed to bind HTTP listener on {address}: {message}")]
     HttpBind { address: String, message: String },
 
@@ -251,6 +254,9 @@ fn config_log_sections(
 }
 
 /// Replaces the values of [`REDACTED_CONFIG_KEYS`] with `"***"`, recursively.
+/// Values of custom sink headers whose name looks credential-ish
+/// (authorization, tokens, keys...) are redacted as well: header names are
+/// operator-defined, so they cannot be covered by a fixed key list.
 fn redact_sensitive_values(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -262,6 +268,8 @@ fn redact_sensitive_values(value: &mut serde_json::Value) {
                     )
                 {
                     *entry = serde_json::Value::String("***".to_string());
+                } else if key == "headers" {
+                    redact_sensitive_headers(entry);
                 } else {
                     redact_sensitive_values(entry);
                 }
@@ -273,6 +281,23 @@ fn redact_sensitive_values(value: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Redacts the values of credential-ish header names inside a serialized
+/// `headers` map (`HashMap<String, String>` of a sink transport).
+fn redact_sensitive_headers(value: &mut serde_json::Value) {
+    if let serde_json::Value::Object(map) = value {
+        for (name, entry) in map.iter_mut() {
+            if crate::config_types::is_sensitive_header(name)
+                && matches!(
+                    entry,
+                    serde_json::Value::String(s) if !s.is_empty()
+                )
+            {
+                *entry = serde_json::Value::String("***".to_string());
+            }
+        }
     }
 }
 
@@ -319,6 +344,13 @@ fn build_cors_layer(
 ) -> Result<Option<CorsLayer>, StartupError> {
     if !cors_config.enabled {
         return Ok(None);
+    }
+
+    if cors_config.allow_any_origin && cors_config.allow_credentials {
+        return Err(StartupError::CorsConfig(
+            "CORS cannot combine 'allow_any_origin' with 'allow_credentials'"
+                .to_string(),
+        ));
     }
 
     let cors_layer = CorsLayer::new()
@@ -386,6 +418,13 @@ pub async fn run() -> Result<(), StartupError> {
     } else {
         config.node.safe_mode
     };
+
+    // Validate before anything else: the config must not be dumped, the
+    // port bound or the auth database touched with an invalid configuration
+    config
+        .validate()
+        .map_err(|e| StartupError::ConfigValidation(e.to_string()))?;
+
     auth::request_meta::validate_proxy_config(&config.http.proxy)
         .map_err(StartupError::ProxyConfig)?;
 
@@ -764,12 +803,14 @@ mod tests {
                     transport: SinkTransportConfig::Http(Box::new(
                         HttpSinkConfig {
                             url: "https://sink.example.com".to_string(),
-                            auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
-                                auth_url: "https://idp.example.com/token"
-                                    .to_string(),
-                                username: "sink-user".to_string(),
-                                ..SinkAuthConfig::default()
-                            })),
+                            auth: Some(SinkAuthMethod::OAuth2(
+                                SinkAuthConfig {
+                                    auth_url: "https://idp.example.com/token"
+                                        .to_string(),
+                                    username: "sink-user".to_string(),
+                                    ..SinkAuthConfig::default()
+                                },
+                            )),
                             ..HttpSinkConfig::default()
                         },
                     )),
@@ -783,11 +824,13 @@ mod tests {
                 },
                 servers: vec![SinkServer {
                     server: "kafka-sink".to_string(),
-                    transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                        bootstrap_servers: "broker:9092".to_string(),
-                        topic: "ave".to_string(),
-                        ..KafkaSinkConfig::default()
-                    })),
+                    transport: SinkTransportConfig::Kafka(Box::new(
+                        KafkaSinkConfig {
+                            bootstrap_servers: "broker:9092".to_string(),
+                            topic: "ave".to_string(),
+                            ..KafkaSinkConfig::default()
+                        },
+                    )),
                     ..SinkServer::default()
                 }],
             },

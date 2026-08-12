@@ -88,19 +88,7 @@ pub async fn list_actions(
     path = "/admin/audit-logs",
     operation_id = "queryAuditLogs",
     tag = "Audit Logs",
-    params(
-        ("user_id" = Option<i64>, Query, description = "Filter by user ID"),
-        ("api_key_id" = Option<String>, Query, description = "Filter by API key ID"),
-        ("endpoint" = Option<String>, Query, description = "Filter by endpoint path"),
-        ("http_method" = Option<String>, Query, description = "Filter by HTTP method"),
-        ("ip_address" = Option<String>, Query, description = "Filter by IP address"),
-        ("user_agent" = Option<String>, Query, description = "Filter by User-Agent"),
-        ("success" = Option<bool>, Query, description = "Filter by success status"),
-        ("start_timestamp" = Option<i64>, Query, description = "Start timestamp (Unix)"),
-        ("end_timestamp" = Option<i64>, Query, description = "End timestamp (Unix)"),
-        ("limit" = Option<i64>, Query, description = "Maximum number of results"),
-        ("offset" = Option<i64>, Query, description = "Offset for pagination")
-    ),
+    params(AuditLogQuery),
     responses(
         (status = 200, description = "Audit log entries", body = AuditLogPage),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -132,9 +120,7 @@ pub async fn query_audit_logs(
     path = "/admin/audit-logs/stats",
     operation_id = "getAuditStats",
     tag = "Audit Logs",
-    params(
-        ("days" = Option<u32>, Query, description = "Number of days to include (default 7)")
-    ),
+    params(AuditStatsQuery),
     responses(
         (status = 200, description = "Audit statistics", body = AuditStats),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -161,8 +147,10 @@ pub async fn get_audit_stats(
     Ok(Json(stats))
 }
 
-#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AuditStatsQuery {
+    /// Number of days to include (default 7)
     pub days: Option<u32>,
 }
 
@@ -176,10 +164,7 @@ pub struct AuditStatsQuery {
     path = "/admin/config",
     operation_id = "listSystemConfig",
     tag = "System",
-    params(
-        ("limit" = Option<i64>, Query, description = "Maximum number of results"),
-        ("offset" = Option<i64>, Query, description = "Offset for pagination")
-    ),
+    params(PaginationQuery),
     responses(
         (status = 200, description = "System configuration", body = SystemConfigPage),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -245,6 +230,24 @@ pub async fn update_system_config(
 ) -> Result<Json<SystemConfig>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "put")?;
+
+    // Security-sensitive switches (audit trail, rate limiting) can only be
+    // flipped by the superadmin: disabling them at runtime weakens the
+    // node's auditability and brute-force protection
+    let is_security_sensitive = [
+        super::system_config::SystemConfigKey::AuditEnable.as_str(),
+        super::system_config::SystemConfigKey::RateLimitEnable.as_str(),
+    ]
+    .contains(&key.as_str());
+    if is_security_sensitive && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify security-sensitive configuration"
+                    .to_string(),
+            }),
+        ));
+    }
 
     let endpoint = format!("/admin/config/{}", key);
     let value = req.value.clone();
@@ -404,7 +407,7 @@ pub async fn get_my_permissions_detailed(
     get,
     path = "/admin/rate-limits/stats",
     operation_id = "getRateLimitStats",
-    tag = "Audit Logs",
+    tag = "System",
     params(
         ("hours" = Option<u32>, Query, description = "Time window in hours (default 24)")
     ),

@@ -71,7 +71,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use validation::{Validation, ValidationMessage};
 
-use crate::api_input_validation::{
+pub use crate::api_input_validation::{
     parse_request_id, require_non_empty_str, require_positive_u64,
     validate_aborts_query, validate_event_request, validate_events_query,
     validate_governance_id, validate_request_id, validate_sink_events_query,
@@ -1393,11 +1393,9 @@ impl Api {
     }
 
     pub async fn get_sinks_status(&self) -> Result<Vec<SinkStatusInfo>, Error> {
-        let query = SinksQuery {
-            in_config: Some(true),
-            ..SinksQuery::default()
-        };
-        self.get_sinks(query).await.map(|infos| {
+        // No in_config filter: residual sinks (removed from the config but
+        // still tracked by the manager) must be visible in the status view.
+        self.get_sinks(SinksQuery::default()).await.map(|infos| {
             infos
                 .into_iter()
                 .map(|info| SinkStatusInfo {

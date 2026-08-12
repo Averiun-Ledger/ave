@@ -787,7 +787,13 @@ async fn non_superadmin_cannot_grant_permission_they_do_not_have() {
     let role_id = create_admin_role(&db, "escalation_grant_actor", &[]);
     let actor = create_user_with_role(&db, "escalation_grant_actor", role_id);
     let target = db
-        .create_user("escalation_grant_puppet", "Password123!", None, None, None)
+        .create_user(
+            "escalation_grant_puppet",
+            "Password123!",
+            None,
+            None,
+            None,
+        )
         .unwrap();
 
     let result = set_user_permission(
@@ -820,11 +826,8 @@ async fn non_superadmin_can_grant_permission_they_have() {
     let (db, _dirs) = common::create_test_db();
     let db = Arc::new(db);
 
-    let role_id = create_admin_role(
-        &db,
-        "delegation_actor",
-        &[("node_subject", "get")],
-    );
+    let role_id =
+        create_admin_role(&db, "delegation_actor", &[("node_subject", "get")]);
     let actor = create_user_with_role(&db, "delegation_actor", role_id);
     let target = db
         .create_user("delegation_target", "Password123!", None, None, None)
@@ -1024,7 +1027,10 @@ async fn non_superadmin_can_manage_regular_users() {
         }),
     )
     .await;
-    assert!(result.is_ok(), "admin must update regular users: {result:?}");
+    assert!(
+        result.is_ok(),
+        "admin must update regular users: {result:?}"
+    );
 
     let result = delete_user(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
@@ -1070,24 +1076,22 @@ async fn api_key_extractor_reuses_auth_context_from_previous_layer() {
     // Without a previous layer context, the extractor runs the full pipeline
     // and rejects the missing credentials
     let mut parts = build_parts(false);
-    let result =
-        <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
-            &mut parts,
-            &(),
-        )
-        .await;
+    let result = <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
+        &mut parts,
+        &(),
+    )
+    .await;
     assert!(matches!(result, Err((StatusCode::UNAUTHORIZED, _))));
 
     // With a context already authenticated by the layer, the extractor must
     // not re-run the pipeline: no credentials required, no extra DB auth,
     // rate-limit or quota consumption
     let mut parts = build_parts(true);
-    let result =
-        <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
-            &mut parts,
-            &(),
-        )
-        .await;
+    let result = <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
+        &mut parts,
+        &(),
+    )
+    .await;
     assert!(result.is_ok());
 }
 
@@ -3611,10 +3615,7 @@ async fn test_direct_permission_overrides_role_permission() {
     );
 
     // Should be denied
-    assert!(
-        !perm.allowed,
-        "Direct deny should override role allow"
-    );
+    assert!(!perm.allowed, "Direct deny should override role allow");
 
     // Should NOT have role_name since it's a direct permission
     assert!(

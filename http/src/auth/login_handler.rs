@@ -41,6 +41,7 @@ fn db_error_to_response(
     responses(
         (status = 200, description = "Login successful, API key returned", body = LoginResponse),
         (status = 401, description = "Invalid credentials or account locked", body = ErrorResponse),
+        (status = 429, description = "Rate limit exceeded", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
@@ -170,7 +171,8 @@ pub struct ChangePasswordRequest {
     responses(
         (status = 200, description = "Password changed"),
         (status = 400, description = "Invalid password", body = ErrorResponse),
-        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 401, description = "Invalid credentials or password change not required", body = ErrorResponse),
+        (status = 429, description = "Rate limit exceeded", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
