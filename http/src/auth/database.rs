@@ -9,7 +9,10 @@ use super::database_audit::AuditLogParams;
 use super::db_runtime::{AuthDbRuntime, PooledConnection, auth_tuning_for_ram};
 use super::models::*;
 use super::system_config::SystemConfigKey;
-use super::{MAINTENANCE_LIMITS, PASSWORD_POLICY, VALIDATION_LIMITS};
+use super::{
+    MAINTENANCE_LIMITS, PASSWORD_POLICY, SUPERADMIN_PASSWORD_POLICY,
+    VALIDATION_LIMITS,
+};
 use ave_actors::rusqlite::{
     Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
@@ -19,7 +22,6 @@ use ave_bridge::{
     auth::{AuthConfig, EndpointRateLimit},
     resolve_spec,
 };
-use rand::RngExt;
 use std::{
     fs,
     path::Path,
@@ -47,6 +49,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (2, include_str!("../../migrations/002_role_permissions.sql")),
     (3, include_str!("../../migrations/003_usage_plans.sql")),
     (4, include_str!("../../migrations/004_sink_role_permissions.sql")),
+    (
+        5,
+        include_str!("../../migrations/005_single_active_management_key.sql"),
+    ),
 ];
 
 // =============================================================================
@@ -1203,6 +1209,16 @@ impl AuthDatabase {
 
         info!(target: TARGET, username = %superadmin, "bootstrapping superadmin account");
 
+        // The bootstrap password arrives through an env var and protects the
+        // most privileged account: enforce the stricter superadmin policy.
+        if let Err(reason) =
+            validate_password(password, &SUPERADMIN_PASSWORD_POLICY)
+        {
+            return Err(DatabaseError::Validation(format!(
+                "superadmin bootstrap password rejected: {reason}"
+            )));
+        }
+
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
             DatabaseError::Crypto(format!(
@@ -1266,20 +1282,6 @@ impl AuthDatabase {
     /// Get the current Unix timestamp in seconds
     pub(crate) fn now() -> i64 {
         time::OffsetDateTime::now_utc().unix_timestamp()
-    }
-
-    /// Generate a UUID v4 string (for API key public IDs)
-    pub(crate) fn generate_uuid() -> String {
-        let mut rng = rand::rng();
-
-        format!(
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            rng.random::<u32>(),
-            rng.random::<u16>(),
-            0x4000 | (rng.random::<u16>() & 0x0FFF), // Version 4
-            0x8000 | (rng.random::<u16>() & 0x3FFF), // Variant 1
-            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
-        )
     }
 }
 

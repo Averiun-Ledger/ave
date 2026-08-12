@@ -2,8 +2,7 @@
 //
 // Authentication and authorization middleware for Axum
 
-use crate::auth::middleware::uuid::Uuid;
-
+use super::crypto::generate_uuid;
 use super::database::{AuthDatabase, DatabaseError};
 use super::http_api::rate_limit_error_response;
 use super::http_api::request_result_from_status;
@@ -17,8 +16,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use rand::RngExt;
-use std::fmt::Display;
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{error, warn};
@@ -297,7 +294,7 @@ pub async fn audit_log_middleware(
 ) -> Response {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = generate_uuid();
 
     // SECURITY FIX: Get IP from socket address only, ignore client headers
     // X-Forwarded-For and X-Real-IP can be spoofed
@@ -472,7 +469,7 @@ pub async fn audit_rejected_request(
     let ip_address = meta.ip_address;
     let user_agent = meta.user_agent;
     let error_message = format!("HTTP {}", status);
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = generate_uuid();
     let result = db
         .run_blocking("audit_rejected_request", move |db| {
             let Some(ctx) = auth_ctx else {
@@ -509,33 +506,5 @@ pub async fn audit_rejected_request(
         .await;
     if let Err(e) = result {
         error!(target: TARGET, error = %e, "failed to write rejection audit log");
-    }
-}
-
-// Need to add uuid dependency
-// For now, let's create a simple request ID generator
-mod uuid {
-    pub struct Uuid;
-
-    impl Uuid {
-        pub const fn new_v4() -> Self {
-            Self
-        }
-    }
-}
-
-impl Display for Uuid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut rng = rand::rng();
-
-        write!(
-            f,
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            rng.random::<u32>(),
-            rng.random::<u16>(),
-            rng.random::<u16>(),
-            rng.random::<u16>(),
-            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
-        )
     }
 }

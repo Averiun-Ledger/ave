@@ -2187,3 +2187,165 @@ fn every_migration_file_is_registered_and_applied() {
         "every migrations/*.sql file must be registered in MIGRATIONS and applied"
     );
 }
+
+/// The pinned Argon2id parameters must travel in the PHC string: if they are
+/// ever loosened or re-coupled to the crate defaults, this test fails.
+#[test]
+fn password_hash_uses_pinned_argon2id_parameters() {
+    let hash = ave_http::auth::crypto::hash_password("TestPass123!")
+        .expect("hash password");
+    assert!(
+        hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+        "unexpected Argon2 parameters in PHC string: {hash}"
+    );
+}
+
+/// `generate_uuid` must produce canonical UUIDs with the version-4 and
+/// variant-1 bits set (the regression that motivated unifying the
+/// generator).
+#[test]
+fn generate_uuid_produces_version4_variant1_ids() {
+    for _ in 0..100 {
+        let id = ave_http::auth::crypto::generate_uuid();
+        let bytes = id.as_bytes();
+        assert_eq!(id.len(), 36, "not a canonical UUID: {id}");
+        assert_eq!(bytes[14], b'4', "missing v4 version nibble: {id}");
+        assert!(
+            matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
+            "missing variant-1 nibble: {id}"
+        );
+    }
+}
+
+/// The bootstrap superadmin password must satisfy the stricter superadmin
+/// policy (min 12 chars): a weak password fails startup fast with a clear
+/// validation error instead of provisioning a weak admin account.
+#[test(tokio::test)]
+async fn superadmin_bootstrap_rejects_weak_password() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let mut config = AuthConfig::default();
+    config.enable = true;
+    config.database_path = tmp_dir.path().to_path_buf();
+
+    // "Short1!" meets every rule except the 12-char minimum.
+    match AuthDatabase::new(config, "Short1!", None) {
+        Err(DatabaseError::Validation(message)) => {
+            assert!(
+                message.contains("superadmin bootstrap password"),
+                "unexpected error message: {message}"
+            );
+        }
+        Err(other) => panic!("unexpected error kind: {other}"),
+        Ok(_) => panic!("weak bootstrap password must be rejected"),
+    }
+}
+
+/// Management (interactive) keys must always expire: an explicit TTL=0, an
+/// oversized TTL or a zero system default are all clamped to the management
+/// key limit. Service keys keep the explicit TTL=0 = never expires contract.
+#[test(tokio::test)]
+async fn management_keys_always_expire_within_the_limit() {
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("mgmt_ttl_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let max_ttl: i64 = 7 * 24 * 3600;
+
+    // Explicit TTL=0 on a management key -> the limit applies.
+    let (_, zero) = db
+        .create_api_key(user.id, Some("mgmt_zero"), None, Some(0), true)
+        .unwrap();
+    assert_eq!(zero.expires_at, Some(zero.created_at + max_ttl));
+
+    // Oversized TTL -> clamped to the limit.
+    let (_, huge) = db
+        .create_api_key(
+            user.id,
+            Some("mgmt_huge"),
+            None,
+            Some(i64::MAX / 2),
+            true,
+        )
+        .unwrap();
+    assert_eq!(huge.expires_at, Some(huge.created_at + max_ttl));
+
+    // No TTL with a zero system default (create_test_db) -> the limit applies.
+    let (_, defaulted) = db
+        .create_api_key(user.id, Some("mgmt_default"), None, None, true)
+        .unwrap();
+    assert_eq!(defaulted.expires_at, Some(defaulted.created_at + max_ttl));
+
+    // Service keys keep the explicit TTL=0 = never expires contract.
+    let (_, service) = db
+        .create_api_key(user.id, Some("svc_zero"), None, Some(0), false)
+        .unwrap();
+    assert!(service.expires_at.is_none());
+}
+
+/// Concurrent management key issuance (the login flow) must leave exactly
+/// one active management key per user: the partial unique index from
+/// migration 005 makes the invariant structural.
+#[test(tokio::test)]
+async fn concurrent_management_key_issuance_leaves_a_single_active_key() {
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("mgmt_race_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let workers = 5;
+    let barrier = Arc::new(Barrier::new(workers));
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let db = db.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            db.issue_management_api_key_transactional(
+                user.id,
+                Some("session"),
+                None,
+                None,
+                None,
+            )
+        }));
+    }
+
+    // Losers of the race may fail (unique index or busy); what must never
+    // happen is two active management keys.
+    let mut succeeded = 0;
+    for handle in handles {
+        if handle.join().unwrap().is_ok() {
+            succeeded += 1;
+        }
+    }
+    assert!(succeeded > 0, "at least one issuance must succeed");
+
+    let keys = db.list_user_api_keys(user.id, false).unwrap();
+    let active_management = keys.iter().filter(|k| k.is_management).count();
+    assert_eq!(
+        active_management, 1,
+        "exactly one active management key must survive the race"
+    );
+
+    // The structural guard itself: the partial unique index from migration
+    // 005 must exist. Without it the invariant above depends on transaction
+    // timing alone.
+    drop(db);
+    let conn =
+        ave_actors::rusqlite::Connection::open(_dirs.path().join("auth.db"))
+            .expect("open auth.db");
+    let index_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master
+             WHERE type = 'index'
+               AND name = 'idx_api_keys_one_active_management_key'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query sqlite_master");
+    assert!(
+        index_exists,
+        "migration 005 must install the single-active-management-key index"
+    );
+}

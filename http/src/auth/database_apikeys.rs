@@ -2,10 +2,13 @@
 //
 // This module provides database operations for API keys
 
-use super::crypto::{extract_key_prefix, generate_api_key, hash_api_key};
+use super::crypto::{
+    extract_key_prefix, generate_api_key, generate_uuid, hash_api_key,
+};
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::*;
+use super::VALIDATION_LIMITS;
 use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
@@ -143,12 +146,26 @@ impl AuthDatabase {
                     None
                 }
             }
-            _ => unreachable!("Negative TTL already validated above"),
+            Some(ttl) => {
+                return Err(DatabaseError::Validation(format!(
+                    "Invalid TTL: {ttl} (must be positive or 0)"
+                )));
+            }
+        };
+        // Interactive (management) keys are login sessions, not long-lived
+        // credentials: they must always expire. An explicit TTL=0 or a zero
+        // system default would otherwise make them eternal, and oversized
+        // TTLs are clamped to the limit.
+        let effective_ttl = if is_management {
+            let max_ttl = VALIDATION_LIMITS.management_key_max_ttl_seconds;
+            Some(effective_ttl.map_or(max_ttl, |ttl| ttl.min(max_ttl)))
+        } else {
+            effective_ttl
         };
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 
         // Generate UUID for id
-        let key_id = Self::generate_uuid();
+        let key_id = generate_uuid();
 
         conn.execute(
             "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, name, description, expires_at, is_management)

@@ -3,7 +3,7 @@
 // This module provides password hashing with Argon2 and API key generation/hashing
 
 use argon2::{
-    Argon2,
+    Algorithm, Argon2, Params, Version,
     password_hash::{
         PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
         rand_core::OsRng,
@@ -28,6 +28,21 @@ pub enum CryptoError {
     InvalidHashFormat,
 }
 
+/// Argon2id parameters, pinned to the OWASP recommended minimums instead of
+/// the crate defaults, so a dependency upgrade cannot silently change the
+/// hashing cost in either direction. Existing hashes keep verifying: the
+/// parameters travel inside the PHC string.
+const ARGON2_M_COST_KIB: u32 = 19456; // 19 MiB
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+
+fn argon2id() -> CryptoResult<Argon2<'static>> {
+    let params =
+        Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None)
+            .map_err(|e| CryptoError::HashError(e.to_string()))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
+}
+
 // =============================================================================
 // PASSWORD HASHING WITH ARGON2
 // =============================================================================
@@ -44,7 +59,7 @@ pub enum CryptoError {
 /// * `CryptoResult<String>` - The hashed password in PHC format
 pub fn hash_password(password: &str) -> CryptoResult<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
+    let argon2 = argon2id()?;
 
     argon2
         .hash_password(password.as_bytes(), &salt)
@@ -64,7 +79,9 @@ pub fn verify_password(password: &str, hash: &str) -> CryptoResult<bool> {
     let parsed_hash =
         PasswordHash::new(hash).map_err(|_| CryptoError::InvalidHashFormat)?;
 
-    let argon2 = Argon2::default();
+    // The parameters are read from the PHC string, so any parameter set
+    // verifies; the pinned constructor is used for consistency.
+    let argon2 = argon2id()?;
 
     match argon2.verify_password(password.as_bytes(), &parsed_hash) {
         Ok(_) => Ok(true),
@@ -96,7 +113,9 @@ pub fn generate_api_key(prefix: &str) -> String {
 
 /// Extract the visible prefix from an API key
 ///
-/// Returns the first 11 characters (ave_node_XXX) for logging and identification
+/// Returns the first `prefix.len()` characters (ave_node_XXX) for logging and
+/// identification. Keys shorter than the prefix are returned whole instead of
+/// panicking.
 ///
 /// # Arguments
 /// * `api_key` - The full API key
@@ -104,7 +123,23 @@ pub fn generate_api_key(prefix: &str) -> String {
 /// # Returns
 /// * `String` - The visible prefix
 pub fn extract_key_prefix(api_key: &str, prefix: &str) -> String {
-    api_key[..prefix.len()].to_string()
+    api_key.get(..prefix.len()).unwrap_or(api_key).to_string()
+}
+
+/// Generate a random UUID (version 4, variant 1) in canonical form.
+///
+/// Used for API key ids and request ids in the audit trail.
+pub fn generate_uuid() -> String {
+    let mut rng = rand::rng();
+
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        rng.random::<u32>(),
+        rng.random::<u16>(),
+        0x4000 | (rng.random::<u16>() & 0x0FFF), // Version 4
+        0x8000 | (rng.random::<u16>() & 0x3FFF), // Variant 1
+        rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
+    )
 }
 
 /// Hash an API key using SHA-256
