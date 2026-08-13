@@ -2,27 +2,15 @@
 //
 // REST API endpoints for API key management
 
-use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{DatabaseErrorMapping, run_db as shared_run_db};
+use super::database::AuthDatabase;
+use super::http_api::run_db_admin as run_db;
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use crate::extract::{ApiJson, ApiPath, ApiQuery};
+use crate::extract::{ApiJson, ApiPath, ApiQuery, OptionalApiJson};
 use axum::{Extension, Json, http::StatusCode};
 use serde::Deserialize;
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
-
-async fn run_db<T, F>(
-    db: &Arc<AuthDatabase>,
-    operation: &'static str,
-    work: F,
-) -> Result<T, (StatusCode, Json<ErrorResponse>)>
-where
-    T: Send + 'static,
-    F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
-{
-    shared_run_db(db, operation, DatabaseErrorMapping::admin(), work).await
-}
 
 // =============================================================================
 // API KEY MANAGEMENT ENDPOINTS (ADMIN)
@@ -255,13 +243,14 @@ pub async fn revoke_api_key(
     })
     .await?;
 
-    // Only superadmin can revoke keys of other users
+    // Only superadmin can revoke keys of other users. A key owned by
+    // another user is reported as not found to avoid leaking key ids
+    // (same policy as the self-service route).
     if key_info.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
         return Err((
-            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: "Only superadmin can revoke API keys of other users"
-                    .to_string(),
+                error: "API key not found".to_string(),
             }),
         ));
     }
@@ -307,6 +296,7 @@ pub async fn revoke_api_key(
     request_body = RotateApiKeyRequest,
     responses(
         (status = 201, description = "API key rotated successfully", body = CreateApiKeyResponse),
+        (status = 400, description = "Cannot rotate the currently used API key", body = ErrorResponse),
         (status = 403, description = "Permission denied", body = ErrorResponse),
         (status = 404, description = "API key not found", body = ErrorResponse),
     ),
@@ -316,13 +306,24 @@ pub async fn rotate_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
     ApiPath(id): ApiPath<String>,
-    req: Option<Json<RotateApiKeyRequest>>,
+    OptionalApiJson(req): OptionalApiJson<RotateApiKeyRequest>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
 > {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "post")?;
+
+    // Rotation revokes the old key: rotating the key in use would kill the
+    // caller's own session mid-request (same guard as revoke_api_key).
+    if id == auth_ctx.api_key_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot rotate the currently used API key".to_string(),
+            }),
+        ));
+    }
 
     // Fetch existing key for user and defaults
     let lookup_id = id.clone();
@@ -343,16 +344,16 @@ pub async fn rotate_api_key(
         ));
     }
 
-    // Extract request body or use defaults
-    let req = req.as_ref().map(|r| &r.0);
-    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    // Audit details only when a body was sent (a body-less rotation has none)
+    let audit_details =
+        req.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default());
 
     let existing_id = existing.id.clone();
     let auth_ctx_for_db = auth_ctx.clone();
-    let req_name = req.and_then(|r| r.name.clone());
-    let req_description = req.and_then(|r| r.description.clone());
-    let req_expires = req.and_then(|r| r.expires_in_seconds);
-    let req_reason = req.and_then(|r| r.reason.clone());
+    let req_name = req.as_ref().and_then(|r| r.name.clone());
+    let req_description = req.as_ref().and_then(|r| r.description.clone());
+    let req_expires = req.as_ref().and_then(|r| r.expires_in_seconds);
+    let req_reason = req.as_ref().and_then(|r| r.reason.clone());
     let rotate_endpoint = format!("/admin/api-keys/{}/rotate", id);
     let (api_key, key_info) = run_db(&db, "rotate_api_key", move |db| {
         db.rotate_api_key_transactional(crate::auth::RotateApiKeyParams {
@@ -371,7 +372,7 @@ pub async fn rotate_api_key(
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,
                 request_id: None,
-                details: Some(&audit_details),
+                details: audit_details.as_deref(),
                 success: true,
                 error_message: None,
             }),

@@ -57,7 +57,7 @@ futures = { workspace = true }
 axum = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 testcontainers = { workspace = true }
-axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+axum-server = { workspace = true }
 rcgen = "0.14"
 tokio-rustls = "0.26"
 aws-lc-rs = { version = "1", features = ["ring-io"] }

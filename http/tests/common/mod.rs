@@ -735,6 +735,8 @@ pub struct TestServerOptions {
     /// the bridge config under the top-level `sinks` key. Each entry must be a
     /// valid `SinkConfigEntry` serialized as JSON.
     pub sinks_config: Option<String>,
+    /// Mount the public documentation routes (`/doc/`, `/api-docs/openapi.json`).
+    pub enable_doc: bool,
 }
 
 impl Default for TestServerOptions {
@@ -747,13 +749,13 @@ impl Default for TestServerOptions {
             node_type: "Bootstrap".to_string(),
             persistence: None,
             sinks_config: None,
+            enable_doc: false,
         }
     }
 }
 
 pub struct TestApp {
     app: Router,
-    memory_port: u16,
     graceful_token: CancellationToken,
     runners: Vec<JoinHandle<()>>,
 }
@@ -804,6 +806,7 @@ async fn build_test_router_with_options(
         node_type,
         persistence,
         sinks_config,
+        enable_doc,
     } = options;
 
     let sinks_json = sinks_config.unwrap_or_default();
@@ -927,7 +930,7 @@ async fn build_test_router_with_options(
         }},
         "sinks": [{sinks_json}],
         "http": {{
-            "enable_doc": false
+            "enable_doc": {enable_doc}
         }}
         }}
         "#
@@ -954,7 +957,7 @@ async fn build_test_router_with_options(
         db.register_prometheus_metrics(&mut registry_guard);
     }
     let app = build_routes(
-        false,
+        bridge_config.http.enable_doc,
         bridge_config.http.proxy.clone(),
         bridge,
         auth_db,
@@ -965,6 +968,50 @@ async fn build_test_router_with_options(
 }
 
 impl TestServer {
+    /// Bind a random local port and serve the router on it. Returns `None`
+    /// when the environment forbids binding, so callers skip instead of
+    /// failing. No startup sleep: the listener is already bound, so client
+    /// connections wait in the kernel backlog until the accept loop runs.
+    async fn bind_and_serve(
+        app: Router,
+        memory_port: u16,
+        runners: Vec<JoinHandle<()>>,
+        graceful_token: CancellationToken,
+        vec_dir: Vec<TempDir>,
+    ) -> Option<(Self, Vec<TempDir>)> {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping HTTP integration test: local TCP bind not permitted"
+                );
+                return None;
+            }
+            Err(err) => panic!("failed to bind test listener: {err}"),
+        };
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("Can not run axum server");
+        });
+
+        Some((
+            Self {
+                addr,
+                memory_port,
+                graceful_token,
+                handle: Some(handle),
+                runners,
+            },
+            vec_dir,
+        ))
+    }
+
     pub async fn build(
         enable_auth: bool,
         always_accept: bool,
@@ -972,43 +1019,8 @@ impl TestServer {
     ) -> Option<(Self, Vec<TempDir>)> {
         let (app, vec_dir, port, runners, graceful_token) =
             build_test_router(enable_auth, always_accept, node).await;
-
-        // Bind to a random available port
-        let listener = match TcpListener::bind("127.0.0.1:0").await {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "skipping HTTP integration test: local TCP bind not permitted"
-                );
-                return None;
-            }
-            Err(err) => panic!("failed to bind test listener: {err}"),
-        };
-        let addr = listener.local_addr().unwrap();
-
-        // Spawn the server
-        let handle = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
+        Self::bind_and_serve(app, port, runners, graceful_token, vec_dir)
             .await
-            .expect("Can not run axum server");
-        });
-
-        // Give the server a moment to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        Some((
-            Self {
-                addr,
-                memory_port: port,
-                graceful_token,
-                handle: Some(handle),
-                runners,
-            },
-            vec_dir,
-        ))
     }
 
     pub async fn build_with_options(
@@ -1016,70 +1028,12 @@ impl TestServer {
     ) -> Option<(Self, Vec<TempDir>)> {
         let (app, vec_dir, port, runners, graceful_token) =
             build_test_router_with_options(options).await;
-
-        let listener = match TcpListener::bind("127.0.0.1:0").await {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "skipping HTTP integration test: local TCP bind not permitted"
-                );
-                return None;
-            }
-            Err(err) => panic!("failed to bind test listener: {err}"),
-        };
-        let addr = listener.local_addr().unwrap();
-
-        let handle = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
+        Self::bind_and_serve(app, port, runners, graceful_token, vec_dir)
             .await
-            .expect("Can not run axum server");
-        });
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        Some((
-            Self {
-                addr,
-                memory_port: port,
-                graceful_token,
-                handle: Some(handle),
-                runners,
-            },
-            vec_dir,
-        ))
-    }
-
-    pub async fn reopen_with_persistence(
-        persistence: TestPersistencePaths,
-        enable_auth: bool,
-        always_accept: bool,
-        safe_mode: bool,
-        node_type: impl Into<String>,
-        node: Option<(String, u16)>,
-    ) -> Option<Self> {
-        let (server, _) = Self::build_with_options(TestServerOptions {
-            enable_auth,
-            always_accept,
-            node,
-            safe_mode,
-            node_type: node_type.into(),
-            persistence: Some(persistence),
-            sinks_config: None,
-        })
-        .await?;
-
-        Some(server)
     }
 
     pub fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
-    }
-
-    pub fn get_url(&self) -> String {
-        format!("http://{}", self.addr)
     }
 
     pub const fn memory_port(&self) -> u16 {
@@ -1104,22 +1058,29 @@ impl TestApp {
         always_accept: bool,
         node: Option<(String, u16)>,
     ) -> (Self, Vec<TempDir>) {
-        let (app, vec_dir, memory_port, runners, graceful_token) =
-            build_test_router(enable_auth, always_accept, node).await;
+        Self::build_with_options(TestServerOptions {
+            enable_auth,
+            always_accept,
+            node,
+            ..Default::default()
+        })
+        .await
+    }
+
+    pub async fn build_with_options(
+        options: TestServerOptions,
+    ) -> (Self, Vec<TempDir>) {
+        let (app, vec_dir, _memory_port, runners, graceful_token) =
+            build_test_router_with_options(options).await;
 
         (
             Self {
                 app,
-                memory_port,
                 graceful_token,
                 runners,
             },
             vec_dir,
         )
-    }
-
-    pub const fn memory_port(&self) -> u16 {
-        self.memory_port
     }
 }
 
@@ -1187,13 +1148,16 @@ pub async fn login(
     }
 }
 
-pub async fn make_app_request(
-    app: &TestApp,
+/// Shared builder for the in-memory router requests: method, optional API
+/// key, optional content type, body and a fixed `ConnectInfo` so handlers
+/// that read the peer address work without a real socket.
+fn build_app_request(
     path: &str,
     method: &str,
     api_key: Option<&str>,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
+    content_type: Option<&str>,
+    body: Body,
+) -> Request<Body> {
     let method = match method {
         "GET" => Method::GET,
         "POST" => Method::POST,
@@ -1208,23 +1172,41 @@ pub async fn make_app_request(
     if let Some(key) = api_key {
         req = req.header("X-API-Key", key);
     }
-
-    let body = if let Some(value) = body {
-        req = req.header("content-type", "application/json");
-        Body::from(serde_json::to_vec(&value).expect("request body json"))
-    } else {
-        Body::empty()
-    };
+    if let Some(content_type) = content_type {
+        req = req.header("content-type", content_type);
+    }
 
     let mut req = req.body(body).expect("request build");
     req.extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 3000))));
+    req
+}
 
+async fn app_oneshot(app: &TestApp, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     let resp = app.app.clone().oneshot(req).await.expect("request failed");
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("response body");
+    (status, bytes.to_vec())
+}
+
+pub async fn make_app_request(
+    app: &TestApp,
+    path: &str,
+    method: &str,
+    api_key: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let (content_type, body) = match body {
+        Some(value) => (
+            Some("application/json"),
+            Body::from(serde_json::to_vec(&value).expect("request body json")),
+        ),
+        None => (None, Body::empty()),
+    };
+    let req = build_app_request(path, method, api_key, content_type, body);
+    let (status, bytes) = app_oneshot(app, req).await;
     let json = serde_json::from_slice(&bytes).unwrap_or(json!({}));
 
     (status, json)
@@ -1237,38 +1219,16 @@ pub async fn make_app_request_raw(
     api_key: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, String) {
-    let method = match method {
-        "GET" => Method::GET,
-        "POST" => Method::POST,
-        "PUT" => Method::PUT,
-        "DELETE" => Method::DELETE,
-        "PATCH" => Method::PATCH,
-        _ => panic!("Unsupported method: {}", method),
+    let (content_type, body) = match body {
+        Some(value) => (
+            Some("application/json"),
+            Body::from(serde_json::to_vec(&value).expect("request body json")),
+        ),
+        None => (None, Body::empty()),
     };
-
-    let mut req = Request::builder().method(method).uri(path);
-
-    if let Some(key) = api_key {
-        req = req.header("X-API-Key", key);
-    }
-
-    let body = if let Some(value) = body {
-        req = req.header("content-type", "application/json");
-        Body::from(serde_json::to_vec(&value).expect("request body json"))
-    } else {
-        Body::empty()
-    };
-
-    let mut req = req.body(body).expect("request build");
-    req.extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 3000))));
-
-    let resp = app.app.clone().oneshot(req).await.expect("request failed");
-    let status = resp.status();
-    let bytes = to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("response body");
-    let body = String::from_utf8(bytes.to_vec()).expect("utf8 response body");
+    let req = build_app_request(path, method, api_key, content_type, body);
+    let (status, bytes) = app_oneshot(app, req).await;
+    let body = String::from_utf8(bytes).expect("utf8 response body");
 
     (status, body)
 }
@@ -1283,31 +1243,14 @@ pub async fn make_app_raw_body_request(
     content_type: &str,
     raw_body: Vec<u8>,
 ) -> (StatusCode, Value) {
-    let method = match method {
-        "GET" => Method::GET,
-        "POST" => Method::POST,
-        "PUT" => Method::PUT,
-        "DELETE" => Method::DELETE,
-        "PATCH" => Method::PATCH,
-        _ => panic!("Unsupported method: {}", method),
-    };
-
-    let mut req = Request::builder().method(method).uri(path);
-
-    if let Some(key) = api_key {
-        req = req.header("X-API-Key", key);
-    }
-    req = req.header("content-type", content_type);
-
-    let mut req = req.body(Body::from(raw_body)).expect("request build");
-    req.extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 3000))));
-
-    let resp = app.app.clone().oneshot(req).await.expect("request failed");
-    let status = resp.status();
-    let bytes = to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("response body");
+    let req = build_app_request(
+        path,
+        method,
+        api_key,
+        Some(content_type),
+        Body::from(raw_body),
+    );
+    let (status, bytes) = app_oneshot(app, req).await;
     let json = serde_json::from_slice(&bytes).unwrap_or(json!({}));
 
     (status, json)
@@ -1507,64 +1450,6 @@ pub async fn add_governance_member_as_witness(
     body
 }
 
-pub async fn add_tracker_fact_mod_one(
-    client: &Client,
-    server: &TestServer,
-    api_key: Option<&str>,
-    subject_id: &str,
-    data: u32,
-) -> Value {
-    let (status, body) = make_request(
-        client,
-        &server.url("/requests"),
-        "POST",
-        api_key,
-        Some(json!({
-            "request": {
-                "event": "fact",
-                "data": {
-                    "subject_id": subject_id,
-                    "payload": {
-                        "ModOne": {
-                            "data": data
-                        }
-                    }
-                }
-            }
-        })),
-    )
-    .await;
-    assert!(status.is_success(), "tracker fact failed: {body}");
-    body
-}
-
-pub async fn transfer_subject(
-    client: &Client,
-    server: &TestServer,
-    api_key: Option<&str>,
-    subject_id: &str,
-    new_owner: &str,
-) -> Value {
-    let (status, body) = make_request(
-        client,
-        &server.url("/requests"),
-        "POST",
-        api_key,
-        Some(json!({
-            "request": {
-                "event": "transfer",
-                "data": {
-                    "subject_id": subject_id,
-                    "new_owner": new_owner
-                }
-            }
-        })),
-    )
-    .await;
-    assert!(status.is_success(), "transfer request failed: {body}");
-    body
-}
-
 pub async fn wait_request_finish(
     client: &Client,
     server: &TestServer,
@@ -1582,7 +1467,9 @@ pub async fn wait_request_finish(
         .await;
         assert!(status.is_success(), "request status failed: {body}");
         if body["state"] == "Finish" {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            // No settle sleep: the node commits every side effect before the
+            // request reaches Finish, and callers that need downstream state
+            // already poll for it (get_subject, wait_for_sink_blocked…).
             return;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

@@ -690,16 +690,38 @@ async fn serve_http(
         app
     };
 
-    axum::serve(
-        listener_http,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        join_all(runners).await;
-        info!(target: TARGET, "all runners stopped");
-    })
-    .await
-    .map_err(|error| StartupError::HttpServer(error.to_string()))?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener_http,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            join_all(runners).await;
+            info!(target: TARGET, "all runners stopped");
+            let _ = shutdown_tx.send(());
+        }),
+    );
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => {
+            result
+                .map_err(|error| StartupError::HttpServer(error.to_string()))?;
+        }
+        // Once the shutdown signal fires, in-flight requests get a bounded
+        // grace period — same 10s as the HTTPS graceful_shutdown — before
+        // the server future is dropped and connections are aborted.
+        _ = async {
+            let _ = shutdown_rx.await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } => {
+            warn!(target: TARGET,
+                "HTTP graceful shutdown exceeded 10s; forcing connection close"
+            );
+        }
+    }
 
     Ok(())
 }

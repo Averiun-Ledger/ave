@@ -2,11 +2,6 @@
 //
 // This module defines the core data structures for the authentication and authorization system.
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use utoipa::{IntoParams, ToSchema};
@@ -50,12 +45,6 @@ pub struct PaginationQuery {
     pub limit: Option<i64>,
     /// Offset for pagination
     pub offset: Option<i64>,
-}
-
-impl IntoResponse for ErrorResponse {
-    fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, Json(self)).into_response()
-    }
 }
 
 // =============================================================================

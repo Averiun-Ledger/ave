@@ -167,9 +167,28 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
 
     if let (Some(mut rx), Some(url)) = (api_rx, api_url_final) {
         tokio::spawn(async move {
-            let client = Client::new();
+            // Bounded waits: an endpoint that accepts and never answers must
+            // not stall the only consumer until the channel fills and every
+            // log line gets silently dropped.
+            let client = match Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    eprintln!(
+                        "log forwarder disabled: failed to build HTTP client: {err}"
+                    );
+                    return;
+                }
+            };
             while let Some(bytes) = rx.recv().await {
-                let _ = client.post(&url).body(bytes).send().await;
+                if let Err(err) = client.post(&url).body(bytes).send().await {
+                    // stderr on purpose: reporting through tracing would
+                    // re-enter this forwarder recursively.
+                    eprintln!("log forwarder: delivery to {url} failed: {err}");
+                }
             }
         });
     }

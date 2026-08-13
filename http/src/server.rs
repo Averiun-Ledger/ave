@@ -297,9 +297,8 @@ pub async fn post_event_request(
         ApprovalQuery
     ),
     responses(
-        (status = 200, description = "Approval details for the subject", body = Option<ApprovalEntry>),
+        (status = 200, description = "Approval details for the subject (null when none is pending)", body = Option<ApprovalEntry>),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
-        (status = 404, description = "Approval not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -888,7 +887,7 @@ pub async fn is_tracker_banned(
         ("subject_id" = String, Path, description = "Subject identifier")
     ),
     responses(
-        (status = 200, description = "Set of sync peer public keys", body = Vec<String>),
+        (status = 200, description = "Set of sync peer public keys", body = HashSet<String>),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
         (status = 404, description = "Sync peers not found for subject", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -1803,11 +1802,6 @@ pub async fn permission_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    // Skip docs
-    if req.uri().path().starts_with("/doc") {
-        return next.run(req).await;
-    }
-
     let mut req = req;
 
     // Ensure auth context is present; if not, try to run the extractor inline

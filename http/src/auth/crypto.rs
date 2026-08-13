@@ -196,7 +196,7 @@ mod tests {
 
         // Check format
         assert!(key.starts_with("ave_node_"));
-        // Length should be 7 (prefix) + 40 (hex) = 47
+        // Length should be 9 (prefix) + 40 (hex) = 49
         assert_eq!(key.len(), 49);
     }
 

@@ -28,11 +28,11 @@ file-rotate = { workspace = true }
 futures = { workspace = true }
 
 reqwest = { workspace = true }
-axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+axum-server = { workspace = true }
 axum = { workspace = true }
 ip_network = { workspace = true }
 tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["trace", "metrics", "cors", "set-header"] }
+tower-http = { version = "0.7.0", features = ["trace", "cors", "set-header"] }
 utoipa = { workspace = true, features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tokio-util = { workspace = true }

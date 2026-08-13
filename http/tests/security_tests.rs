@@ -19,11 +19,13 @@ use ave_http::auth::{
         reset_user_password, set_role_permission, set_user_permission,
         update_user,
     },
+    apikey_handlers::revoke_api_key,
     middleware::{ApiKeyAuthNew, AuthContextExtractor},
     models::{
-        AuthContext, Permission, SetPermissionRequest, SystemConfigValue,
-        UpdateUserRequest, User,
+        AuthContext, Permission, RevokeApiKeyQuery, SetPermissionRequest,
+        SystemConfigValue, UpdateSystemConfigRequest, UpdateUserRequest, User,
     },
+    system_handlers::update_system_config,
 };
 use ave_http::extract::{ApiJson, ApiPath, ApiQuery};
 use axum::{
@@ -2808,6 +2810,180 @@ async fn test_api_keys_blocked_when_must_change_password() {
         auth_result.is_ok(),
         "API key should work after password has been changed"
     );
+}
+
+/// SECURITY REGRESSION TEST:
+/// API keys of a deleted user must fail authentication with a generic
+/// permission error (401), not an internal error (500).
+#[test(tokio::test)]
+async fn test_api_key_of_deleted_user_is_rejected_as_invalid() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("doomed_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (api_key, _) = db
+        .create_api_key(user.id, Some("doomed_key"), None, None, true)
+        .unwrap();
+
+    // The key authenticates while the user exists.
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
+
+    db.delete_user(user.id).unwrap();
+
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    assert!(
+        matches!(result, Err(DatabaseError::PermissionDenied(_))),
+        "deleted user's key must be a permission error, got {result:?}"
+    );
+}
+
+/// SECURITY REGRESSION TEST:
+/// Failed current-password attempts on the change-password flow feed the
+/// same lockout counter as the login flow, and every rejection uses the
+/// generic "Invalid username or password" message (no account-state
+/// oracle).
+#[test(tokio::test)]
+async fn test_change_password_feeds_lockout_and_stays_generic() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("lockme", "InitialPass123!", None, None, Some(false))
+        .unwrap();
+    // Force the password change requirement so the endpoint is usable.
+    db.admin_reset_password(user.id, "ResetPass123!").unwrap();
+
+    // Wrong current passwords must increment the counter and, at the
+    // threshold, lock the account.
+    for _ in 0..5 {
+        let result = db.change_password_with_credentials(
+            "lockme",
+            "WrongPass!",
+            "AnotherPass123!",
+        );
+        assert!(
+            matches!(result, Err(DatabaseError::PermissionDenied(_))),
+            "wrong current password must be denied: {result:?}"
+        );
+    }
+
+    // Once locked, even the correct current password is rejected with the
+    // generic message.
+    let result = db.change_password_with_credentials(
+        "lockme",
+        "ResetPass123!",
+        "AnotherPass123!",
+    );
+    match result {
+        Err(DatabaseError::PermissionDenied(message)) => {
+            assert_eq!(message, "Invalid username or password");
+        }
+        other => panic!("expected generic PermissionDenied, got {other:?}"),
+    }
+
+    // Valid credentials without the change requirement are rejected with
+    // the same generic message (no "password is correct" oracle).
+    db.create_user("plain", "PlainPass123!", None, None, Some(false))
+        .unwrap();
+    let result = db.change_password_with_credentials(
+        "plain",
+        "PlainPass123!",
+        "NewPlainPass123!",
+    );
+    match result {
+        Err(DatabaseError::PermissionDenied(message)) => {
+            assert_eq!(message, "Invalid username or password");
+        }
+        other => panic!("expected generic PermissionDenied, got {other:?}"),
+    }
+}
+
+/// SECURITY REGRESSION TEST:
+/// Revoking another user's key as a non-superadmin must return 404 — the
+/// same status as a nonexistent key — so key ids cannot be enumerated via
+/// the 403/404 split.
+#[test(tokio::test)]
+async fn non_superadmin_revoke_other_user_key_is_indistinguishable_from_missing()
+ {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id =
+        create_admin_role(&db, "key_revoker", &[("admin_api_key", "delete")]);
+    let actor = create_user_with_role(&db, "key_revoker", role_id);
+    let victim = db
+        .create_user("key_victim", "Password123!", None, None, None)
+        .unwrap();
+    let (_, victim_key) = db
+        .create_api_key(victim.id, Some("victim_key"), None, None, false)
+        .unwrap();
+
+    // Another user's key -> 404 (not 403)
+    let result = revoke_api_key(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(victim_key.id.clone()),
+        ApiQuery(RevokeApiKeyQuery { reason: None }),
+    )
+    .await;
+    match result {
+        Err((StatusCode::NOT_FOUND, _)) => {}
+        other => panic!("expected 404 for another user's key, got {other:?}"),
+    }
+
+    // A nonexistent key -> also 404
+    let result = revoke_api_key(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath("00000000-0000-0000-0000-000000000000".to_string()),
+        ApiQuery(RevokeApiKeyQuery { reason: None }),
+    )
+    .await;
+    match result {
+        Err((StatusCode::NOT_FOUND, _)) => {}
+        other => panic!("expected 404 for a missing key, got {other:?}"),
+    }
+
+    // The victim's key is untouched
+    assert!(!db.get_api_key_info(&victim_key.id).unwrap().revoked);
+}
+
+/// SECURITY REGRESSION TEST:
+/// The rate-limit geometry switches (`rate_limit_limit_by_ip` /
+/// `rate_limit_limit_by_key`) are security-sensitive: only the superadmin
+/// may flip them, like `rate_limit_enable` and `audit_enable`.
+#[test(tokio::test)]
+async fn non_superadmin_cannot_change_rate_limit_geometry() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id =
+        create_admin_role(&db, "config_actor", &[("admin_system", "put")]);
+    let actor = create_user_with_role(&db, "config_actor", role_id);
+
+    for key in [
+        "rate_limit_limit_by_ip",
+        "rate_limit_limit_by_key",
+        "rate_limit_enable",
+        "audit_enable",
+    ] {
+        let result = update_system_config(
+            AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+            Extension(db.clone()),
+            ApiPath(key.to_string()),
+            ApiJson(UpdateSystemConfigRequest {
+                value: SystemConfigValue::Boolean(false),
+            }),
+        )
+        .await;
+        match result {
+            Err((StatusCode::FORBIDDEN, _)) => {}
+            other => panic!("expected 403 flipping {key}, got {other:?}"),
+        }
+    }
 }
 
 /// SECURITY TEST: Superadmin can change their own password

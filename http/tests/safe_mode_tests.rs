@@ -181,6 +181,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
         node_type: "Bootstrap".to_string(),
         persistence: None,
         sinks_config: None,
+        enable_doc: false,
     };
     let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
@@ -269,6 +270,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
         sinks_config: None,
+        enable_doc: false,
     };
     let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 
@@ -294,6 +296,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
         node_type: "Bootstrap".to_string(),
         persistence: None,
         sinks_config: None,
+        enable_doc: false,
     };
     let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
@@ -440,6 +443,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
         sinks_config: None,
+        enable_doc: false,
     };
     let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 

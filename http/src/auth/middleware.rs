@@ -178,10 +178,14 @@ where
                         error = %e,
                         "api key authentication failed"
                     );
+                    // Generic message: the specific reason (revoked, expired,
+                    // inactive or locked account) must not leak to
+                    // unauthenticated callers. The detail stays in the
+                    // server-side log above.
                     (
                         StatusCode::UNAUTHORIZED,
                         Json(ErrorResponse {
-                            error: format!("Authentication failed: {}", e),
+                            error: "Invalid API key".to_string(),
                         }),
                     )
                 }

@@ -3,9 +3,7 @@
 // REST API endpoints for user, role, permission, and API key management
 
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{
-    DatabaseErrorMapping, normalize_pagination, run_db as shared_run_db,
-};
+use super::http_api::{normalize_pagination, run_db_admin as run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use crate::extract::{ApiJson, ApiPath, ApiQuery};
@@ -13,22 +11,6 @@ use axum::{Extension, Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
-
-// =============================================================================
-// ERROR HANDLING
-// =============================================================================
-
-async fn run_db<T, F>(
-    db: &Arc<AuthDatabase>,
-    operation: &'static str,
-    work: F,
-) -> Result<T, (StatusCode, Json<ErrorResponse>)>
-where
-    T: Send + 'static,
-    F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
-{
-    shared_run_db(db, operation, DatabaseErrorMapping::admin(), work).await
-}
 
 /// Check if a user has the superadmin role
 fn is_superadmin_user(
@@ -357,78 +339,31 @@ pub async fn update_user(
     .to_string();
     let auth_ctx_for_db = auth_ctx.clone();
     let user_info = run_db(&db, "admin_update_user", move |db| {
-        let target_user = db.get_user_by_id(user_id)?;
-        let is_target_superadmin = is_superadmin_user(&db, &target_user)?;
-
-        if is_target_superadmin {
-            if req.is_active == Some(false) {
-                return Err(DatabaseError::PermissionDenied(
-                    "Cannot deactivate superadmin account".to_string(),
-                ));
-            }
-
-            if req.password.is_some() {
-                return Err(DatabaseError::PermissionDenied(
-                    "Cannot change superadmin password through API. Use direct database access".to_string(),
-                ));
-            }
-
-            if req.role_ids.is_some() {
-                return Err(DatabaseError::PermissionDenied(
-                    "Cannot modify superadmin roles. Superadmin has all permissions automatically".to_string(),
-                ));
-            }
-        }
-
-        if !auth_ctx_for_db.is_superadmin()
-            && (req.password.is_some()
-                || req.is_active.is_some()
-                || req.role_ids.is_some())
-            && is_admin_account(&db, &target_user)?
-        {
-            return Err(DatabaseError::PermissionDenied(
-                "Only superadmin can modify admin accounts".to_string(),
-            ));
-        }
-
-        if let Some(role_ids) = &req.role_ids {
-            let superadmin_role_id = get_superadmin_role_id(&db)?;
-            if let Some(sa_role_id) = superadmin_role_id {
-                let is_target_currently_superadmin =
-                    is_superadmin_user(&db, &target_user)?;
-
-                if role_ids.contains(&sa_role_id) {
-                    validate_superadmin_assignment(
-                        &db,
-                        &auth_ctx_for_db,
-                        user_id,
-                    )?;
-                } else if is_target_currently_superadmin {
-                    validate_superadmin_removal(&db, &auth_ctx_for_db, user_id)?;
-                }
-            }
-
-        }
-
-        let user = db.update_user_with_roles_transactional(
-            user_id,
-            req.password.as_deref(),
-            req.is_active,
-            req.role_ids.as_deref(),
-            Some(auth_ctx_for_db.user_id),
-            Some(crate::auth::database_audit::AuditLogParams {
-                user_id: Some(auth_ctx_for_db.user_id),
-                api_key_id: Some(&auth_ctx_for_db.api_key_id),
-                action_type: "user_updated",
-                endpoint: Some(&format!("/admin/users/{}", user_id)),
-                http_method: Some("PUT"),
-                ip_address: auth_ctx_for_db.ip_address.as_deref(),
-                user_agent: None,
-                request_id: None,
-                details: Some(&audit_details),
-                success: true,
-                error_message: None,
-            }),
+        // Validations and mutation run in a single Immediate transaction
+        // inside the DB layer: no concurrent write can interleave between
+        // them (TOCTOU).
+        let user = db.update_user_validated_transactional(
+            crate::auth::UpdateUserParams {
+                user_id,
+                password: req.password.as_deref(),
+                is_active: req.is_active,
+                role_ids: req.role_ids.as_deref(),
+                actor_is_superadmin: auth_ctx_for_db.is_superadmin(),
+                assigned_by: Some(auth_ctx_for_db.user_id),
+                audit: Some(crate::auth::database_audit::AuditLogParams {
+                    user_id: Some(auth_ctx_for_db.user_id),
+                    api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                    action_type: "user_updated",
+                    endpoint: Some(&format!("/admin/users/{}", user_id)),
+                    http_method: Some("PUT"),
+                    ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                    user_agent: None,
+                    request_id: None,
+                    details: Some(&audit_details),
+                    success: true,
+                    error_message: None,
+                }),
+            },
         )?;
 
         let roles = db.get_user_roles(user_id)?;

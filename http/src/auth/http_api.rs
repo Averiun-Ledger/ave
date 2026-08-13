@@ -180,6 +180,19 @@ where
     }
 }
 
+/// `run_db` with the admin error mapping (authz failures surface as 403).
+pub async fn run_db_admin<T, F>(
+    db: &Arc<AuthDatabase>,
+    operation: &'static str,
+    work: F,
+) -> Result<T, HttpErrorResponse>
+where
+    T: Send + 'static,
+    F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
+{
+    run_db(db, operation, DatabaseErrorMapping::admin(), work).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

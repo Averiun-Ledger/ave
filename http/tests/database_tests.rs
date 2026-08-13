@@ -785,8 +785,7 @@ async fn test_management_key_creation_rolls_back_on_error() {
 }
 
 #[test(tokio::test)]
-async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
-{
+async fn test_login_writes_audit_and_replaces_management_key() {
     let (db, _dirs) = create_test_db();
 
     let user = db
@@ -796,29 +795,19 @@ async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
         .create_api_key(user.id, Some("mgmt_session"), None, None, true)
         .unwrap();
 
-    let (new_api_key, new_key_info) = db
-        .issue_management_api_key_transactional(
-            user.id,
-            Some("mgmt_session"),
-            None,
-            None,
-            Some(ave_http::auth::database_audit::AuditLogParams {
-                user_id: Some(user.id),
-                api_key_id: None,
-                action_type: "login_success",
-                endpoint: Some("/login"),
-                http_method: Some("POST"),
-                ip_address: Some("127.0.0.1"),
-                user_agent: Some("test-agent"),
-                request_id: None,
-                details: Some("issued management key"),
-                success: true,
-                error_message: None,
-            }),
+    // The login path issues the management key, revokes the old one and
+    // writes the audit row in the same transaction
+    let (logged, _, _, new_api_key) = db
+        .login_transactional(
+            "mgmt_audit",
+            "TestPass123!",
+            Some("127.0.0.1"),
+            Some("test-agent"),
+            "mgmt_audit_session",
         )
         .unwrap();
+    assert_eq!(logged.id, user.id);
 
-    assert_ne!(new_key_info.id, old_key_info.id);
     assert!(
         db.authenticate_api_key_request(&new_api_key, None, "/peer-id")
             .is_ok()
@@ -831,10 +820,19 @@ async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
     let old_key_info = db.get_api_key_info(&old_key_info.id).unwrap();
     assert!(old_key_info.revoked);
 
+    // The success audit row references the freshly issued key
+    let new_key_id = db
+        .list_user_api_keys(user.id, false)
+        .unwrap()
+        .into_iter()
+        .find(|k| k.is_management && !k.revoked)
+        .map(|k| k.id)
+        .unwrap();
+
     let logs = db
-        .query_audit_logs(&AuditLogQuery {
+        .query_audit_logs_page(&AuditLogQuery {
             user_id: Some(user.id),
-            api_key_id: Some(new_key_info.id),
+            api_key_id: Some(new_key_id),
             endpoint: Some("/login".to_string()),
             http_method: Some("POST".to_string()),
             ip_address: None,
@@ -849,7 +847,8 @@ async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
             exclude_ip_address: None,
             exclude_endpoint: None,
         })
-        .unwrap();
+        .unwrap()
+        .items;
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].action_type, "login_success");
 }
@@ -926,7 +925,7 @@ async fn test_rotate_api_key_transactional_writes_audit() {
     assert!(db.get_api_key_info(&old_key_info.id).unwrap().revoked);
 
     let logs = db
-        .query_audit_logs(&AuditLogQuery {
+        .query_audit_logs_page(&AuditLogQuery {
             user_id: Some(user.id),
             api_key_id: Some(old_key_info.id),
             endpoint: Some("/admin/api-keys/test/rotate".to_string()),
@@ -943,7 +942,8 @@ async fn test_rotate_api_key_transactional_writes_audit() {
             exclude_ip_address: None,
             exclude_endpoint: None,
         })
-        .unwrap();
+        .unwrap()
+        .items;
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].action_type, "api_key_rotated");
 }
@@ -1645,6 +1645,32 @@ async fn test_rate_limit_by_key_only() {
 }
 
 #[test(tokio::test)]
+async fn test_rate_limit_without_identifiers_never_forms_global_bucket() {
+    let rate_limit = RateLimitConfig {
+        enable: true,
+        window_seconds: 60,
+        max_requests: 1,
+        limit_by_key: false,
+        limit_by_ip: false,
+        cleanup_interval_seconds: 3600,
+        sensitive_endpoints: vec![],
+    };
+
+    let (db, _dirs) = create_test_db_with_rate_limit(rate_limit).await;
+
+    // With both dimensions disabled there is no identifier to bucket by;
+    // requests must pass instead of sharing a single global bucket that
+    // anyone could exhaust (denial of service on the node's auth surface).
+    for i in 1..=5 {
+        assert!(
+            db.check_rate_limit(None, Some("10.0.0.1"), Some("/login"))
+                .is_ok(),
+            "request {i} without an identifier must not be globally limited"
+        );
+    }
+}
+
+#[test(tokio::test)]
 async fn test_rate_limit_by_both_key_and_ip() {
     let rate_limit = RateLimitConfig {
         enable: true,
@@ -1853,7 +1879,7 @@ async fn test_audit_logging_disabled() {
         exclude_endpoint: None,
     };
 
-    let logs = db.query_audit_logs(&query).unwrap();
+    let logs = db.query_audit_logs_page(&query).unwrap().items;
     assert!(logs.is_empty());
 }
 
@@ -1921,7 +1947,7 @@ async fn test_log_api_request_enabled() {
         exclude_endpoint: None,
     };
 
-    let logs = db.query_audit_logs(&query).unwrap();
+    let logs = db.query_audit_logs_page(&query).unwrap().items;
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].endpoint.as_deref(), Some("/api/test"));
     assert_eq!(logs[0].http_method.as_deref(), Some("GET"));
@@ -1994,7 +2020,7 @@ async fn test_log_api_request_always_enabled() {
         exclude_endpoint: None,
     };
 
-    let logs = db.query_audit_logs(&query).unwrap();
+    let logs = db.query_audit_logs_page(&query).unwrap().items;
     assert_eq!(logs.len(), 1, "Should have logged exactly one request");
     assert_eq!(logs[0].endpoint.as_deref(), Some("/api/test"));
     assert_eq!(logs[0].http_method.as_deref(), Some("POST"));
@@ -2156,6 +2182,73 @@ async fn test_concurrent_failed_logins_increment_attempts_atomically() {
     );
 }
 
+/// `login_transactional` runs verification, the role/permission snapshot and
+/// the management key issuance in one transaction: the key works right away,
+/// a second login rotates it, and failures feed the lockout counter.
+#[test(tokio::test)]
+async fn test_login_transactional_issues_snapshots_and_rotates() {
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("login_tx_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("login_tx_role", None).unwrap();
+    db.set_role_permission(role.id, "node_subject", "get", true)
+        .unwrap();
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    // Successful login: key issued and roles/permissions snapshot together
+    let (logged, roles, perms, key1) = db
+        .login_transactional(
+            "login_tx_user",
+            "TestPass123!",
+            None,
+            None,
+            "login_tx_user_session",
+        )
+        .unwrap();
+    assert_eq!(logged.id, user.id);
+    assert_eq!(roles, vec!["login_tx_role".to_string()]);
+    assert!(perms.iter().any(|p| p.resource == "node_subject"
+        && p.action == "get"
+        && p.allowed));
+    assert!(
+        db.authenticate_api_key_request(&key1, None, "/peer-id").is_ok()
+    );
+
+    // A second login rotates the management key: the old one dies
+    let (_, _, _, key2) = db
+        .login_transactional(
+            "login_tx_user",
+            "TestPass123!",
+            None,
+            None,
+            "login_tx_user_session",
+        )
+        .unwrap();
+    assert!(matches!(
+        db.authenticate_api_key_request(&key1, None, "/peer-id"),
+        Err(DatabaseError::PermissionDenied(_))
+    ));
+    assert!(
+        db.authenticate_api_key_request(&key2, None, "/peer-id").is_ok()
+    );
+
+    // Wrong password: generic error and the attempt is counted
+    let result = db.login_transactional(
+        "login_tx_user",
+        "WrongPass123!",
+        None,
+        None,
+        "login_tx_user_session",
+    );
+    assert!(matches!(
+        result,
+        Err(DatabaseError::PermissionDenied(_)),
+    ));
+    let after = db.get_user_by_id(user.id).unwrap();
+    assert_eq!(after.failed_login_attempts, 1);
+}
+
 /// Defensive test: every migration file in `http/migrations/` must be
 /// registered in `MIGRATIONS` and applied, so `PRAGMA user_version` after a
 /// fresh boot matches the file count. Fails when someone adds a migration
@@ -2301,12 +2394,12 @@ async fn concurrent_management_key_issuance_leaves_a_single_active_key() {
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            db.issue_management_api_key_transactional(
-                user.id,
-                Some("session"),
+            db.login_transactional(
+                "mgmt_race_user",
+                "TestPass123!",
                 None,
                 None,
-                None,
+                "session",
             )
         }));
     }
@@ -2319,7 +2412,7 @@ async fn concurrent_management_key_issuance_leaves_a_single_active_key() {
             succeeded += 1;
         }
     }
-    assert!(succeeded > 0, "at least one issuance must succeed");
+    assert!(succeeded > 0, "at least one login must succeed");
 
     let keys = db.list_user_api_keys(user.id, false).unwrap();
     let active_management = keys.iter().filter(|k| k.is_management).count();

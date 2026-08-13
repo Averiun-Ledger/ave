@@ -874,6 +874,9 @@ impl Display for LoggingRotation {
 #[serde(default)]
 pub struct LoggingConfig {
     pub output: LoggingOutput,
+    /// Endpoint that receives the log batches. `https://` is expected in
+    /// production: `http://` is accepted (e.g. collectors on localhost or a
+    /// trusted internal network) but ships the logs unencrypted.
     pub api_url: Option<String>,
     pub file_path: PathBuf, // ruta base de logs
     pub rotation: LoggingRotation,

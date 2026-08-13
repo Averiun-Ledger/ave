@@ -226,14 +226,6 @@ impl AuthDatabase {
         })
     }
 
-    /// Query audit logs
-    pub fn query_audit_logs(
-        &self,
-        query: &AuditLogQuery,
-    ) -> Result<Vec<AuditLog>, DatabaseError> {
-        Ok(self.query_audit_logs_page(query)?.items)
-    }
-
     pub fn query_audit_logs_page(
         &self,
         query: &AuditLogQuery,
@@ -629,6 +621,14 @@ impl AuthDatabase {
             None
         };
 
+        // Without a per-key or per-IP identifier every request would share
+        // a single global bucket, letting anyone exhaust the node's
+        // authentication quota (pre-auth calls carry neither). Skip
+        // limiting instead of creating that denial-of-service vector.
+        if api_key_id.is_none() && ip_address.is_none() {
+            return Ok(true);
+        }
+
         let (max_requests, window_seconds) =
             self.get_endpoint_rate_limit(endpoint)?;
 
@@ -943,7 +943,7 @@ impl AuthDatabase {
                 params![cutoff],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let (max_requests, window_seconds) = self.rate_limit_defaults();
 
@@ -1103,7 +1103,7 @@ impl AuthDatabase {
 
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         tx.execute(
@@ -1123,17 +1123,6 @@ impl AuthDatabase {
         self.apply_runtime_system_config_value(key_id, &typed_value)?;
 
         Ok(result)
-    }
-
-    pub fn update_system_config_typed(
-        &self,
-        key: &str,
-        value: &SystemConfigValue,
-        updated_by: Option<i64>,
-    ) -> Result<SystemConfig, DatabaseError> {
-        let key_id = SystemConfigKey::parse(key)?;
-        let persisted_value = key_id.serialize_value(value)?;
-        self.update_system_config(key, &persisted_value, updated_by)
     }
 
     pub fn update_system_config_typed_transactional(

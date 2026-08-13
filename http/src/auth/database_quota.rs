@@ -5,7 +5,9 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::{ApiKeyQuotaStatus, QuotaExtensionInfo, UsagePlan};
-use ave_actors::rusqlite::{self, OptionalExtension, params};
+use ave_actors::rusqlite::{
+    self, OptionalExtension, TransactionBehavior, params,
+};
 use time::OffsetDateTime;
 
 impl AuthDatabase {
@@ -375,7 +377,7 @@ impl AuthDatabase {
     ) -> Result<UsagePlan, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         let plan = self.create_usage_plan_with_conn(
             &tx,
@@ -487,7 +489,7 @@ impl AuthDatabase {
     ) -> Result<UsagePlan, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         let plan = self.update_usage_plan_with_conn(
             &tx,
@@ -544,7 +546,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Self::delete_usage_plan_with_conn(&tx, id)?;
         if let Some(audit) = audit {
@@ -606,7 +608,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         self.assign_api_key_plan_with_conn(&tx, key_id, plan_id, assigned_by)?;
         if let Some(audit) = audit {
@@ -700,7 +702,7 @@ impl AuthDatabase {
     ) -> Result<QuotaExtensionInfo, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         let extension = Self::add_quota_extension_with_conn(
             &tx,

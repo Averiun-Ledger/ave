@@ -228,12 +228,14 @@ pub async fn update_system_config(
     // Check permission
     check_permission(&auth_ctx, "admin_system", "put")?;
 
-    // Security-sensitive switches (audit trail, rate limiting) can only be
-    // flipped by the superadmin: disabling them at runtime weakens the
-    // node's auditability and brute-force protection
+    // Security-sensitive switches (audit trail, rate limiting and its
+    // geometry) can only be flipped by the superadmin: disabling them at
+    // runtime weakens the node's auditability and brute-force protection
     let is_security_sensitive = [
         super::system_config::SystemConfigKey::AuditEnable.as_str(),
         super::system_config::SystemConfigKey::RateLimitEnable.as_str(),
+        super::system_config::SystemConfigKey::RateLimitLimitByKey.as_str(),
+        super::system_config::SystemConfigKey::RateLimitLimitByIp.as_str(),
     ]
     .contains(&key.as_str());
     if is_security_sensitive && !auth_ctx.is_superadmin() {
@@ -368,18 +370,17 @@ pub async fn get_my_permissions_detailed(
         move |db| {
             let mut role_permissions = Vec::new();
             for role_name in &roles {
-                if let Ok(role) = db.get_role_by_name(role_name)
-                    && let Ok(perms) = db.get_role_permissions(role.id)
-                {
-                    role_permissions.push(RolePermissionsInfo {
-                        role_name: role_name.clone(),
-                        permissions: perms,
-                    });
-                }
+                // DB errors must surface: a 200 with partial data would
+                // misreport what the user can actually do.
+                let role = db.get_role_by_name(role_name)?;
+                let perms = db.get_role_permissions(role.id)?;
+                role_permissions.push(RolePermissionsInfo {
+                    role_name: role_name.clone(),
+                    permissions: perms,
+                });
             }
 
-            let user_overrides =
-                db.get_user_permissions(user_id).unwrap_or_default();
+            let user_overrides = db.get_user_permissions(user_id)?;
 
             Ok((role_permissions, user_overrides))
         },

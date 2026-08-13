@@ -66,6 +66,33 @@ where
     }
 }
 
+/// Optional JSON body extractor: a request without a JSON content type
+/// yields `None`, while a malformed body is rejected with the canonical
+/// error body instead of axum's plain-text rejection.
+pub struct OptionalApiJson<T>(pub Option<T>);
+
+impl<S, T> FromRequest<S> for OptionalApiJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiRejection;
+
+    async fn from_request(
+        req: Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(Self(Some(value))),
+            Err(JsonRejection::MissingJsonContentType(_)) => Ok(Self(None)),
+            Err(rejection) => Err(reject(
+                json_rejection_status(&rejection),
+                rejection.body_text(),
+            )),
+        }
+    }
+}
+
 /// Query string extractor that reports rejections with the canonical error
 /// body.
 pub struct ApiQuery<T>(pub T);

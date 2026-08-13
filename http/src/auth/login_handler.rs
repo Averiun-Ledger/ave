@@ -2,10 +2,10 @@
 //
 // Database-backed login endpoint that returns full authentication context
 
-use super::database::{AuthDatabase, DatabaseError};
+use super::database::AuthDatabase;
 use super::http_api::{
-    DatabaseErrorMapping, db_error_to_response as shared_db_error_to_response,
-    rate_limit_error_response, request_result_from_status,
+    DatabaseErrorMapping, db_error_to_response, rate_limit_error_response,
+    request_result_from_status,
 };
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use super::request_meta;
@@ -18,13 +18,6 @@ use std::{net::SocketAddr, sync::Arc};
 use tracing::warn;
 
 const TARGET: &str = "ave::http::auth";
-
-/// Convert DatabaseError to HTTP response tuple
-fn db_error_to_response(
-    err: DatabaseError,
-) -> (StatusCode, Json<ErrorResponse>) {
-    shared_db_error_to_response(err, DatabaseErrorMapping::login())
-}
 
 /// Login endpoint - authenticate with username/password and get API key
 ///
@@ -82,39 +75,17 @@ pub async fn login(
     let login_user_agent = user_agent.clone();
     let (user, roles, permissions, api_key) = db
         .run_blocking("login_session", move |db| {
-            let user = db.verify_credentials_transactional(
+            let session_name = format!("{}_session", login_username);
+            // Verify, snapshot roles/permissions and issue the key in a
+            // single transaction: a concurrent reset or revoke-all cannot
+            // slip in between and leave the new key alive.
+            db.login_transactional(
                 &login_username,
                 &login_password,
                 login_ip.as_deref(),
                 login_user_agent.as_deref(),
-            )?;
-            let roles = db.get_user_roles(user.id)?;
-            let permissions = db.calculate_user_permissions(user.id)?;
-            let session_name = format!("{}_session", user.username);
-            let audit_details =
-                format!("User {} logged in successfully", user.username);
-            let (api_key, _key_info) = db
-                .issue_management_api_key_transactional(
-                    user.id,
-                    Some(&session_name),
-                    None,
-                    None,
-                    Some(crate::auth::database_audit::AuditLogParams {
-                        user_id: Some(user.id),
-                        api_key_id: None,
-                        action_type: "login_success",
-                        endpoint: Some("/login"),
-                        http_method: Some("POST"),
-                        ip_address: login_ip.as_deref(),
-                        user_agent: login_user_agent.as_deref(),
-                        request_id: None,
-                        details: Some(&audit_details),
-                        success: true,
-                        error_message: None,
-                    }),
-                )?;
-
-            Ok((user, roles, permissions, api_key))
+                &session_name,
+            )
         })
         .await
         .map_err(|e| {
@@ -125,7 +96,8 @@ pub async fn login(
                 error = %e,
                 "login failed"
             );
-            let response = db_error_to_response(e);
+            let response =
+                db_error_to_response(e, DatabaseErrorMapping::login());
             db.record_request_metrics(
                 "login",
                 request_result_from_status(response.0),
@@ -225,7 +197,8 @@ pub async fn change_password(
     })
     .await
     .map_err(|e| {
-        let response = db_error_to_response(e);
+        let response =
+            db_error_to_response(e, DatabaseErrorMapping::login());
         db.record_request_metrics(
             "change_password",
             request_result_from_status(response.0),

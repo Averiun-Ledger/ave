@@ -1,6 +1,6 @@
 use crate::config_types::MachineSpecHttp;
 use crate::error::GovernanceHasTrackersError;
-use crate::server::{self};
+use crate::server;
 use crate::{
     auth::{
         admin_handlers::{self, ResetPasswordRequest},
@@ -45,16 +45,14 @@ use crate::{
 };
 use ave_bridge::MonitorNetworkState;
 use ave_bridge::ave_common::{
-    Namespace, SchemaType,
+    SchemaType,
     bridge::{
         request::{
-            AbortsQuery, ApprovalQuery, ApprovalState, ApprovalStateRes,
-            BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
-            BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
-            BridgeSignedEventRequest, BridgeTransferRequest, EventRequestType,
-            EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery,
-            SinkReplayItem, SinkReplayRequest, SubjectQuery,
-            UpdateSubjectQuery,
+            ApprovalState, ApprovalStateRes, BridgeConfirmRequest,
+            BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest,
+            BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest,
+            BridgeTransferRequest, EventRequestType, SinkReplayItem,
+            SinkReplayRequest,
         },
         signature::BridgeSignature,
     },
@@ -128,6 +126,7 @@ impl Modify for FeatureGatedPathsAddon {
         server::get_public_key,
         server::get_config,
         server::get_network_state,
+        server::delete_subject,
 
         // ── Request ─────────────────────────────────────────────
         server::get_requests_in_manager,
@@ -171,7 +170,6 @@ impl Modify for FeatureGatedPathsAddon {
 
         // ── Ledger ──────────────────────────────────────────────
         server::get_events,
-        server::get_sink_events,
         server::get_aborts,
         server::get_event_sn,
         server::get_first_or_end_events,
@@ -232,6 +230,7 @@ impl Modify for FeatureGatedPathsAddon {
         system_handlers::get_rate_limit_stats,
         system_handlers::list_system_config,
         system_handlers::update_system_config,
+        server::get_metrics,
 
         // ── Sink ──────────────────────────────────────────────
         server::get_sinks,
@@ -241,12 +240,7 @@ impl Modify for FeatureGatedPathsAddon {
         server::test_sink,
         server::reset_sink_cursors,
         server::replay_sink_events,
-
-        // ── Maintenance ─────────────────────────────────────────
-        server::delete_subject,
-
-        // ── Observability ───────────────────────────────────────
-        server::get_metrics,
+        server::get_sink_events,
     ),
     components(
         schemas(
@@ -308,16 +302,6 @@ impl Modify for FeatureGatedPathsAddon {
             SystemConfigPage,
             UpdateSystemConfigRequest,
 
-            // ── Query parameters ────────────────────────────────
-            SubjectQuery,
-            UpdateSubjectQuery,
-            GovQuery,
-            ApprovalQuery,
-            EventsQuery,
-            SinkEventsQuery,
-            AbortsQuery,
-            FirstEndEvents,
-
             // ── Event request types ─────────────────────────────
             BridgeSignedEventRequest,
             BridgeEventRequest,
@@ -343,7 +327,6 @@ impl Modify for FeatureGatedPathsAddon {
             GovsData,
             SubjsData,
             SchemaType,
-            Namespace,
             TransferSubject,
             MonitorNetworkState,
             LedgerDB,

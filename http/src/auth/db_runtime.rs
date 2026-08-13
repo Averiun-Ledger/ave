@@ -1,8 +1,9 @@
 use super::database::DatabaseError;
 use ave_actors::rusqlite::Connection;
 use std::{
+    mem::ManuallyDrop,
     path::Path,
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, PoisonError},
 };
 
 pub(super) struct AuthDbRuntime {
@@ -16,7 +17,10 @@ struct ConnectionPool {
 }
 
 pub(super) struct PooledConnection {
-    conn: Option<Connection>,
+    // `ManuallyDrop` lets `Drop` move the connection back into the pool
+    // without an `Option` whose `None` arm would be a (technically
+    // unreachable) panic in `Deref`/`DerefMut`.
+    conn: ManuallyDrop<Connection>,
     pool: Arc<ConnectionPool>,
 }
 
@@ -77,17 +81,19 @@ impl ConnectionPool {
     }
 
     fn acquire(self: &Arc<Self>) -> Result<PooledConnection, DatabaseError> {
-        let mut guard = self.connections.lock().map_err(|e| {
-            DatabaseError::Connection(format!("DB pool mutex poisoned: {}", e))
-        })?;
+        // Poison recovery is safe here: the guarded Vec has no invariants a
+        // panic could break, and refusing the lock would shrink the pool or
+        // hang auth forever.
+        let mut guard = self
+            .connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         while guard.is_empty() {
-            guard = self.available.wait(guard).map_err(|e| {
-                DatabaseError::Connection(format!(
-                    "DB pool wait poisoned: {}",
-                    e
-                ))
-            })?;
+            guard = self
+                .available
+                .wait(guard)
+                .unwrap_or_else(PoisonError::into_inner);
         }
 
         let conn = guard.pop().ok_or_else(|| {
@@ -96,16 +102,19 @@ impl ConnectionPool {
         drop(guard);
 
         Ok(PooledConnection {
-            conn: Some(conn),
+            conn: ManuallyDrop::new(conn),
             pool: Arc::clone(self),
         })
     }
 
     fn release(&self, conn: Connection) {
-        if let Ok(mut guard) = self.connections.lock() {
-            guard.push(conn);
-            self.available.notify_one();
-        }
+        let mut guard = self
+            .connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.push(conn);
+        drop(guard);
+        self.available.notify_one();
     }
 }
 
@@ -113,21 +122,23 @@ impl std::ops::Deref for PooledConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
-        self.conn.as_ref().expect("pooled connection missing")
+        &self.conn
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.conn.as_mut().expect("pooled connection missing")
+        &mut self.conn
     }
 }
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool.release(conn);
-        }
+        // SAFETY: `conn` is taken exactly once here and never used
+        // afterwards: `Drop` runs at most once and no code path moves the
+        // connection out by value anywhere else.
+        let conn = unsafe { ManuallyDrop::take(&mut self.conn) };
+        self.pool.release(conn);
     }
 }
 

@@ -135,6 +135,60 @@ async fn test_permissions_change_when_role_removed() {
         && p.allowed));
 }
 
+/// The permissions reported to the client (the login response uses
+/// `get_user_effective_permissions`) must mirror exactly what the server
+/// enforces (`get_effective_permissions`): role aggregation is allow-wins
+/// and a user override always wins.
+#[test(tokio::test)]
+async fn test_reported_permissions_match_enforcement() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let allow_role = db.create_role("allow_role", None).unwrap();
+    let deny_role = db.create_role("deny_role", None).unwrap();
+
+    // The contested pair: one role allows, another denies
+    db.set_role_permission(allow_role.id, "node_subject", "get", true)
+        .unwrap();
+    db.set_role_permission(deny_role.id, "node_subject", "get", false)
+        .unwrap();
+    db.assign_role_to_user(user.id, allow_role.id, None).unwrap();
+    db.assign_role_to_user(user.id, deny_role.id, None).unwrap();
+
+    let reported = db.get_user_effective_permissions(user.id).unwrap();
+    let enforced = db.get_effective_permissions(user.id).unwrap();
+
+    // Allow-wins: exactly one row for the contested pair, and allowed
+    let contested: Vec<bool> = reported
+        .iter()
+        .filter(|p| p.resource == "node_subject" && p.action == "get")
+        .map(|p| p.allowed)
+        .collect();
+    assert_eq!(contested, vec![true], "allow-wins, exactly one row");
+
+    // Both views must be identical
+    let tuples = |perms: &[ave_http::auth::models::Permission]| {
+        perms
+            .iter()
+            .map(|p| (p.resource.clone(), p.action.clone(), p.allowed))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tuples(&reported), tuples(&enforced));
+
+    // A user override always wins over the role aggregation
+    db.set_user_permission(user.id, "node_subject", "get", false, None)
+        .unwrap();
+    let reported = db.get_user_effective_permissions(user.id).unwrap();
+    let contested: Vec<bool> = reported
+        .iter()
+        .filter(|p| p.resource == "node_subject" && p.action == "get")
+        .map(|p| p.allowed)
+        .collect();
+    assert_eq!(contested, vec![false], "user override wins");
+}
+
 #[test(tokio::test)]
 async fn test_multiple_role_changes() {
     let (db, _dirs) = common::create_test_db();

@@ -334,7 +334,7 @@ impl AuthDatabase {
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let result = if is_management {
@@ -382,7 +382,7 @@ impl AuthDatabase {
 
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let result = if is_management {
@@ -420,52 +420,6 @@ impl AuthDatabase {
         Ok(result)
     }
 
-    pub fn issue_management_api_key_transactional(
-        &self,
-        user_id: i64,
-        name: Option<&str>,
-        description: Option<&str>,
-        expires_in_seconds: Option<i64>,
-        audit: Option<AuditLogParams>,
-    ) -> Result<(String, ApiKeyInfo), DatabaseError> {
-        let mut conn = self.lock_conn()?;
-        let tx_started = std::time::Instant::now();
-        let result = (|| {
-            let tx = conn
-                .transaction()
-                .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-
-            let (api_key, key_info) = self.issue_management_api_key_with_conn(
-                &tx,
-                user_id,
-                name,
-                description,
-                expires_in_seconds,
-            )?;
-
-            if let Some(audit) = audit {
-                Self::create_audit_log_with_conn(
-                    &tx,
-                    self.audit_enabled(),
-                    AuditLogParams {
-                        api_key_id: Some(&key_info.id),
-                        ..audit
-                    },
-                )?;
-            }
-
-            tx.commit()
-                .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-
-            Ok((api_key, key_info))
-        })();
-        self.record_transaction_duration(
-            "issue_management_api_key_transactional",
-            tx_started.elapsed(),
-        );
-        result
-    }
-
     pub fn rotate_api_key_transactional(
         &self,
         params: RotateApiKeyParams<'_>,
@@ -483,7 +437,7 @@ impl AuthDatabase {
         let tx_started = std::time::Instant::now();
         let result = (|| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             let existing = Self::get_api_key_info_internal(&tx, key_id)?;
@@ -689,7 +643,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Self::revoke_api_key_internal(&tx, key_id, revoked_by, reason)?;
         if let Some(audit) = audit {
@@ -786,8 +740,15 @@ impl AuthDatabase {
             }
         }
 
-        // Get user
-        let user = Self::get_user_by_id_internal(conn, user_id)?;
+        // Get user. A key whose owner no longer exists (e.g. a deleted
+        // user) is treated as an invalid key, not an internal error.
+        let user = Self::get_user_by_id_internal(conn, user_id).map_err(|e| {
+            if matches!(e, DatabaseError::NotFound(_)) {
+                DatabaseError::PermissionDenied("Invalid API key".to_string())
+            } else {
+                e
+            }
+        })?;
 
         // Check if user is active
         if !user.is_active {
