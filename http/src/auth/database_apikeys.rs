@@ -616,33 +616,6 @@ impl AuthDatabase {
         Ok(keys)
     }
 
-    /// Get an active API key by name for a user
-    pub fn get_active_api_key_by_name(
-        &self,
-        user_id: i64,
-        name: &str,
-    ) -> Result<ApiKeyInfo, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        let key_id: String = conn
-            .query_row(
-                "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
-                params![user_id, name],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .ok_or_else(|| {
-                DatabaseError::NotFound(
-                    "API key not found for this user/name".into(),
-                )
-            })?;
-
-        let result = Self::get_api_key_info_internal(&conn, &key_id);
-        drop(conn);
-        result
-    }
-
     /// List all API keys (admin)
     pub fn list_all_api_keys(
         &self,

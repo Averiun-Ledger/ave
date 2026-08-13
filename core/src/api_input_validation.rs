@@ -13,6 +13,8 @@ use ave_common::bridge::request::{
 use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
 use ave_common::schematype::SchemaType;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::error::Error;
 
@@ -89,12 +91,34 @@ pub fn parse_request_id(request_id: &str) -> Result<DigestIdentifier, Error> {
     })
 }
 
-/// Validates pagination fields of an [`EventsQuery`].
+/// Validates pagination and time-range fields of an [`EventsQuery`].
 pub fn validate_events_query(query: &EventsQuery) -> Result<(), Error> {
     if let Some(quantity) = query.quantity {
         require_positive_u64("quantity", quantity)?;
     }
+    for (name, value) in [
+        ("event_request_ts_from", &query.event_request_ts_from),
+        ("event_request_ts_to", &query.event_request_ts_to),
+        ("event_ledger_ts_from", &query.event_ledger_ts_from),
+        ("event_ledger_ts_to", &query.event_ledger_ts_to),
+        ("sink_ts_from", &query.sink_ts_from),
+        ("sink_ts_to", &query.sink_ts_to),
+    ] {
+        if let Some(value) = value {
+            require_iso8601(name, value)?;
+        }
+    }
     // Page numbering starts at 0, so no positive-only check is needed.
+    Ok(())
+}
+
+/// Rejects timestamps that are not well-formed ISO 8601 (RFC 3339).
+fn require_iso8601(name: &str, value: &str) -> Result<(), Error> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|e| {
+        Error::InvalidQueryParams(format!(
+            "{name} is not a valid ISO 8601 timestamp: {e}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -140,11 +164,13 @@ pub fn validate_aborts_query(query: &AbortsQuery) -> Result<(), Error> {
 
 /// Validates filters of a [`SinksQuery`].
 pub fn validate_sinks_query(query: &SinksQuery) -> Result<(), Error> {
-    if let Some(name) = &query.name {
-        require_non_empty_str("name", name)?;
-    }
-    if let Some(target) = &query.target {
-        require_non_empty_str("target", target)?;
+    if let Some(target) = &query.target
+        && target != "governance"
+        && target != "schema"
+    {
+        return Err(Error::InvalidQueryParams(format!(
+            "target must be \"governance\" or \"schema\", got \"{target}\""
+        )));
     }
     if let Some(schema_id) = &query.schema_id {
         require_non_empty_str("schema_id", schema_id)?;

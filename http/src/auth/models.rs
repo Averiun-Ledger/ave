@@ -260,8 +260,10 @@ pub struct CreateApiKeyResponse {
     pub key_info: ApiKeyInfo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RevokeApiKeyRequest {
+#[derive(Debug, Clone, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RevokeApiKeyQuery {
+    /// Optional revocation reason (recorded in the audit trail)
     pub reason: Option<String>,
 }
 

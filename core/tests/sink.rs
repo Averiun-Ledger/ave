@@ -5585,8 +5585,7 @@ async fn sink_transient_errors_and_fast_events() {
 ///    Some("Example".to_owned()), .. })` includes `new-sink`.
 ///
 /// **Part B — advanced filters and ordering:**
-/// 1. Verify that `api.get_sinks(SinksQuery { name:
-///    Some("new-sink".to_owned()), .. })` returns only `new-sink`.
+/// 1. Verify that `api.get_sink("new-sink")` returns only that sink.
 /// 2. Verify that `api.get_sinks(SinksQuery { governance_id:
 ///    Some(governance_id.to_string()), .. })` returns `new-sink` (its target
 ///    `Example` belongs to that governance) and **not** `gov-sink` (its target
@@ -5637,8 +5636,7 @@ async fn sink_transient_errors_and_fast_events() {
 ///    `Accept` mode.
 /// 2. Change the `TestSink` to `422 Unprocessable Entity` mode.
 /// 3. Emit a fact on `S1` and wait for the sink to block.
-/// 4. Verify that `api.get_sinks(SinksQuery { name:
-///    Some("new-sink".to_owned()), .. })` returns the sink with `blocked:
+/// 4. Verify that `api.get_sink("new-sink")` returns the sink with `blocked:
 ///    Some(reason)`.
 /// 5. Verify that `api.get_sinks_status()` shows `new-sink` with `blocked:
 ///    Some(reason)` and `lagging_subjects > 0`.
@@ -5817,17 +5815,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     assert_eq!(example_query.len(), 1);
     assert_eq!(example_query[0].name, "new-sink");
 
-    // Part B — advanced filters and ordering.
-    let by_name = node
-        .api
-        .get_sinks(SinksQuery {
-            name: Some("new-sink".to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(by_name.len(), 1);
-    assert_eq!(by_name[0].name, "new-sink");
+    // Part B — single-resource fetch, advanced filters and ordering.
+    let by_name = node.api.get_sink("new-sink".to_owned()).await.unwrap();
+    assert_eq!(by_name.name, "new-sink");
 
     let by_gov = node
         .api
@@ -5869,18 +5859,16 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     assert_eq!(combined.len(), 1);
     assert_eq!(combined[0].name, "new-sink");
 
-    // Filter that matches nothing -> empty result.
-    let empty = node
+    // Unknown sink name -> SinkNotFound.
+    let err = node
         .api
-        .get_sinks(SinksQuery {
-            name: Some("no-such-sink".to_owned()),
-            ..Default::default()
-        })
+        .get_sink("no-such-sink".to_owned())
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(
-        empty.is_empty(),
-        "query with no matches should return empty list"
+        matches!(err, Error::SinkNotFound(_)),
+        "expected SinkNotFound, got {:?}",
+        err
     );
 
     let all_sinks = node.api.get_sinks(SinksQuery::default()).await.unwrap();
@@ -6113,17 +6101,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 
     wait_for_sink_lagging_subjects(&node.api, "new-sink", 1).await;
 
-    let blocked_info = node
-        .api
-        .get_sinks(SinksQuery {
-            name: Some("new-sink".to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(blocked_info.len(), 1);
+    let blocked_info = node.api.get_sink("new-sink".to_owned()).await.unwrap();
     assert!(
-        blocked_info[0].blocked.is_some(),
+        blocked_info.blocked.is_some(),
         "new-sink should be reported as blocked"
     );
 

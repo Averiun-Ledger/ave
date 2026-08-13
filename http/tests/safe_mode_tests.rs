@@ -20,21 +20,21 @@ const MEMBER_PUBLIC_KEY: &str = "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
 fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
     matches!(
         (method, path),
-        ("get", "/request")
-            | ("get", "/request/{request_id}")
+        ("get", "/requests")
+            | ("get", "/requests/{request_id}")
             | ("get", _)
-            | ("post", "/request")
-            | ("post", "/request-abort/{subject_id}")
-            | ("post", "/update/{subject_id}")
-            | ("post", "/manual-distribution/{subject_id}")
+            | ("post", "/requests")
+            | ("post", "/subjects/{subject_id}/abort-request")
+            | ("post", "/subjects/{subject_id}/update")
+            | ("post", "/subjects/{subject_id}/manual-distribution")
             | ("put", "/governances/{subject_id}/authorize")
             | ("delete", "/governances/{subject_id}/authorize")
             | ("put", "/trackers/{subject_id}/ban")
-            | ("put", "/trackers/{subject_id}/unban")
+            | ("delete", "/trackers/{subject_id}/ban")
             | ("put", "/subjects/{subject_id}/sync-peers")
-            | ("delete", "/subjects/{subject_id}/sync-peers")
+            | ("delete", "/subjects/{subject_id}/sync-peers/{peer}")
             | ("delete", "/maintenance/subjects/{subject_id}")
-            | ("patch", "/approval/{subject_id}")
+            | ("patch", "/approvals/{subject_id}")
             | ("post", "/sinks/replay")
             | ("post", "/sinks/{sink_name}/unblock")
             | ("post", "/sinks/{sink_name}/test")
@@ -66,7 +66,6 @@ struct AuthFixture {
     user_id: i64,
     role_id: i64,
     api_key_id: String,
-    api_key_name: String,
     usage_plan_id: String,
 }
 
@@ -145,7 +144,7 @@ async fn accept_approval(
     for _ in 0..120 {
         let (status, body) = make_request(
             client,
-            &server.url(&format!("/approval/{subject_id}")),
+            &server.url(&format!("/approvals/{subject_id}")),
             "GET",
             None,
             None,
@@ -155,7 +154,7 @@ async fn accept_approval(
         if status == StatusCode::OK && !body.is_null() {
             let (status, body) = make_request(
                 client,
-                &server.url(&format!("/approval/{subject_id}")),
+                &server.url(&format!("/approvals/{subject_id}")),
                 "PATCH",
                 None,
                 Some(json!("accepted")),
@@ -400,7 +399,6 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let api_key_id = body["key_info"]["id"].as_str()?.to_string();
-    let api_key_name = body["key_info"]["name"].as_str()?.to_string();
 
     let (status, _) = make_request(
         &client,
@@ -461,7 +459,6 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
             user_id,
             role_id,
             api_key_id,
-            api_key_name,
             usage_plan_id: usage_plan_id.to_string(),
         },
     })
@@ -477,12 +474,15 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
 
     let query_paths = [
         "/config".to_string(),
-        format!("/events/{}", fixture.governance_id),
-        format!("/events/{}", fixture.tracker_id),
-        format!("/events/{}/0", fixture.governance_id),
-        format!("/events/{}/0", fixture.tracker_id),
-        format!("/aborts/{}", fixture.governance_id),
-        format!("/events-first-last/{}?quantity=1", fixture.governance_id),
+        format!("/subjects/{}/events", fixture.governance_id),
+        format!("/subjects/{}/events", fixture.tracker_id),
+        format!("/subjects/{}/events/0", fixture.governance_id),
+        format!("/subjects/{}/events/0", fixture.tracker_id),
+        format!("/subjects/{}/aborts", fixture.governance_id),
+        format!(
+            "/subjects/{}/events-first-last?quantity=1",
+            fixture.governance_id
+        ),
     ];
 
     for path in query_paths {
@@ -587,7 +587,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     assert_eq!(witnesses, vec![json!(MEMBER_PUBLIC_KEY)]);
 
     let (status, body) =
-        make_request(&client, &env.server.url("/subjects"), "GET", None, None)
+        make_request(&client, &env.server.url("/governances"), "GET", None, None)
             .await;
     assert_eq!(status, StatusCode::OK);
     let govs = body.as_array().cloned().unwrap_or_default();
@@ -599,7 +599,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let (status, body) = make_request(
         &client,
         &env.server
-            .url(&format!("/subjects/{}", fixture.governance_id)),
+            .url(&format!("/governances/{}/subjects", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -614,7 +614,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let (status, body) = make_request(
         &client,
         &env.server.url(&format!(
-            "/subjects/{}?schema_id=Example1",
+            "/governances/{}/subjects?schema_id=Example1",
             fixture.governance_id
         )),
         "GET",
@@ -630,7 +630,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let (status, body) = make_request(
         &client,
         &env.server
-            .url(&format!("/approval/{}", fixture.governance_id)),
+            .url(&format!("/approvals/{}", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -641,7 +641,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     assert_eq!(body["request"]["subject_id"], json!(fixture.governance_id));
 
     let (status, body) =
-        make_request(&client, &env.server.url("/approval"), "GET", None, None)
+        make_request(&client, &env.server.url("/approvals"), "GET", None, None)
             .await;
     assert_eq!(status, StatusCode::OK);
     let approvals = body.as_array().cloned().unwrap_or_default();
@@ -650,7 +650,8 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
 
     let (status, body) = make_request(
         &client,
-        &env.server.url(&format!("/state/{}", fixture.governance_id)),
+        &env.server
+            .url(&format!("/subjects/{}/state", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -662,7 +663,8 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
 
     let (status, body) = make_request(
         &client,
-        &env.server.url(&format!("/state/{}", fixture.tracker_id)),
+        &env.server
+            .url(&format!("/subjects/{}/state", fixture.tracker_id)),
         "GET",
         None,
         None,
@@ -675,7 +677,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let (status, body) = make_request(
         &client,
         &env.server
-            .url(&format!("/sink-events/{}", fixture.governance_id)),
+            .url(&format!("/subjects/{}/sink-events", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -687,7 +689,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let (status, body) = make_request(
         &client,
         &env.server
-            .url(&format!("/sink-events/{}", fixture.tracker_id)),
+            .url(&format!("/subjects/{}/sink-events", fixture.tracker_id)),
         "GET",
         None,
         None,
@@ -711,7 +713,8 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
 
     let (status, body) = make_request(
         &client,
-        &env.server.url(&format!("/state/{}", fixture.tracker_id)),
+        &env.server
+            .url(&format!("/subjects/{}/state", fixture.tracker_id)),
         "GET",
         None,
         None,
@@ -722,7 +725,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let (status, body) = make_request(
         &client,
         &env.server
-            .url(&format!("/subjects/{}", fixture.governance_id)),
+            .url(&format!("/governances/{}/subjects", fixture.governance_id)),
         "GET",
         None,
         None,
@@ -784,7 +787,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     assert_eq!(body["node"]["network"]["node_type"], json!("Addressable"));
 
     let (status, body) =
-        make_request(&client, &env.server.url("/request"), "GET", None, None)
+        make_request(&client, &env.server.url("/requests"), "GET", None, None)
             .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(
@@ -796,7 +799,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
 
     let (status, body) = make_request(
         &client,
-        &env.server.url(&format!("/request/{}", fixture.request_id)),
+        &env.server.url(&format!("/requests/{}", fixture.request_id)),
         "GET",
         None,
         None,
@@ -822,7 +825,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "POST",
-        "/request",
+        "/requests",
         Some(json!({
             "request": {
                 "event": "create",
@@ -840,7 +843,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "PATCH",
-        &format!("/approval/{}", fixture.governance_id),
+        &format!("/approvals/{}", fixture.governance_id),
         Some(json!("accepted")),
     )
     .await;
@@ -849,7 +852,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "POST",
-        &format!("/request-abort/{}", fixture.governance_id),
+        &format!("/subjects/{}/abort-request", fixture.governance_id),
         None,
     )
     .await;
@@ -876,7 +879,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "POST",
-        &format!("/update/{}", fixture.governance_id),
+        &format!("/subjects/{}/update", fixture.governance_id),
         None,
     )
     .await;
@@ -885,7 +888,10 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "POST",
-        &format!("/manual-distribution/{}", fixture.governance_id),
+        &format!(
+            "/subjects/{}/manual-distribution",
+            fixture.governance_id
+        ),
         None,
     )
     .await;
@@ -1077,8 +1083,8 @@ async fn safe_mode_auth_api_with_auth_keeps_reads_and_blocks_mutations() {
         (
             Some(api_key),
             "DELETE",
-            format!("/admin/api-keys/{}", fixture.api_key_id),
-            Some(json!({"reason": "blocked"})),
+            format!("/admin/api-keys/{}?reason=blocked", fixture.api_key_id),
+            None,
         ),
         (
             Some(api_key),
@@ -1145,7 +1151,7 @@ async fn safe_mode_auth_api_with_auth_keeps_reads_and_blocks_mutations() {
         (
             Some(api_key),
             "DELETE",
-            format!("/me/api-keys/{}", fixture.api_key_name),
+            format!("/me/api-keys/{}", fixture.api_key_id),
             None,
         ),
     ];

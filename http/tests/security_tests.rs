@@ -25,9 +25,10 @@ use ave_http::auth::{
         UpdateUserRequest, User,
     },
 };
+use ave_http::extract::{ApiJson, ApiPath, ApiQuery};
 use axum::{
     Extension, Json,
-    extract::{FromRequestParts, Path, Query},
+    extract::FromRequestParts,
     http::StatusCode,
 };
 use std::collections::BTreeSet;
@@ -653,8 +654,8 @@ async fn non_superadmin_cannot_modify_permissions_of_admin_via_role_inheritance(
     let result = set_user_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(target.id),
-        Json(Permission {
+        ApiPath(target.id),
+        ApiJson(Permission {
             resource: "admin_system".to_string(),
             action: "all".to_string(),
             allowed: true,
@@ -724,8 +725,8 @@ async fn non_superadmin_cannot_remove_permissions_of_admin_via_role_inheritance(
     let result = remove_user_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(target.id),
-        Query(RemovePermissionQuery {
+        ApiPath(target.id),
+        ApiQuery(RemovePermissionQuery {
             resource: "node_subject".to_string(),
             action: "get".to_string(),
         }),
@@ -799,8 +800,8 @@ async fn non_superadmin_cannot_grant_permission_they_do_not_have() {
     let result = set_user_permission(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(Permission {
+        ApiPath(target.id),
+        ApiJson(Permission {
             resource: "node_sink".to_string(),
             action: "all".to_string(),
             allowed: true,
@@ -836,8 +837,8 @@ async fn non_superadmin_can_grant_permission_they_have() {
     let result = set_user_permission(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(Permission {
+        ApiPath(target.id),
+        ApiJson(Permission {
             resource: "node_subject".to_string(),
             action: "get".to_string(),
             allowed: true,
@@ -888,8 +889,8 @@ async fn non_superadmin_cannot_remove_permission_they_do_not_have() {
     let result = remove_user_permission(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Query(RemovePermissionQuery {
+        ApiPath(target.id),
+        ApiQuery(RemovePermissionQuery {
             resource: "node_subject".to_string(),
             action: "get".to_string(),
         }),
@@ -920,8 +921,8 @@ async fn non_superadmin_cannot_reset_password_of_admin() {
     let result = reset_user_password(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(ResetPasswordRequest {
+        ApiPath(target.id),
+        ApiJson(ResetPasswordRequest {
             password: "NewPass123!".to_string(),
         }),
     )
@@ -942,7 +943,7 @@ async fn non_superadmin_cannot_delete_admin() {
     let result = delete_user(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
+        ApiPath(target.id),
     )
     .await;
 
@@ -966,8 +967,8 @@ async fn non_superadmin_cannot_update_admin_account() {
     let result = update_user(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(UpdateUserRequest {
+        ApiPath(target.id),
+        ApiJson(UpdateUserRequest {
             password: None,
             is_active: Some(false),
             role_ids: None,
@@ -980,8 +981,8 @@ async fn non_superadmin_cannot_update_admin_account() {
     let result = update_user(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(UpdateUserRequest {
+        ApiPath(target.id),
+        ApiJson(UpdateUserRequest {
             password: Some("NewPass123!".to_string()),
             is_active: None,
             role_ids: None,
@@ -1008,8 +1009,8 @@ async fn non_superadmin_can_manage_regular_users() {
     let result = reset_user_password(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(ResetPasswordRequest {
+        ApiPath(target.id),
+        ApiJson(ResetPasswordRequest {
             password: "NewPass123!".to_string(),
         }),
     )
@@ -1019,8 +1020,8 @@ async fn non_superadmin_can_manage_regular_users() {
     let result = update_user(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
-        Json(UpdateUserRequest {
+        ApiPath(target.id),
+        ApiJson(UpdateUserRequest {
             password: None,
             is_active: Some(true),
             role_ids: None,
@@ -1035,7 +1036,7 @@ async fn non_superadmin_can_manage_regular_users() {
     let result = delete_user(
         AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
         Extension(db.clone()),
-        Path(target.id),
+        ApiPath(target.id),
     )
     .await;
     assert!(matches!(result, Ok(StatusCode::NO_CONTENT)));
@@ -2341,8 +2342,8 @@ async fn test_cannot_escalate_privileges_via_role_permission_modification() {
     let result = set_role_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(role_manager_role.id),
-        Json(SetPermissionRequest {
+        ApiPath(role_manager_role.id),
+        ApiJson(SetPermissionRequest {
             resource: "admin_users".to_string(),
             action: "all".to_string(),
             allowed: true,
@@ -2402,8 +2403,8 @@ async fn test_cannot_remove_role_permission_denials() {
     let result = remove_role_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(limited_admin_role.id),
-        Query(RemovePermissionQuery {
+        ApiPath(limited_admin_role.id),
+        ApiQuery(RemovePermissionQuery {
             resource: "admin_system".to_string(),
             action: "all".to_string(),
         }),
@@ -2702,8 +2703,8 @@ async fn test_cannot_change_superadmin_password_via_update() {
     let result = update_user(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(superadmin.id),
-        Json(UpdateUserRequest {
+        ApiPath(superadmin.id),
+        ApiJson(UpdateUserRequest {
             password: Some("HackedPass123!".to_string()),
             is_active: None,
             role_ids: None,
@@ -3214,7 +3215,7 @@ async fn test_admin_cannot_assign_role_to_other_admin() {
     let result = assign_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((admin_target.id, editor_role.id)),
+        ApiPath((admin_target.id, editor_role.id)),
     )
     .await;
 
@@ -3285,7 +3286,7 @@ async fn test_admin_cannot_remove_role_from_other_admin() {
     let result = remove_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((admin_target.id, system_admin_role.id)),
+        ApiPath((admin_target.id, system_admin_role.id)),
     )
     .await;
 
@@ -3354,7 +3355,7 @@ async fn test_admin_can_assign_role_to_regular_user() {
     let result = assign_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((regular_user.id, viewer_role.id)),
+        ApiPath((regular_user.id, viewer_role.id)),
     )
     .await;
 
@@ -3411,7 +3412,7 @@ async fn test_superadmin_can_assign_role_to_admin() {
     let result = assign_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((other_admin.id, admin_role.id)),
+        ApiPath((other_admin.id, admin_role.id)),
     )
     .await;
 
@@ -3479,7 +3480,7 @@ async fn test_permission_source_field_distinguishes_direct_and_role_permissions(
     let result = get_user_permissions(
         AuthContextExtractor(auth_ctx),
         Extension(Arc::new(db.clone())),
-        Path(user.id),
+        ApiPath(user.id),
     )
     .await;
 
@@ -3592,7 +3593,7 @@ async fn test_direct_permission_overrides_role_permission() {
     let result = get_user_permissions(
         AuthContextExtractor(auth_ctx),
         Extension(Arc::new(db.clone())),
-        Path(user.id),
+        ApiPath(user.id),
     )
     .await;
 
@@ -3734,7 +3735,7 @@ async fn test_service_key_cannot_manage_api_keys() {
     use ave_http::auth::apikey_handlers::{
         create_my_api_key, revoke_my_api_key,
     };
-    use ave_http::auth::models::CreateApiKeyRequest;
+    use ave_http::auth::models::{CreateApiKeyRequest, RevokeApiKeyQuery};
 
     let (db, _dirs) = common::create_test_db();
 
@@ -3779,7 +3780,7 @@ async fn test_service_key_cannot_manage_api_keys() {
     let result = create_my_api_key(
         AuthContextExtractor(management_ctx.clone()),
         Extension(Arc::new(db.clone())),
-        Json(create_req),
+        ApiJson(create_req),
     )
     .await;
 
@@ -3818,7 +3819,7 @@ async fn test_service_key_cannot_manage_api_keys() {
     let result = create_my_api_key(
         AuthContextExtractor(service_ctx.clone()),
         Extension(Arc::new(db.clone())),
-        Json(create_req2),
+        ApiJson(create_req2),
     )
     .await;
 
@@ -3838,8 +3839,8 @@ async fn test_service_key_cannot_manage_api_keys() {
     let result = revoke_my_api_key(
         AuthContextExtractor(service_ctx),
         Extension(Arc::new(db.clone())),
-        Path(service_info.name.clone()),
-        None,
+        ApiPath(service_info.name.clone()),
+        ApiQuery(RevokeApiKeyQuery { reason: None }),
     )
     .await;
 

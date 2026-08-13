@@ -10,9 +10,9 @@ use reqwest::StatusCode;
 use serde_json::json;
 
 use crate::common::{
-    TestApp, login_app, make_app_request, materialize_role_test_path,
-    role_test_request_body, server_auth_route_catalog,
-    server_public_auth_route_catalog,
+    TestApp, login_app, make_app_raw_body_request, make_app_request,
+    materialize_role_test_path, role_test_request_body,
+    server_auth_route_catalog, server_public_auth_route_catalog,
 };
 use test_log::test;
 
@@ -644,14 +644,27 @@ async fn test_revoke_api_key() {
     // Revoke key
     let (status, _) = make_app_request(
         &app,
-        &format!("/admin/api-keys/{}", id),
+        &format!("/admin/api-keys/{}?reason=Test%20revocation", id),
         "DELETE",
         Some(&api_key),
-        Some(json!({"reason": "Test revocation"})),
+        None,
     )
     .await;
 
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The reason travels in the query string and must be persisted
+    let (status, body) = make_app_request(
+        &app,
+        &format!("/admin/api-keys/{}", id),
+        "GET",
+        Some(&api_key),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "get revoked key: {body}");
+    assert_eq!(body["revoked"], true);
+    assert_eq!(body["revoked_reason"], "Test revocation");
 }
 
 #[test(tokio::test)]
@@ -1183,15 +1196,14 @@ async fn test_revoke_currently_used_key_returns_400() {
         .expect("management key in list")
         .clone();
     let key_id = management["id"].as_str().unwrap();
-    let key_name = management["name"].as_str().unwrap();
 
     // Admin route: revoking the key in use is a 400, not a 204
     let (status, body) = make_app_request(
         &app,
-        &format!("/admin/api-keys/{key_id}"),
+        &format!("/admin/api-keys/{key_id}?reason=self%20revocation"),
         "DELETE",
         Some(&mgmt_key),
-        Some(json!({"reason": "self revocation"})),
+        None,
     )
     .await;
     assert_eq!(
@@ -1203,10 +1215,10 @@ async fn test_revoke_currently_used_key_returns_400() {
     // Self-service route: the management key cannot be revoked either
     let (status, body) = make_app_request(
         &app,
-        &format!("/me/api-keys/{key_name}"),
+        &format!("/me/api-keys/{key_id}?reason=self%20revocation"),
         "DELETE",
         Some(&mgmt_key),
-        Some(json!({"reason": "self revocation"})),
+        None,
     )
     .await;
     assert_eq!(
@@ -1219,4 +1231,105 @@ async fn test_revoke_currently_used_key_returns_400() {
     let (status, body) =
         make_app_request(&app, "/me", "GET", Some(&mgmt_key), None).await;
     assert_eq!(status, StatusCode::OK, "key must stay active: {body}");
+}
+
+// =============================================================================
+// ERROR SHAPE NORMALIZATION
+// =============================================================================
+
+/// Every error response of the API — including framework-level rejections —
+/// must carry the canonical `{"error": "…"}` body with a standards-based
+/// status code.
+///
+/// **Sequence:**
+/// 1. Unknown route -> 404.
+/// 2. Known path with a method missing from the catalog -> 403 (auth and
+///    permission checks run before method negotiation).
+/// 3. Invalid query parameter -> 400.
+/// 4. Malformed JSON body -> 400.
+/// 5. Wrong `Content-Type` -> 415.
+/// 6. Well-formed JSON that does not match the schema -> 422.
+/// 7. Body larger than 2 MiB -> 413.
+#[test(tokio::test)]
+async fn test_http_error_responses_have_canonical_shape() {
+    let (app, _dir) = TestApp::build(true, true, None).await;
+    let admin_key = login_app(&app, "admin", "AdminPass123!")
+        .await
+        .expect("admin login");
+
+    let cases: [(&str, &str, Option<(&str, Vec<u8>)>, StatusCode); 7] = [
+        // Unknown route.
+        ("/no-such-route", "GET", None, StatusCode::NOT_FOUND),
+        // Known path, method not in the catalog: the permission layer denies
+        // before method negotiation.
+        (
+            "/sinks/example-sink",
+            "DELETE",
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        // Invalid query parameter.
+        (
+            "/sinks?in_config=notabool",
+            "GET",
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+        // Malformed JSON body.
+        (
+            "/requests",
+            "POST",
+            Some(("application/json", b"{".to_vec())),
+            StatusCode::BAD_REQUEST,
+        ),
+        // Wrong content type.
+        (
+            "/requests",
+            "POST",
+            Some(("text/plain", b"{}".to_vec())),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        // Well-formed JSON that does not match the expected schema.
+        (
+            "/requests",
+            "POST",
+            Some(("application/json", b"{\"unexpected\": true}".to_vec())),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        // Body larger than the 2 MiB limit.
+        (
+            "/requests",
+            "POST",
+            Some(("application/json", vec![b'x'; 3 * 1024 * 1024])),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ];
+
+    for (path, method, raw, expected) in cases {
+        let (status, body) = match raw {
+            Some((content_type, raw_body)) => {
+                make_app_raw_body_request(
+                    &app,
+                    path,
+                    method,
+                    Some(&admin_key),
+                    content_type,
+                    raw_body,
+                )
+                .await
+            }
+            None => {
+                make_app_request(&app, path, method, Some(&admin_key), None)
+                    .await
+            }
+        };
+        assert_eq!(
+            status, expected,
+            "{method} {path} must return {expected}"
+        );
+        assert!(
+            body["error"].is_string(),
+            "{method} {path} must return the canonical error body, got: {body}"
+        );
+    }
 }

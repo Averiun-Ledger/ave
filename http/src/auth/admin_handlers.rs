@@ -8,11 +8,8 @@ use super::http_api::{
 };
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{
-    Extension, Json,
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use crate::extract::{ApiJson, ApiPath, ApiQuery};
+use axum::{Extension, Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
@@ -160,7 +157,7 @@ fn is_admin_account(
 pub async fn create_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Json(req): Json<CreateUserRequest>,
+    ApiJson(req): ApiJson<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserInfo>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "post")?;
@@ -247,7 +244,7 @@ pub async fn create_user(
 pub async fn list_users(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(params): Query<ListUsersQuery>,
+    ApiQuery(params): ApiQuery<ListUsersQuery>,
 ) -> Result<Json<Vec<UserInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "get")?;
@@ -301,7 +298,7 @@ pub struct ListUsersQuery {
 pub async fn get_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
+    ApiPath(user_id): ApiPath<i64>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "get")?;
@@ -347,8 +344,8 @@ pub async fn get_user(
 pub async fn update_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<UpdateUserRequest>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<UpdateUserRequest>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "put")?;
@@ -477,8 +474,8 @@ pub struct ResetPasswordRequest {
 pub async fn reset_user_password(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<ResetPasswordRequest>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<ResetPasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "post")?;
     run_db(&db, "admin_reset_user_password", move |db| {
@@ -538,7 +535,7 @@ pub async fn reset_user_password(
 pub async fn delete_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
+    ApiPath(user_id): ApiPath<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "delete")?;
@@ -609,7 +606,7 @@ pub async fn delete_user(
 pub async fn assign_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path((user_id, role_id)): Path<(i64, i64)>,
+    ApiPath((user_id, role_id)): ApiPath<(i64, i64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
@@ -679,7 +676,7 @@ pub async fn assign_role(
 pub async fn remove_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path((user_id, role_id)): Path<(i64, i64)>,
+    ApiPath((user_id, role_id)): ApiPath<(i64, i64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
@@ -751,7 +748,7 @@ pub async fn remove_role(
 pub async fn create_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Json(req): Json<CreateRoleRequest>,
+    ApiJson(req): ApiJson<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<Role>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "post")?;
@@ -826,7 +823,7 @@ pub async fn list_roles(
 pub async fn get_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
+    ApiPath(role_id): ApiPath<i64>,
 ) -> Result<Json<Role>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "get")?;
@@ -858,8 +855,8 @@ pub async fn get_role(
 pub async fn update_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
-    Json(req): Json<UpdateRoleRequest>,
+    ApiPath(role_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<UpdateRoleRequest>,
 ) -> Result<Json<Role>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "put")?;
@@ -909,7 +906,7 @@ pub async fn update_role(
 pub async fn delete_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
+    ApiPath(role_id): ApiPath<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "delete")?;
@@ -956,7 +953,7 @@ pub async fn delete_role(
 pub async fn get_role_permissions(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
+    ApiPath(role_id): ApiPath<i64>,
 ) -> Result<Json<Vec<Permission>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "get")?;
@@ -989,8 +986,8 @@ pub async fn get_role_permissions(
 pub async fn set_role_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
-    Json(req): Json<SetPermissionRequest>,
+    ApiPath(role_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<SetPermissionRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;
@@ -1061,7 +1058,7 @@ pub async fn set_role_permission(
 pub async fn get_user_permissions(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
+    ApiPath(user_id): ApiPath<i64>,
 ) -> Result<Json<Vec<Permission>>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "get")?;
     let permissions = run_db(&db, "admin_get_user_permissions", move |db| {
@@ -1093,8 +1090,8 @@ pub async fn get_user_permissions(
 pub async fn set_user_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<Permission>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<Permission>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
@@ -1184,8 +1181,8 @@ pub async fn set_user_permission(
 pub async fn remove_user_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Query(params): Query<RemovePermissionQuery>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiQuery(params): ApiQuery<RemovePermissionQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
@@ -1272,8 +1269,8 @@ pub async fn remove_user_permission(
 pub async fn remove_role_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
-    Query(params): Query<RemovePermissionQuery>,
+    ApiPath(role_id): ApiPath<i64>,
+    ApiQuery(params): ApiQuery<RemovePermissionQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;

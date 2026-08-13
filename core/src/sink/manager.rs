@@ -134,13 +134,26 @@ pub enum SinkManagerMessage {
 
 impl Message for SinkManagerMessage {}
 
+/// Failure of a non-persistent sink test ([`SinkManagerMessage::TestSink`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SinkTestError {
+    /// The sink is registered but has no server configuration (e.g. a
+    /// residual sink whose config entry was removed).
+    NotConfigured,
+    /// Node-side failure while preparing the test (signer, transport
+    /// construction).
+    Internal(String),
+    /// The test delivery itself failed (health check or payload).
+    Delivery(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SinkManagerResponse {
     Ok,
     Status(Vec<SinkStatus>),
     DetailedStatus(SinkManagerDetailedStatus),
     ReplayResult(SinkReplayResponse),
-    TestResult(Result<(), String>),
+    TestResult(Result<(), SinkTestError>),
 }
 
 impl Response for SinkManagerResponse {}
@@ -2130,11 +2143,11 @@ impl SinkManager {
         &self,
         sink_name: &str,
         ctx: &ActorContext<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SinkTestError> {
         let server = match self.sink_servers.get(sink_name) {
             Some(server) => server.clone(),
             None => {
-                return Err(format!("sink '{}' is not configured", sink_name));
+                return Err(SinkTestError::NotConfigured);
             }
         };
 
@@ -2147,10 +2160,10 @@ impl SinkManager {
                 {
                     Ok(node) => Some(NodeSigner::new(node)),
                     Err(e) => {
-                        return Err(format!(
+                        return Err(SinkTestError::Internal(format!(
                             "failed to get node actor for sink test: {}",
                             e
-                        ));
+                        )));
                     }
                 }
             }
@@ -2162,10 +2175,10 @@ impl SinkManager {
                 {
                     Ok(node) => Some(NodeSigner::new(node)),
                     Err(e) => {
-                        return Err(format!(
+                        return Err(SinkTestError::Internal(format!(
                             "failed to get node actor for sink test: {}",
                             e
-                        ));
+                        )));
                     }
                 }
             }
@@ -2177,10 +2190,10 @@ impl SinkManager {
                 {
                     Ok(node) => Some(NodeSigner::new(node)),
                     Err(e) => {
-                        return Err(format!(
+                        return Err(SinkTestError::Internal(format!(
                             "failed to get node actor for sink test: {}",
                             e
-                        ));
+                        )));
                     }
                 }
             }
@@ -2193,7 +2206,12 @@ impl SinkManager {
             Some(self.node_public_key.as_str()),
         )
         .await
-        .map_err(|e| format!("failed to build sink transport: {}", e))?;
+        .map_err(|e| {
+            SinkTestError::Internal(format!(
+                "failed to build sink transport: {}",
+                e
+            ))
+        })?;
 
         transport.test().await.map_err(|e| {
             warn!(
@@ -2202,7 +2220,7 @@ impl SinkManager {
                 error = %e,
                 "Sink test delivery failed"
             );
-            format!("sink test failed: {}", e)
+            SinkTestError::Delivery(format!("sink test failed: {}", e))
         })
     }
 

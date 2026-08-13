@@ -157,6 +157,10 @@ pub enum Error {
     #[error("Sink '{0}' not found")]
     SinkNotFound(String),
 
+    /// Sink is registered but has no server configuration.
+    #[error("Sink '{0}' is registered but not configured")]
+    SinkNotConfigured(String),
+
     /// Non-persistent sink test delivery failed.
     #[error("Sink test failed: {0}")]
     SinkTestFailed(String),

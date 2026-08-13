@@ -46,7 +46,9 @@ use ave_common::response::{
 };
 use ave_common::{
     bridge::request::SinksQuery,
-    bridge::response::{SinkInfo, SinkManagerTarget, SinkStatusInfo},
+    bridge::response::{
+        SinkInfo, SinkManagerTarget, SinkServerView, SinkStatusInfo,
+    },
     sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
 use ave_network::{
@@ -1351,7 +1353,10 @@ impl Api {
                     .map(|st| st.lagging_subjects)
                     .unwrap_or_default(),
                 last_error: sink_status.and_then(|st| st.last_error.clone()),
-                server,
+                transport: server
+                    .as_ref()
+                    .map(|s| s.transport.kind().to_string()),
+                server: server.map(SinkServerView::from),
             });
         }
 
@@ -1376,6 +1381,7 @@ impl Api {
                         blocked: sink_status.blocked.clone(),
                         lagging_subjects: sink_status.lagging_subjects,
                         last_error: sink_status.last_error.clone(),
+                        transport: None,
                         server: None,
                     });
                 }
@@ -1390,6 +1396,19 @@ impl Api {
         });
 
         Ok(infos)
+    }
+
+    /// Returns the full view of a single sink, located by its unique name.
+    ///
+    /// Covers both registered sinks and residual ones reported by a manager
+    /// but missing from the registry, exactly like [`Self::get_sinks`].
+    pub async fn get_sink(&self, sink_name: String) -> Result<SinkInfo, Error> {
+        require_non_empty_str("sink_name", &sink_name)?;
+        self.get_sinks(SinksQuery::default())
+            .await?
+            .into_iter()
+            .find(|info| info.name == sink_name)
+            .ok_or(Error::SinkNotFound(sink_name))
     }
 
     pub async fn get_sinks_status(&self) -> Result<Vec<SinkStatusInfo>, Error> {
@@ -1407,10 +1426,7 @@ impl Api {
                     blocked: info.blocked,
                     lagging_subjects: info.lagging_subjects,
                     last_error: info.last_error,
-                    transport: info
-                        .server
-                        .as_ref()
-                        .map(|server| server.transport.kind().to_string()),
+                    transport: info.transport,
                 })
                 .collect()
         })
@@ -1787,7 +1803,19 @@ impl Api {
         {
             Ok(crate::sink::manager::SinkManagerResponse::TestResult(
                 result,
-            )) => result.map_err(Error::SinkTestFailed),
+            )) => result.map_err(|e| match e {
+                crate::sink::manager::SinkTestError::NotConfigured => {
+                    Error::SinkNotConfigured(sink_name.clone())
+                }
+                crate::sink::manager::SinkTestError::Internal(reason) => {
+                    Error::Internal(format!(
+                        "sink '{sink_name}' test: {reason}"
+                    ))
+                }
+                crate::sink::manager::SinkTestError::Delivery(reason) => {
+                    Error::SinkTestFailed(reason)
+                }
+            }),
             Ok(other) => {
                 warn!(
                     sink = %sink_name,
@@ -2217,11 +2245,6 @@ fn find_sink_config(
 }
 
 fn sink_info_matches_query(info: &SinkInfo, query: &SinksQuery) -> bool {
-    if let Some(name) = &query.name
-        && info.name != *name
-    {
-        return false;
-    }
     if let Some(target) = &query.target {
         let matches = match info.target.as_ref() {
             Some(SinkTarget::Schema { schema_id, .. }) => {
@@ -2365,38 +2388,6 @@ mod tests {
     }
 
     #[test]
-    fn sink_info_query_filters_by_name() {
-        let info = SinkInfo {
-            name: "foo".to_string(),
-            target: Some(SinkTarget::Schema {
-                schema_id: "governance".to_string(),
-                governance_id: None,
-            }),
-            manager: SinkManagerTarget::Node,
-            in_config: true,
-            running: true,
-            blocked: None,
-            lagging_subjects: 0,
-            last_error: None,
-            server: None,
-        };
-        assert!(sink_info_matches_query(
-            &info,
-            &SinksQuery {
-                name: Some("foo".to_string()),
-                ..Default::default()
-            }
-        ));
-        assert!(!sink_info_matches_query(
-            &info,
-            &SinksQuery {
-                name: Some("bar".to_string()),
-                ..Default::default()
-            }
-        ));
-    }
-
-    #[test]
     fn sink_info_query_filters_by_running_and_in_config() {
         let info = SinkInfo {
             name: "foo".to_string(),
@@ -2410,6 +2401,7 @@ mod tests {
             blocked: Some("boom".to_string()),
             lagging_subjects: 0,
             last_error: None,
+            transport: None,
             server: None,
         };
         assert!(sink_info_matches_query(
@@ -2444,6 +2436,7 @@ mod tests {
             blocked: None,
             lagging_subjects: 0,
             last_error: None,
+            transport: None,
             server: None,
         };
         assert!(sink_info_matches_query(

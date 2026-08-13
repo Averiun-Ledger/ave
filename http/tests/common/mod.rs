@@ -279,12 +279,12 @@ pub fn materialize_role_test_path(method: &str, path: &str) -> String {
     let governance_id = "JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI";
 
     match (method, path) {
-        ("get", "/subjects") => "/subjects?active=true".to_string(),
-        ("get", "/events/{subject_id}") => {
-            format!("/events/{subject_id}?quantity=10&page=1")
+        ("get", "/governances") => "/governances?active=true".to_string(),
+        ("get", "/subjects/{subject_id}/events") => {
+            format!("/subjects/{subject_id}/events?quantity=10&page=1")
         }
-        ("get", "/events-first-last/{subject_id}") => {
-            format!("/events-first-last/{subject_id}?quantity=5")
+        ("get", "/subjects/{subject_id}/events-first-last") => {
+            format!("/subjects/{subject_id}/events-first-last?quantity=5")
         }
         ("get", "/admin/users") => {
             "/admin/users?include_inactive=false".to_string()
@@ -335,19 +335,19 @@ pub fn materialize_role_test_path(method: &str, path: &str) -> String {
             .replace("{role_id}", "2")
             .replace("{key_id}", "999")
             .replace("{plan_id}", "test_plan")
-            .replace("{name}", "test_key")
             .replace("{sink_name}", "test_sink")
+            .replace("{peer}", "ExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI")
             .replace("{key}", "test_key"),
     }
 }
 
 pub fn role_test_request_body(method: &str, path: &str) -> Option<Value> {
     match (method, path) {
-        ("patch", "/approval/{subject_id}") => Some(json!("Accepted")),
+        ("patch", "/approvals/{subject_id}") => Some(json!("Accepted")),
         ("put", "/governances/{subject_id}/authorize") => {
             Some(json!(["ExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI"]))
         }
-        ("post", "/request") => Some(json!({"request": {}, "signature": null})),
+        ("post", "/requests") => Some(json!({"request": {}, "signature": null})),
         ("post", "/login") => {
             Some(json!({"username": "admin", "password": "AdminPass123!"}))
         }
@@ -377,9 +377,6 @@ pub fn role_test_request_body(method: &str, path: &str) -> Option<Value> {
         }
         ("post", "/admin/api-keys/user/{user_id}") => {
             Some(json!({"name": "test_key"}))
-        }
-        ("delete", "/admin/api-keys/{key_id}") => {
-            Some(json!({"reason": "test"}))
         }
         ("post", "/admin/api-keys/{key_id}/rotate") => {
             Some(json!({"name": "rotated_key"}))
@@ -1276,6 +1273,46 @@ pub async fn make_app_request_raw(
     (status, body)
 }
 
+/// Like [`make_app_request`] but with a raw body and an explicit content
+/// type, to exercise malformed-input rejections.
+pub async fn make_app_raw_body_request(
+    app: &TestApp,
+    path: &str,
+    method: &str,
+    api_key: Option<&str>,
+    content_type: &str,
+    raw_body: Vec<u8>,
+) -> (StatusCode, Value) {
+    let method = match method {
+        "GET" => Method::GET,
+        "POST" => Method::POST,
+        "PUT" => Method::PUT,
+        "DELETE" => Method::DELETE,
+        "PATCH" => Method::PATCH,
+        _ => panic!("Unsupported method: {}", method),
+    };
+
+    let mut req = Request::builder().method(method).uri(path);
+
+    if let Some(key) = api_key {
+        req = req.header("X-API-Key", key);
+    }
+    req = req.header("content-type", content_type);
+
+    let mut req = req.body(Body::from(raw_body)).expect("request build");
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 3000))));
+
+    let resp = app.app.clone().oneshot(req).await.expect("request failed");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let json = serde_json::from_slice(&bytes).unwrap_or(json!({}));
+
+    (status, json)
+}
+
 pub async fn login_app(
     app: &TestApp,
     username: &str,
@@ -1312,7 +1349,7 @@ pub async fn create_governance(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1340,7 +1377,7 @@ pub async fn add_example_schema_to_governance(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1407,7 +1444,7 @@ pub async fn create_subject(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1436,7 +1473,7 @@ pub async fn add_governance_member_as_witness(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1479,7 +1516,7 @@ pub async fn add_tracker_fact_mod_one(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1510,7 +1547,7 @@ pub async fn transfer_subject(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1537,7 +1574,7 @@ pub async fn wait_request_finish(
     for _ in 0..60 {
         let (status, body) = make_request(
             client,
-            &server.url(&format!("/request/{request_id}")),
+            &server.url(&format!("/requests/{request_id}")),
             "GET",
             api_key,
             None,

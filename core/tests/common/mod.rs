@@ -573,12 +573,7 @@ pub async fn get_events(
                 subject_id.clone(),
                 EventsQuery {
                     quantity: Some(expected_len.max(1000) as u64),
-                    page: Some(0),
-                    reverse: Some(false),
-                    event_request_ts: None,
-                    event_ledger_ts: None,
-                    sink_ts: None,
-                    event_type: None,
+                    ..Default::default()
                 },
             )
             .await

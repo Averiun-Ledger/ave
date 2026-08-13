@@ -207,7 +207,7 @@ async fn fact_req_schema(
 
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -236,7 +236,7 @@ async fn transfer_req(
 
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -263,7 +263,7 @@ async fn reject_req(
 
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -291,7 +291,7 @@ async fn confirm_req(
 
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -318,7 +318,7 @@ async fn eol_req(
 
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -331,9 +331,9 @@ async fn eol_req(
 
 #[test(tokio::test)]
 async fn test_request_deserialization() {
-    // GET /request/{request-id} -> RequestInfo
-    // GET /request -> Vec<RequestInfo>
-    // POST /request -> RequestData
+    // GET /requests/{request-id} -> RequestInfo
+    // GET /requests -> Vec<RequestInfo>
+    // POST /requests -> RequestData
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
         return;
@@ -347,7 +347,7 @@ async fn test_request_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -368,7 +368,7 @@ async fn test_request_deserialization() {
     assert_eq!(request_info.version, 0);
 
     let (.., body) =
-        make_request(&client, &server.url("/request"), "GET", None, None).await;
+        make_request(&client, &server.url("/requests"), "GET", None, None).await;
 
     let request_info: Vec<RequestInfoExtend> =
         serde_json::from_value(body).unwrap();
@@ -381,9 +381,9 @@ async fn test_request_deserialization() {
 // --- Approval Endpoints ---
 #[test(tokio::test)]
 async fn test_approval_deserialization() {
-    // GET /approval/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
-    // GET /approval?state={ApprovalState} -> Vec<ApprovalEntry>
-    // PATCH /approval/{subject_id} + Json<String> -> String
+    // GET /approvals/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
+    // GET /approvals?state={ApprovalState} -> Vec<ApprovalEntry>
+    // PATCH /approvals/{subject_id} + Json<String> -> String
 
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
@@ -416,7 +416,7 @@ async fn test_approval_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/approval/{}", request_data.subject_id)),
+            &server.url(&format!("/approvals/{}", request_data.subject_id)),
             "GET",
             None,
             None,
@@ -442,7 +442,7 @@ async fn test_approval_deserialization() {
     let (.., body) = make_request(
         &client,
         &server.url(&format!(
-            "/approval/{}?state=accepted",
+            "/approvals/{}?state=accepted",
             request_data.subject_id
         )),
         "GET",
@@ -456,7 +456,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&"/approval".to_string()),
+        &server.url(&"/approvals".to_string()),
         "GET",
         None,
         None,
@@ -472,7 +472,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&"/approval?state=accepted".to_string()),
+        &server.url(&"/approvals?state=accepted".to_string()),
         "GET",
         None,
         None,
@@ -485,7 +485,7 @@ async fn test_approval_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/approval/{}", request_data.subject_id)),
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
         "PATCH",
         None,
         Some(json!("accepted")),
@@ -506,7 +506,7 @@ async fn test_approval_deserialization() {
     let (.., body) = make_request(
         &client,
         &server.url(&format!(
-            "/approval/{}?state=accepted",
+            "/approvals/{}?state=accepted",
             request_data.subject_id
         )),
         "GET",
@@ -524,7 +524,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&"/approval?state=accepted".to_string()),
+        &server.url(&"/approvals?state=accepted".to_string()),
         "GET",
         None,
         None,
@@ -639,11 +639,74 @@ async fn test_subject_access_endpoints_deserialization() {
     );
 }
 
+#[test(tokio::test)]
+async fn test_sync_peers_add_and_remove_by_path() {
+    // PUT two peers, DELETE one via its path parameter, GET must show only
+    // the remaining one.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+    let subject = "BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA";
+    let peer1 = "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
+    let peer2 = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers")),
+        "PUT",
+        None,
+        Some(json!([peer1, peer2])),
+    )
+    .await;
+    assert!(status.is_success(), "add sync peers failed: {body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let peers: HashSet<String> = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        peers,
+        HashSet::from_iter([peer1.to_string(), peer2.clone()])
+    );
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers/{peer1}")),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "remove sync peer failed: {body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let peers: HashSet<String> = serde_json::from_value(body).unwrap();
+    assert_eq!(peers, HashSet::from_iter([peer2]));
+}
+
 // --- Subject Update & Transfer Endpoints ---
 #[test(tokio::test)]
 async fn test_update_and_transfer_deserialization() {
-    // POST /update/{subject_id} -> String
-    // POST /manual-distribution/{subject_id} -> String
+    // POST /subjects/{subject_id}/update -> String
+    // POST /subjects/{subject_id}/manual-distribution -> String
     // GET /pending-transfers -> Vec<TransferSubject>
 
     let Some((server, _dirs)) = TestServer::build(false, true, None).await
@@ -674,7 +737,7 @@ async fn test_update_and_transfer_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/update/{}", request_data.subject_id)),
+        &server.url(&format!("/subjects/{}/update", request_data.subject_id)),
         "POST",
         None,
         None,
@@ -702,7 +765,7 @@ async fn test_update_and_transfer_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -725,7 +788,7 @@ async fn test_update_and_transfer_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -743,7 +806,7 @@ async fn test_update_and_transfer_deserialization() {
     let (status, body) = make_request(
         &client,
         &server
-            .url(&format!("/manual-distribution/{}", request_data.subject_id)),
+            .url(&format!("/subjects/{}/manual-distribution", request_data.subject_id)),
         "POST",
         None,
         None,
@@ -779,8 +842,8 @@ async fn test_update_and_transfer_deserialization() {
 // --- Gov Sub Endpoints ---
 #[test(tokio::test)]
 async fn test_gov_sub_deserialization() {
-    // GET /subjects/{governance_id}?active={bool}&schema={string} -> Vec<SubjsData>
-    // GET /subjects?active={bool} -> Vec<GovsData>
+    // GET /governances/{governance_id}/subjects?active={bool}&schema={string} -> Vec<SubjsData>
+    // GET /governances?active={bool} -> Vec<GovsData>
 
     let Some((server, _dirs)) = TestServer::build(false, true, None).await
     else {
@@ -794,7 +857,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -821,7 +884,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -887,7 +950,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -908,7 +971,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -929,7 +992,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -946,7 +1009,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{governance_id}")),
+        &server.url(&format!("/governances/{governance_id}/subjects")),
         "GET",
         None,
         None,
@@ -994,7 +1057,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{governance_id}?active=false")),
+        &server.url(&format!("/governances/{governance_id}/subjects?active=false")),
         "GET",
         None,
         None,
@@ -1026,7 +1089,9 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{governance_id}?schema_id=Example1")),
+        &server.url(&format!(
+            "/governances/{governance_id}/subjects?schema_id=Example1"
+        )),
         "GET",
         None,
         None,
@@ -1059,7 +1124,7 @@ async fn test_gov_sub_deserialization() {
     let (status, body) = make_request(
         &client,
         &server.url(&format!(
-            "/subjects/{governance_id}?active=false&schema_id=Example2"
+            "/governances/{governance_id}/subjects?active=false&schema_id=Example2"
         )),
         "GET",
         None,
@@ -1081,7 +1146,7 @@ async fn test_gov_sub_deserialization() {
     );
 
     let (status, body) =
-        make_request(&client, &server.url("/subjects"), "GET", None, None)
+        make_request(&client, &server.url("/governances"), "GET", None, None)
             .await;
     assert!(status.is_success());
     let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
@@ -1093,7 +1158,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects?active=false"),
+        &server.url("/governances?active=false"),
         "GET",
         None,
         None,
@@ -1109,7 +1174,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1126,7 +1191,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects?active=true"),
+        &server.url("/governances?active=true"),
         "GET",
         None,
         None,
@@ -1138,7 +1203,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects?active=false"),
+        &server.url("/governances?active=false"),
         "GET",
         None,
         None,
@@ -1156,11 +1221,11 @@ async fn test_gov_sub_deserialization() {
 // --- Event Endpoints ---
 #[test(tokio::test)]
 async fn test_subject_deserialization() {
-    // GET /events/{subject_id}? -> PaginatorEvents
-    // GET /events/{subject_id}/{sn} -> EventInfo
-    // GET /aborts/{subject_id}
-    // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
-    // GET /state/{subject_id} -> SubjectDB
+    // GET /subjects/{subject_id}/events? -> PaginatorEvents
+    // GET /subjects/{subject_id}/events/{sn} -> EventInfo
+    // GET /subjects/{subject_id}/aborts
+    // GET /subjects/{subject_id}/events-first-last?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
+    // GET /subjects/{subject_id}/state -> SubjectDB
 
     let Some((server1, _dirs)) = TestServer::build(false, true, None).await
     else {
@@ -1175,7 +1240,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1251,7 +1316,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1268,7 +1333,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/state/{}", governance_id)),
+        &server1.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1296,7 +1361,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1329,7 +1394,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1346,7 +1411,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1362,7 +1427,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/request/{}", request_data.request_id)),
+            &server2.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1379,7 +1444,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/update/{}", governance_id)),
+        &server1.url(&format!("/subjects/{}/update", governance_id)),
         "POST",
         None,
         None,
@@ -1391,7 +1456,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/state/{}", governance_id)),
+        &server1.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1408,7 +1473,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1425,7 +1490,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1441,7 +1506,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/request/{}", request_data.request_id)),
+            &server2.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1458,7 +1523,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1474,7 +1539,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/request/{}", request_data.request_id)),
+            &server2.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1491,7 +1556,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1505,7 +1570,7 @@ async fn test_subject_deserialization() {
     // events/{subject_id}?quantity={u64}&page={u64}&reverse={bool} -> PaginatorEvents
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}?quantity=1&page=3", governance_id)),
+        &server2.url(&format!("/subjects/{}/events?quantity=1&page=3", governance_id)),
         "GET",
         None,
         None,
@@ -1520,7 +1585,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/events", governance_id)),
         "GET",
         None,
         None,
@@ -1535,7 +1600,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}?reverse=true", governance_id)),
+        &server2.url(&format!("/subjects/{}/events?reverse=true", governance_id)),
         "GET",
         None,
         None,
@@ -1586,7 +1651,7 @@ async fn test_subject_deserialization() {
     // GET /event/{subject_id}?sn={u64} -> EventInfo
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}/2", governance_id)),
+        &server2.url(&format!("/subjects/{}/events/2", governance_id)),
         "GET",
         None,
         None,
@@ -1603,7 +1668,7 @@ async fn test_subject_deserialization() {
     let (status, body) = make_request(
         &client,
         &server2.url(&format!(
-            "/events-first-last/{}?quantity=2&reverse=true",
+            "/subjects/{}/events-first-last?quantity=2&reverse=true",
             governance_id
         )),
         "GET",
@@ -1626,7 +1691,7 @@ async fn test_subject_deserialization() {
     let (status, body) = make_request(
         &client,
         &server2
-            .url(&format!("/events-first-last/{}?quantity=2", governance_id)),
+            .url(&format!("/subjects/{}/events-first-last?quantity=2", governance_id)),
         "GET",
         None,
         None,
@@ -1646,11 +1711,11 @@ async fn test_subject_deserialization() {
     // Test date filters deserialization with a future date that returns no events
     let future_date = "2099-01-01T00:00:00Z";
 
-    // event_request_ts[from] with future date -> no events
+    // event_request_ts_from with future date -> no events
     let (status, ..) = make_request(
         &client,
         &server2.url(&format!(
-            "/events/{}?event_request_ts[from]={}",
+            "/subjects/{}/events?event_request_ts_from={}",
             governance_id, future_date
         )),
         "GET",
@@ -1660,11 +1725,11 @@ async fn test_subject_deserialization() {
     .await;
     assert!(!status.is_success());
 
-    // event_ledger_ts[from] with future date -> no events
+    // event_ledger_ts_from with future date -> no events
     let (status, ..) = make_request(
         &client,
         &server2.url(&format!(
-            "/events/{}?event_ledger_ts[from]={}",
+            "/subjects/{}/events?event_ledger_ts_from={}",
             governance_id, future_date
         )),
         "GET",
@@ -1675,11 +1740,11 @@ async fn test_subject_deserialization() {
 
     assert!(!status.is_success());
 
-    // sink_ts[from] with future date -> no events
+    // sink_ts_from with future date -> no events
     let (status, ..) = make_request(
         &client,
         &server2.url(&format!(
-            "/events/{}?sink_ts[from]={}",
+            "/subjects/{}/events?sink_ts_from={}",
             governance_id, future_date
         )),
         "GET",
@@ -1688,6 +1753,50 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(!status.is_success());
+
+    // event_request_ts_to in the past -> no events
+    let (status, ..) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_request_ts_to=2000-01-01T00:00:00Z",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(!status.is_success());
+
+    // Range covering the events -> all 7 events are returned
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_request_ts_from=2000-01-01T00:00:00Z&event_request_ts_to={}",
+            governance_id, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let paginator: PaginatorEvents = serde_json::from_value(body).unwrap();
+    assert_eq!(paginator.events.len(), 7);
+
+    // Invalid ISO 8601 timestamp -> 400 Bad Request
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_request_ts_from=not-a-date",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "invalid timestamp must be rejected: {body}");
 }
 
 #[test(tokio::test)]
@@ -1792,7 +1901,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
     for _ in 0..60 {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/state/{}", governance_id)),
+            &server2.url(&format!("/subjects/{}/state", governance_id)),
             "GET",
             None,
             None,
@@ -1809,7 +1918,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url("/request"),
+        &server2.url("/requests"),
         "POST",
         None,
         Some(json!({
@@ -1832,7 +1941,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
     for _ in 0..60 {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/sink-events/{}", governance_id)),
+            &server2.url(&format!("/subjects/{}/sink-events", governance_id)),
             "GET",
             None,
             None,
@@ -1931,7 +2040,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(json!({
@@ -1956,7 +2065,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/sink-events/{}", tracker_id)),
+        &server.url(&format!("/subjects/{}/sink-events", tracker_id)),
         "GET",
         None,
         None,

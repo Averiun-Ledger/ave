@@ -11,6 +11,7 @@ use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use super::request_meta;
 use ave_bridge::ProxyConfig;
 use axum::{Extension, Json, extract::ConnectInfo, http::StatusCode};
+use crate::extract::ApiJson;
 use serde::Deserialize;
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
@@ -50,7 +51,7 @@ pub async fn login(
     Extension(proxy): Extension<Arc<ProxyConfig>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<LoginRequest>,
+    ApiJson(req): ApiJson<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
     let request_meta =
         request_meta::extract_request_meta(&headers, addr, &proxy);
@@ -181,7 +182,7 @@ pub async fn change_password(
     Extension(proxy): Extension<Arc<ProxyConfig>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<ChangePasswordRequest>,
+    ApiJson(req): ApiJson<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let request_meta =
         request_meta::extract_request_meta(&headers, addr, &proxy);

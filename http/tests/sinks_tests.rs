@@ -125,7 +125,7 @@ async fn start_server_with_sinks(
 /// **Sequence:**
 /// 1. `GET /sinks` without filters -> 200, both sinks, sorted by manager/name.
 /// 2. Verify `SinkInfo` shape for each sink.
-/// 3. `GET /sinks?name=schema-sink` -> only `schema-sink`.
+/// 3. `GET /sinks/schema-sink` -> 200, single `SinkInfo` object.
 /// 4. `GET /sinks?target=governance` -> only `gov-sink`.
 /// 5. `GET /sinks?target=schema` -> only `schema-sink`.
 /// 6. `GET /sinks?schema_id=Example1` -> only `schema-sink`.
@@ -133,7 +133,9 @@ async fn start_server_with_sinks(
 /// 8. `GET /sinks?in_config=true` -> both sinks.
 /// 9. `GET /sinks?running=true` -> both sinks (they should be running).
 /// 10. `GET /sinks?target=schema&in_config=true&running=true` -> `schema-sink`.
-/// 11. `GET /sinks?name=nonexistent` -> empty array.
+/// 11. `GET /sinks/nonexistent` -> 404.
+/// 12. `GET /sinks?target=unknown` -> 400 (target only admits `governance`
+///     or `schema`).
 ///
 /// **Verifications:**
 /// - All responses return 200.
@@ -173,9 +175,32 @@ async fn test_http_get_sinks_with_filters() {
                 || sink["lagging_subjects"].is_i64()
         );
         assert!(sink["server"].is_object());
+        assert_eq!(sink["transport"], "http");
+        // Sanitized view: delivery contract present, internals absent.
+        let server_view = &sink["server"];
+        assert!(server_view["events"].is_array());
+        assert_eq!(server_view["transport"]["type"], "http");
+        assert!(server_view.get("catch_up_batch_size").is_none());
+        assert!(server_view.get("server").is_none());
+        assert!(server_view["transport"].get("max_retries").is_none());
     }
 
-    assert_filter(&client, &base, "name=schema-sink", &["schema-sink"]).await;
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks/schema-sink"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["name"], "schema-sink");
+    assert!(body["target"].is_object());
+    assert!(body["manager"].is_object());
+    assert_eq!(body["in_config"], true);
+    assert_eq!(body["running"], true);
+    assert_eq!(body["transport"], "http");
+
     assert_filter(&client, &base, "target=governance", &["gov-sink"]).await;
     assert_filter(&client, &base, "target=schema", &["schema-sink"]).await;
     assert_filter(&client, &base, "schema_id=Example1", &["schema-sink"]).await;
@@ -202,7 +227,25 @@ async fn test_http_get_sinks_with_filters() {
         &["schema-sink"],
     )
     .await;
-    assert_filter(&client, &base, "name=nonexistent", &[]).await;
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/nonexistent"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks?target=unknown"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "invalid target must be rejected: {body}");
 }
 
 /// HTTP Test 2: `GET /sinks/status`.
@@ -459,6 +502,116 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
     assert_eq!(status, 503);
 }
 
+/// HTTP Test 4b: `POST /sinks/{sink_name}/test` status codes.
+///
+/// **Objective:** the endpoint distinguishes a failed delivery (502), a
+/// registered-but-unconfigured sink (409) and an unknown sink (404).
+///
+/// **Setup:** two governance sinks: `failing-sink`, whose receiver rejects
+/// deliveries with 422, and `residual-sink`, removed from the configuration
+/// on a restart so it stays registered but unconfigured.
+///
+/// **Sequence:**
+/// 1. `POST /sinks/failing-sink/test` -> 502 (test delivery failed).
+/// 2. Restart without `residual-sink` in config;
+///    `POST /sinks/residual-sink/test` -> 409.
+/// 3. `POST /sinks/missing-sink/test` -> 404.
+#[test(tokio::test)]
+async fn test_http_test_sink_status_codes() {
+    let failing_sink = TestSink::start().await;
+    failing_sink.set_mode(ResponseMode::ClientError).await;
+    let residual_sink = TestSink::start().await;
+
+    let initial_config = format!(
+        r#"
+        {{
+            "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
+            "servers": [{{ "server": "failing-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
+        }},
+        {{
+            "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
+            "servers": [{{ "server": "residual-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
+        }}
+        "#,
+        failing_sink.url(),
+        residual_sink.url()
+    );
+
+    let (server, dirs) = TestServer::build_with_options(TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        sinks_config: Some(initial_config),
+        ..Default::default()
+    })
+    .await
+    .expect("server should build");
+
+    let client = Client::new();
+
+    // Wait until the sink is registered before testing it: the registry is
+    // populated asynchronously after the server starts.
+    wait_for_sink_visible(&client, &server, "failing-sink").await;
+
+    // 1. The receiver rejects the test delivery -> 502 Bad Gateway.
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/failing-sink/test"),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 502);
+
+    server.shutdown().await;
+
+    // Restart without residual-sink in config so it becomes residual.
+    let persistence = TestPersistencePaths::from_tempdirs(&dirs);
+    let second_config = format!(
+        r#"
+        {{
+            "target": {{ "type": "schema", "schema_id": "governance", "governance_id": null }},
+            "servers": [{{ "server": "failing-sink", "events": ["all"], "transport": {{ "type": "http", "url": "{}" }} }}]
+        }}
+        "#,
+        failing_sink.url()
+    );
+    let (server, _dirs2) = TestServer::build_with_options(TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        persistence: Some(persistence),
+        sinks_config: Some(second_config),
+        ..Default::default()
+    })
+    .await
+    .expect("server should build");
+
+    // Wait until the residual sink is visible again after the restart.
+    wait_for_sink_visible(&client, &server, "residual-sink").await;
+
+    // 2. Registered but not configured -> 409 Conflict.
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/residual-sink/test"),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 409);
+
+    // 3. Unknown sink -> 404 Not Found.
+    let (status, _body) = make_request(
+        &client,
+        &server.url("/sinks/missing-sink/test"),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
 /// HTTP Test 5: `POST /sinks/{sink_name}/reset-cursors` happy path.
 ///
 /// **Objective:** verify cursor reset in safe mode.
@@ -566,6 +719,21 @@ async fn test_http_reset_sink_cursors() {
         .expect("in-config sink must appear in /sinks/status");
     assert_eq!(in_config["in_config"], true);
 
+    // The singular endpoint also resolves residual sinks.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks/residual-sink"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["name"], "residual-sink");
+    assert_eq!(body["in_config"], false);
+    assert!(body["server"].is_null());
+    assert!(body["transport"].is_null());
+
     let (status, _body) = make_request(
         &client,
         &server.url("/sinks/in-config-sink/reset-cursors"),
@@ -578,15 +746,14 @@ async fn test_http_reset_sink_cursors() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/sinks?name=in-config-sink"),
+        &server.url("/sinks/in-config-sink"),
         "GET",
         None,
         None,
     )
     .await;
     assert_eq!(status, 200);
-    let found: Vec<Value> = serde_json::from_value(body).unwrap();
-    assert_eq!(found.len(), 1);
+    assert_eq!(body["name"], "in-config-sink");
 
     let (status, _body) = make_request(
         &client,
@@ -714,6 +881,8 @@ async fn test_http_reset_sink_cursors_permissions_and_safe_mode() {
 ///
 /// **Objective:** the cursor reset operation moved to
 /// `POST /sinks/{sink_name}/reset-cursors`; the old route must be gone.
+/// The path exists for `GET /sinks/{sink_name}`, so a `DELETE` hits the
+/// method router and must be rejected with 405 Method Not Allowed.
 #[test(tokio::test)]
 async fn test_http_legacy_delete_sink_route_is_not_mounted() {
     let (server, _dirs) = TestServer::build_with_options(TestServerOptions {
@@ -725,7 +894,7 @@ async fn test_http_legacy_delete_sink_route_is_not_mounted() {
     .expect("server should build");
 
     let client = Client::new();
-    let (status, _body) = make_request(
+    let (status, body) = make_request(
         &client,
         &server.url("/sinks/example-sink"),
         "DELETE",
@@ -734,8 +903,12 @@ async fn test_http_legacy_delete_sink_route_is_not_mounted() {
     )
     .await;
     assert_eq!(
-        status, 404,
+        status, 405,
         "legacy DELETE /sinks/{{sink_name}} must not be mounted"
+    );
+    assert!(
+        body["error"].is_string(),
+        "405 must return the canonical error body: {body}"
     );
 }
 
@@ -1066,7 +1239,7 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
     );
 }
 
-/// HTTP Test 9: `GET /sink-events/{subject_id}` query params.
+/// HTTP Test 9: `GET /subjects/{subject_id}/sink-events` query params.
 ///
 /// **Objective:** verify query param parsing and response shape.
 ///
@@ -1074,13 +1247,13 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
 /// pagination and validation).
 ///
 /// **Sequence:**
-/// 1. `GET /sink-events/<governance>?from_sn=0&limit=100` -> 200.
-/// 2. `GET /sink-events/<governance>?from_sn=0&limit=1` -> 200.
-/// 3. `GET /sink-events/<governance>?from_sn=0&to_sn=0` -> 200.
-/// 4. `GET /sink-events/<governance>?limit=0` -> 400.
-/// 5. `GET /sink-events/<governance>?limit=1000` -> 200; `limit=1001` -> 400 (cap).
-/// 6. `GET /sink-events/<governance>?from_sn=5&to_sn=3` -> 400.
-/// 7. `GET /sink-events/<missing>` -> 404.
+/// 1. `GET /subjects/<governance>/sink-events?from_sn=0&limit=100` -> 200.
+/// 2. `GET /subjects/<governance>/sink-events?from_sn=0&limit=1` -> 200.
+/// 3. `GET /subjects/<governance>/sink-events?from_sn=0&to_sn=0` -> 200.
+/// 4. `GET /subjects/<governance>/sink-events?limit=0` -> 400.
+/// 5. `GET /subjects/<governance>/sink-events?limit=1000` -> 200; `limit=1001` -> 400 (cap).
+/// 6. `GET /subjects/<governance>/sink-events?from_sn=5&to_sn=3` -> 400.
+/// 7. `GET /subjects/<missing>/sink-events` -> 404.
 ///
 /// **Verifications:**
 /// - Responses are `SinkEventsPage` with `from_sn`, `to_sn`, `limit`,
@@ -1127,7 +1300,11 @@ async fn test_http_get_sink_events_queries() {
 
     let (status, _body) = make_request(
         &client,
-        &format!("{}/{}", server.url("/sink-events"), unknown_subject_id()),
+        &format!(
+            "{}/subjects/{}/sink-events",
+            server.url(""),
+            unknown_subject_id()
+        ),
         "GET",
         None,
         None,
@@ -1139,7 +1316,7 @@ async fn test_http_get_sink_events_queries() {
     drop(dirs);
 }
 
-/// HTTP Test 10: `GET /sink-events/{subject_id}` permissions.
+/// HTTP Test 10: `GET /subjects/{subject_id}/sink-events` permissions.
 ///
 /// **Objective:** verify `node_sink:get`.
 ///
@@ -1170,7 +1347,11 @@ async fn test_http_get_sink_events_permissions() {
         create_sink_user_and_login(&server, &client, &admin_key).await;
     let (status, _body) = make_request(
         &client,
-        &format!("{}/{}", server.url("/sink-events"), unknown_subject),
+        &format!(
+            "{}/subjects/{}/sink-events",
+            server.url(""),
+            unknown_subject
+        ),
         "GET",
         Some(&sink_key),
         None,
@@ -1204,7 +1385,11 @@ async fn test_http_get_sink_events_permissions() {
             .unwrap_or_else(|_| panic!("{} login", role));
         let (status, _body) = make_request(
             &client,
-            &format!("{}/{}", server.url("/sink-events"), unknown_subject),
+            &format!(
+                "{}/subjects/{}/sink-events",
+                server.url(""),
+                unknown_subject
+            ),
             "GET",
             Some(&key),
             None,
@@ -1224,7 +1409,7 @@ async fn test_http_get_sink_events_permissions() {
 /// **Sequence:**
 /// 1. `GET /sinks` -> 200.
 /// 2. `GET /sinks/status` -> 200.
-/// 3. `GET /sink-events/<subject>` -> 200/404.
+/// 3. `GET /subjects/<subject>/sink-events` -> 200/404.
 /// 4. `POST /sinks/example-sink/unblock` -> 200.
 /// 5. `POST /sinks/example-sink` -> 403 (unmatched route).
 /// 6. `POST /sinks/replay` -> 200.
@@ -1262,7 +1447,11 @@ async fn test_http_sink_role_endpoints() {
     for (method, path, expected) in [
         ("GET", "/sinks", 200u16),
         ("GET", "/sinks/status", 200),
-        ("GET", &format!("/sink-events/{}", unknown_subject), 404),
+        (
+            "GET",
+            &format!("/subjects/{}/sink-events", unknown_subject),
+            404,
+        ),
         ("POST", "/sinks/example-sink/unblock", 200),
         ("POST", "/sinks/example-sink", 403),
         ("POST", "/sinks/replay", 200),
@@ -1368,7 +1557,11 @@ async fn test_http_sinks_require_auth() {
     for (method, path, body) in [
         ("GET", "/sinks", None),
         ("GET", "/sinks/status", None),
-        ("GET", &format!("/sink-events/{}", dummy_subject), None),
+        (
+            "GET",
+            &format!("/subjects/{}/sink-events", dummy_subject),
+            None,
+        ),
         ("POST", "/sinks/example-sink/unblock", None),
         ("POST", "/sinks/example-sink", None),
         (
@@ -1406,7 +1599,7 @@ async fn add_example_schema(
 ) -> Value {
     let (status, body) = make_request(
         client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         api_key,
         Some(json!({
@@ -1476,7 +1669,12 @@ async fn assert_query(
 ) {
     let (status, body) = make_request(
         client,
-        &format!("{}/{}{}", server.url("/sink-events"), tracker_id, query),
+        &format!(
+            "{}/subjects/{}/sink-events{}",
+            server.url(""),
+            tracker_id,
+            query
+        ),
         "GET",
         None,
         None,
@@ -1499,7 +1697,7 @@ async fn assert_query(
     }
 }
 
-/// Poll `GET /sinks?name={name}` until the sink reports a non-null `blocked`
+/// Poll `GET /sinks/{name}` until the sink reports a non-null `blocked`
 /// reason or the timeout expires.
 async fn wait_for_sink_blocked(
     client: &Client,
@@ -1509,22 +1707,45 @@ async fn wait_for_sink_blocked(
     for _ in 0..40 {
         let (status, body) = make_request(
             client,
-            &server.url(&format!("/sinks?name={}", name)),
+            &server.url(&format!("/sinks/{}", name)),
             "GET",
             None,
             None,
         )
         .await;
-        assert_eq!(status, 200);
-        let sinks: Vec<Value> = serde_json::from_value(body).unwrap();
-        if let Some(sink) = sinks.iter().find(|s| s["name"] == name)
-            && !sink["blocked"].is_null()
-        {
-            return;
+        if status == 200 {
+            let sink: Value = serde_json::from_value(body).unwrap();
+            if !sink["blocked"].is_null() {
+                return;
+            }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     }
     panic!("sink {} did not become blocked in time", name);
+}
+
+/// Poll `GET /sinks/{name}` until the sink is registered (200) or the
+/// timeout expires.
+async fn wait_for_sink_visible(
+    client: &Client,
+    server: &TestServer,
+    name: &str,
+) {
+    for _ in 0..40 {
+        let (status, _body) = make_request(
+            client,
+            &server.url(&format!("/sinks/{}", name)),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        if status == 200 {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+    }
+    panic!("sink {} did not become visible in time", name);
 }
 
 async fn assert_filter(

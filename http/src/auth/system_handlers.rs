@@ -7,11 +7,8 @@ use super::database::AuthDatabase;
 use super::http_api::{DatabaseErrorMapping, normalize_pagination, run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{
-    Extension, Json,
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use crate::extract::{ApiJson, ApiPath, ApiQuery};
+use axum::{Extension, Json, http::StatusCode};
 use std::sync::Arc;
 
 // =============================================================================
@@ -98,7 +95,7 @@ pub async fn list_actions(
 pub async fn query_audit_logs(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(query): Query<AuditLogQuery>,
+    ApiQuery(query): ApiQuery<AuditLogQuery>,
 ) -> Result<Json<AuditLogPage>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
@@ -130,7 +127,7 @@ pub async fn query_audit_logs(
 pub async fn get_audit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(params): Query<AuditStatsQuery>,
+    ApiQuery(params): ApiQuery<AuditStatsQuery>,
 ) -> Result<Json<AuditStats>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
@@ -174,7 +171,7 @@ pub struct AuditStatsQuery {
 pub async fn list_system_config(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(query): Query<PaginationQuery>,
+    ApiQuery(query): ApiQuery<PaginationQuery>,
 ) -> Result<Json<SystemConfigPage>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
@@ -225,8 +222,8 @@ pub async fn list_system_config(
 pub async fn update_system_config(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(key): Path<String>,
-    Json(req): Json<UpdateSystemConfigRequest>,
+    ApiPath(key): ApiPath<String>,
+    ApiJson(req): ApiJson<UpdateSystemConfigRequest>,
 ) -> Result<Json<SystemConfig>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "put")?;
@@ -420,7 +417,7 @@ pub async fn get_my_permissions_detailed(
 pub async fn get_rate_limit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(query): Query<RateLimitStatsQuery>,
+    ApiQuery(query): ApiQuery<RateLimitStatsQuery>,
 ) -> Result<Json<RateLimitStats>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_system", "get")?;
 

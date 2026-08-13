@@ -15,7 +15,7 @@ use crate::{
             ErrorResponse, LoginRequest, LoginResponse, Permission,
             QuotaExtensionInfo, RateLimitApiKeyStats, RateLimitEndpointStats,
             RateLimitIpEndpointStats, RateLimitIpStats, RateLimitStats,
-            Resource, RevokeApiKeyRequest, Role, RoleInfo, RotateApiKeyRequest,
+            Resource, Role, RoleInfo, RotateApiKeyRequest,
             SetPermissionRequest, SystemConfig, SystemConfigPage,
             UpdateRoleRequest, UpdateSystemConfigRequest,
             UpdateUsagePlanRequest, UpdateUserRequest, UsagePlan, UserInfo,
@@ -64,7 +64,7 @@ use ave_bridge::ave_common::{
         RequestEventDB, RequestInfo, RequestInfoExtend, RequestState,
         RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SinkInfo,
         SinkManagerTarget, SinkReplayError, SinkReplayResponse, SinkStatusInfo,
-        SubjectDB, SubjsData, TimeRange, TransferSubject,
+        SubjectDB, SubjsData, TransferSubject,
     },
 };
 
@@ -106,7 +106,7 @@ impl Modify for FeatureGatedPathsAddon {
 #[openapi(
     info(
         title = "Ave HTTP API",
-        description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.\n\nProtected endpoints return `401 Unauthorized` when the API key is missing or invalid, and `403 Forbidden` when the key does not hold the permission required by the endpoint.\nEndpoints that mutate node state return `503 Service Unavailable` while the node is running in safe mode.",
+        description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.\n\nProtected endpoints return `401 Unauthorized` when the API key is missing or invalid, and `403 Forbidden` when the key does not hold the permission required by the endpoint.\nEndpoints that mutate node state return `503 Service Unavailable` while the node is running in safe mode.\n\n## Error format\n\nEvery error response carries the same JSON body: `{\"error\": \"…\"}`.\nThat includes framework-level rejections: unknown routes return `404 Not Found`, a known path hit with a method the API does not offer returns `405 Method Not Allowed` (authentication and permission checks run first, so unauthorized callers receive `401`/`403` instead), invalid path or query parameters return `400 Bad Request`, a malformed JSON body returns `400 Bad Request`, a well-formed JSON body that does not match the expected schema returns `422 Unprocessable Entity`, a missing or wrong `Content-Type` returns `415 Unsupported Media Type`, and bodies larger than 2 MiB return `413 Payload Too Large`.\n\n## URL conventions\n\nCollections use plural nouns (`/requests`, `/approvals`, `/sinks`, `/governances`).\nViews and actions over a single subject hang from its resource: `/subjects/{subject_id}/state`, `/subjects/{subject_id}/events`, `/subjects/{subject_id}/update`.\nActions over sinks hang from `/sinks/{sink_name}/...`.",
         version = "0.12.0",
         contact(
             name = "Averiun",
@@ -235,6 +235,7 @@ impl Modify for FeatureGatedPathsAddon {
 
         // ── Sink ──────────────────────────────────────────────
         server::get_sinks,
+        server::get_sink,
         server::get_sinks_status,
         server::unblock_sink,
         server::test_sink,
@@ -283,7 +284,6 @@ impl Modify for FeatureGatedPathsAddon {
             CreateApiKeyRequest,
             CreateApiKeyResponse,
             RotateApiKeyRequest,
-            RevokeApiKeyRequest,
             AssignApiKeyPlanRequest,
             CreateQuotaExtensionRequest,
             QuotaExtensionInfo,
@@ -355,7 +355,6 @@ impl Modify for FeatureGatedPathsAddon {
             Paginator,
             AbortDB,
             SubjectDB,
-            TimeRange,
             EventRequestType,
 
             // ── Sink response / request types ─────────────────────

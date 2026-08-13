@@ -226,12 +226,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             tracker_id.clone(),
             EventsQuery {
                 quantity: Some(50),
-                page: Some(0),
-                reverse: Some(false),
-                event_request_ts: None,
-                event_ledger_ts: None,
-                sink_ts: None,
-                event_type: None,
+                ..Default::default()
             },
         )
         .await

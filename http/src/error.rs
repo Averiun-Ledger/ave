@@ -131,6 +131,7 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         CoreError::InvalidRequestState(_)
         | CoreError::InvalidApprovalState(_)
         | CoreError::SubjectNotActive(_)
+        | CoreError::SinkNotConfigured(_)
         | CoreError::GovernanceHasTrackers { .. } => StatusCode::CONFLICT,
 
         // ── 422 Unprocessable Entity ───────────────────────────
@@ -142,9 +143,9 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         CoreError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
 
         // ── 502 Bad Gateway ────────────────────────────────────
-        CoreError::Network(_) | CoreError::NetworkState(_) => {
-            StatusCode::BAD_GATEWAY
-        }
+        CoreError::Network(_)
+        | CoreError::NetworkState(_)
+        | CoreError::SinkTestFailed(_) => StatusCode::BAD_GATEWAY,
 
         // ── 504 Gateway Timeout ────────────────────────────────
         CoreError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
@@ -162,7 +163,6 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         | CoreError::ActorCommunication { .. }
         | CoreError::UnexpectedResponse { .. }
         | CoreError::ActorError(_)
-        | CoreError::SinkTestFailed(_)
         | CoreError::TransferFailed(_)
         | CoreError::DistributionFailed(_)
         | CoreError::UpdateFailed(_, _)

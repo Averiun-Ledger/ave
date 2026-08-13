@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ave_common::{
     LightEvent, SchemaType, SinkTarget, SinkTypes,
     bridge::request::{SinkReplayItem, SinkReplayRequest},
+    bridge::response::{SinkServerView, SinkTransportView},
     identity::{
         BLAKE3_HASHER, DigestIdentifier, Hash as _, PublicKey,
         SignatureIdentifier, TimeStamp, keys::KeyPair,
@@ -2644,6 +2645,46 @@ async fn grpc_node_test_sink_api() {
             .is_err(),
         "testing an unknown sink must fail"
     );
+}
+
+/// `Api::get_sink` exposes the sanitized view of a gRPC sink: flat transport
+/// kind, endpoint and delivery contract, without internal tuning or
+/// credentials.
+#[test(tokio::test)]
+async fn grpc_node_sink_info_view() {
+    let sink = GrpcTestSink::start().await;
+    let (owner, dirs, governance_id, _subject_id) =
+        start_node_with_history(0).await;
+    let (owner, _dirs) = restart_with_grpc_sink(
+        owner,
+        dirs,
+        "grpc-node-sink",
+        grpc_config(&sink.endpoint()),
+        &governance_id,
+    )
+    .await;
+    wait_for_sink_caught_up(&owner.api, "grpc-node-sink").await;
+
+    let info = owner
+        .api
+        .get_sink("grpc-node-sink".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(info.transport.as_deref(), Some("grpc"));
+    assert!(info.in_config);
+    assert!(info.running);
+    let Some(SinkServerView {
+        transport: SinkTransportView::Grpc(view),
+        ..
+    }) = &info.server
+    else {
+        panic!("expected the gRPC transport view, got {:?}", info.server);
+    };
+    assert_eq!(view.endpoint, sink.endpoint());
+    assert!(view.auth.is_none());
+    assert!(!view.tls);
+    assert!(!view.signature);
+    assert!(!view.batch_delivery);
 }
 
 /// Catch-up with several subjects delivers each subject's full history, in

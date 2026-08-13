@@ -332,6 +332,15 @@ impl Bridge {
         Ok(self.api.get_sinks(query).await?)
     }
 
+    pub async fn get_sink(
+        &self,
+        sink_name: String,
+    ) -> Result<SinkInfo, BridgeError> {
+        Self::require_non_empty_str("sink_name", &sink_name)?;
+
+        Ok(self.api.get_sink(sink_name).await?)
+    }
+
     pub async fn get_sinks_status(
         &self,
     ) -> Result<Vec<SinkStatusInfo>, BridgeError> {

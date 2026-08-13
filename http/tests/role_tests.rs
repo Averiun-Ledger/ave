@@ -370,7 +370,7 @@ fn user_api_key_routes() -> BTreeSet<(String, String)> {
     server_auth_route_catalog()
         .into_iter()
         .filter(|(_, path)| {
-            *path == "/me/api-keys" || *path == "/me/api-keys/{name}"
+            *path == "/me/api-keys" || *path == "/me/api-keys/{key_id}"
         })
         .collect()
 }
@@ -946,22 +946,26 @@ async fn test_sender_role_endpoints_access() {
 
     let sender_node_access = [
         // node_request:post
-        ("post", "/request", true),
+        ("post", "/requests", true),
         // node_request:get
-        ("get", "/request", true),
-        ("get", "/request/{request_id}", true),
+        ("get", "/requests", true),
+        ("get", "/requests/{request_id}", true),
         ("get", "/requests-in-manager", true),
         ("get", "/requests-in-manager/{subject_id}", true),
         // node_subject:get
-        ("get", "/state/{subject_id}", true),
-        ("get", "/events/{subject_id}", true),
-        ("get", "/events/{subject_id}/{sn}", true),
-        ("get", "/events-first-last/{subject_id}", true),
-        ("get", "/aborts/{subject_id}", true),
-        ("get", "/subjects", true),
-        ("get", "/subjects/{governance_id}", true),
-        ("get", "/approval", true),
-        ("get", "/approval/{subject_id}", true),
+        ("get", "/subjects/{subject_id}/state", true),
+        ("get", "/subjects/{subject_id}/events", true),
+        ("get", "/subjects/{subject_id}/events/{sn}", true),
+        (
+            "get",
+            "/subjects/{subject_id}/events-first-last",
+            true,
+        ),
+        ("get", "/subjects/{subject_id}/aborts", true),
+        ("get", "/governances", true),
+        ("get", "/governances/{governance_id}/subjects", true),
+        ("get", "/approvals", true),
+        ("get", "/approvals/{subject_id}", true),
         ("get", "/governances/authorized", true),
         ("get", "/governances/{subject_id}/authorized", true),
         ("get", "/subjects/{subject_id}/sync-peers", true),
@@ -1136,7 +1140,8 @@ async fn test_manager_role_endpoints_access() {
     let manager_overrides: &[(&str, &str, bool)] = &[
         ("get", "/sinks", false),
         ("get", "/sinks/status", false),
-        ("get", "/sink-events/{subject_id}", false),
+        ("get", "/sinks/{sink_name}", false),
+        ("get", "/subjects/{subject_id}/sink-events", false),
         ("post", "/sinks/{sink_name}/unblock", false),
         ("post", "/sinks/{sink_name}/test", false),
         ("post", "/sinks/{sink_name}/reset-cursors", false),
@@ -1307,15 +1312,19 @@ async fn test_data_role_endpoints_access() {
         ("get", "/network-state", true),
         // /config requires node_management:get - data does NOT have it
         // node_subject:get
-        ("get", "/state/{subject_id}", true),
-        ("get", "/events/{subject_id}", true),
-        ("get", "/events/{subject_id}/{sn}", true),
-        ("get", "/events-first-last/{subject_id}", true),
-        ("get", "/aborts/{subject_id}", true),
-        ("get", "/subjects", true),
-        ("get", "/subjects/{governance_id}", true),
-        ("get", "/approval", true),
-        ("get", "/approval/{subject_id}", true),
+        ("get", "/subjects/{subject_id}/state", true),
+        ("get", "/subjects/{subject_id}/events", true),
+        ("get", "/subjects/{subject_id}/events/{sn}", true),
+        (
+            "get",
+            "/subjects/{subject_id}/events-first-last",
+            true,
+        ),
+        ("get", "/subjects/{subject_id}/aborts", true),
+        ("get", "/governances", true),
+        ("get", "/governances/{governance_id}/subjects", true),
+        ("get", "/approvals", true),
+        ("get", "/approvals/{subject_id}", true),
         ("get", "/governances/authorized", true),
         ("get", "/governances/{subject_id}/authorized", true),
         ("get", "/subjects/{subject_id}/sync-peers", true),
@@ -1324,8 +1333,8 @@ async fn test_data_role_endpoints_access() {
         ("get", "/sync-peers", true),
         ("get", "/pending-transfers", true),
         // node_request:get
-        ("get", "/request", true),
-        ("get", "/request/{request_id}", true),
+        ("get", "/requests", true),
+        ("get", "/requests/{request_id}", true),
         ("get", "/requests-in-manager", true),
         ("get", "/requests-in-manager/{subject_id}", true),
     ];
