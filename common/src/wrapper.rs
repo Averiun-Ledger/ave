@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn test_value_wrapper_number_f64() {
         let value =
-            ValueWrapper(Value::Number(Number::from_f64(3.14).unwrap()));
+            ValueWrapper(Value::Number(Number::from_f64(7.25).unwrap()));
         let vec = borsh::to_vec(&value).unwrap();
         let value2: ValueWrapper =
             BorshDeserialize::try_from_slice(&vec).unwrap();
@@ -885,10 +885,10 @@ mod tests {
         let mut bytes = Vec::new();
         push_u8(&mut bytes, 1); // Type: Number
         push_u8(&mut bytes, 0); // Sub-type: f64
-        push_f64(&mut bytes, 3.14159);
+        push_f64(&mut bytes, 7.0625);
 
         let result = deser(bytes).expect("should deserialize f64");
-        assert_eq!(result.0, Value::Number(Number::from_f64(3.14159).unwrap()));
+        assert_eq!(result.0, Value::Number(Number::from_f64(7.0625).unwrap()));
     }
 
     // Tests push_f64: handles special values (+0, -0, very large/small)

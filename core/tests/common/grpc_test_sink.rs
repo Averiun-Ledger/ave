@@ -14,9 +14,16 @@ use ave_common::sink::pb;
 use ave_common::sink::pb::event_sink_server::{
     EventSink, EventSinkServer,
 };
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use rustls::{
+    RootCertStore, ServerConfig as RustlsServerConfig,
+    pki_types::pem::PemObject as _,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    server::WebPkiClientVerifier,
+};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tonic::service::Routes;
 use tonic::{Code, Request, Response, Status};
 
 use super::test_sink::TestTlsMaterial;
@@ -159,33 +166,28 @@ impl GrpcTestSink {
         require_client_cert: bool,
     ) -> (Self, TestTlsMaterial) {
         let material = TestTlsMaterial::generate();
-        let identity = Identity::from_pem(
-            material.server_cert_pem.clone(),
-            material.server_key_pem.clone(),
-        );
-        let mut tls = ServerTlsConfig::new().identity(identity);
-        if require_client_cert {
-            tls = tls
-                .client_ca_root(Certificate::from_pem(material.ca_pem.clone()));
-        }
-        let sink = Self::start_inner(true, Some(tls)).await;
+        let sink =
+            Self::start_inner(true, Some((&material, require_client_cert)))
+                .await;
         (sink, material)
     }
 
     async fn start_inner(
         with_health: bool,
-        tls: Option<ServerTlsConfig>,
+        tls: Option<(&TestTlsMaterial, bool)>,
     ) -> Self {
         let state = Arc::new(Mutex::new(GrpcSinkState {
             mode: Some(GrpcResponseMode::Accept),
             stream_enabled: true,
             ..Default::default()
         }));
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("grpc test sink should bind an ephemeral port");
+        std_listener
+            .set_nonblocking(true)
+            .expect("listener should be non-blocking");
         let addr: SocketAddr =
-            listener.local_addr().expect("listener has local address");
+            std_listener.local_addr().expect("listener has local address");
 
         let control_notify = Arc::new(tokio::sync::Notify::new());
         let service = TestEventSink {
@@ -195,37 +197,104 @@ impl GrpcTestSink {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let scheme = if tls.is_some() { "https" } else { "http" };
-        let mut server = tonic::transport::Server::builder();
-        if let Some(tls) = tls {
-            server = server.tls_config(tls).expect("test TLS config is valid");
-        }
-        let router = server.add_service(
+        let routes = Routes::new(
             EventSinkServer::new(service)
                 .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                 .accept_compressed(tonic::codec::CompressionEncoding::Zstd),
         );
-        let (router, health_reporter) = if with_health {
+        let (routes, health_reporter) = if with_health {
             let (reporter, health_service) =
                 tonic_health::server::health_reporter();
             reporter
                 .set_serving::<EventSinkServer<TestEventSink>>()
                 .await;
-            (router.add_service(health_service), Some(reporter))
+            (routes.add_service(health_service), Some(reporter))
         } else {
-            (router, None)
+            (routes, None)
         };
 
-        tokio::spawn(async move {
-            let _ = router
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(listener),
-                    async move {
-                        let mut rx = shutdown_rx;
-                        let _ = rx.wait_for(|v| *v).await;
-                    },
+        match tls {
+            None => {
+                let listener = TcpListener::from_std(std_listener)
+                    .expect("listener should convert to tokio");
+                let server =
+                    tonic::transport::Server::builder().add_routes(routes);
+                tokio::spawn(async move {
+                    let _ = server
+                        .serve_with_incoming_shutdown(
+                            TcpListenerStream::new(listener),
+                            async move {
+                                let mut rx = shutdown_rx;
+                                let _ = rx.wait_for(|v| *v).await;
+                            },
+                        )
+                        .await;
+                });
+            }
+            Some((material, require_client_cert)) => {
+                // Serve the tonic routes over axum-server with an explicit
+                // crypto provider: tonic's `ServerTlsConfig` resolves the
+                // process-level default, which is unset when several rustls
+                // backends are linked into the test binary.
+                let cert_der = CertificateDer::from_pem_slice(
+                    material.server_cert_pem.as_bytes(),
                 )
-                .await;
-        });
+                .expect("test server certificate PEM should parse");
+                let key_der = PrivatePkcs8KeyDer::from_pem_slice(
+                    material.server_key_pem.as_bytes(),
+                )
+                .expect("test server key PEM should parse");
+                let provider =
+                    Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+                let builder = RustlsServerConfig::builder_with_provider(
+                    provider.clone(),
+                )
+                .with_safe_default_protocol_versions()
+                .expect("default TLS versions should be valid");
+                let builder = if require_client_cert {
+                    let mut roots = RootCertStore::empty();
+                    let ca_der = CertificateDer::from_pem_slice(
+                        material.ca_pem.as_bytes(),
+                    )
+                    .expect("test CA PEM should parse");
+                    roots.add(ca_der).expect("CA cert should be valid");
+                    let verifier =
+                        WebPkiClientVerifier::builder_with_provider(
+                            Arc::new(roots),
+                            provider,
+                        )
+                        .build()
+                        .expect("client verifier should build");
+                    builder.with_client_cert_verifier(verifier)
+                } else {
+                    builder.with_no_client_auth()
+                };
+                let mut server_config = builder
+                    .with_single_cert(
+                        vec![cert_der],
+                        PrivateKeyDer::Pkcs8(key_der),
+                    )
+                    .expect("server cert/key should be valid");
+                server_config.alpn_protocols = vec![b"h2".to_vec()];
+
+                let app = routes.prepare().into_axum_router();
+                let rustls_config =
+                    RustlsConfig::from_config(Arc::new(server_config));
+                tokio::spawn(async move {
+                    let server = axum_server::from_tcp(std_listener)
+                        .expect("listener should convert to axum-server")
+                        .acceptor(RustlsAcceptor::new(rustls_config))
+                        .serve(app.into_make_service());
+                    tokio::select! {
+                        _ = server => {}
+                        _ = async move {
+                            let mut rx = shutdown_rx;
+                            let _ = rx.wait_for(|v| *v).await;
+                        } => {}
+                    }
+                });
+            }
+        }
 
         Self {
             endpoint: format!("{}://{}", scheme, addr),

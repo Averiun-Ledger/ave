@@ -319,33 +319,39 @@ impl TestSink {
             .expect("listener should be non-blocking");
         let addr = listener.local_addr().expect("listener has local address");
 
+        // Both branches build the server config with an explicit crypto
+        // provider so the test does not depend on the process-level default,
+        // which may be unset when multiple rustls crypto backends are linked.
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let rustls_config = if require_client_cert {
             let mut roots = RootCertStore::empty();
             roots
                 .add(material.ca_der.clone())
                 .expect("CA cert should parse");
-            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-                .build()
-                .expect("client verifier should build");
-            let mut server_config = RustlsServerConfig::builder()
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(
-                    vec![material.server_cert_der.clone()],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                        material.server_key_der.clone(),
-                    )),
-                )
+            let verifier = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider.clone(),
+            )
+            .build()
+            .expect("client verifier should build");
+            let mut server_config =
+                RustlsServerConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .expect("default TLS versions should be valid")
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(
+                        vec![material.server_cert_der.clone()],
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                            material.server_key_der.clone(),
+                        )),
+                    )
                 .expect("server cert/key should be valid");
             server_config.alpn_protocols =
                 vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             RustlsConfig::from_config(Arc::new(server_config))
         } else {
-            // Build the server config manually with an explicit crypto provider
-            // so the test does not depend on the process-level default, which
-            // may be unset when multiple rustls crypto backends are linked.
-            let provider = rustls::crypto::aws_lc_rs::default_provider();
             let mut server_config =
-                RustlsServerConfig::builder_with_provider(Arc::new(provider))
+                RustlsServerConfig::builder_with_provider(provider)
                     .with_safe_default_protocol_versions()
                     .expect("default TLS versions should be valid")
                     .with_no_client_auth()

@@ -1938,8 +1938,9 @@ mod tests {
     }
 
     fn build_db() -> Arc<AuthDatabase> {
-        #[allow(deprecated)]
-        let tmp = tempfile::tempdir().unwrap().into_path();
+        // `keep` leaks the dir on purpose: the SQLite file must outlive the
+        // test that created the database.
+        let tmp = tempfile::tempdir().unwrap().keep();
         let config = AuthConfig {
             durability: false,
             enable: true,

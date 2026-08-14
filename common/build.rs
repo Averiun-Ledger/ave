@@ -9,11 +9,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: single-threaded build script; the variable is set before
         // any protoc invocation and read only by prost-build.
         unsafe { std::env::set_var("PROTOC", protoc) };
-        tonic_build::configure()
-            // The messages carry only Eq-capable fields (no floats); deriving
-            // Eq keeps the generated code free of
-            // `clippy::derive_partial_eq_without_eq` warnings.
-            .type_attribute(".", "#[derive(Eq)]")
+        // prost 0.14 derives `Eq` on its own for Eq-capable messages (no
+        // floats), keeping the generated code free of
+        // `clippy::derive_partial_eq_without_eq` warnings.
+        tonic_prost_build::configure()
             .compile_protos(&["proto/ave/sink/v1/sink.proto"], &["proto"])?;
 
         // tonic-build (even 0.14) does not emit the server's message-size

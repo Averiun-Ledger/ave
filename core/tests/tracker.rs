@@ -4,9 +4,6 @@ use std::{
 
 mod common;
 
-#[allow(unused)]
-use ave_common::identity::{HashAlgorithm, hash_borsh};
-
 use ave_common::{
     ValueWrapper,
     identity::{KeyPair, PublicKey, keys::Ed25519Signer},

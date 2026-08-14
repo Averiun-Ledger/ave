@@ -54,13 +54,13 @@ pkcs8 = "0.11.0"
 axum = "0.8.9"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 utoipa = "5.5.0"
-async-trait = "0.1.91"
+async-trait = "0.1.92"
 bs58 = "0.5.1"
-base64 = "0.23.0"
-blake3 = "1.8.5"
+base64 = "0.23.1"
+blake3 = "1.8.6"
 borsh = { version = "1.8.0", features = ["std", "derive"] }
 ed25519-dalek = { version = "3", features = ["alloc", "pkcs8"] }
-futures = "0.3.33"
+futures = "0.3.34"
 futures-timer = "3.0"
 prometheus-client = "0.25.0"
 getrandom = "0.4.3"
@@ -78,8 +78,8 @@ sha2 = "0.11.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
-time = "0.3.54"
-thiserror = "2.0.19"
+time = "0.3.55"
+thiserror = "2.0.20"
 tokio = "1.53.1"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
@@ -92,14 +92,15 @@ reqwest = { version = "0.13.4", features = ["json", "stream"] }
 config = { version = "0.15.25", features = ["json", "toml", "yaml"] }
 zeroize = "1.9"
 subtle = "2.6"
-lru = "0.18.1"
+lru = "0.18.2"
 rdkafka = { version = "0.39.0", features = ["tokio", "ssl", "zstd"] }
-testcontainers = { version = "0.27.3", default-features = false, features = ["blocking"] }
-tonic = { version = "0.13", default-features = false, features = ["transport", "channel", "router", "prost", "codegen", "tls-aws-lc", "tls-native-roots", "gzip", "zstd"] }
-tonic-health = "0.13"
-tonic-types = "0.13"
-prost = "0.13"
-tonic-build = "0.13"
+testcontainers = { version = "0.28.0", default-features = false, features = ["blocking"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "channel", "router", "codegen", "tls-aws-lc", "tls-native-roots", "gzip", "zstd"] }
+tonic-health = "0.14"
+tonic-types = "0.14"
+prost = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 protoc-bin-vendored = "3"
 
 [dependencies]
