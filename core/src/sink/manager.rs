@@ -130,6 +130,13 @@ pub enum SinkManagerMessage {
     /// start workers and catch-up because governance actors are guaranteed to
     /// be available.
     StartupReady,
+    /// Periodic healthcheck tick for a sink with lagging subjects. Routed
+    /// through the manager's mailbox so the worker reference is resolved (or
+    /// the worker recreated) at fire time — a captured `ActorRef` would keep
+    /// firing at a dead worker forever.
+    HealthcheckTick {
+        sink: String,
+    },
 }
 
 impl Message for SinkManagerMessage {}
@@ -603,6 +610,10 @@ impl PersistentActor for SinkManager {
         self.version = state.version;
         self.blocked_sinks.clone_from(&state.blocked_sinks);
         self.replay_floors.clone_from(&state.replay_floors);
+        // `apply` also mutates these two (e.g. `SinkCursorsDeleted` clears
+        // them); skipping them here would silently drop the mutation.
+        self.lagging.clone_from(&state.lagging);
+        self.last_errors.clone_from(&state.last_errors);
     }
 }
 
@@ -892,6 +903,35 @@ impl Handler<Self> for SinkManager {
                     }
                 }
             }
+            SinkManagerMessage::HealthcheckTick { sink } => {
+                // Skip when the sink left the config, is blocked, or has
+                // nothing lagging (recovery/block cancel the timer anyway;
+                // these guards cover the stale-tick race).
+                if !self.sink_servers.contains_key(&sink)
+                    || self.blocked_sinks.contains_key(&sink)
+                {
+                    return Ok(SinkManagerResponse::Ok);
+                }
+                if !self.lagging.get(&sink).is_some_and(|s| !s.is_empty()) {
+                    return Ok(SinkManagerResponse::Ok);
+                }
+                // Resolve the worker at fire time, recreating it if it was
+                // idle-killed: a lagging sink must keep being monitored or
+                // its recovery is never detected.
+                match self.ensure_worker(&sink, ctx).await {
+                    Ok(worker) => {
+                        self.cancel_worker_shutdown(&sink);
+                        if let Err(e) =
+                            worker.tell(SinkWorkerMessage::HealthCheck).await
+                        {
+                            error!(msg_type = "HealthcheckTick", sink = %sink, error = %e, "Failed to forward healthcheck to worker");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "HealthcheckTick", sink = %sink, error = %e, "Failed to ensure worker for healthcheck");
+                    }
+                }
+            }
         }
         Ok(SinkManagerResponse::Ok)
     }
@@ -938,14 +978,15 @@ impl Handler<Self> for SinkManager {
 
                 // If the cursor is behind last_seen, events were lost or the
                 // subject was lagging; ensure catch-up recovers them in order.
+                // CR-4: no cursor at all means outdated even when last_sn == 0
+                // (e.g. a Create that failed before the cursor was persisted).
                 let cursor_sn = self
                     .cursors
                     .get(&(sink.clone(), subject_id.clone()))
                     .copied();
                 let last_sn =
                     self.last_seen.get(&subject_id).copied().unwrap_or(0);
-                let is_outdated =
-                    cursor_sn.map_or(last_sn > 0, |sn| sn < last_sn);
+                let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
                 if is_outdated {
                     self.try_insert_lagging(&sink, subject_id.clone());
                     if let Err(e) = self
@@ -1566,8 +1607,10 @@ impl SinkManager {
     }
 
     /// Schedule a periodic healthcheck for a sink that has lagging subjects.
-    /// The manager creates a worker, sends HealthCheck, and reschedules using
-    /// `healthcheck_intervals_secs`.  Cancelled when the sink recovers.
+    /// The task self-tells `HealthcheckTick` through the manager's mailbox,
+    /// where the worker reference is resolved (or the worker recreated) at
+    /// fire time — capturing the `ActorRef` here would keep firing tells at
+    /// a dead worker forever. Cancelled when the sink recovers or is blocked.
     async fn schedule_healthcheck(
         &mut self,
         sink_name: String,
@@ -1576,31 +1619,41 @@ impl SinkManager {
         if let Some(token) = self.pending_healthchecks.remove(&sink_name) {
             token.cancel();
         }
-        let child_name = format!("worker_{}", sink_name);
-        let Ok(worker) = ctx.get_child::<SinkWorker>(&child_name).await else {
-            // Worker is no longer alive; nothing to healthcheck.
-            return;
-        };
         let intervals = self
             .sink_servers
             .get(&sink_name)
             .map(|s| s.healthcheck_intervals_secs.clone())
             .unwrap_or_else(default_sink_healthcheck_intervals_secs);
+        let self_ref = match ctx.reference().await {
+            Ok(self_ref) => self_ref,
+            Err(e) => {
+                error!(msg_type = "ScheduleHealthcheck", sink = %sink_name, error = %e, "Failed to get self reference for healthcheck timer");
+                return;
+            }
+        };
         let token = CancellationToken::new();
         let token_for_task = token.clone();
+        let sink_name_for_task = sink_name.clone();
         ctx.spawn(async move {
             let mut interval_idx = 0usize;
-            let last_idx = intervals.len().saturating_sub(1);
             loop {
-                let delay_secs = intervals.get(interval_idx.min(last_idx)).copied().unwrap_or(60);
+                let delay_secs =
+                    crate::sink::healthcheck_delay_secs(&intervals, interval_idx);
                 let delay_secs = crate::sink::add_jitter(delay_secs);
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {
                         if token_for_task.is_cancelled() {
                             break;
                         }
-                        let _ = worker.tell(SinkWorkerMessage::HealthCheck).await;
-                        interval_idx = (interval_idx + 1).min(last_idx);
+                        if let Err(e) = self_ref
+                            .tell(SinkManagerMessage::HealthcheckTick {
+                                sink: sink_name_for_task.clone(),
+                            })
+                            .await
+                        {
+                            error!(msg_type = "HealthcheckTick", sink = %sink_name_for_task, error = %e, "Failed to send healthcheck tick to manager");
+                        }
+                        interval_idx = interval_idx.saturating_add(1);
                     }
                     _ = token_for_task.cancelled() => {
                         break;
@@ -2407,14 +2460,26 @@ impl SinkManager {
             if let Ok(worker) = self.ensure_worker(&sink, ctx).await {
                 // Cancel pending shutdown before sending messages to prevent race
                 self.cancel_worker_shutdown(&sink);
-                let _ = worker
+                // If these tells fail the worker is dying mid-shutdown; its
+                // replacement starts fresh (unblocked, zero recoveries), and
+                // the persisted `blocked_sinks` (already updated above) is the
+                // source of truth, so the states cannot diverge. A live
+                // blocked worker has an idle mailbox, so `MailboxFull` is not
+                // reachable here — anything else is logged for visibility.
+                if let Err(e) = worker
                     .tell(
                         crate::sink::worker::SinkWorkerMessage::ResetRecoveries,
                     )
-                    .await;
-                let _ = worker
+                    .await
+                {
+                    error!(msg_type = "ResetRecoveries", sink = %sink, error = %e, "Failed to reset worker flapping counter on unblock");
+                }
+                if let Err(e) = worker
                     .tell(crate::sink::worker::SinkWorkerMessage::ClearBlocked)
-                    .await;
+                    .await
+                {
+                    error!(msg_type = "ClearBlocked", sink = %sink, error = %e, "Failed to clear worker blocked state on unblock");
+                }
             }
             // Rebuild lagging for this sink and trigger catch-up to catch up on missed events.
             let subjects_to_add: Vec<String> = self

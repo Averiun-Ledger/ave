@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response, TimerKey,
+    NotPersistentActor, OverflowStrategy, Response, TimerKey,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{error, info_span, warn};
@@ -93,6 +93,11 @@ pub struct SinkSubjectWorker {
     /// catch-up restarts (e.g. a replay rewinding below the in-flight
     /// catch-up) deterministic and keeps delivery order.
     catch_up_generation: u64,
+    /// `true` while this worker holds a `SubjectManager::Up` requester for
+    /// its subject (lifted for catch-up ledger reads). Every successful `Up`
+    /// must be paired with a `Finish` or the subject stays resident in
+    /// memory forever.
+    subject_lifted: bool,
 }
 
 impl std::fmt::Debug for SinkSubjectWorker {
@@ -122,6 +127,26 @@ impl Actor for SinkSubjectWorker {
             || info_span!("sink_subject_worker", id),
             |parent_span| info_span!(parent: parent_span, "sink_subject_worker", id),
         )
+    }
+
+    /// Fail instead of blocking the sender when the mailbox is full: the
+    /// delivery chain is cyclic (manager ⇄ worker ⇄ subject worker), so
+    /// backpressure can deadlock it. A failed `tell` surfaces immediately
+    /// and the subject is recovered via lagging/catch-up from the ledger —
+    /// nothing is lost, at most redelivered (idempotency-key).
+    fn mailbox_overflow_strategy() -> OverflowStrategy {
+        OverflowStrategy::Fail
+    }
+
+    /// Safety net: if the worker stops with the subject still lifted (idle
+    /// shutdown, live-delivery-only era, system stop), pair the `Up` with
+    /// its `Finish` so the subject can be unloaded from memory.
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        self.release_subject(ctx).await;
+        Ok(())
     }
 }
 
@@ -304,6 +329,20 @@ impl Handler<Self> for SinkSubjectWorker {
     }
 }
 
+/// Outcome of a catch-up query against the ledger. Distinguishing a
+/// genuinely deleted subject from a transient failure matters: the manager
+/// deletes the cursor and the shared `last_seen` on `NotFound`, so a
+/// transient hiccup must never take that path.
+enum SubjectQuery {
+    /// Events read from the ledger.
+    Events(Vec<DataToSink>),
+    /// The subject genuinely does not exist (deleted).
+    NotFound,
+    /// Transient failure (actor unavailable, ask error/timeout): the
+    /// subject stays lagging and the catch-up is retried later.
+    Unavailable,
+}
+
 impl SinkSubjectWorker {
     pub fn new(
         sink_name: String,
@@ -333,6 +372,47 @@ impl SinkSubjectWorker {
             pending: Vec::new(),
             flush_timer: None,
             catch_up_generation: 0,
+            subject_lifted: false,
+        }
+    }
+
+    /// Release the subject lifted by catch-up ledger reads: every successful
+    /// `SubjectManager::Up` must be paired with a `Finish` or the subject
+    /// stays resident in memory forever (one dangling requester per sink per
+    /// subject). Idempotent; a failed `Finish` only leaves the subject up
+    /// until node shutdown (the requester set is in-memory only).
+    async fn release_subject(&mut self, ctx: &ActorContext<Self>) {
+        if !self.subject_lifted {
+            return;
+        }
+        self.subject_lifted = false;
+        let subject_id = ctx.path().key().to_owned();
+        let requester = format!("sink:{}:{}", self.sink_name, subject_id);
+        let Ok(digest) =
+            subject_id.parse::<ave_common::identity::DigestIdentifier>()
+        else {
+            return;
+        };
+        let path = ActorPath::from("/user/node/subject_manager");
+        match ctx
+            .system()
+            .get_actor::<crate::node::subject_manager::SubjectManager>(&path)
+            .await
+        {
+            Ok(subject_manager) => {
+                if let Err(e) = subject_manager
+                    .ask(crate::node::subject_manager::SubjectManagerMessage::Finish {
+                        subject_id: digest,
+                        requester,
+                    })
+                    .await
+                {
+                    error!(msg_type = "ReleaseSubject", sink = %self.sink_name, subject_id = %subject_id, error = %e, "Failed to finish subject lift");
+                }
+            }
+            Err(e) => {
+                error!(msg_type = "ReleaseSubject", sink = %self.sink_name, subject_id = %subject_id, error = %e, "Failed to get subject manager for finish");
+            }
         }
     }
 
@@ -340,7 +420,7 @@ impl SinkSubjectWorker {
     /// and delivers it (whole batch in `batch_delivery` mode, event by event
     /// otherwise), chaining the continuation with the given `generation`.
     async fn run_catch_up_batch(
-        &self,
+        &mut self,
         from_sn: u64,
         batch_size: usize,
         generation: u64,
@@ -351,8 +431,9 @@ impl SinkSubjectWorker {
             .query_subject(&subject_id, from_sn, batch_size, ctx)
             .await
         {
-            Some(events) => events,
-            None => {
+            SubjectQuery::Events(events) => events,
+            SubjectQuery::NotFound => {
+                self.release_subject(ctx).await;
                 match ctx.get_parent::<SinkWorker>().await {
                     Ok(parent) => {
                         if let Err(e) = parent
@@ -374,9 +455,42 @@ impl SinkSubjectWorker {
                 }
                 return Ok(());
             }
+            SubjectQuery::Unavailable => {
+                // Transient query failure: report it as a failed catch-up so
+                // the subject stays lagging and the manager retries later.
+                // The cursor and the shared `last_seen` are NOT touched —
+                // wiping them on a hiccup would lose events permanently.
+                self.release_subject(ctx).await;
+                match ctx.get_parent::<SinkWorker>().await {
+                    Ok(parent) => {
+                        if let Err(e) = parent
+                            .emit_error(
+                                SinkSubjectWorkerError::DeliveryFailed {
+                                    subject_id,
+                                    sn: from_sn,
+                                    reason: "catch-up ledger query \
+                                             unavailable (transient)"
+                                        .to_owned(),
+                                    from_catch_up: true,
+                                    count: 0,
+                                },
+                            )
+                            .await
+                        {
+                            error!(msg_type = "ReportCatchUpUnavailable", sink = %self.sink_name, error = %e, "Failed to report catch-up query failure");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+                    }
+                }
+                return Ok(());
+            }
         };
 
         if events.is_empty() {
+            // Catch-up finished: release the subject lift before reporting.
+            self.release_subject(ctx).await;
             match ctx.get_parent::<SinkWorker>().await {
                 Ok(parent) => {
                     if let Err(e) = parent
@@ -611,18 +725,19 @@ impl SinkSubjectWorker {
     }
 
     async fn query_subject(
-        &self,
+        &mut self,
         subject_id: &str,
         from_sn: u64,
         batch_size: usize,
         ctx: &ActorContext<Self>,
-    ) -> Option<Vec<DataToSink>> {
+    ) -> SubjectQuery {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
         ));
         if self.is_governance {
-            // Governances are always in memory; access directly.
+            // Governances are always in memory once created, so a missing
+            // actor means the governance was genuinely deleted.
             if let Ok(actor) = ctx
                 .system()
                 .get_actor::<crate::governance::Governance>(&path)
@@ -637,68 +752,91 @@ impl SinkSubjectWorker {
                 {
                     Ok(crate::governance::GovernanceResponse::SinkEvents(
                         events,
-                    )) => Some(events),
-                    _ => None,
+                    )) => SubjectQuery::Events(events),
+                    // A governance always holds at least its Create event, so
+                    // a failed query is transient, never "not found".
+                    other => {
+                        error!(msg_type = "CatchUpQuery", subject_id = %subject_id, response = ?other.is_err(), "Governance catch-up query failed");
+                        SubjectQuery::Unavailable
+                    }
                 }
             } else {
                 error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Governance not found for catch-up query");
-                None
+                SubjectQuery::NotFound
             }
         } else {
             // Trackers may not be in memory; lift via SubjectManager::Up first.
             let subject_manager_path =
                 ActorPath::from("/user/node/subject_manager");
-            if let Ok(subject_manager) = ctx
+            let Ok(subject_manager) = ctx
                 .system()
                 .get_actor::<crate::node::subject_manager::SubjectManager>(
                     &subject_manager_path,
                 )
                 .await
-            {
-                let requester =
-                    format!("sink:{}:{}", self.sink_name, subject_id);
-                let subject_id_digest =
-                    match subject_id
-                        .parse::<ave_common::identity::DigestIdentifier>()
-                    {
-                        Ok(d) => d,
-                        Err(_) => {
-                            error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Invalid subject_id format");
-                            return None;
-                        }
-                    };
-                if matches!(
-                    subject_manager
-                        .ask(crate::node::subject_manager::SubjectManagerMessage::Up {
-                            subject_id: subject_id_digest,
-                            requester,
-                            create_ledger: None,
-                        })
-                        .await,
-                    Ok(crate::node::subject_manager::SubjectManagerResponse::Up)
-                ) {
-                    if let Ok(actor) = ctx.system().get_actor::<crate::tracker::Tracker>(&path).await {
-                        match actor
-                            .ask(crate::tracker::TrackerMessage::GetSinkEvents {
-                                from_sn,
-                                batch_size,
-                            })
-                            .await
-                        {
-                            Ok(crate::tracker::TrackerResponse::SinkEvents(events)) => Some(events),
-                            _ => None,
-                        }
-                    } else {
-                        error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Tracker not found after Up");
-                        None
+            else {
+                error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "SubjectManager unavailable for catch-up query");
+                return SubjectQuery::Unavailable;
+            };
+            let requester =
+                format!("sink:{}:{}", self.sink_name, subject_id);
+            let subject_id_digest =
+                match subject_id
+                    .parse::<ave_common::identity::DigestIdentifier>()
+                {
+                    Ok(d) => d,
+                    Err(_) => {
+                        error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Invalid subject_id format");
+                        return SubjectQuery::NotFound;
                     }
-                } else {
-                    error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "SubjectManager::Up failed");
-                    None
+                };
+            if !matches!(
+                subject_manager
+                    .ask(crate::node::subject_manager::SubjectManagerMessage::Up {
+                        subject_id: subject_id_digest,
+                        requester,
+                        create_ledger: None,
+                    })
+                    .await,
+                Ok(crate::node::subject_manager::SubjectManagerResponse::Up)
+            ) {
+                // Up failing (timeout, store error, overloaded node) is
+                // transient: the subject may well exist.
+                error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "SubjectManager::Up failed");
+                return SubjectQuery::Unavailable;
+            }
+            self.subject_lifted = true;
+            let Ok(actor) =
+                ctx.system().get_actor::<crate::tracker::Tracker>(&path).await
+            else {
+                error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Tracker not found after Up");
+                return SubjectQuery::Unavailable;
+            };
+            match actor
+                .ask(crate::tracker::TrackerMessage::GetSinkEvents {
+                    from_sn,
+                    batch_size,
+                })
+                .await
+            {
+                Ok(crate::tracker::TrackerResponse::SinkEvents(events)) => {
+                    SubjectQuery::Events(events)
                 }
-            } else {
-                error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "SubjectManager not found");
-                None
+                _ => {
+                    // Distinguish a deleted subject (Up recreates a phantom
+                    // tracker whose store is empty) from a transient query
+                    // failure: a subject that exists always has at least its
+                    // Create event, i.e. a last ledger entry.
+                    match actor
+                        .ask(crate::tracker::TrackerMessage::GetLastLedger)
+                        .await
+                    {
+                        Ok(crate::tracker::TrackerResponse::LastLedger {
+                            ledger_event,
+                        }) if ledger_event.is_none() => SubjectQuery::NotFound,
+                        _ => SubjectQuery::Unavailable,
+                    }
+                }
             }
         }
     }

@@ -67,6 +67,19 @@ pub fn add_jitter(base: u64) -> u64 {
     }
 }
 
+/// Delay before the next healthcheck attempt: the configured interval at
+/// `idx` (clamped to the last entry so the backoff stops growing), or 60s
+/// when the configured list is empty.
+///
+/// Single source for worker and manager healthcheck scheduling — keep the
+/// fallback in sync here only.
+pub fn healthcheck_delay_secs(intervals: &[u64], idx: usize) -> u64 {
+    intervals
+        .get(idx.min(intervals.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(60)
+}
+
 /// Compute the backoff delay for a delivery retry `attempt` (1-based: it is
 /// only called after the first failure).
 ///

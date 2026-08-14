@@ -5373,6 +5373,196 @@ async fn sink_subject_deletion_cleans_tracking() {
     }
 }
 
+/// Test 13b: `sink_governance_deletion_cleans_tracking`.
+///
+/// **Cases covered:** same as `sink_subject_deletion_cleans_tracking` but for
+/// a governance subject — the governance branch of the sink catch-up query
+/// (a missing governance actor must be classified as a genuine `NotFound`,
+/// cleaning the cursor and the shared `last_seen`).
+///
+/// **Setup:**
+/// - Bootstrap node with a governance sink (`gov-sink`).
+/// - Governance with Create + 2 facts delivered; a 3rd fact fails (sink in
+///   500 mode) so the governance subject stays lagging with persisted state.
+/// - Safe-mode restart, delete the governance (it has no trackers), normal
+///   restart with the sink accepting.
+///
+/// **Assertions:**
+/// - No new events are delivered for the deleted governance.
+/// - The sink reports no lagging subjects and is not blocked.
+/// - Replay for the deleted governance reports "subject has no known events"
+///   on the sink, confirming the tracking state was cleaned up.
+#[traced_test]
+#[tokio::test]
+async fn sink_governance_deletion_cleans_tracking() {
+    let sink_a = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        sinks: governance_sink_config(sink_a.url()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    let gov_id_str = governance_id.to_string();
+
+    // Two governance facts, delivered live (sn 1 and 2).
+    let member_one =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "One", "key": member_one}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let member_two =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "Two", "key": member_two}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&node.api, "gov-sink").await;
+    sink_a.wait_for_count(3, true).await;
+    let initial = sink_a.snapshot().await;
+    assert_eq!(initial.len(), 3);
+    assert_no_duplicate_events(&initial);
+    assert_subject_sn_sequence(&initial, &gov_id_str, 0, 2);
+    assert_event_is_create(&initial[0], &gov_id_str, 0);
+
+    // Sink in failure mode and a third fact: the governance subject becomes
+    // lagging with persisted cursor/lagging state to clean up after deletion.
+    sink_a.set_mode(ResponseMode::ServerError).await;
+    let member_three =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "Three", "key": member_three}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_lagging_subjects(&node.api, "gov-sink", 1).await;
+
+    // Restart in safe mode and delete the governance (it has no trackers).
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config_safe_mode(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(sink_a.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let delete_result =
+        node.api.delete_subject(governance_id.clone()).await.unwrap();
+    assert_eq!(delete_result, "Governance deleted successfully");
+
+    // Restart in normal mode with the sink accepting again.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    sink_a.set_mode(ResponseMode::Accept).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(sink_a.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Poll until the sink event count stabilizes: no new events should arrive
+    // for the deleted governance.
+    let mut attempts = 0;
+    let mut last = 0;
+    let mut stable_iterations = 0;
+    loop {
+        let current = sink_a.snapshot().await.len();
+        if current == last {
+            stable_iterations += 1;
+            if stable_iterations >= 3 {
+                break;
+            }
+        } else {
+            stable_iterations = 0;
+        }
+        last = current;
+        if attempts > 40 {
+            panic!(
+                "sink event count did not stabilize after 4s; count: {}",
+                current
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+
+    let after = sink_a.snapshot().await;
+    assert_eq!(
+        after.len(),
+        3,
+        "no new events should be delivered for a deleted governance"
+    );
+    assert_eq!(count_events_for_subject(&after, &gov_id_str), 3);
+
+    // The sink must report no lagging and remain unblocked.
+    assert_sink_not_lagging(&node.api, "gov-sink").await;
+    assert_sink_unblocked(&node.api, "gov-sink").await;
+
+    // Replay for the deleted governance must report that the subject has no
+    // known events, confirming tracking was cleaned up.
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "gov-sink".to_owned(),
+                subject_id: gov_id_str.clone(),
+                from_sn: 0,
+            }],
+        })
+        .await
+        .unwrap();
+    assert!(response.processed.is_empty());
+    assert_eq!(response.errors.len(), 1);
+    let replay_err = &response.errors[0];
+    assert!(replay_err.subject_id == gov_id_str);
+    assert_eq!(replay_err.from_sn, 0);
+    assert!(
+        replay_err.reason.contains("subject has no known events"),
+        "unexpected replay error reason: {}",
+        replay_err.reason
+    );
+}
+
 /// Test 14: `sink_transient_errors_and_fast_events`.
 ///
 /// **Cases covered:** transient HTTP errors (5xx) with retries and backoff,
@@ -7282,6 +7472,114 @@ async fn sink_worker_idle_shutdown_and_recreate() {
         2,
         true,
         Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_sink_running(&node.api, "example-sink").await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+}
+
+/// Covers the recovery of a lagging sink whose worker was idle-killed while
+/// the backend was down: the manager's periodic healthcheck tick must
+/// recreate the worker (it is gone), detect the recovery and drive the
+/// catch-up that delivers the pending fact.
+///
+/// **Setup:** node with a short-idle sink (200ms) and 1s healthchecks
+/// (`short_idle_sink_config`); subject created and Create delivered; sink in
+/// 500 mode so a fact becomes lagging; the worker is idle-killed while the
+/// sink is still down (observed via the `SinkWorkerShutdown` production log,
+/// same pattern as `sink_worker_idle_shutdown_and_recreate`).
+///
+/// **Assertions:** once the sink accepts again, the pending fact is
+/// delivered (Create + fact, sns 0-1) and the sink reports running and not
+/// lagging.
+#[traced_test]
+#[tokio::test]
+async fn sink_recovers_after_worker_idle_shutdown_while_lagging() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        short_idle_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    // Sink down: the fact fails and the subject becomes lagging.
+    sink.set_mode(ResponseMode::ServerError).await;
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+
+    // Wait (with polling) until the manager idle-kills the worker while the
+    // sink is still down: from here on, only the manager's healthcheck tick
+    // can detect the recovery — the worker's own chain died with it.
+    wait_for_condition(|| logs_contain("SinkWorkerShutdown")).await;
+
+    // The sink comes back: the tick must recreate the worker, detect the
+    // recovery and drive the catch-up that delivers the pending fact.
+    sink.set_mode(ResponseMode::Accept).await;
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(2, true).await;
+    let events = sink.full_snapshot().await;
+    assert_eq!(
+        events.len(),
+        2,
+        "Create + pending fact should be delivered after worker recreation"
+    );
+    assert_subject_sn_sequence(&events, &subject_id_str, 0, 1);
+    assert_event_is_fact_full(
+        &events[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
     );
     assert_sink_running(&node.api, "example-sink").await;
     assert_sink_not_lagging(&node.api, "example-sink").await;
