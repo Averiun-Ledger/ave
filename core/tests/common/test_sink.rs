@@ -53,6 +53,10 @@ pub enum ResponseMode {
     /// delivery request, then accept subsequent ones. Used to test that the
     /// worker honors the server-provided retry delay.
     RateLimitOnce(u64),
+    /// Return HTTP 408 on the first delivery request, then accept subsequent
+    /// ones. Used to test that a request timeout reported by the server is
+    /// retried (RFC 9110 §15.6.9) instead of blocking the sink.
+    RequestTimeoutOnce,
 }
 
 /// Response mode of the test sink's OAuth2 token endpoint.
@@ -98,6 +102,7 @@ struct TestSinkState {
     batch_lens: Vec<usize>,
     unauthorized_once_consumed: bool,
     ratelimit_once_consumed: bool,
+    request_timeout_once_consumed: bool,
 }
 
 /// Signature headers captured on a `/events` delivery.
@@ -259,6 +264,7 @@ impl TestSink {
             batch_lens: Vec::new(),
             unauthorized_once_consumed: false,
             ratelimit_once_consumed: false,
+            request_timeout_once_consumed: false,
         }))
     }
 
@@ -770,6 +776,18 @@ impl TestSink {
                         [(axum::http::header::RETRY_AFTER, secs.to_string())],
                         "rate limited",
                     )
+                        .into_response()
+                } else {
+                    guard.batch_lens.push(received_events.len());
+                    guard.events.extend(received_events);
+                    StatusCode::OK.into_response()
+                }
+            }
+            ResponseMode::RequestTimeoutOnce => {
+                if !guard.request_timeout_once_consumed {
+                    guard.request_timeout_once_consumed = true;
+                    drop(guard);
+                    (StatusCode::REQUEST_TIMEOUT, "request timeout")
                         .into_response()
                 } else {
                     guard.batch_lens.push(received_events.len());

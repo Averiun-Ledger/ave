@@ -9693,11 +9693,73 @@ async fn sink_retry_after_capped() {
     sink.wait_for_count(1, true).await;
 }
 
-/// Batch delivery in catch-up: with `batch_delivery` the pending events of a
-/// subject are delivered as a single POST with a JSON array body instead of
-/// one POST per event.
+/// HTTP 408 (Request Timeout) is retryable per RFC 9110 §15.6.9: the worker
+/// must retry the delivery instead of treating it as a permanent rejection
+/// (which would block the sink).
 ///
 /// **Flow:**
+/// A subject is created with no sink registered; the node restarts with the
+/// sink configured and the sink answers the first catch-up delivery with
+/// 408, then accepts the retry.
+///
+/// **Verifications:**
+/// - The event is delivered after the retry; without the retryable
+///   classification the sink would block and the wait would time out.
+#[traced_test]
+#[tokio::test]
+async fn sink_request_timeout_status_is_retried() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    create_subject(&node.api, governance_id.clone(), "Example", "", true)
+        .await
+        .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::RequestTimeoutOnce).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "request-timeout-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(1, true).await;
+}
 /// 1. Create governance, schema and a subject; emit three facts.
 /// 2. Restart with a batch sink; startup catch-up delivers the four pending
 ///    events.

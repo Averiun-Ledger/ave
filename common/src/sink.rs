@@ -1826,7 +1826,9 @@ pub struct HttpSinkConfig {
     pub pool_max_idle_per_host: usize,
     /// Maximum number of HTTP redirects the sink client will follow. `0`
     /// disables redirects entirely, which is the recommended default for
-    /// webhooks to avoid SSRF / open-redirect attacks.
+    /// webhooks to avoid SSRF / open-redirect attacks. Only 307/308 are
+    /// followed: they preserve the method and body, while 301/302/303 would
+    /// downgrade POST to GET and silently drop the event payload.
     pub max_redirects: usize,
 }
 

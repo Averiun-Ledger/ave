@@ -13,6 +13,7 @@ pub mod transport;
 pub mod worker;
 
 pub use error::SinkError;
+use futures::StreamExt;
 pub use manager::{
     SendResult, SinkManager, SinkManagerDetailedStatus, SinkManagerEvent,
     SinkManagerInitParams, SinkManagerMessage, SinkManagerResponse, SinkStatus,
@@ -135,6 +136,43 @@ pub const fn retry_after_of(err: &SinkError) -> Option<u64> {
     }
 }
 
+/// Read at most `limit` bytes from a byte stream, truncating the rest.
+/// Returns a lossy UTF-8 string with a `…(truncated)` marker when the body
+/// exceeds the limit. This prevents a misbehaving endpoint from causing an
+/// out-of-memory error by returning a multi-gigabyte error payload.
+pub(crate) async fn read_limited_body<S, E>(stream: S, limit: usize) -> String
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, E>>,
+{
+    let mut collected = Vec::with_capacity(limit.min(1024));
+    let mut stream = Box::pin(stream);
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                let remaining = limit.saturating_sub(collected.len());
+                if remaining == 0 {
+                    return format!(
+                        "{}…(truncated)",
+                        String::from_utf8_lossy(&collected)
+                    );
+                }
+                let take = bytes.len().min(remaining);
+                collected.extend_from_slice(&bytes[..take]);
+                if collected.len() >= limit {
+                    return format!(
+                        "{}…(truncated)",
+                        String::from_utf8_lossy(&collected)
+                    );
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    String::from_utf8_lossy(&collected).into_owned()
+}
+
 /// What to do when the first delivery attempt fails with an auth error.
 pub enum AuthRetryDecision {
     /// Retry once immediately: the credentials were refreshed.
@@ -186,7 +224,17 @@ where
             Err(e) if is_permanent_error(&e) => return Err(e),
             Err(e @ SinkError::Auth { .. }) if attempt_n == 0 => {
                 match on_auth_error().await {
-                    AuthRetryDecision::Retry => return attempt().await,
+                    AuthRetryDecision::Retry => {
+                        // Immediate retry with the refreshed credentials, but
+                        // its outcome goes through the normal policy: a
+                        // transient failure must consume the remaining retry
+                        // budget instead of being returned as-is.
+                        match attempt().await {
+                            Ok(()) => return Ok(()),
+                            Err(e) if is_permanent_error(&e) => return Err(e),
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
                     AuthRetryDecision::Abort => return Err(e),
                     AuthRetryDecision::Backoff => last_err = Some(e),
                 }
@@ -214,6 +262,10 @@ pub const fn extract_sn(data: &DataToSink) -> u64 {
 
 /// Maximum number of retries when obtaining an OAuth2 token.
 const TOKEN_OBTAIN_MAX_RETRIES: u32 = 2;
+
+/// Maximum size of an auth-endpoint error body embedded in the error message
+/// (same bound as the HTTP transport's delivery error bodies).
+const AUTH_ERROR_BODY_MAX_BYTES: usize = 4_096;
 
 /// Obtain an OAuth2 token from the authentication endpoint, reusing the
 /// caller's `reqwest::Client` so the token request travels through the same
@@ -260,10 +312,11 @@ pub async fn obtain_token(
         } else {
             None
         };
-        let body = res
-            .text()
-            .await
-            .unwrap_or_else(|_| "could not read auth error body".to_owned());
+        let body = read_limited_body(
+            res.bytes_stream(),
+            AUTH_ERROR_BODY_MAX_BYTES,
+        )
+        .await;
         return Err(SinkError::Auth {
             message: format!("auth endpoint returned {}: {}", status, body),
             retry_after_ms,
@@ -323,10 +376,13 @@ pub async fn obtain_token_with_retry(
 /// OAuth2 access-token cache shared by the sink transports (HTTP and gRPC).
 ///
 /// `token()` returns the cached token while it is fresh (with the
-/// configured refresh margin) and otherwise fetches a new one, running the
-/// fetch outside any lock so concurrent deliveries are never blocked while
-/// the auth endpoint is slow or down. `invalidate()` forces the next call
-/// to re-authenticate (used after a 401 / UNAUTHENTICATED).
+/// configured refresh margin) and otherwise fetches a new one. Concurrent
+/// fetches are coalesced by `fetch_lock`: the first caller fetches while the
+/// rest wait and then re-read the cache, so an expired token produces a
+/// single request to the IdP instead of one per in-flight delivery. The
+/// fetch itself runs outside the cache lock, so reads of a still-valid
+/// token are never blocked. `invalidate()` forces the next call to
+/// re-authenticate (used after a 401 / UNAUTHENTICATED).
 #[derive(Debug)]
 pub struct OAuth2TokenCache {
     client: reqwest::Client,
@@ -336,6 +392,9 @@ pub struct OAuth2TokenCache {
     retry_base_delay_ms: u64,
     /// `pub(crate)` so transport tests can seed an expired token.
     pub(crate) cached: tokio::sync::RwLock<Option<TokenResponse>>,
+    /// Serializes token fetches (single-flight); never held across a cache
+    /// read, so a slow IdP only serializes the concurrent refreshers.
+    fetch_lock: tokio::sync::Mutex<()>,
 }
 
 impl OAuth2TokenCache {
@@ -353,6 +412,7 @@ impl OAuth2TokenCache {
             margin_secs,
             retry_base_delay_ms,
             cached: tokio::sync::RwLock::new(None),
+            fetch_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -366,6 +426,19 @@ impl OAuth2TokenCache {
                 return Ok(token.access_token.clone());
             }
             // Missing, expired or expiring soon; fall through to fetch.
+        }
+
+        // Single-flight: only one task fetches; the others wait here and
+        // then re-read the cache (double-check) instead of hammering the
+        // IdP with one request per concurrent delivery.
+        let _fetch_guard = self.fetch_lock.lock().await;
+        {
+            let guard = self.cached.read().await;
+            if let Some(token) = guard.as_ref()
+                && !token.is_expired_or_expiring_soon(self.margin_secs)
+            {
+                return Ok(token.access_token.clone());
+            }
         }
 
         let token = obtain_token_with_retry(
@@ -403,8 +476,8 @@ pub(crate) async fn read_tls_file(
 }
 
 /// Add every PEM certificate in `path` as a root CA to the client builder.
-/// Shared by the HTTP sink and the OIDC token client of the Kafka sink so
-/// both honor the same custom-CA configuration.
+/// Shared by the HTTP sink and the OAuth2/OIDC token clients of the gRPC
+/// and Kafka sinks so all of them honor the same custom-CA configuration.
 pub(crate) async fn add_root_certificates(
     mut builder: reqwest::ClientBuilder,
     sink_name: &str,
@@ -429,6 +502,37 @@ pub(crate) async fn add_root_certificates(
     for cert in certs {
         builder = builder.add_root_certificate(cert);
     }
+    Ok(builder)
+}
+
+/// Add an mTLS client identity (certificate chain + private key) to the
+/// client builder. No-op when `client_certificate` is empty. Shared by the
+/// HTTP sink and the OAuth2/OIDC token clients of the gRPC and Kafka sinks
+/// so all of them honor the same `client_certificate` / `client_key`
+/// configuration when talking to the IdP or the backend.
+pub(crate) async fn add_mtls_identity(
+    mut builder: reqwest::ClientBuilder,
+    sink_name: &str,
+    client_certificate: &str,
+    client_key: &str,
+) -> Result<reqwest::ClientBuilder, SinkError> {
+    if client_certificate.is_empty() {
+        return Ok(builder);
+    }
+    let mut pem =
+        read_tls_file(sink_name, "client_certificate", client_certificate)
+            .await?;
+    let key = read_tls_file(sink_name, "client_key", client_key).await?;
+    // rustls expects a single PEM buffer with the certificate chain
+    // followed by the private key.
+    pem.extend_from_slice(&key);
+    let identity = reqwest::Identity::from_pem(&pem).map_err(|e| {
+        SinkError::ClientBuild(format!(
+            "sink '{}': invalid mTLS identity ('{}' / '{}'): {}",
+            sink_name, client_certificate, client_key, e
+        ))
+    })?;
+    builder = builder.identity(identity);
     Ok(builder)
 }
 
@@ -781,6 +885,101 @@ mod tests {
                 .as_object()
                 .expect("body is object")
                 .contains_key("scope")
+        );
+    }
+
+    /// Concurrent `token()` calls with an expired/empty cache must be
+    /// coalesced (single-flight): exactly one request reaches the IdP and
+    /// every caller gets the fetched token. The server holds the response
+    /// until the test releases it, so without coalescing every concurrent
+    /// caller would issue its own request and the counter would exceed 1.
+    #[tokio::test]
+    async fn token_cache_coalesces_concurrent_fetches() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt;
+        use tokio::sync::Notify;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let request_count_server = Arc::clone(&request_count);
+        let release_server = Arc::clone(&release);
+
+        tokio::spawn(async move {
+            let ok_body = r#"{"access_token":"coalesced-token","token_type":"Bearer","expires_in":3600}"#;
+            loop {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("test listener should accept");
+                request_count_server.fetch_add(1, Ordering::SeqCst);
+                let release = Arc::clone(&release_server);
+                tokio::spawn(async move {
+                    release.notified().await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        ok_body.len(),
+                        ok_body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        let cache = Arc::new(OAuth2TokenCache::new(
+            reqwest::Client::new(),
+            SinkAuthConfig {
+                auth_url: format!("http://{}/token", addr),
+                username: "test-user".to_owned(),
+                ..SinkAuthConfig::default()
+            },
+            "test-secret".to_owned(),
+            60,
+            10,
+        ));
+
+        const CALLERS: usize = 8;
+        let mut handles = Vec::new();
+        for _ in 0..CALLERS {
+            let cache = Arc::clone(&cache);
+            handles.push(tokio::spawn(async move { cache.token().await }));
+        }
+
+        // Poll until the single in-flight fetch reaches the endpoint, then
+        // yield so the other callers queue on the fetch lock (without
+        // single-flight they would all reach the endpoint here).
+        let mut attempts = 0;
+        while request_count.load(Ordering::SeqCst) == 0 && attempts < 100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            attempts += 1;
+        }
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "exactly one fetch should be in flight"
+        );
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        release.notify_waiters();
+
+        for handle in handles {
+            let token = handle
+                .await
+                .expect("caller task should join")
+                .expect("token should be obtained");
+            assert_eq!(token, "coalesced-token");
+        }
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "concurrent fetches must be coalesced into one IdP request"
         );
     }
 }

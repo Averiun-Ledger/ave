@@ -496,18 +496,35 @@ impl GrpcTransport {
         self.apply_metadata(&mut request)
             .await
             .map_err(StreamFailure::Delivery)?;
-        let response = self
-            .client
-            .clone()
-            .deliver_stream(request)
-            .await
-            .map_err(|e| {
+        // Bound only the stream establishment (the await resolves when the
+        // response headers arrive): a live server that never answers would
+        // otherwise hang every delivery behind the stream mutex while the
+        // health check keeps passing. `Request::set_timeout` is NOT an
+        // option here — it would cap the lifetime of the whole stream.
+        let response = match tokio::time::timeout(
+            self.request_timeout(),
+            self.client.clone().deliver_stream(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
                 if e.code() == Code::Unimplemented {
-                    StreamFailure::Unimplemented
-                } else {
-                    StreamFailure::Delivery(map_status(&e))
+                    return Err(StreamFailure::Unimplemented);
                 }
-            })?;
+                return Err(StreamFailure::Delivery(map_status(&e)));
+            }
+            Err(_elapsed) => {
+                return Err(StreamFailure::Delivery(SinkError::Delivery {
+                    message: format!(
+                        "sink '{}': stream open timeout after {} ms",
+                        self.sink_name, self.config.request_timeout_ms
+                    ),
+                    retryable: true,
+                    retry_after_ms: None,
+                }));
+            }
+        };
 
         let pending: PendingAcks = Arc::new(Mutex::new(HashMap::new()));
         let handle = StreamHandle {
@@ -803,7 +820,12 @@ const fn map_code(
             retryable: true,
             retry_after_ms,
         },
-        Code::Unauthenticated => SinkError::Auth {
+        // `Unauthenticated` and `PermissionDenied` both map to `Auth` (token
+        // invalidation + refresh + retry), mirroring the HTTP sink treating
+        // 401 and 403 alike: a backend that rejects a revoked/expired token
+        // with `PermissionDenied` recovers the same way as its HTTP 403
+        // equivalent instead of rejecting the event permanently.
+        Code::Unauthenticated | Code::PermissionDenied => SinkError::Auth {
             message,
             retry_after_ms,
         },
@@ -815,8 +837,7 @@ const fn map_code(
             retryable: true,
             retry_after_ms,
         },
-        Code::PermissionDenied
-        | Code::InvalidArgument
+        Code::InvalidArgument
         | Code::OutOfRange
         | Code::FailedPrecondition
         | Code::Unimplemented
@@ -899,8 +920,9 @@ fn auth_metadata_pair(
 }
 
 /// Build the reqwest client that fetches OAuth2 tokens, honoring the
-/// sink's `tls.ca_certificate` as an additional root CA (same policy as
-/// the Kafka OIDC token client).
+/// sink's TLS configuration (`ca_certificate` as an additional root CA and
+/// `client_certificate` / `client_key` as the mTLS identity), same policy
+/// as the Kafka OIDC token client.
 async fn build_token_client(
     sink_name: &str,
     tls: Option<&GrpcTlsConfig>,
@@ -908,13 +930,20 @@ async fn build_token_client(
 ) -> Result<reqwest::Client, SinkError> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_millis(request_timeout_ms));
-    if let Some(tls) = tls
-        && !tls.ca_certificate.is_empty()
-    {
-        builder = crate::sink::add_root_certificates(
+    if let Some(tls) = tls {
+        if !tls.ca_certificate.is_empty() {
+            builder = crate::sink::add_root_certificates(
+                builder,
+                sink_name,
+                &tls.ca_certificate,
+            )
+            .await?;
+        }
+        builder = crate::sink::add_mtls_identity(
             builder,
             sink_name,
-            &tls.ca_certificate,
+            &tls.client_certificate,
+            &tls.client_key,
         )
         .await?;
     }
@@ -1025,9 +1054,19 @@ mod tests {
     }
 
     #[test]
+    fn map_status_permission_denied_is_auth_error() {
+        // Parity with the HTTP sink treating 403 like 401: a revoked token
+        // rejected with PermissionDenied triggers a credential refresh, not
+        // a permanent rejection.
+        match map_status(&status(Code::PermissionDenied, "forbidden")) {
+            SinkError::Auth { .. } => {}
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn map_status_permanent_codes_are_rejected() {
         for code in [
-            Code::PermissionDenied,
             Code::InvalidArgument,
             Code::OutOfRange,
             Code::FailedPrecondition,
@@ -1080,5 +1119,30 @@ mod tests {
                 "missing env secret must be a build error for {auth:?}"
             );
         }
+    }
+
+    /// The token client must wire the sink's mTLS configuration into the
+    /// shared `add_mtls_identity` helper: a missing `client_certificate`
+    /// file surfaces as a build error naming the field. (The end-to-end
+    /// mTLS handshake against an IdP that requires a client certificate is
+    /// covered by the Kafka token client test, which shares the helper.)
+    #[tokio::test]
+    async fn build_token_client_rejects_missing_client_certificate() {
+        let tls = GrpcTlsConfig {
+            ca_certificate: String::new(),
+            client_certificate: "/nonexistent/ave-test-client.pem".to_owned(),
+            client_key: "/nonexistent/ave-test-client.key".to_owned(),
+        };
+        let err =
+            build_token_client("unit-grpc-mtls-missing-cert", Some(&tls), 1_000)
+                .await
+                .unwrap_err();
+        let SinkError::ClientBuild(message) = err else {
+            panic!("expected ClientBuild error, got {err:?}");
+        };
+        assert!(
+            message.contains("cannot read TLS client_certificate file"),
+            "unexpected error: {message}"
+        );
     }
 }

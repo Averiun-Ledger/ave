@@ -7,8 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use futures::StreamExt;
-use reqwest::{Client, Identity, tls::Version};
+use reqwest::{Client, tls::Version};
 use tracing::debug;
 
 use rustls::client::danger::{
@@ -22,6 +21,7 @@ use crate::config::{
     SinkCompression, HttpSinkConfig, HttpTlsVersion,
 };
 use crate::sink::SinkError;
+use crate::sink::read_limited_body;
 use crate::sink::read_tls_file;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
@@ -273,7 +273,23 @@ async fn build_http_client(
         .redirect(if config.max_redirects == 0 {
             reqwest::redirect::Policy::none()
         } else {
-            reqwest::redirect::Policy::limited(config.max_redirects)
+            // Follow only 307/308, which preserve the method and body.
+            // 301/302/303 would downgrade POST to GET and drop the event
+            // payload, producing a false success if the target answers 2xx
+            // to the bare GET; stopping surfaces the 3xx to the standard
+            // error mapping (non-retryable, visible to the operator).
+            let max_redirects = config.max_redirects;
+            reqwest::redirect::Policy::custom(move |attempt| {
+                // `previous()` includes the original request URL, so `>`
+                // matches `Policy::limited(n)` semantics (n followed hops).
+                if attempt.previous().len() > max_redirects {
+                    attempt.error("too many redirects")
+                } else if matches!(attempt.status().as_u16(), 307 | 308) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            })
         });
 
     if let Some(secs) = config.tcp_keepalive_secs {
@@ -301,26 +317,13 @@ async fn build_http_client(
             .await?;
         }
 
-        if !tls.client_certificate.is_empty() {
-            let mut pem = read_tls_file(
-                sink_name,
-                "client_certificate",
-                &tls.client_certificate,
-            )
-            .await?;
-            let key =
-                read_tls_file(sink_name, "client_key", &tls.client_key).await?;
-            // rustls expects a single PEM buffer with the certificate chain
-            // followed by the private key.
-            pem.extend_from_slice(&key);
-            let identity = Identity::from_pem(&pem).map_err(|e| {
-                SinkError::ClientBuild(format!(
-                    "sink '{}': invalid mTLS identity ('{}' / '{}'): {}",
-                    sink_name, tls.client_certificate, tls.client_key, e
-                ))
-            })?;
-            builder = builder.identity(identity);
-        }
+        builder = crate::sink::add_mtls_identity(
+            builder,
+            sink_name,
+            &tls.client_certificate,
+            &tls.client_key,
+        )
+        .await?;
 
         if let Some(min_version) = &tls.min_tls_version {
             let version = match min_version {
@@ -400,7 +403,6 @@ const fn oauth2_credentials_ready(auth: &SinkAuthConfig) -> bool {
 }
 
 /// HTTP transport for a single sink server.
-#[derive(Debug)]
 pub struct HttpTransport {
     client: Client,
     sink_name: String,
@@ -415,6 +417,23 @@ pub struct HttpTransport {
     oauth2: Option<crate::sink::OAuth2TokenCache>,
     /// Node identity signer; required when `config.signature` is enabled.
     signer: Option<NodeSigner>,
+}
+
+// Manual implementation (same policy as the gRPC and Kafka transports):
+// `static_auth` and `oauth2` hold live credentials, so they must never end
+// up in a log line via `{:?}`.
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("sink_name", &self.sink_name)
+            .field("config", &self.config)
+            .field(
+                "has_auth",
+                &(self.static_auth.is_some() || self.oauth2.is_some()),
+            )
+            .field("has_signer", &self.signer.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpTransport {
@@ -617,12 +636,19 @@ impl HttpTransport {
             request = request.header("Authorization", header);
         }
 
-        let response =
-            request.send().await.map_err(|e| SinkError::Delivery {
+        let response = request.send().await.map_err(|e| {
+            // Builder/redirect errors are configuration-level (e.g. an
+            // invalid URL produced by the template or the redirect policy
+            // exceeded): retrying cannot fix them, so they surface as
+            // permanent (the sink blocks for operator intervention) instead
+            // of looping through lagging/catch-up forever.
+            let retryable = !e.is_builder() && !e.is_redirect();
+            SinkError::Delivery {
                 message: format!("HTTP request failed ({}): {}", request_id, e),
-                retryable: true,
+                retryable,
                 retry_after_ms: None,
-            })?;
+            }
+        })?;
 
         let status = response.status();
         if status.is_success() {
@@ -875,33 +901,36 @@ impl SinkTransport for HttpTransport {
             request = request.header("Authorization", header);
         }
 
-        let response =
-            request.send().await.map_err(|e| SinkError::Delivery {
-                message: format!(
-                    "Sink test request failed ({}): {}",
-                    request_id, e
-                ),
-                retryable: true,
-                retry_after_ms: None,
-            })?;
+        timed_sink_request(&self.sink_name, || async {
+            let response =
+                request.send().await.map_err(|e| SinkError::Delivery {
+                    message: format!(
+                        "Sink test request failed ({}): {}",
+                        request_id, e
+                    ),
+                    retryable: true,
+                    retry_after_ms: None,
+                })?;
 
-        let status = response.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            // No retry loop here (deliveries invalidate in their retry
-            // loop): invalidate inline so the next test re-authenticates.
-            if status == 401 || status == 403 {
-                self.invalidate_cached_token().await;
+            let status = response.status();
+            if status.is_success() {
+                Ok(())
+            } else {
+                // No retry loop here (deliveries invalidate in their retry
+                // loop): invalidate inline so the next test re-authenticates.
+                if status == 401 || status == 403 {
+                    self.invalidate_cached_token().await;
+                }
+                Err(map_error_response(
+                    response,
+                    &request_id,
+                    self.config.max_error_body_bytes,
+                    "Sink test returned",
+                )
+                .await)
             }
-            Err(map_error_response(
-                response,
-                &request_id,
-                self.config.max_error_body_bytes,
-                "Sink test returned",
-            )
-            .await)
-        }
+        })
+        .await
     }
 
     /// Deliver a batch of events as JSON array payloads. When the URL
@@ -963,49 +992,16 @@ impl SinkTransport for HttpTransport {
     }
 }
 
-/// Read at most `limit` bytes from a byte stream, truncating the rest.
-/// Returns a lossy UTF-8 string with a `…(truncated)` marker when the body
-/// exceeds the limit. This prevents a misbehaving endpoint from causing an
-/// out-of-memory error by returning a multi-gigabyte error payload.
-async fn read_limited_body<S, E>(stream: S, limit: usize) -> String
-where
-    S: futures::Stream<Item = Result<bytes::Bytes, E>>,
-{
-    let mut collected = Vec::with_capacity(limit.min(1024));
-    let mut stream = Box::pin(stream);
-
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(bytes) => {
-                let remaining = limit.saturating_sub(collected.len());
-                if remaining == 0 {
-                    return format!(
-                        "{}…(truncated)",
-                        String::from_utf8_lossy(&collected)
-                    );
-                }
-                let take = bytes.len().min(remaining);
-                collected.extend_from_slice(&bytes[..take]);
-                if collected.len() >= limit {
-                    return format!(
-                        "{}…(truncated)",
-                        String::from_utf8_lossy(&collected)
-                    );
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    String::from_utf8_lossy(&collected).into_owned()
-}
-
 /// Map a non-success HTTP response to the shared error taxonomy: 401/403 →
-/// `Auth`; 429 and 5xx → retryable `Delivery` honoring the `Retry-After`
-/// hint; any other status → non-retryable `Delivery`. The body is truncated
-/// to `max_error_body_bytes` and `label` prefixes the message (`"HTTP"` for
-/// deliveries, `"Health check returned"`, ...). Single place so every call
-/// site classifies statuses identically.
+/// `Auth`; 408, 429 and 5xx → retryable `Delivery` honoring the
+/// `Retry-After` hint; any other status → `Rejected` (a permanent rejection
+/// of the payload or the endpoint contract — the same semantics as gRPC's
+/// `Rejected` codes and Kafka's `MessageSizeTooLarge`/`InvalidTopic`). The
+/// body is truncated to `max_error_body_bytes` and `label` prefixes the
+/// message (`"HTTP"` for deliveries, `"Health check returned"`, ...).
+/// Single place so every call site classifies statuses identically. (408 is
+/// retryable per RFC 9110 §15.6.9, matching the gRPC sink's
+/// `DeadlineExceeded`.)
 async fn map_error_response(
     response: reqwest::Response,
     request_id: &str,
@@ -1028,19 +1024,21 @@ async fn map_error_response(
             message,
             retry_after_ms: None,
         }
-    } else {
+    } else if status.is_server_error() || status == 429 || status == 408 {
         SinkError::Delivery {
             message,
-            retryable: status.is_server_error() || status == 429,
+            retryable: true,
             retry_after_ms,
         }
+    } else {
+        SinkError::Rejected { message }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
     use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -1873,10 +1871,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         drop(requests);
     }
 
-    /// Start a minimal HTTP server that returns a redirect on the first request
-    /// and HTTP 200 on subsequent requests. Returns the base URL and an atomic
-    /// request counter.
-    async fn start_redirect_server() -> (String, Arc<AtomicUsize>) {
+    /// Start a minimal HTTP server that returns a redirect with the given
+    /// status code on the first request and HTTP 200 on subsequent requests.
+    /// Returns the base URL and an atomic request counter.
+    async fn start_redirect_server(status: u16) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
@@ -1891,9 +1889,11 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                 };
                 let n = count_server.fetch_add(1, Ordering::SeqCst);
                 let response = if n == 0 {
-                    "HTTP/1.1 302 Found\r\nLocation: /ok\r\nContent-Length: 0\r\n\r\n"
+                    format!(
+                        "HTTP/1.1 {status} Redirect\r\nLocation: /ok\r\nContent-Length: 0\r\n\r\n"
+                    )
                 } else {
-                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_owned()
                 };
                 // Drain enough of the request to avoid RST on some platforms.
                 let mut tmp = [0u8; 1024];
@@ -1908,7 +1908,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
     #[tokio::test]
     async fn max_redirects_zero_rejects_redirect() {
-        let (url, count) = start_redirect_server().await;
+        let (url, count) = start_redirect_server(307).await;
 
         let mut config = base_config();
         config.url = url;
@@ -1935,7 +1935,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
 
     #[tokio::test]
     async fn max_redirects_one_follows_single_redirect() {
-        let (url, count) = start_redirect_server().await;
+        let (url, count) = start_redirect_server(307).await;
 
         let mut config = base_config();
         config.url = url;
@@ -1948,12 +1948,131 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         transport
             .health_check()
             .await
-            .expect("health check should follow the redirect and succeed");
+            .expect("health check should follow the 307 redirect and succeed");
         assert_eq!(
             count.load(Ordering::SeqCst),
             2,
             "initial request plus the followed redirect"
         );
+    }
+
+    #[tokio::test]
+    async fn max_redirects_one_does_not_follow_302() {
+        // 301/302/303 downgrade POST to GET and drop the event payload:
+        // following them could turn a lost delivery into a false success,
+        // so only 307/308 are followed.
+        let (url, count) = start_redirect_server(302).await;
+
+        let mut config = base_config();
+        config.url = url;
+        config.max_redirects = 1;
+        let transport = HttpTransport::new(
+            "unit-redirect-302".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        let result = transport.health_check().await;
+        assert!(
+            result.is_err(),
+            "health check should fail: 302 redirects are not followed"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the 302 response must not be followed"
+        );
+    }
+
+    /// Start a minimal HTTP server that answers every request with the
+    /// status currently held in the returned handle (switchable between
+    /// requests). Each connection gets one response and is closed.
+    async fn start_status_server() -> (String, Arc<AtomicU16>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+        let status = Arc::new(AtomicU16::new(200));
+        let status_server = Arc::clone(&status);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let code = status_server.load(Ordering::SeqCst);
+                let response =
+                    format!("HTTP/1.1 {code} Status\r\nContent-Length: 2\r\n\r\nok");
+                // Drain enough of the request to avoid RST on some platforms.
+                let mut tmp = [0u8; 1024];
+                let _ = stream.read(&mut tmp).await;
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        (format!("http://{addr}/events"), status)
+    }
+
+    /// The status → error-variant taxonomy is the sink's contract with the
+    /// retry/block machinery (and with the gRPC/Kafka parity): pin it down
+    /// through a real HTTP roundtrip. The health check routes every
+    /// non-success status through the same `map_error_response` as
+    /// deliveries.
+    #[tokio::test]
+    async fn map_error_response_classifies_statuses() {
+        let (url, status) = start_status_server().await;
+        let mut config = base_config();
+        config.url = url;
+        let transport = HttpTransport::new(
+            "unit-status-taxonomy".to_owned(),
+            config,
+            None,
+        )
+        .await
+        .expect("transport should build");
+
+        // 401/403 → Auth (token invalidation + re-authentication).
+        for code in [401u16, 403] {
+            status.store(code, Ordering::SeqCst);
+            let err = transport
+                .health_check()
+                .await
+                .expect_err("401/403 must fail the health check");
+            assert!(
+                matches!(err, SinkError::Auth { .. }),
+                "{code} must map to Auth, got {err:?}"
+            );
+        }
+
+        // 408/429/5xx → retryable Delivery.
+        for code in [408u16, 429, 500, 503] {
+            status.store(code, Ordering::SeqCst);
+            let err = transport
+                .health_check()
+                .await
+                .expect_err("a retryable status must fail the health check");
+            assert!(
+                matches!(err, SinkError::Delivery { retryable: true, .. }),
+                "{code} must map to retryable Delivery, got {err:?}"
+            );
+        }
+
+        // Any other non-success → Rejected (permanent): parity with the
+        // gRPC `Rejected` codes and Kafka's MessageSizeTooLarge/InvalidTopic.
+        for code in [400u16, 404, 422] {
+            status.store(code, Ordering::SeqCst);
+            let err = transport
+                .health_check()
+                .await
+                .expect_err("a rejection must fail the health check");
+            assert!(
+                matches!(err, SinkError::Rejected { .. }),
+                "{code} must map to Rejected, got {err:?}"
+            );
+        }
     }
 
     /// Generate a self-signed test certificate and return its DER.

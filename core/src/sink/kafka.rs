@@ -210,22 +210,31 @@ fn default_transactional_id(sink_name: &str, node_id: Option<&str>) -> String {
 type PreparedGroup = (String, Option<String>, Vec<u8>, String);
 
 /// Build the reqwest client that fetches OAUTHBEARER tokens from the OIDC
-/// endpoint. Honors the sink's `tls.ca_certificate` as an additional root
-/// CA so IdPs on corporate CAs work; proxying follows reqwest's standard
-/// system-proxy detection (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`).
+/// endpoint. Honors the sink's TLS configuration (`ca_certificate` as an
+/// additional root CA and `client_certificate` / `client_key` as the mTLS
+/// identity) so IdPs on corporate CAs and IdPs that require client
+/// certificates work; proxying follows reqwest's standard system-proxy
+/// detection (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`).
 async fn build_oauth_token_client(
     sink_name: &str,
     config: &KafkaSinkConfig,
 ) -> Result<reqwest::Client, SinkError> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_millis(config.request_timeout_ms));
-    if let Some(tls) = &config.tls
-        && !tls.ca_certificate.is_empty()
-    {
-        builder = crate::sink::add_root_certificates(
+    if let Some(tls) = &config.tls {
+        if !tls.ca_certificate.is_empty() {
+            builder = crate::sink::add_root_certificates(
+                builder,
+                sink_name,
+                &tls.ca_certificate,
+            )
+            .await?;
+        }
+        builder = crate::sink::add_mtls_identity(
             builder,
             sink_name,
-            &tls.ca_certificate,
+            &tls.client_certificate,
+            &tls.client_key,
         )
         .await?;
     }
@@ -433,14 +442,20 @@ impl KafkaTransport {
             }
         }
 
-        if uses_tls && let Some(tls) = &config.tls {
-            if !tls.ca_certificate.is_empty() {
-                client_config.set("ssl.ca.location", &tls.ca_certificate);
-            }
-            if !tls.client_certificate.is_empty() {
-                client_config
-                    .set("ssl.certificate.location", &tls.client_certificate)
-                    .set("ssl.key.location", &tls.client_key);
+        if uses_tls {
+            // Verify the broker certificate against the bootstrap hostname.
+            // Default since librdkafka 2.x, but the crate links the system
+            // librdkafka, which may be older and default to no verification.
+            client_config.set("ssl.endpoint.identification.algorithm", "https");
+            if let Some(tls) = &config.tls {
+                if !tls.ca_certificate.is_empty() {
+                    client_config.set("ssl.ca.location", &tls.ca_certificate);
+                }
+                if !tls.client_certificate.is_empty() {
+                    client_config
+                        .set("ssl.certificate.location", &tls.client_certificate)
+                        .set("ssl.key.location", &tls.client_key);
+                }
             }
         }
 
@@ -561,6 +576,27 @@ impl KafkaTransport {
             .await
     }
 
+    /// Run a blocking librdkafka call on the blocking thread pool:
+    /// `commit_transaction`, `abort_transaction` and `fetch_metadata` are
+    /// synchronous FFI calls that block the caller up to their timeout, so
+    /// they must not run on the async executor (same policy as the HTTP
+    /// sink's `spawn_blocking` compression). A join failure (panic in the
+    /// blocking task) surfaces as a retryable delivery error.
+    async fn off_executor<F, T>(&self, f: F) -> Result<T, SinkError>
+    where
+        F: FnOnce(FutureProducer<KafkaStatsContext>) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let producer = self.producer.clone();
+        tokio::task::spawn_blocking(move || f(producer))
+            .await
+            .map_err(|e| SinkError::Delivery {
+                message: format!("kafka blocking task failed: {e}"),
+                retryable: true,
+                retry_after_ms: None,
+            })
+    }
+
     /// A single produce attempt: optional transaction, one send, optional
     /// commit. Each retry of `produce` is a fresh transaction: a retryable
     /// failure aborts the previous one and starts over. Aborting ignores the
@@ -648,24 +684,37 @@ impl KafkaTransport {
 
         match send_result {
             Ok(delivery) => {
-                if transactional
-                    && let Err(e) = self.producer.commit_transaction(
-                        Duration::from_millis(self.config.request_timeout_ms),
-                    ) {
+                if transactional {
+                    let commit_timeout = Duration::from_millis(
+                        self.config.request_timeout_ms,
+                    );
+                    let commit = self
+                        .off_executor(move |producer| {
+                            producer.commit_transaction(commit_timeout)
+                        })
+                        .await
+                        .and_then(|result| {
+                            result.map_err(|e| SinkError::Delivery {
+                                message: format!("commit transaction: {e}"),
+                                retryable: true,
+                                retry_after_ms: None,
+                            })
+                        });
+                    if let Err(e) = commit {
                         // The message reached the broker but the commit
                         // failed: abort so the receiver does not see a
                         // dangling transaction, and retry as a unit.
-                        let _ = self.producer.abort_transaction(
-                            Duration::from_millis(
-                                self.config.request_timeout_ms,
-                            ),
+                        let abort_timeout = Duration::from_millis(
+                            self.config.request_timeout_ms,
                         );
-                        return Err(SinkError::Delivery {
-                            message: format!("commit transaction: {e}"),
-                            retryable: true,
-                            retry_after_ms: None,
-                        });
+                        let _ = self
+                            .off_executor(move |producer| {
+                                producer.abort_transaction(abort_timeout)
+                            })
+                            .await;
+                        return Err(e);
                     }
+                }
                 debug!(
                     msg_type = "SinkSend",
                     sink = %self.sink_name,
@@ -679,9 +728,13 @@ impl KafkaTransport {
             }
             Err((err, _message)) => {
                 if transactional {
-                    let _ = self.producer.abort_transaction(
-                        Duration::from_millis(self.config.request_timeout_ms),
-                    );
+                    let abort_timeout =
+                        Duration::from_millis(self.config.request_timeout_ms);
+                    let _ = self
+                        .off_executor(move |producer| {
+                            producer.abort_transaction(abort_timeout)
+                        })
+                        .await;
                 }
                 Err(map_produce_error(err))
             }
@@ -712,29 +765,28 @@ impl KafkaTransport {
         Ok(Some((topic, key, payload, request_id)))
     }
 
-    fn fetch_metadata(&self) -> Result<(), SinkError> {
-        self.producer
-            .client()
-            .fetch_metadata(
-                None,
-                Duration::from_millis(self.config.request_timeout_ms),
-            )
-            .map(|metadata| {
-                debug!(
-                    msg_type = "SinkHealthCheck",
-                    sink = %self.sink_name,
-                    brokers = metadata.brokers().len(),
-                    "Kafka cluster reachable"
-                );
-            })
-            .map_err(|e| match map_produce_error(e.clone()) {
-                SinkError::Delivery { .. } => SinkError::Delivery {
-                    message: format!("kafka metadata fetch failed: {e}"),
-                    retryable: true,
-                    retry_after_ms: None,
-                },
-                other => other,
-            })
+    async fn fetch_metadata(&self) -> Result<(), SinkError> {
+        let timeout = Duration::from_millis(self.config.request_timeout_ms);
+        self.off_executor(move |producer| {
+            producer.client().fetch_metadata(None, timeout)
+        })
+        .await?
+        .map(|metadata| {
+            debug!(
+                msg_type = "SinkHealthCheck",
+                sink = %self.sink_name,
+                brokers = metadata.brokers().len(),
+                "Kafka cluster reachable"
+            );
+        })
+        .map_err(|e| match map_produce_error(e.clone()) {
+            SinkError::Delivery { .. } => SinkError::Delivery {
+                message: format!("kafka metadata fetch failed: {e}"),
+                retryable: true,
+                retry_after_ms: None,
+            },
+            other => other,
+        })
     }
 }
 
@@ -907,7 +959,7 @@ impl SinkTransport for KafkaTransport {
     }
 
     async fn health_check(&self) -> Result<(), SinkError> {
-        self.fetch_metadata()
+        self.fetch_metadata().await
     }
 
     /// Run a non-persistent end-to-end test of the sink. Performs a health
@@ -933,7 +985,7 @@ impl SinkTransport for KafkaTransport {
     }
 
     async fn warm_up(&self) -> Result<(), SinkError> {
-        self.fetch_metadata()
+        self.fetch_metadata().await
     }
 }
 
@@ -1301,5 +1353,150 @@ mod tests {
             .await
             .expect("the token fetch must trust the configured CA");
         assert_eq!(response.access_token, "tls-oidc-token");
+    }
+
+    /// The OIDC token fetch must honor the sink's mTLS configuration: an
+    /// IdP that requires a client certificate is reachable only when
+    /// `tls.client_certificate` / `tls.client_key` are configured on the
+    /// token client.
+    #[tokio::test]
+    async fn build_oauth_token_client_fetches_token_over_mtls() {
+        use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair,
+            SanType,
+        };
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::server::WebPkiClientVerifier;
+        use rustls::{RootCertStore, ServerConfig as RustlsServerConfig};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Throwaway CA with a server certificate for 127.0.0.1 and a client
+        // certificate, same generation as the integration TLS helpers.
+        let ca_key = KeyPair::generate().expect("CA key should generate");
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "ave-test-oidc-mtls-ca");
+        let ca_cert = ca_params
+            .self_signed(&ca_key)
+            .expect("CA cert should generate");
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let server_key =
+            KeyPair::generate().expect("server key should generate");
+        let mut server_params = CertificateParams::default();
+        server_params.subject_alt_names =
+            vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        let server_cert = server_params
+            .signed_by(&server_key, &issuer)
+            .expect("server cert should generate");
+
+        let client_key =
+            KeyPair::generate().expect("client key should generate");
+        let client_cert = CertificateParams::default()
+            .signed_by(&client_key, &issuer)
+            .expect("client cert should generate");
+
+        // HTTPS token endpoint that requires a client certificate.
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "mtls-oidc-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                }))
+            }),
+        );
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let addr = listener.local_addr().expect("local address");
+        // Explicit crypto provider: the process-level default may be unset
+        // when several rustls backends are linked.
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let mut roots = RootCertStore::empty();
+        roots.add(ca_cert.der().clone()).expect("CA cert should parse");
+        let verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            provider.clone(),
+        )
+        .build()
+        .expect("client verifier should build");
+        let server_config =
+            RustlsServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("default TLS versions should be valid")
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(
+                    vec![server_cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        server_key.serialize_der(),
+                    )),
+                )
+                .expect("server cert/key should be valid");
+        let rustls_config = RustlsConfig::from_config(Arc::new(server_config));
+        tokio::spawn(async move {
+            let _ = axum_server::from_tcp(listener)
+                .expect("listener should convert to tokio")
+                .acceptor(RustlsAcceptor::new(rustls_config))
+                .serve(app.into_make_service())
+                .await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        let client_cert_path = dir.path().join("client.pem");
+        let client_key_path = dir.path().join("client.key");
+        std::fs::write(&ca_path, ca_cert.pem()).unwrap();
+        std::fs::write(&client_cert_path, client_cert.pem()).unwrap();
+        std::fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
+
+        let tls_config = |client_certificate: String, client_key: String| {
+            KafkaSinkConfig {
+                tls: Some(crate::config::KafkaTlsConfig {
+                    ca_certificate: ca_path.to_string_lossy().into_owned(),
+                    client_certificate,
+                    client_key,
+                }),
+                ..KafkaSinkConfig::default()
+            }
+        };
+
+        let auth = ave_common::sink::SinkAuthConfig {
+            auth_url: format!("https://{addr}/token"),
+            username: String::new(),
+            grant_type: ave_common::sink::OAuth2GrantType::ClientCredentials,
+            client_id: "client-1".to_owned(),
+            scope: String::new(),
+        };
+
+        // Negative control first: without a client certificate the IdP
+        // rejects the TLS handshake, proving the server enforces mTLS.
+        let no_cert_config = tls_config(String::new(), String::new());
+        let no_cert_client =
+            build_oauth_token_client("unit-oidc-mtls-no-cert", &no_cert_config)
+                .await
+                .expect("client without mTLS identity should still build");
+        assert!(
+            crate::sink::obtain_token(&no_cert_client, &auth, "secret")
+                .await
+                .is_err(),
+            "the IdP must reject connections without a client certificate"
+        );
+
+        let config = tls_config(
+            client_cert_path.to_string_lossy().into_owned(),
+            client_key_path.to_string_lossy().into_owned(),
+        );
+        let client = build_oauth_token_client("unit-oidc-mtls", &config)
+            .await
+            .expect("client with mTLS identity should build");
+        let response = crate::sink::obtain_token(&client, &auth, "secret")
+            .await
+            .expect("the token fetch must present the client certificate");
+        assert_eq!(response.access_token, "mtls-oidc-token");
     }
 }
