@@ -2313,9 +2313,9 @@ impl SinkManager {
                     && let Err(e) = self
                         .send_catch_up(sink.clone(), subject_id, from_sn, ctx)
                         .await
-                    {
-                        error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up restart to worker");
-                    }
+                {
+                    error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up restart to worker");
+                }
                 continue;
             }
 

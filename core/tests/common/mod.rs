@@ -138,8 +138,8 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
     let mut vec_dirs = vec![];
     let local_db = local_db.map_or_else(
         || {
-            let dir = tempfile::tempdir()
-                .expect("Can not create temporal directory");
+            let dir =
+                tempfile::tempdir().expect("Can not create temporal directory");
             let local_db = dir.path().to_path_buf();
             vec_dirs.push(dir);
 
@@ -150,8 +150,8 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
 
     let ext_db = ext_db.map_or_else(
         || {
-            let dir = tempfile::tempdir()
-                .expect("Can not create temporal directory");
+            let dir =
+                tempfile::tempdir().expect("Can not create temporal directory");
             let ext_db = dir.path().to_path_buf();
             vec_dirs.push(dir);
 
@@ -719,9 +719,10 @@ pub async fn node_running(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         if let Ok(state) = node.get_network_state().await
-            && state == MonitorNetworkState::Running {
-                break;
-            }
+            && state == MonitorNetworkState::Running
+        {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     Ok(())

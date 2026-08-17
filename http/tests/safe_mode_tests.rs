@@ -590,9 +590,14 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let witnesses = body.as_array().cloned().unwrap_or_default();
     assert_eq!(witnesses, vec![json!(MEMBER_PUBLIC_KEY)]);
 
-    let (status, body) =
-        make_request(&client, &env.server.url("/governances"), "GET", None, None)
-            .await;
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/governances"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let govs = body.as_array().cloned().unwrap_or_default();
     assert_eq!(govs.len(), 1, "{body}");
@@ -892,10 +897,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         &env.server,
         None,
         "POST",
-        &format!(
-            "/subjects/{}/manual-distribution",
-            fixture.governance_id
-        ),
+        &format!("/subjects/{}/manual-distribution", fixture.governance_id),
         None,
     )
     .await;

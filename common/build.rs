@@ -23,8 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // a future tonic-build changes the emitted code the replacement
         // becomes a no-op and the warning reappears — visible, never silent
         // breakage.
-        let generated =
-            std::path::Path::new(&std::env::var("OUT_DIR")?).join("ave.sink.v1.rs");
+        let generated = std::path::Path::new(&std::env::var("OUT_DIR")?)
+            .join("ave.sink.v1.rs");
         let code = std::fs::read_to_string(&generated)?;
         let code = code
             .replace(

@@ -351,7 +351,7 @@ impl TestSink {
                             material.server_key_der.clone(),
                         )),
                     )
-                .expect("server cert/key should be valid");
+                    .expect("server cert/key should be valid");
             server_config.alpn_protocols =
                 vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             RustlsConfig::from_config(Arc::new(server_config))
@@ -664,8 +664,7 @@ impl TestSink {
                 }
             }
             Some("zstd") => {
-                match zstd::bulk::decompress(body.as_ref(), 16 * 1024 * 1024)
-                {
+                match zstd::bulk::decompress(body.as_ref(), 16 * 1024 * 1024) {
                     Ok(buf) => {
                         decoded = buf;
                         &decoded

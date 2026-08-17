@@ -368,7 +368,8 @@ async fn test_request_deserialization() {
     assert_eq!(request_info.version, 0);
 
     let (.., body) =
-        make_request(&client, &server.url("/requests"), "GET", None, None).await;
+        make_request(&client, &server.url("/requests"), "GET", None, None)
+            .await;
 
     let request_info: Vec<RequestInfoExtend> =
         serde_json::from_value(body).unwrap();
@@ -805,8 +806,10 @@ async fn test_update_and_transfer_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server
-            .url(&format!("/subjects/{}/manual-distribution", request_data.subject_id)),
+        &server.url(&format!(
+            "/subjects/{}/manual-distribution",
+            request_data.subject_id
+        )),
         "POST",
         None,
         None,
@@ -1057,7 +1060,9 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/governances/{governance_id}/subjects?active=false")),
+        &server.url(&format!(
+            "/governances/{governance_id}/subjects?active=false"
+        )),
         "GET",
         None,
         None,
@@ -1570,7 +1575,10 @@ async fn test_subject_deserialization() {
     // events/{subject_id}?quantity={u64}&page={u64}&reverse={bool} -> PaginatorEvents
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/subjects/{}/events?quantity=1&page=3", governance_id)),
+        &server2.url(&format!(
+            "/subjects/{}/events?quantity=1&page=3",
+            governance_id
+        )),
         "GET",
         None,
         None,
@@ -1600,7 +1608,8 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/subjects/{}/events?reverse=true", governance_id)),
+        &server2
+            .url(&format!("/subjects/{}/events?reverse=true", governance_id)),
         "GET",
         None,
         None,
@@ -1690,8 +1699,10 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2
-            .url(&format!("/subjects/{}/events-first-last?quantity=2", governance_id)),
+        &server2.url(&format!(
+            "/subjects/{}/events-first-last?quantity=2",
+            governance_id
+        )),
         "GET",
         None,
         None,

@@ -984,7 +984,8 @@ pub mod tests {
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
-            .await.is_ok()
+            .await
+            .is_ok()
         {
             panic!("Invalid response")
         }

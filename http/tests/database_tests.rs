@@ -2212,7 +2212,8 @@ async fn test_login_transactional_issues_snapshots_and_rotates() {
         && p.action == "get"
         && p.allowed));
     assert!(
-        db.authenticate_api_key_request(&key1, None, "/peer-id").is_ok()
+        db.authenticate_api_key_request(&key1, None, "/peer-id")
+            .is_ok()
     );
 
     // A second login rotates the management key: the old one dies
@@ -2230,7 +2231,8 @@ async fn test_login_transactional_issues_snapshots_and_rotates() {
         Err(DatabaseError::PermissionDenied(_))
     ));
     assert!(
-        db.authenticate_api_key_request(&key2, None, "/peer-id").is_ok()
+        db.authenticate_api_key_request(&key2, None, "/peer-id")
+            .is_ok()
     );
 
     // Wrong password: generic error and the attempt is counted
@@ -2241,10 +2243,7 @@ async fn test_login_transactional_issues_snapshots_and_rotates() {
         None,
         "login_tx_user_session",
     );
-    assert!(matches!(
-        result,
-        Err(DatabaseError::PermissionDenied(_)),
-    ));
+    assert!(matches!(result, Err(DatabaseError::PermissionDenied(_)),));
     let after = db.get_user_by_id(user.id).unwrap();
     assert_eq!(after.failed_login_attempts, 1);
 }

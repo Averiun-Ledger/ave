@@ -1113,10 +1113,7 @@ mod tests {
         }
 
         // Empty endpoint.
-        assert_rejects(
-            &GrpcSinkConfig::default(),
-            "GrpcSinkConfig.endpoint",
-        );
+        assert_rejects(&GrpcSinkConfig::default(), "GrpcSinkConfig.endpoint");
         // Unsupported scheme.
         assert_rejects(
             &GrpcSinkConfig {
@@ -1282,10 +1279,9 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let decoded_test = pb::TestRequest::decode(
-            test_request.encode_to_vec().as_slice(),
-        )
-        .expect("test request must decode");
+        let decoded_test =
+            pb::TestRequest::decode(test_request.encode_to_vec().as_slice())
+                .expect("test request must decode");
         assert_eq!(test_request, decoded_test);
     }
 
@@ -1404,10 +1400,7 @@ mod tests {
         cfg.partitioner = Some("roundrobin".to_string());
         assert_rejects(&cfg, "KafkaSinkConfig.partitioner");
         cfg.partitioner = Some("murmur2_random".to_string());
-        assert!(
-            cfg.validate().is_ok(),
-            "a known partitioner must validate"
-        );
+        assert!(cfg.validate().is_ok(), "a known partitioner must validate");
         cfg.partitioner = None;
 
         // OAUTHBEARER requires the OIDC token endpoint, and the endpoint is
@@ -1417,8 +1410,7 @@ mod tests {
             username: "client-1".to_string(),
         };
         assert_rejects(&cfg, "KafkaSinkConfig.oauth_token_url");
-        cfg.oauth_token_url =
-            Some("https://idp.example/token".to_string());
+        cfg.oauth_token_url = Some("https://idp.example/token".to_string());
         assert!(
             cfg.validate().is_ok(),
             "OAUTHBEARER with a token URL must validate"
@@ -2841,7 +2833,9 @@ fn validate_template_placeholders(
         if !ALLOWED.contains(&name) {
             return Err(Error::InvalidConfiguration {
                 component: component.to_string(),
-                reason: format!("unknown template placeholder '{{{{{name}}}}}'"),
+                reason: format!(
+                    "unknown template placeholder '{{{{{name}}}}}'"
+                ),
             });
         }
         rest = &after[end + 2..];

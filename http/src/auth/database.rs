@@ -60,7 +60,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../../migrations/001_initial_schema.sql")),
     (2, include_str!("../../migrations/002_role_permissions.sql")),
     (3, include_str!("../../migrations/003_usage_plans.sql")),
-    (4, include_str!("../../migrations/004_sink_role_permissions.sql")),
+    (
+        4,
+        include_str!("../../migrations/004_sink_role_permissions.sql"),
+    ),
     (
         5,
         include_str!("../../migrations/005_single_active_management_key.sql"),
@@ -1724,9 +1727,7 @@ impl AuthDatabase {
         }
 
         if !actor_is_superadmin
-            && (password.is_some()
-                || is_active.is_some()
-                || role_ids.is_some())
+            && (password.is_some() || is_active.is_some() || role_ids.is_some())
         {
             // Admin account: superadmin role or any admin-resource permission
             let is_admin = is_target_superadmin || {
@@ -2121,9 +2122,9 @@ impl AuthDatabase {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-            let user = match self.verify_credentials_with_conn(
-                &tx, username, password,
-            ) {
+            let user = match self
+                .verify_credentials_with_conn(&tx, username, password)
+            {
                 Ok(user) => user,
                 Err(err) => {
                     // The failure (and the lockout counter increment) must
@@ -2160,14 +2161,13 @@ impl AuthDatabase {
             let roles = Self::get_user_roles_internal(&tx, user.id)?;
             let permissions =
                 Self::get_effective_permissions_internal(&tx, user.id)?;
-            let (api_key, key_info) = self
-                .issue_management_api_key_with_conn(
-                    &tx,
-                    user.id,
-                    Some(session_name),
-                    None,
-                    None,
-                )?;
+            let (api_key, key_info) = self.issue_management_api_key_with_conn(
+                &tx,
+                user.id,
+                Some(session_name),
+                None,
+                None,
+            )?;
 
             let audit_details =
                 format!("User {} logged in successfully", user.username);

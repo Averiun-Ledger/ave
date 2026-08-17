@@ -126,7 +126,8 @@ async fn kafka_transport_happy_path() {
     let transport = KafkaTransport::new(
         "test".to_string(),
         kafka_sink_config(&env.bootstrap_servers, "ave-{{schema-id}}"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -162,7 +163,8 @@ async fn kafka_transport_happy_path() {
     let transport = KafkaTransport::new(
         "test".to_string(),
         kafka_sink_config(&env.bootstrap_servers, "{{subject-id}}"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -184,7 +186,8 @@ async fn kafka_transport_sends_delivery_headers() {
     let transport = KafkaTransport::new(
         "test-headers".to_string(),
         kafka_sink_config(&env.bootstrap_servers, "headers-{{schema-id}}"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -247,7 +250,8 @@ async fn kafka_transport_test_sends_test_message() {
     let transport = KafkaTransport::new(
         "test-endpoint".to_string(),
         kafka_sink_config(&env.bootstrap_servers, "test-topic"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -290,7 +294,8 @@ async fn kafka_transport_test_renders_event_type_template() {
             &env.bootstrap_servers,
             "test-{{schema-id}}-{{event-type}}",
         ),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -322,7 +327,8 @@ async fn kafka_transport_logs_request_id() {
     let transport = KafkaTransport::new(
         "test-logs".to_string(),
         kafka_sink_config(&env.bootstrap_servers, "logs-{{schema-id}}"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -371,7 +377,9 @@ async fn kafka_transport_retries_on_unknown_topic() {
         cfg.retry_max_delay_ms = 500;
     });
     let transport =
-        KafkaTransport::new("test-retry".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-retry".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -446,7 +454,9 @@ async fn kafka_transport_tls_custom_ca() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("test-tls".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-tls".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -472,7 +482,9 @@ async fn kafka_transport_tls_missing_ca_fails() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("test-tls-fail".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-tls-fail".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     let result = transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -503,7 +515,9 @@ async fn kafka_transport_config_variants() {
             |cfg| cfg.compression = compression,
         );
         let transport =
-            KafkaTransport::new("test".to_string(), config, None, None).await.unwrap();
+            KafkaTransport::new("test".to_string(), config, None, None)
+                .await
+                .unwrap();
         transport
             .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
             .await
@@ -524,7 +538,9 @@ async fn kafka_transport_config_variants() {
             |cfg| cfg.acks = acks,
         );
         let transport =
-            KafkaTransport::new("test".to_string(), config, None, None).await.unwrap();
+            KafkaTransport::new("test".to_string(), config, None, None)
+                .await
+                .unwrap();
         transport
             .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
             .await
@@ -552,8 +568,9 @@ async fn kafka_transport_error_handling() {
         },
         ..KafkaSinkConfig::default()
     };
-    let err =
-        KafkaTransport::new("test".to_string(), config, None, None).await.unwrap_err();
+    let err = KafkaTransport::new("test".to_string(), config, None, None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, SinkError::ClientBuild(_)));
 
     // Invalid acks values are rejected at deserialization time.
@@ -571,8 +588,9 @@ async fn kafka_transport_error_handling() {
         request_timeout_ms: 500,
         ..KafkaSinkConfig::default()
     };
-    let transport =
-        KafkaTransport::new("test".to_string(), config, None, None).await.unwrap();
+    let transport = KafkaTransport::new("test".to_string(), config, None, None)
+        .await
+        .unwrap();
     let err = transport.health_check().await.unwrap_err();
     assert!(
         matches!(
@@ -590,7 +608,8 @@ async fn kafka_transport_error_handling() {
     let transport = KafkaTransport::new(
         "test".to_string(),
         kafka_sink_config(&env.bootstrap_servers, "ave-{{schema-id}}"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -626,7 +645,8 @@ async fn kafka_transport_sasl() {
     let transport = KafkaTransport::new(
         "sasl-ok".to_string(),
         kafka_sink_config_sasl(&env.bootstrap_servers, "ave-sasl-ok", username),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -652,7 +672,9 @@ async fn kafka_transport_sasl() {
         ..KafkaSinkConfig::default()
     };
     let transport =
-        KafkaTransport::new("sasl-bad".to_string(), bad_config, None, None).await.unwrap();
+        KafkaTransport::new("sasl-bad".to_string(), bad_config, None, None)
+            .await
+            .unwrap();
     // Force an immediate connection attempt; librdkafka may report the bad
     // credentials as an auth error or, with some broker timings, as a
     // retryable connection timeout.
@@ -681,8 +703,7 @@ async fn kafka_transport_oauthbearer_delivers() {
     let discovery_url =
         format!("{}/.well-known/openid-configuration", idp.issuer);
     let env =
-        RedpandaOidcEnv::start(&discovery_url, &idp.audience, "client-1")
-            .await;
+        RedpandaOidcEnv::start(&discovery_url, &idp.audience, "client-1").await;
 
     let _secret = TempEnvVar::set("AVE_SINK_PASSWORD_TEST_OIDC", "oidc-secret");
 
@@ -738,8 +759,8 @@ async fn kafka_transport_oauthbearer_delivers_over_custom_ca() {
             .await;
     let discovery_url =
         format!("{}/.well-known/openid-configuration", idp.issuer);
-    let env = RedpandaOidcEnv::start(&discovery_url, &idp.audience, "client-1")
-        .await;
+    let env =
+        RedpandaOidcEnv::start(&discovery_url, &idp.audience, "client-1").await;
 
     let _secret =
         TempEnvVar::set("AVE_SINK_PASSWORD_TEST_OIDC_TLS", "oidc-secret");
@@ -1300,7 +1321,9 @@ async fn kafka_transport_batch_delivery() {
         |cfg| cfg.batch_delivery = true,
     );
     let transport =
-        KafkaTransport::new("test-batch".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-batch".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     let events: Vec<IncomingSinkEvent> = vec![
         IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
@@ -1345,10 +1368,14 @@ async fn kafka_transport_batch_groups_by_event_type() {
         "batch-{{schema-id}}-{{event-type}}",
         |cfg| cfg.batch_delivery = true,
     );
-    let transport =
-        KafkaTransport::new("test-batch-event-type".to_string(), config, None, None)
-            .await
-            .unwrap();
+    let transport = KafkaTransport::new(
+        "test-batch-event-type".to_string(),
+        config,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let light = |sn: u64| LightEvent {
         subject_id: SUBJECT_ID.to_string(),
@@ -1403,7 +1430,8 @@ async fn kafka_transport_topic_template_with_event_type() {
             &env.bootstrap_servers,
             "ave-{{schema-id}}-{{event-type}}",
         ),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -1441,9 +1469,10 @@ async fn kafka_transport_signature_requires_signer() {
     let mut config = kafka_sink_config(&env.bootstrap_servers, topic);
     config.signature = true;
 
-    let err = KafkaTransport::new("test-signature".to_string(), config, None, None)
-        .await
-        .unwrap_err();
+    let err =
+        KafkaTransport::new("test-signature".to_string(), config, None, None)
+            .await
+            .unwrap_err();
     assert!(
         matches!(err, SinkError::ClientBuild(_)),
         "expected ClientBuild error, got {:?}",
@@ -1513,12 +1542,14 @@ async fn kafka_node_signature_headers() {
             servers: vec![SinkServer {
                 server: "signature-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                    bootstrap_servers: env.bootstrap_servers.clone(),
-                    topic: topic.to_owned(),
-                    signature: true,
-                    ..KafkaSinkConfig::default()
-                })),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    KafkaSinkConfig {
+                        bootstrap_servers: env.bootstrap_servers.clone(),
+                        topic: topic.to_owned(),
+                        signature: true,
+                        ..KafkaSinkConfig::default()
+                    },
+                )),
                 ..Default::default()
             }],
         }],
@@ -1654,13 +1685,15 @@ async fn kafka_node_batch_delivery() {
             servers: vec![SinkServer {
                 server: "kafka-batch-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                    bootstrap_servers: env.bootstrap_servers.clone(),
-                    topic: topic.to_owned(),
-                    batch_delivery: true,
-                    batch_max_delay_ms: 30_000,
-                    ..KafkaSinkConfig::default()
-                })),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    KafkaSinkConfig {
+                        bootstrap_servers: env.bootstrap_servers.clone(),
+                        topic: topic.to_owned(),
+                        batch_delivery: true,
+                        batch_max_delay_ms: 30_000,
+                        ..KafkaSinkConfig::default()
+                    },
+                )),
                 batch_delivery_size: 3,
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
@@ -1799,13 +1832,15 @@ async fn kafka_node_batch_delivery_timer_flush() {
             servers: vec![SinkServer {
                 server: "kafka-batch-timer-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                    bootstrap_servers: env.bootstrap_servers.clone(),
-                    topic: topic.to_owned(),
-                    batch_delivery: true,
-                    batch_max_delay_ms: 10_000,
-                    ..KafkaSinkConfig::default()
-                })),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    KafkaSinkConfig {
+                        bootstrap_servers: env.bootstrap_servers.clone(),
+                        topic: topic.to_owned(),
+                        batch_delivery: true,
+                        batch_max_delay_ms: 10_000,
+                        ..KafkaSinkConfig::default()
+                    },
+                )),
                 batch_delivery_size: 100,
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
@@ -1931,13 +1966,15 @@ async fn kafka_node_signature_v2_binds_headers() {
             servers: vec![SinkServer {
                 server: "kafka-signature-v2-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                    bootstrap_servers: env.bootstrap_servers.clone(),
-                    topic: topic.to_owned(),
-                    signature: true,
-                    signature_version: 2,
-                    ..KafkaSinkConfig::default()
-                })),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    KafkaSinkConfig {
+                        bootstrap_servers: env.bootstrap_servers.clone(),
+                        topic: topic.to_owned(),
+                        signature: true,
+                        signature_version: 2,
+                        ..KafkaSinkConfig::default()
+                    },
+                )),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,
@@ -2219,7 +2256,9 @@ async fn kafka_transport_key_strategy_none() {
         },
     );
     let transport =
-        KafkaTransport::new("test-key-none".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-key-none".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2283,10 +2322,14 @@ async fn kafka_transport_key_strategy_template() {
             );
         },
     );
-    let transport =
-        KafkaTransport::new("test-key-template".to_string(), config, None, None)
-            .await
-            .unwrap();
+    let transport = KafkaTransport::new(
+        "test-key-template".to_string(),
+        config,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2367,7 +2410,9 @@ async fn kafka_transport_tuning_delivers() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tune".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-tune".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2427,7 +2472,9 @@ async fn kafka_transport_exposes_producer_stats() {
         },
     );
     let transport =
-        KafkaTransport::new(sink_name.to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new(sink_name.to_string(), config, None, None)
+            .await
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -2519,7 +2566,9 @@ async fn kafka_transport_batch_best_effort_fails_fast() {
         });
     let sink_name = "test-best-effort-dead";
     let transport =
-        KafkaTransport::new(sink_name.to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new(sink_name.to_string(), config, None, None)
+            .await
+            .unwrap();
 
     // Initialize the core metrics global (idempotent via `OnceLock`): the
     // failure must surface with the transient label, and the shared retry
@@ -2568,7 +2617,8 @@ async fn kafka_transport_records_request_duration() {
     let transport = KafkaTransport::new(
         sink_name.to_string(),
         kafka_sink_config(&env.bootstrap_servers, "duration-{{schema-id}}"),
-        None, None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -2607,14 +2657,18 @@ async fn kafka_transport_custom_headers() {
         },
     );
     let transport =
-        KafkaTransport::new("test-headers".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-headers".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
         .await
         .unwrap();
 
-    let messages = env.consume_with_headers("headers-Example", 1, TIMEOUT).await;
+    let messages = env
+        .consume_with_headers("headers-Example", 1, TIMEOUT)
+        .await;
     assert_eq!(messages.len(), 1);
     let headers = &messages[0].2;
     let get = |name: &str| {
@@ -2673,7 +2727,9 @@ async fn kafka_transport_transactional_batch() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tx-batch".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-tx-batch".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     let light = |sn: u64| LightEvent {
         subject_id: SUBJECT_ID.to_string(),
@@ -2728,7 +2784,9 @@ async fn kafka_transport_transactional_batch_best_effort() {
         },
     );
     let transport =
-        KafkaTransport::new("test-tx-best".to_string(), config, None, None).await.unwrap();
+        KafkaTransport::new("test-tx-best".to_string(), config, None, None)
+            .await
+            .unwrap();
 
     let light = |sn: u64| LightEvent {
         subject_id: SUBJECT_ID.to_string(),
@@ -2974,12 +3032,16 @@ async fn kafka_node_key_strategy_static() {
             servers: vec![SinkServer {
                 server: "node-key-static-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                    bootstrap_servers: env.bootstrap_servers.clone(),
-                    topic: topic.to_owned(),
-                    key_strategy: KafkaKeyStrategy::Static(fixed_key.clone()),
-                    ..KafkaSinkConfig::default()
-                })),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    KafkaSinkConfig {
+                        bootstrap_servers: env.bootstrap_servers.clone(),
+                        topic: topic.to_owned(),
+                        key_strategy: KafkaKeyStrategy::Static(
+                            fixed_key.clone(),
+                        ),
+                        ..KafkaSinkConfig::default()
+                    },
+                )),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,
@@ -3072,12 +3134,14 @@ async fn kafka_node_transactional_delivers() {
             servers: vec![SinkServer {
                 server: "node-tx-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
-                    bootstrap_servers: env.bootstrap_servers.clone(),
-                    topic: topic.to_owned(),
-                    transactional: true,
-                    ..KafkaSinkConfig::default()
-                })),
+                transport: SinkTransportConfig::Kafka(Box::new(
+                    KafkaSinkConfig {
+                        bootstrap_servers: env.bootstrap_servers.clone(),
+                        topic: topic.to_owned(),
+                        transactional: true,
+                        ..KafkaSinkConfig::default()
+                    },
+                )),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,

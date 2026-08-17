@@ -201,7 +201,8 @@ impl Handler<Self> for SinkSubjectWorker {
                         self.report_success(ctx, subject_id, sn, false, 1).await
                     }
                     Err(e) => {
-                        self.report_error(ctx, subject_id, sn, e, false, 1).await
+                        self.report_error(ctx, subject_id, sn, e, false, 1)
+                            .await
                     }
                 }
 
@@ -295,7 +296,8 @@ impl Handler<Self> for SinkSubjectWorker {
                     Err(e) => {
                         // The whole chain stops on failure: the subject goes
                         // back to lagging and catch-up retries it later.
-                        self.report_error(ctx, subject_id, sn, e, true, 1).await;
+                        self.report_error(ctx, subject_id, sn, e, true, 1)
+                            .await;
                     }
                 }
 
@@ -544,7 +546,10 @@ impl SinkSubjectWorker {
                     }
                 }
                 Err(e) => {
-                    self.report_error(ctx, subject_id, first_sn, e, true, count).await;
+                    self.report_error(
+                        ctx, subject_id, first_sn, e, true, count,
+                    )
+                    .await;
                 }
             }
             return Ok(());
@@ -628,7 +633,10 @@ impl SinkSubjectWorker {
                         .await
                 }
                 Err(e) => {
-                    self.report_error(ctx, subject_id, first_sn, e, false, count).await
+                    self.report_error(
+                        ctx, subject_id, first_sn, e, false, count,
+                    )
+                    .await
                 }
             }
         }
@@ -778,18 +786,16 @@ impl SinkSubjectWorker {
                 error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "SubjectManager unavailable for catch-up query");
                 return SubjectQuery::Unavailable;
             };
-            let requester =
-                format!("sink:{}:{}", self.sink_name, subject_id);
-            let subject_id_digest =
-                match subject_id
-                    .parse::<ave_common::identity::DigestIdentifier>()
-                {
-                    Ok(d) => d,
-                    Err(_) => {
-                        error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Invalid subject_id format");
-                        return SubjectQuery::NotFound;
-                    }
-                };
+            let requester = format!("sink:{}:{}", self.sink_name, subject_id);
+            let subject_id_digest = match subject_id
+                .parse::<ave_common::identity::DigestIdentifier>(
+            ) {
+                Ok(d) => d,
+                Err(_) => {
+                    error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Invalid subject_id format");
+                    return SubjectQuery::NotFound;
+                }
+            };
             if !matches!(
                 subject_manager
                     .ask(crate::node::subject_manager::SubjectManagerMessage::Up {
@@ -806,8 +812,10 @@ impl SinkSubjectWorker {
                 return SubjectQuery::Unavailable;
             }
             self.subject_lifted = true;
-            let Ok(actor) =
-                ctx.system().get_actor::<crate::tracker::Tracker>(&path).await
+            let Ok(actor) = ctx
+                .system()
+                .get_actor::<crate::tracker::Tracker>(&path)
+                .await
             else {
                 error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Tracker not found after Up");
                 return SubjectQuery::Unavailable;

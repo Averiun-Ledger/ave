@@ -83,11 +83,8 @@ pub async fn generate_self_signed_cert(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            key_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .await?;
+        fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+            .await?;
     }
 
     info!(

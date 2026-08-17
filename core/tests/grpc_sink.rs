@@ -18,12 +18,10 @@ use ave_common::{
         BLAKE3_HASHER, DigestIdentifier, Hash as _, PublicKey,
         SignatureIdentifier, TimeStamp, keys::KeyPair,
     },
-    sink::{
-        DataToSink, DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig,
-    },
+    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
 };
 use ave_core::config::{
-    SinkAuthMethod, GrpcSinkConfig, GrpcTlsConfig, SinkCompression,
+    GrpcSinkConfig, GrpcTlsConfig, SinkAuthMethod, SinkCompression,
     SinkConfigEntry, SinkServer, SinkTransportConfig,
 };
 use ave_core::sink::SinkError;
@@ -32,10 +30,6 @@ use ave_core::sink::delivery::{DeliveryMeta, canonical_payload};
 use ave_core::sink::grpc::GrpcTransport;
 use ave_network::NodeType;
 use base64::{Engine as _, prelude::BASE64_STANDARD};
-use futures::future::join_all;
-use std::str::FromStr;
-use tonic::Code;
-use test_log::test;
 use common::grpc_test_sink::{GrpcResponseMode, GrpcTestSink};
 use common::test_sink::TestSink;
 use common::{
@@ -47,6 +41,10 @@ use common::{
         wait_for_sink_caught_up, wait_for_sink_lagging_subjects,
     },
 };
+use futures::future::join_all;
+use std::str::FromStr;
+use test_log::test;
+use tonic::Code;
 
 const SUBJECT_ID: &str = "GRPC-SUBJECT-ID";
 const SCHEMA_ID: &str = "Example";
@@ -202,7 +200,9 @@ async fn grpc_transport_gzip_compression() {
             IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
                 SUBJECT_ID, SCHEMA_ID,
             ))),
-            IncomingSinkEvent::Light(example_light_event(SUBJECT_ID, SCHEMA_ID)),
+            IncomingSinkEvent::Light(example_light_event(
+                SUBJECT_ID, SCHEMA_ID,
+            )),
         ])
         .await
         .unwrap();
@@ -219,8 +219,7 @@ async fn grpc_transport_gzip_compression() {
         .expect("gzip payload decompresses to JSON");
     assert_eq!(payload["payload"]["event"], "create");
 
-    let batch_body =
-        deliveries[1].body.as_ref().expect("batch carries a body");
+    let batch_body = deliveries[1].body.as_ref().expect("batch carries a body");
     let batch: serde_json::Value = serde_json::from_slice(&batch_body.payload)
         .expect("gzip batch payload decompresses to JSON");
     assert!(batch.is_array(), "batch payload must be a JSON array");
@@ -229,19 +228,17 @@ async fn grpc_transport_gzip_compression() {
     // The wire must actually be compressed (`grpc-encoding: gzip`), not
     // just decompressible: tonic would accept plaintext transparently.
     assert!(
-        deliveries
-            .iter()
-            .all(|d| d.metadata.get("grpc-encoding").map(String::as_str)
-                == Some("gzip")),
+        deliveries.iter().all(|d| d
+            .metadata
+            .get("grpc-encoding")
+            .map(String::as_str)
+            == Some("gzip")),
         "compressed transports must send grpc-encoding: gzip on every RPC"
     );
 
     // Contrast: an uncompressed transport sends no grpc-encoding metadata.
-    let plain = build_transport(
-        &sink.endpoint(),
-        grpc_config(&sink.endpoint()),
-    )
-    .await;
+    let plain =
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await;
     plain
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
         .await
@@ -275,7 +272,9 @@ async fn grpc_transport_zstd_compression() {
             IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
                 SUBJECT_ID, SCHEMA_ID,
             ))),
-            IncomingSinkEvent::Light(example_light_event(SUBJECT_ID, SCHEMA_ID)),
+            IncomingSinkEvent::Light(example_light_event(
+                SUBJECT_ID, SCHEMA_ID,
+            )),
         ])
         .await
         .unwrap();
@@ -290,8 +289,7 @@ async fn grpc_transport_zstd_compression() {
         .expect("zstd payload decompresses to JSON");
     assert_eq!(payload["payload"]["event"], "create");
 
-    let batch_body =
-        deliveries[1].body.as_ref().expect("batch carries a body");
+    let batch_body = deliveries[1].body.as_ref().expect("batch carries a body");
     let batch: serde_json::Value = serde_json::from_slice(&batch_body.payload)
         .expect("zstd batch payload decompresses to JSON");
     assert_eq!(batch.as_array().expect("batch is an array").len(), 2);
@@ -299,10 +297,11 @@ async fn grpc_transport_zstd_compression() {
     // The wire must actually be compressed (`grpc-encoding: zstd`), not
     // just decompressible: tonic would accept plaintext transparently.
     assert!(
-        deliveries
-            .iter()
-            .all(|d| d.metadata.get("grpc-encoding").map(String::as_str)
-                == Some("zstd")),
+        deliveries.iter().all(|d| d
+            .metadata
+            .get("grpc-encoding")
+            .map(String::as_str)
+            == Some("zstd")),
         "compressed transports must send grpc-encoding: zstd on every RPC"
     );
 }
@@ -440,11 +439,12 @@ async fn grpc_transport_sends_basic_auth_metadata() {
 
     let deliveries = sink.deliveries();
     assert_eq!(deliveries.len(), 1);
-    let expected = format!(
-        "Basic {}",
-        BASE64_STANDARD.encode("alice:pass-secret")
+    let expected =
+        format!("Basic {}", BASE64_STANDARD.encode("alice:pass-secret"));
+    assert_eq!(
+        deliveries[0].authorization.as_deref(),
+        Some(expected.as_str())
     );
-    assert_eq!(deliveries[0].authorization.as_deref(), Some(expected.as_str()));
 }
 
 /// Custom static metadata: user headers reach the server on every RPC,
@@ -494,10 +494,8 @@ async fn grpc_transport_custom_headers_and_reserved_filtering() {
 async fn grpc_transport_oauth2_fetches_caches_and_refreshes_token() {
     let idp = TestSink::start().await;
     let sink = GrpcTestSink::start().await;
-    let _guard = TempEnvVar::set(
-        "AVE_SINK_PASSWORD_TEST_OAUTH2_FETCH",
-        "oauth-secret",
-    );
+    let _guard =
+        TempEnvVar::set("AVE_SINK_PASSWORD_TEST_OAUTH2_FETCH", "oauth-secret");
 
     let config = GrpcSinkConfig {
         auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
@@ -640,12 +638,9 @@ async fn grpc_transport_oauth2_idp_failure_is_auth_error() {
         retry_base_delay_ms: 1,
         ..grpc_config(&sink.endpoint())
     };
-    let transport = build_transport_named(
-        "test-oauth2-idp-fail",
-        &sink.endpoint(),
-        config,
-    )
-    .await;
+    let transport =
+        build_transport_named("test-oauth2-idp-fail", &sink.endpoint(), config)
+            .await;
 
     let result = transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -703,8 +698,7 @@ async fn grpc_transport_retry_info_drives_backoff_hint() {
 async fn grpc_transport_warm_up_opens_stream_eagerly() {
     let sink = GrpcTestSink::start().await;
     let transport =
-        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
-            .await;
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await;
 
     assert_eq!(sink.stream_opens(), 0);
     transport.warm_up().await.unwrap();
@@ -737,12 +731,18 @@ async fn grpc_transport_best_effort_is_single_attempt() {
     };
     let transport = build_transport(&sink.endpoint(), config).await;
 
-    let events = vec![IncomingSinkEvent::Full(Arc::new(
-        example_data_to_sink(SUBJECT_ID, SCHEMA_ID),
-    ))];
+    let events = vec![IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+        SUBJECT_ID, SCHEMA_ID,
+    )))];
     let result = transport.send_batch_best_effort(events).await;
     assert!(
-        matches!(result, Err(SinkError::Delivery { retryable: true, .. })),
+        matches!(
+            result,
+            Err(SinkError::Delivery {
+                retryable: true,
+                ..
+            })
+        ),
         "expected a retryable delivery error, got {result:?}"
     );
     assert_eq!(
@@ -763,8 +763,7 @@ async fn grpc_transport_exposes_stream_metrics() {
     ave_core::metrics::register(&mut registry);
     let encode = |registry: &prometheus_client::registry::Registry| {
         let mut text = String::new();
-        prometheus_client::encoding::text::encode(&mut text, registry)
-            .unwrap();
+        prometheus_client::encoding::text::encode(&mut text, registry).unwrap();
         text
     };
 
@@ -1012,8 +1011,7 @@ async fn grpc_transport_pipelines_over_single_stream() {
     let sink = GrpcTestSink::start().await;
     sink.set_stream_ack_delay(50);
     let transport = Arc::new(
-        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
-            .await,
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await,
     );
 
     let mut handles = Vec::new();
@@ -1047,8 +1045,7 @@ async fn grpc_transport_recovers_from_stream_cut() {
         retry_base_delay_ms: 1,
         ..grpc_config(&sink.endpoint())
     };
-    let transport =
-        build_transport(&sink.endpoint(), config).await;
+    let transport = build_transport(&sink.endpoint(), config).await;
 
     transport
         .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
@@ -1098,18 +1095,15 @@ async fn grpc_transport_stream_backpressure_on_stalled_consumer() {
 
     // While stalled nothing is delivered and the third send cannot
     // complete (window = 2): poll briefly to observe the stable state.
-    let stalled = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        async {
+    let stalled =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while sink.deliveries().is_empty()
                 && handles.iter().all(|h| !h.is_finished())
             {
-                tokio::time::sleep(std::time::Duration::from_millis(50))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-        },
-    )
-    .await;
+        })
+        .await;
     assert!(
         stalled.is_err(),
         "the stall must hold for the whole observation window"
@@ -1133,8 +1127,7 @@ async fn grpc_transport_stream_backpressure_on_stalled_consumer() {
 async fn grpc_transport_unary_fallback_for_legacy_server() {
     let sink = GrpcTestSink::start_unary_only().await;
     let transport =
-        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
-            .await;
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await;
 
     for _ in 0..2 {
         transport
@@ -1384,7 +1377,10 @@ async fn grpc_node_light_events_for_non_subscribed_types() {
     let create_meta = create.meta.as_ref().expect("create carries meta");
     assert_eq!(create_meta.sn, 0);
     assert_eq!(create_meta.event_type, "create");
-    assert!(!create_meta.light, "the create event must be delivered full");
+    assert!(
+        !create_meta.light,
+        "the create event must be delivered full"
+    );
     let create_body = create.body.as_ref().expect("full event carries a body");
     let payload: serde_json::Value =
         serde_json::from_slice(&create_body.payload).expect("payload is JSON");
@@ -1413,7 +1409,8 @@ async fn grpc_node_light_events_for_non_subscribed_types() {
     .unwrap();
     sink.wait_for_deliveries(3).await;
     let deliveries = sink.deliveries();
-    let live_meta = deliveries[2].meta.as_ref().expect("live fact carries meta");
+    let live_meta =
+        deliveries[2].meta.as_ref().expect("live fact carries meta");
     assert_eq!(live_meta.sn, 2);
     assert_eq!(live_meta.event_type, "fact");
     assert!(live_meta.light, "live facts must travel as light events");
@@ -1441,9 +1438,9 @@ async fn grpc_node_governance_sink_receives_governance_events() {
             servers: vec![SinkServer {
                 server: "grpc-gov-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Grpc(Box::new(
-                    grpc_config(&sink.endpoint()),
-                )),
+                transport: SinkTransportConfig::Grpc(Box::new(grpc_config(
+                    &sink.endpoint(),
+                ))),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 2,
@@ -1884,9 +1881,9 @@ async fn grpc_node_replay_rewinds_pending_catch_up() {
             servers: vec![SinkServer {
                 server: "grpc-pending-replay-sink".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                transport: SinkTransportConfig::Grpc(Box::new(
-                    grpc_config(&sink_endpoint),
-                )),
+                transport: SinkTransportConfig::Grpc(Box::new(grpc_config(
+                    &sink_endpoint,
+                ))),
                 healthcheck_intervals_secs: vec![1],
                 startup_healthcheck_delay_secs: 0,
                 max_catch_up_concurrency: 1,
@@ -2185,13 +2182,19 @@ async fn grpc_node_signs_light_events() {
     let deliveries = sink.deliveries();
     assert_eq!(deliveries.len(), 3, "create + two facts");
     assert!(
-        !deliveries[0].meta.as_ref().expect("create carries meta").light,
+        !deliveries[0]
+            .meta
+            .as_ref()
+            .expect("create carries meta")
+            .light,
         "the create event must be delivered full"
     );
     assert!(
-        deliveries[1..]
-            .iter()
-            .all(|d| d.meta.as_ref().expect("fact carries meta").light),
+        deliveries[1..].iter().all(|d| d
+            .meta
+            .as_ref()
+            .expect("fact carries meta")
+            .light),
         "facts must be delivered as light events"
     );
 
@@ -2271,7 +2274,7 @@ async fn start_node_with_history(
         create_subject(&owner.api, governance_id.clone(), SCHEMA_ID, "", true)
             .await
             .unwrap();
-        
+
     for i in 0..facts {
         emit_fact(
             &owner.api,
@@ -2764,7 +2767,10 @@ async fn grpc_node_catch_up_multiple_subjects() {
         std::collections::BTreeMap::new();
     for delivery in sink.accepted_deliveries() {
         let meta = delivery.meta.as_ref().expect("live events carry meta");
-        per_subject.entry(meta.subject_id.clone()).or_default().push(meta.sn);
+        per_subject
+            .entry(meta.subject_id.clone())
+            .or_default()
+            .push(meta.sn);
     }
     assert_eq!(
         per_subject.len(),
@@ -2929,16 +2935,13 @@ async fn grpc_node_stalled_consumer_recovers() {
     // While stalled, nothing new is accepted (the delivery waits inside
     // the in-flight window): observe the stable state with the poll
     // pattern instead of a fixed sleep.
-    let stalled = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        async {
+    let stalled =
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while sink.accepted_deliveries().len() == 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(50))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-        },
-    )
-    .await;
+        })
+        .await;
     assert!(
         stalled.is_err(),
         "no delivery may complete while the consumer is stalled"

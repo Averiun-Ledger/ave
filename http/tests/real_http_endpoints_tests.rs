@@ -850,9 +850,10 @@ async fn test_login_reports_allow_wins_permissions() {
 
     // Two roles contesting the same pair: one allows, one denies
     let mut role_ids = Vec::new();
-    for (name, allowed) in
-        [(format!("allow_role_{}", suffix), true), (format!("deny_role_{}", suffix), false)]
-    {
+    for (name, allowed) in [
+        (format!("allow_role_{}", suffix), true),
+        (format!("deny_role_{}", suffix), false),
+    ] {
         let (status, body) = make_app_request(
             &app,
             "/admin/roles",
@@ -923,9 +924,7 @@ async fn test_login_reports_allow_wins_permissions() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|p| {
-            p["resource"] == "node_subject" && p["action"] == "get"
-        })
+        .filter(|p| p["resource"] == "node_subject" && p["action"] == "get")
         .collect();
     assert_eq!(contested.len(), 1, "exactly one row: {contested:?}");
     assert_eq!(contested[0]["allowed"], true, "allow-wins");
@@ -971,8 +970,10 @@ async fn test_concurrent_user_updates_never_fail_with_500() {
             }
         })
         .collect();
-    for (i, (status, body)) in
-        futures::future::join_all(updates).await.into_iter().enumerate()
+    for (i, (status, body)) in futures::future::join_all(updates)
+        .await
+        .into_iter()
+        .enumerate()
     {
         assert_eq!(status, StatusCode::OK, "update {i} failed: {body}");
     }
@@ -1795,12 +1796,7 @@ async fn test_http_error_responses_have_canonical_shape() {
         ("/no-such-route", "GET", None, StatusCode::NOT_FOUND),
         // Known path, method not in the catalog: the permission layer denies
         // before method negotiation.
-        (
-            "/sinks/example-sink",
-            "DELETE",
-            None,
-            StatusCode::FORBIDDEN,
-        ),
+        ("/sinks/example-sink", "DELETE", None, StatusCode::FORBIDDEN),
         // Invalid query parameter.
         (
             "/sinks?in_config=notabool",
@@ -1856,10 +1852,7 @@ async fn test_http_error_responses_have_canonical_shape() {
                     .await
             }
         };
-        assert_eq!(
-            status, expected,
-            "{method} {path} must return {expected}"
-        );
+        assert_eq!(status, expected, "{method} {path} must return {expected}");
         assert!(
             body["error"].is_string(),
             "{method} {path} must return the canonical error body, got: {body}"
@@ -1892,7 +1885,8 @@ async fn test_doc_routes_stay_public_with_auth_enabled() {
         "openapi.json must serve the spec: {body}"
     );
 
-    let (status, body) = make_app_request_raw(&app, "/doc/", "GET", None, None).await;
+    let (status, body) =
+        make_app_request_raw(&app, "/doc/", "GET", None, None).await;
     assert_eq!(status, StatusCode::OK, "doc UI: {body}");
 
     // Control: a protected route without credentials is still rejected.

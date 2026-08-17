@@ -199,10 +199,13 @@ impl ResolvedKeyStrategy {
 /// key) so restarts keep fencing the node's own zombies, and unique per
 /// node so several nodes running the same sink never fence each other.
 fn default_transactional_id(sink_name: &str, node_id: Option<&str>) -> String {
-    node_id.map_or_else(|| format!("ave-sink-{sink_name}"), |node_id| {
-        let short: String = node_id.chars().take(12).collect();
-        format!("ave-sink-{sink_name}-{short}")
-    })
+    node_id.map_or_else(
+        || format!("ave-sink-{sink_name}"),
+        |node_id| {
+            let short: String = node_id.chars().take(12).collect();
+            format!("ave-sink-{sink_name}-{short}")
+        },
+    )
 }
 
 /// Topic, optional message key, JSON payload and request id of a batch
@@ -327,17 +330,16 @@ impl KafkaTransport {
             client_config.set("partitioner", partitioner);
         }
 
-        let key_strategy = ResolvedKeyStrategy::from_config(&config.key_strategy);
+        let key_strategy =
+            ResolvedKeyStrategy::from_config(&config.key_strategy);
 
         // Point 11: transactional producer requires a non-empty
         // `transactional.id` so Kafka can fence zombie producers. The default
         // id is derived from the node identity so two nodes running the same
         // sink never fence each other.
         if config.transactional {
-            let transactional_id = config
-                .transactional_id
-                .clone()
-                .unwrap_or_else(|| {
+            let transactional_id =
+                config.transactional_id.clone().unwrap_or_else(|| {
                     default_transactional_id(&sink_name, node_id)
                 });
             client_config.set("transactional.id", &transactional_id);
@@ -435,7 +437,10 @@ impl KafkaTransport {
                         ))
                     })?;
                     client_config
-                        .set("sasl.kerberos.service.name", &kerberos.service_name)
+                        .set(
+                            "sasl.kerberos.service.name",
+                            &kerberos.service_name,
+                        )
                         .set("sasl.kerberos.principal", &kerberos.principal)
                         .set("sasl.kerberos.keytab", &kerberos.keytab);
                 }
@@ -453,7 +458,10 @@ impl KafkaTransport {
                 }
                 if !tls.client_certificate.is_empty() {
                     client_config
-                        .set("ssl.certificate.location", &tls.client_certificate)
+                        .set(
+                            "ssl.certificate.location",
+                            &tls.client_certificate,
+                        )
                         .set("ssl.key.location", &tls.client_key);
                 }
             }
@@ -642,8 +650,7 @@ impl KafkaTransport {
             });
         }
         if let Some(meta) = meta {
-            for header in build_headers(meta, request_id).as_borrowed().iter()
-            {
+            for header in build_headers(meta, request_id).as_borrowed().iter() {
                 headers = headers.insert(header);
             }
         }
@@ -685,9 +692,8 @@ impl KafkaTransport {
         match send_result {
             Ok(delivery) => {
                 if transactional {
-                    let commit_timeout = Duration::from_millis(
-                        self.config.request_timeout_ms,
-                    );
+                    let commit_timeout =
+                        Duration::from_millis(self.config.request_timeout_ms);
                     let commit = self
                         .off_executor(move |producer| {
                             producer.commit_transaction(commit_timeout)
@@ -1116,14 +1122,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_millis() as i64;
-        assert!(
-            lifetime_ms > now_ms,
-            "the token must expire in the future"
-        );
+        assert!(lifetime_ms > now_ms, "the token must expire in the future");
     }
 
     #[test]
-    fn kafka_stats_context_counts_only_fatal_errors() {        use rdkafka::ClientContext as _;
+    fn kafka_stats_context_counts_only_fatal_errors() {
+        use rdkafka::ClientContext as _;
 
         // Initialize the core metrics global (idempotent via `OnceLock`).
         let mut registry = prometheus_client::registry::Registry::default();
@@ -1152,7 +1156,9 @@ mod tests {
     }
 
     #[test]
-    fn default_transactional_id_is_per_node_stable_and_truncated() {        let id = default_transactional_id("sink", Some("node-public-key-abcdef"));
+    fn default_transactional_id_is_per_node_stable_and_truncated() {
+        let id =
+            default_transactional_id("sink", Some("node-public-key-abcdef"));
         // First 12 chars of the node id: unique per node, stable per restart.
         assert_eq!(id, "ave-sink-sink-node-public-");
         assert_eq!(
@@ -1418,25 +1424,26 @@ mod tests {
         // when several rustls backends are linked.
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = RootCertStore::empty();
-        roots.add(ca_cert.der().clone()).expect("CA cert should parse");
+        roots
+            .add(ca_cert.der().clone())
+            .expect("CA cert should parse");
         let verifier = WebPkiClientVerifier::builder_with_provider(
             Arc::new(roots),
             provider.clone(),
         )
         .build()
         .expect("client verifier should build");
-        let server_config =
-            RustlsServerConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("default TLS versions should be valid")
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(
-                    vec![server_cert.der().clone()],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                        server_key.serialize_der(),
-                    )),
-                )
-                .expect("server cert/key should be valid");
+        let server_config = RustlsServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("default TLS versions should be valid")
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                vec![server_cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                    server_key.serialize_der(),
+                )),
+            )
+            .expect("server cert/key should be valid");
         let rustls_config = RustlsConfig::from_config(Arc::new(server_config));
         tokio::spawn(async move {
             let _ = axum_server::from_tcp(listener)
@@ -1454,16 +1461,15 @@ mod tests {
         std::fs::write(&client_cert_path, client_cert.pem()).unwrap();
         std::fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
 
-        let tls_config = |client_certificate: String, client_key: String| {
-            KafkaSinkConfig {
+        let tls_config =
+            |client_certificate: String, client_key: String| KafkaSinkConfig {
                 tls: Some(crate::config::KafkaTlsConfig {
                     ca_certificate: ca_path.to_string_lossy().into_owned(),
                     client_certificate,
                     client_key,
                 }),
                 ..KafkaSinkConfig::default()
-            }
-        };
+            };
 
         let auth = ave_common::sink::SinkAuthConfig {
             auth_url: format!("https://{addr}/token"),

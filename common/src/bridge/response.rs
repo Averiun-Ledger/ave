@@ -505,15 +505,9 @@ impl From<SinkServer> for SinkServerView {
 impl From<SinkTransportConfig> for SinkTransportView {
     fn from(value: SinkTransportConfig) -> Self {
         match value {
-            SinkTransportConfig::Http(config) => {
-                Self::Http((*config).into())
-            }
-            SinkTransportConfig::Kafka(config) => {
-                Self::Kafka((*config).into())
-            }
-            SinkTransportConfig::Grpc(config) => {
-                Self::Grpc((*config).into())
-            }
+            SinkTransportConfig::Http(config) => Self::Http((*config).into()),
+            SinkTransportConfig::Kafka(config) => Self::Kafka((*config).into()),
+            SinkTransportConfig::Grpc(config) => Self::Grpc((*config).into()),
         }
     }
 }

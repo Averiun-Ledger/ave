@@ -2,9 +2,7 @@
 
 use std::fmt::Display;
 
-use crate::{
-    request::EventRequest, signature::BridgeSignature,
-};
+use crate::{request::EventRequest, signature::BridgeSignature};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

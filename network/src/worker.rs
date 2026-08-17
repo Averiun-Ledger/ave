@@ -3181,9 +3181,9 @@ mod tests {
             .handle_connection_events(SwarmEvent::Behaviour(
                 BehaviourEvent::IdentifyError {
                     peer_id: peer,
-                    error: swarm::StreamUpgradeError::Io(std::io::Error::other(
-                        "test",
-                    )),
+                    error: swarm::StreamUpgradeError::Io(
+                        std::io::Error::other("test"),
+                    ),
                 },
             ))
             .await;

@@ -2,13 +2,13 @@
 //
 // This module provides database operations for API keys
 
+use super::VALIDATION_LIMITS;
 use super::crypto::{
     extract_key_prefix, generate_api_key, generate_uuid, hash_api_key,
 };
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::*;
-use super::VALIDATION_LIMITS;
 use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
@@ -742,13 +742,16 @@ impl AuthDatabase {
 
         // Get user. A key whose owner no longer exists (e.g. a deleted
         // user) is treated as an invalid key, not an internal error.
-        let user = Self::get_user_by_id_internal(conn, user_id).map_err(|e| {
-            if matches!(e, DatabaseError::NotFound(_)) {
-                DatabaseError::PermissionDenied("Invalid API key".to_string())
-            } else {
-                e
-            }
-        })?;
+        let user =
+            Self::get_user_by_id_internal(conn, user_id).map_err(|e| {
+                if matches!(e, DatabaseError::NotFound(_)) {
+                    DatabaseError::PermissionDenied(
+                        "Invalid API key".to_string(),
+                    )
+                } else {
+                    e
+                }
+            })?;
 
         // Check if user is active
         if !user.is_active {

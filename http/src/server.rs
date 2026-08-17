@@ -1991,10 +1991,7 @@ mod tests {
             .route("/governances", get(ok_handler))
             .route("/requests", post(ok_handler).get(ok_handler))
             .route("/requests/123", get(ok_handler))
-            .route(
-                "/subjects/abc/manual-distribution",
-                post(ok_handler),
-            )
+            .route("/subjects/abc/manual-distribution", post(ok_handler))
             .route("/governances/abc/authorize", delete(ok_handler))
             .route("/approvals/abc", get(ok_handler).patch(ok_handler))
             .route("/peer-id", get(ok_handler))
@@ -2020,22 +2017,29 @@ mod tests {
         let app = router();
 
         // data role has node_subject:get - should be allowed
-        let status = call(&app, Method::GET, "/subjects/abc/events", ctx.clone()).await;
+        let status =
+            call(&app, Method::GET, "/subjects/abc/events", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         // data role has node_request:get - should be allowed
-        let status = call(&app, Method::GET, "/requests/123", ctx.clone()).await;
+        let status =
+            call(&app, Method::GET, "/requests/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         // data role does NOT have node_sink:get - should be forbidden
         let status =
-            call(&app, Method::GET, "/subjects/abc/sink-events", ctx.clone()).await;
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx.clone())
+                .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
         // data role does NOT have node_subject:post - should be forbidden
-        let status =
-            call(&app, Method::POST, "/subjects/abc/manual-distribution", ctx.clone())
-                .await;
+        let status = call(
+            &app,
+            Method::POST,
+            "/subjects/abc/manual-distribution",
+            ctx.clone(),
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
         // data role does NOT have node_request:post - should be forbidden
@@ -2049,9 +2053,13 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "manager");
         let app = router();
 
-        let status =
-            call(&app, Method::POST, "/subjects/abc/manual-distribution", ctx.clone())
-                .await;
+        let status = call(
+            &app,
+            Method::POST,
+            "/subjects/abc/manual-distribution",
+            ctx.clone(),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
 
         let status = call(&app, Method::POST, "/requests", ctx).await;
@@ -2064,14 +2072,17 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "sender");
         let app = router();
 
-        let ok_status = call(&app, Method::POST, "/requests", ctx.clone()).await;
+        let ok_status =
+            call(&app, Method::POST, "/requests", ctx.clone()).await;
         assert_eq!(ok_status, StatusCode::OK);
 
-        let ok_get = call(&app, Method::GET, "/requests/123", ctx.clone()).await;
+        let ok_get =
+            call(&app, Method::GET, "/requests/123", ctx.clone()).await;
         assert_eq!(ok_get, StatusCode::OK);
 
         let forbidden =
-            call(&app, Method::POST, "/subjects/abc/manual-distribution", ctx).await;
+            call(&app, Method::POST, "/subjects/abc/manual-distribution", ctx)
+                .await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
@@ -2081,14 +2092,17 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "sink");
         let app = router();
 
-        let ok = call(&app, Method::GET, "/subjects/abc/sink-events", ctx.clone()).await;
+        let ok =
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx.clone())
+                .await;
         assert_ne!(ok, StatusCode::FORBIDDEN);
 
         let forbidden_subject =
             call(&app, Method::GET, "/subjects/abc/events", ctx.clone()).await;
         assert_eq!(forbidden_subject, StatusCode::FORBIDDEN);
 
-        let forbidden_request = call(&app, Method::POST, "/requests", ctx).await;
+        let forbidden_request =
+            call(&app, Method::POST, "/requests", ctx).await;
         assert_eq!(forbidden_request, StatusCode::FORBIDDEN);
     }
 
@@ -2098,7 +2112,8 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "admin");
         let app = router();
 
-        let forbidden = call(&app, Method::GET, "/subjects/abc/sink-events", ctx).await;
+        let forbidden =
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
@@ -2108,7 +2123,8 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "superadmin");
         let app = router();
 
-        let status = call(&app, Method::GET, "/subjects/abc/sink-events", ctx).await;
+        let status =
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx).await;
         assert_ne!(status, StatusCode::FORBIDDEN);
     }
 

@@ -8,8 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ave_common::sink::pb;
 use ave_common::sink::{
-    GrpcSinkConfig, GrpcTlsConfig, SinkCompression,
-    SinkAuthMethod,
+    GrpcSinkConfig, GrpcTlsConfig, SinkAuthMethod, SinkCompression,
 };
 use ave_common::{DataToSink, LightEvent};
 use futures::StreamExt as _;
@@ -27,8 +26,8 @@ use crate::sink::delivery::{
     test_delivery_payload, timed_sink_request,
 };
 use crate::sink::error::SinkError;
-use crate::sink::transport::{NodeSigner, SinkTransport};
 use crate::sink::read_tls_file;
+use crate::sink::transport::{NodeSigner, SinkTransport};
 
 use pb::event_sink_client::EventSinkClient;
 
@@ -121,8 +120,8 @@ impl GrpcTransport {
         config: GrpcSinkConfig,
         signer: Option<NodeSigner>,
     ) -> Result<Self, SinkError> {
-        let mut endpoint =
-            Endpoint::from_shared(config.endpoint.clone()).map_err(|e| {
+        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
+            .map_err(|e| {
                 SinkError::ClientBuild(format!(
                     "sink '{}': invalid endpoint '{}': {}",
                     sink_name, config.endpoint, e
@@ -139,8 +138,7 @@ impl GrpcTransport {
             // Streams can stay idle between events: keep them alive too.
             .keep_alive_while_idle(true);
         if let Some(secs) = config.tcp_keepalive_secs {
-            endpoint =
-                endpoint.tcp_keepalive(Some(Duration::from_secs(secs)));
+            endpoint = endpoint.tcp_keepalive(Some(Duration::from_secs(secs)));
         }
 
         if config.tls.is_some() || config.endpoint.starts_with("https://") {
@@ -199,10 +197,8 @@ impl GrpcTransport {
             let in_flight = self
                 .in_flight_limit
                 .saturating_sub(self.in_flight.available_permits());
-            metrics.set_grpc_in_flight_batches(
-                &self.sink_name,
-                in_flight as i64,
-            );
+            metrics
+                .set_grpc_in_flight_batches(&self.sink_name, in_flight as i64);
         }
     }
 
@@ -343,10 +339,7 @@ impl GrpcTransport {
     ) -> Result<(), SinkError> {
         let request_id = generate_request_id();
         if !self.unary_only.load(Ordering::Acquire) {
-            match self
-                .deliver_via_stream(&request_id, &body, &meta)
-                .await
-            {
+            match self.deliver_via_stream(&request_id, &body, &meta).await {
                 Ok(()) => return Ok(()),
                 Err(StreamFailure::Unimplemented) => {
                     // v1-unary-only server: remember it and deliver every
@@ -549,20 +542,18 @@ impl GrpcTransport {
             );
         }
 
-        tokio::spawn(
-            tracing::Instrument::instrument(
-                stream_reader(
-                    response.into_inner(),
-                    pending,
-                    Arc::clone(&self.stream),
-                    self.sink_name.clone(),
-                ),
-                tracing::info_span!(
-                    "grpc_delivery_stream",
-                    sink = %self.sink_name
-                ),
+        tokio::spawn(tracing::Instrument::instrument(
+            stream_reader(
+                response.into_inner(),
+                pending,
+                Arc::clone(&self.stream),
+                self.sink_name.clone(),
             ),
-        );
+            tracing::info_span!(
+                "grpc_delivery_stream",
+                sink = %self.sink_name
+            ),
+        ));
         Ok(handle)
     }
 
@@ -570,15 +561,12 @@ impl GrpcTransport {
     /// flags the `UNIMPLEMENTED` case (server without a health service) so
     /// callers can fall back without conflating it with real rejections.
     async fn health_service_check(&self) -> Result<bool, SinkError> {
-        let mut client =
-            tonic_health::pb::health_client::HealthClient::new(
-                self.channel.clone(),
-            );
-        let mut request = Request::new(
-            tonic_health::pb::HealthCheckRequest {
-                service: HEALTH_SERVICE_NAME.to_owned(),
-            },
+        let mut client = tonic_health::pb::health_client::HealthClient::new(
+            self.channel.clone(),
         );
+        let mut request = Request::new(tonic_health::pb::HealthCheckRequest {
+            service: HEALTH_SERVICE_NAME.to_owned(),
+        });
         request.set_timeout(self.request_timeout());
         self.apply_metadata(&mut request).await?;
         match client.check(request).await {
@@ -615,7 +603,11 @@ impl GrpcTransport {
             });
             request.set_timeout(self.request_timeout());
             self.apply_metadata(&mut request).await?;
-            client.test(request).await.map(|_| ()).map_err(|e| map_status(&e))
+            client
+                .test(request)
+                .await
+                .map(|_| ())
+                .map_err(|e| map_status(&e))
         })
         .await
     }
@@ -769,8 +761,7 @@ fn map_ack(ack: &pb::DeliverAck) -> Result<(), SinkError> {
     if ack.error_code == 0 {
         return Ok(());
     }
-    let retry_after_ms =
-        (ack.retry_after_ms > 0).then_some(ack.retry_after_ms);
+    let retry_after_ms = (ack.retry_after_ms > 0).then_some(ack.retry_after_ms);
     Err(map_code(
         Code::from(ack.error_code),
         format!("gRPC stream ack {}: {}", ack.error_code, ack.error_message),
@@ -786,12 +777,13 @@ fn map_ack(ack: &pb::DeliverAck) -> Result<(), SinkError> {
 fn map_status(status: &Status) -> SinkError {
     let retry_after_ms = (status.code() == Code::ResourceExhausted)
         .then(|| {
-            tonic_types::StatusExt::get_details_retry_info(status)
-                .and_then(|info| {
+            tonic_types::StatusExt::get_details_retry_info(status).and_then(
+                |info| {
                     info.retry_delay.map(|delay| {
                         u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)
                     })
-                })
+                },
+            )
         })
         .flatten();
     map_code(
@@ -992,9 +984,8 @@ async fn build_tls_config(
             let pem =
                 read_tls_file(sink_name, "ca_certificate", &tls.ca_certificate)
                     .await?;
-            tls_config = tls_config.ca_certificate(
-                tonic::transport::Certificate::from_pem(pem),
-            );
+            tls_config = tls_config
+                .ca_certificate(tonic::transport::Certificate::from_pem(pem));
         }
 
         if !tls.client_certificate.is_empty() {
@@ -1005,8 +996,7 @@ async fn build_tls_config(
             )
             .await?;
             let key_pem =
-                read_tls_file(sink_name, "client_key", &tls.client_key)
-                    .await?;
+                read_tls_file(sink_name, "client_key", &tls.client_key).await?;
             tls_config = tls_config.identity(
                 tonic::transport::Identity::from_pem(cert_pem, key_pem),
             );
@@ -1133,10 +1123,13 @@ mod tests {
             client_certificate: "/nonexistent/ave-test-client.pem".to_owned(),
             client_key: "/nonexistent/ave-test-client.key".to_owned(),
         };
-        let err =
-            build_token_client("unit-grpc-mtls-missing-cert", Some(&tls), 1_000)
-                .await
-                .unwrap_err();
+        let err = build_token_client(
+            "unit-grpc-mtls-missing-cert",
+            Some(&tls),
+            1_000,
+        )
+        .await
+        .unwrap_err();
         let SinkError::ClientBuild(message) = err else {
             panic!("expected ClientBuild error, got {err:?}");
         };

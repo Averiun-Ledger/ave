@@ -887,7 +887,9 @@ mod tests {
 
         let listener_loop = async move {
             loop {
-                if let SwarmEvent::IncomingConnectionError { error, .. } = listener.select_next_some().await {
+                if let SwarmEvent::IncomingConnectionError { error, .. } =
+                    listener.select_next_some().await
+                {
                     let ListenError::Denied { cause } = error else {
                         panic!("Invalid Error")
                     };
@@ -899,7 +901,9 @@ mod tests {
 
         let dialer_loop = async move {
             loop {
-                if let SwarmEvent::ConnectionClosed { cause, .. } = dialer.select_next_some().await {
+                if let SwarmEvent::ConnectionClosed { cause, .. } =
+                    dialer.select_next_some().await
+                {
                     if let Some(error) = cause {
                         match error {
                             ConnectionError::IO(e) => {

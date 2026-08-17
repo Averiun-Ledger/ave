@@ -154,7 +154,8 @@ async fn test_reported_permissions_match_enforcement() {
         .unwrap();
     db.set_role_permission(deny_role.id, "node_subject", "get", false)
         .unwrap();
-    db.assign_role_to_user(user.id, allow_role.id, None).unwrap();
+    db.assign_role_to_user(user.id, allow_role.id, None)
+        .unwrap();
     db.assign_role_to_user(user.id, deny_role.id, None).unwrap();
 
     let reported = db.get_user_effective_permissions(user.id).unwrap();
@@ -1010,11 +1011,7 @@ async fn test_sender_role_endpoints_access() {
         ("get", "/subjects/{subject_id}/state", true),
         ("get", "/subjects/{subject_id}/events", true),
         ("get", "/subjects/{subject_id}/events/{sn}", true),
-        (
-            "get",
-            "/subjects/{subject_id}/events-first-last",
-            true,
-        ),
+        ("get", "/subjects/{subject_id}/events-first-last", true),
         ("get", "/subjects/{subject_id}/aborts", true),
         ("get", "/governances", true),
         ("get", "/governances/{governance_id}/subjects", true),
@@ -1369,11 +1366,7 @@ async fn test_data_role_endpoints_access() {
         ("get", "/subjects/{subject_id}/state", true),
         ("get", "/subjects/{subject_id}/events", true),
         ("get", "/subjects/{subject_id}/events/{sn}", true),
-        (
-            "get",
-            "/subjects/{subject_id}/events-first-last",
-            true,
-        ),
+        ("get", "/subjects/{subject_id}/events-first-last", true),
         ("get", "/subjects/{subject_id}/aborts", true),
         ("get", "/governances", true),
         ("get", "/governances/{governance_id}/subjects", true),

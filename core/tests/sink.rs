@@ -15,8 +15,8 @@ use ave_common::{
         keys::{Ed25519Signer, KeyPair},
     },
     sink::{
-        DataToSinkEvent, SinkCompression, HttpProxyConfig, HttpTlsConfig,
-        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig, SinkAuthMethod,
+        DataToSinkEvent, HttpProxyConfig, HttpTlsConfig, IncomingSinkEvent,
+        OAuth2GrantType, SinkAuthConfig, SinkAuthMethod, SinkCompression,
         SinkTransportConfig,
     },
 };
@@ -404,7 +404,6 @@ async fn sink_batch_event_type_url_groups_by_type() {
     );
 }
 
-
 #[traced_test]
 #[tokio::test]
 async fn sink_last_error_is_reported_after_delivery_failure() {
@@ -471,10 +470,11 @@ async fn sink_last_error_is_reported_after_delivery_failure() {
     for _ in 0..20 {
         let statuses = node.api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == "example-sink")
-            && status.last_error.is_some() {
-                found = true;
-                break;
-            }
+            && status.last_error.is_some()
+        {
+            found = true;
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(found, "last_error should be set after a delivery failure");
@@ -1206,8 +1206,7 @@ async fn replay_filters_and_combinations() {
     .await
     .unwrap();
 
-    let new_owner_pk =
-        PublicKey::from_str(new_owner.api.public_key()).unwrap();
+    let new_owner_pk = PublicKey::from_str(new_owner.api.public_key()).unwrap();
     emit_transfer(&owner.api, subject_id.clone(), new_owner_pk, true)
         .await
         .unwrap();
@@ -5476,8 +5475,11 @@ async fn sink_governance_deletion_cleans_tracking() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
-    let delete_result =
-        node.api.delete_subject(governance_id.clone()).await.unwrap();
+    let delete_result = node
+        .api
+        .delete_subject(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(delete_result, "Governance deleted successfully");
 
     // Restart in normal mode with the sink accepting again.
@@ -7267,8 +7269,12 @@ async fn sink_signature_v2_zstd_verify() {
 
     // The signature binds the canonical v2 headers (with content-encoding)
     // and the COMPRESSED wire body.
-    let canonical =
-        canonical_payload(body, 2, &[("content-encoding", "zstd")], Some(&meta));
+    let canonical = canonical_payload(
+        body,
+        2,
+        &[("content-encoding", "zstd")],
+        Some(&meta),
+    );
     let timestamp =
         TimeStamp::from_nanos(timestamp.parse().expect("nanos timestamp"));
     let payload_bytes = borsh::to_vec(&(canonical, timestamp)).unwrap();
@@ -7622,9 +7628,10 @@ async fn wait_for_sink_not_lagging(api: &Api, sink_name: &str) {
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
-            && status.lagging_subjects == 0 {
-                return;
-            }
+            && status.lagging_subjects == 0
+        {
+            return;
+        }
         if attempts > 100 {
             panic!(
                 "timeout waiting for sink {} to have no lagging subjects",
@@ -7933,8 +7940,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         .unwrap();
 
     // SN 3: successful transfer Owner -> NewOwner.
-    let new_owner_pk =
-        PublicKey::from_str(new_owner.api.public_key()).unwrap();
+    let new_owner_pk = PublicKey::from_str(new_owner.api.public_key()).unwrap();
     emit_transfer(
         &owner.api,
         governance_id.clone(),

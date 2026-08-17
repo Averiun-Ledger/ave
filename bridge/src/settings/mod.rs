@@ -36,10 +36,9 @@ mod tests {
     use ave_common::SinkTypes;
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::config::{
-        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-        SinkCompression, HttpSinkConfig, LoggingOutput, LoggingRotation,
-        MachineSpec, SinkConfigEntry, SinkServer, SinkTarget,
-        SinkTransportConfig,
+        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, HttpSinkConfig,
+        LoggingOutput, LoggingRotation, MachineSpec, SinkCompression,
+        SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
@@ -804,11 +803,13 @@ http:
                     transport: SinkTransportConfig::Http(Box::new(
                         HttpSinkConfig {
                             url: "https://sink.one".to_owned(),
-                            auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
-                                auth_url: "https://auth.service".to_owned(),
-                                username: "sink-user".to_owned(),
-                                ..SinkAuthConfig::default()
-                            })),
+                            auth: Some(SinkAuthMethod::OAuth2(
+                                SinkAuthConfig {
+                                    auth_url: "https://auth.service".to_owned(),
+                                    username: "sink-user".to_owned(),
+                                    ..SinkAuthConfig::default()
+                                },
+                            )),
                             connect_timeout_ms: 5_000,
                             request_timeout_ms: 30_000,
                             max_retries: 5,

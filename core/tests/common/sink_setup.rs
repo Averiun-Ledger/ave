@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, collections::HashMap, time::Duration};
 use ave_common::{
     IncomingSinkEvent, SinkTypes,
     sink::{
-        DataToSink, DataToSinkEvent, SinkCompression, HttpProxyConfig,
-        HttpTlsConfig, SinkAuthMethod,
+        DataToSink, DataToSinkEvent, HttpProxyConfig, HttpTlsConfig,
+        SinkAuthMethod, SinkCompression,
     },
 };
 use ave_core::{
@@ -476,9 +476,10 @@ pub async fn wait_for_sink_blocked(api: &Api, sink_name: &str) -> String {
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
-            && let Some(reason) = &status.blocked {
-                return reason.clone();
-            }
+            && let Some(reason) = &status.blocked
+        {
+            return reason.clone();
+        }
         if attempts > 100 {
             panic!("timeout waiting for sink {} to be blocked", sink_name);
         }
@@ -495,9 +496,10 @@ pub async fn wait_for_sink_unblocked(api: &Api, sink_name: &str) {
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
-            && status.blocked.is_none() {
-                return;
-            }
+            && status.blocked.is_none()
+        {
+            return;
+        }
         if attempts > 100 {
             panic!("timeout waiting for sink {} to be unblocked", sink_name);
         }
@@ -518,9 +520,10 @@ pub async fn wait_for_sink_lagging_subjects(
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
-            && status.lagging_subjects >= min {
-                return;
-            }
+            && status.lagging_subjects >= min
+        {
+            return;
+        }
         if attempts > 100 {
             panic!(
                 "timeout waiting for sink {} to have {} lagging subjects",
@@ -540,9 +543,10 @@ pub async fn wait_for_sink_caught_up(api: &Api, sink_name: &str) {
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
         if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
-            && status.lagging_subjects == 0 {
-                return;
-            }
+            && status.lagging_subjects == 0
+        {
+            return;
+        }
         if attempts > 100 {
             panic!("timeout waiting for sink {} to catch up", sink_name);
         }

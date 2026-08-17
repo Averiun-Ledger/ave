@@ -488,9 +488,10 @@ mod tests {
         let peer_b = async move {
             loop {
                 if let SwarmEvent::Behaviour(Event::ReqresMessage {
-                        message,
-                        ..
-                    }) = node_b.select_next_some().await {
+                    message,
+                    ..
+                }) = node_b.select_next_some().await
+                {
                     match message {
                         Message::Request {
                             channel, request, ..
@@ -585,10 +586,11 @@ mod tests {
         let boot_peer = async move {
             loop {
                 if let SwarmEvent::Behaviour(Event::Identified {
-                        peer_id,
-                        info,
-                        ..
-                    }) = boot_node.select_next_some().await {
+                    peer_id,
+                    info,
+                    ..
+                }) = boot_node.select_next_some().await
+                {
                     for addr in info.listen_addrs {
                         boot_node
                             .behaviour_mut()

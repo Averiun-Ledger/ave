@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ave_common::sink::pb;
-use ave_common::sink::pb::event_sink_server::{
-    EventSink, EventSinkServer,
-};
+use ave_common::sink::pb::event_sink_server::{EventSink, EventSinkServer};
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use rustls::{
     RootCertStore, ServerConfig as RustlsServerConfig,
@@ -64,7 +62,9 @@ fn retry_info_status(code: Code, retry_after_ms: u64) -> Status {
 
 /// Collect the ASCII metadata entries of an RPC into a plain map
 /// (keys are already lowercased by tonic).
-fn metadata_map(metadata: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
+fn metadata_map(
+    metadata: &tonic::metadata::MetadataMap,
+) -> HashMap<String, String> {
     metadata
         .iter()
         .filter_map(|kv| match kv {
@@ -150,10 +150,7 @@ impl GrpcTestSink {
     /// client's unary-only fallback).
     pub async fn start_unary_only() -> Self {
         let sink = Self::start_inner(true, None).await;
-        sink.state
-            .lock()
-            .expect("state lock")
-            .stream_enabled = false;
+        sink.state.lock().expect("state lock").stream_enabled = false;
         sink
     }
 
@@ -186,8 +183,9 @@ impl GrpcTestSink {
         std_listener
             .set_nonblocking(true)
             .expect("listener should be non-blocking");
-        let addr: SocketAddr =
-            std_listener.local_addr().expect("listener has local address");
+        let addr: SocketAddr = std_listener
+            .local_addr()
+            .expect("listener has local address");
 
         let control_notify = Arc::new(tokio::sync::Notify::new());
         let service = TestEventSink {
@@ -246,11 +244,10 @@ impl GrpcTestSink {
                 .expect("test server key PEM should parse");
                 let provider =
                     Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-                let builder = RustlsServerConfig::builder_with_provider(
-                    provider.clone(),
-                )
-                .with_safe_default_protocol_versions()
-                .expect("default TLS versions should be valid");
+                let builder =
+                    RustlsServerConfig::builder_with_provider(provider.clone())
+                        .with_safe_default_protocol_versions()
+                        .expect("default TLS versions should be valid");
                 let builder = if require_client_cert {
                     let mut roots = RootCertStore::empty();
                     let ca_der = CertificateDer::from_pem_slice(
@@ -258,13 +255,12 @@ impl GrpcTestSink {
                     )
                     .expect("test CA PEM should parse");
                     roots.add(ca_der).expect("CA cert should be valid");
-                    let verifier =
-                        WebPkiClientVerifier::builder_with_provider(
-                            Arc::new(roots),
-                            provider,
-                        )
-                        .build()
-                        .expect("client verifier should build");
+                    let verifier = WebPkiClientVerifier::builder_with_provider(
+                        Arc::new(roots),
+                        provider,
+                    )
+                    .build()
+                    .expect("client verifier should build");
                     builder.with_client_cert_verifier(verifier)
                 } else {
                     builder.with_no_client_auth()
@@ -451,24 +447,26 @@ impl EventSink for TestEventSink {
         let api_key = metadata.get("x-api-key").cloned();
 
         let mut state = self.state.lock().expect("state lock");
-        let response = match state.mode.clone().unwrap_or(GrpcResponseMode::Accept)
-        {
-            GrpcResponseMode::Accept => Ok(Response::new(DeliverResponse {})),
-            GrpcResponseMode::AlwaysStatus(code) => {
-                Err(Status::new(code, "test server rejecting"))
-            }
-            GrpcResponseMode::AlwaysStatusRetryInfo {
-                code,
-                retry_after_ms,
-            } => Err(retry_info_status(code, retry_after_ms)),
-            GrpcResponseMode::FailTimes { code, remaining } => {
-                if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
-                    Err(Status::new(code, "test server rejecting"))
-                } else {
+        let response =
+            match state.mode.clone().unwrap_or(GrpcResponseMode::Accept) {
+                GrpcResponseMode::Accept => {
                     Ok(Response::new(DeliverResponse {}))
                 }
-            }
-        };
+                GrpcResponseMode::AlwaysStatus(code) => {
+                    Err(Status::new(code, "test server rejecting"))
+                }
+                GrpcResponseMode::AlwaysStatusRetryInfo {
+                    code,
+                    retry_after_ms,
+                } => Err(retry_info_status(code, retry_after_ms)),
+                GrpcResponseMode::FailTimes { code, remaining } => {
+                    if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
+                        Err(Status::new(code, "test server rejecting"))
+                    } else {
+                        Ok(Response::new(DeliverResponse {}))
+                    }
+                }
+            };
 
         state.deliveries.push(RecordedDelivery {
             request_id: message.request_id.clone(),
@@ -496,8 +494,7 @@ impl EventSink for TestEventSink {
         Ok(Response::new(TestResponse {}))
     }
 
-    type DeliverStreamStream =
-        ReceiverStream<Result<pb::DeliverAck, Status>>;
+    type DeliverStreamStream = ReceiverStream<Result<pb::DeliverAck, Status>>;
 
     async fn deliver_stream(
         &self,
@@ -563,34 +560,37 @@ impl EventSink for TestEventSink {
                     let state = state.lock().expect("state lock");
                     (
                         state.stream_ack_delay_ms,
-                        state
-                            .mode
-                            .clone()
-                            .unwrap_or(GrpcResponseMode::Accept),
+                        state.mode.clone().unwrap_or(GrpcResponseMode::Accept),
                     )
                 };
-                let (error_code, error_message, ack_retry_after_ms) = match &mode
-                {
-                    GrpcResponseMode::Accept => (0, String::new(), 0),
-                    GrpcResponseMode::AlwaysStatus(code) => {
-                        (*code as i32, "test server rejecting".to_owned(), 0)
-                    }
-                    GrpcResponseMode::AlwaysStatusRetryInfo {
-                        code,
-                        retry_after_ms,
-                    } => (
-                        *code as i32,
-                        "test server rejecting".to_owned(),
-                        *retry_after_ms,
-                    ),
-                    GrpcResponseMode::FailTimes { code, remaining } => {
-                        if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
-                            (*code as i32, "test server rejecting".to_owned(), 0)
-                        } else {
-                            (0, String::new(), 0)
+                let (error_code, error_message, ack_retry_after_ms) =
+                    match &mode {
+                        GrpcResponseMode::Accept => (0, String::new(), 0),
+                        GrpcResponseMode::AlwaysStatus(code) => (
+                            *code as i32,
+                            "test server rejecting".to_owned(),
+                            0,
+                        ),
+                        GrpcResponseMode::AlwaysStatusRetryInfo {
+                            code,
+                            retry_after_ms,
+                        } => (
+                            *code as i32,
+                            "test server rejecting".to_owned(),
+                            *retry_after_ms,
+                        ),
+                        GrpcResponseMode::FailTimes { code, remaining } => {
+                            if remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
+                                (
+                                    *code as i32,
+                                    "test server rejecting".to_owned(),
+                                    0,
+                                )
+                            } else {
+                                (0, String::new(), 0)
+                            }
                         }
-                    }
-                };
+                    };
 
                 state.lock().expect("state lock").deliveries.push(
                     RecordedDelivery {

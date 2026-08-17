@@ -312,11 +312,9 @@ pub async fn obtain_token(
         } else {
             None
         };
-        let body = read_limited_body(
-            res.bytes_stream(),
-            AUTH_ERROR_BODY_MAX_BYTES,
-        )
-        .await;
+        let body =
+            read_limited_body(res.bytes_stream(), AUTH_ERROR_BODY_MAX_BYTES)
+                .await;
         return Err(SinkError::Auth {
             message: format!("auth endpoint returned {}: {}", status, body),
             retry_after_ms,
@@ -356,9 +354,10 @@ pub async fn obtain_token_with_retry(
             // Honor a server-provided Retry-After hint when it exceeds the
             // computed backoff.
             if let Some(SinkError::Auth { retry_after_ms, .. }) = &last_err
-                && let Some(hint) = retry_after_ms {
-                    delay = delay.max(*hint);
-                }
+                && let Some(hint) = retry_after_ms
+            {
+                delay = delay.max(*hint);
+            }
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
         match obtain_token(client, auth, password_or_secret).await {

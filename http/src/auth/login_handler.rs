@@ -9,9 +9,9 @@ use super::http_api::{
 };
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use super::request_meta;
+use crate::extract::ApiJson;
 use ave_bridge::ProxyConfig;
 use axum::{Extension, Json, extract::ConnectInfo, http::StatusCode};
-use crate::extract::ApiJson;
 use serde::Deserialize;
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
@@ -197,8 +197,7 @@ pub async fn change_password(
     })
     .await
     .map_err(|e| {
-        let response =
-            db_error_to_response(e, DatabaseErrorMapping::login());
+        let response = db_error_to_response(e, DatabaseErrorMapping::login());
         db.record_request_metrics(
             "change_password",
             request_result_from_status(response.0),

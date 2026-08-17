@@ -347,7 +347,9 @@ pub fn role_test_request_body(method: &str, path: &str) -> Option<Value> {
         ("put", "/governances/{subject_id}/authorize") => {
             Some(json!(["ExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI"]))
         }
-        ("post", "/requests") => Some(json!({"request": {}, "signature": null})),
+        ("post", "/requests") => {
+            Some(json!({"request": {}, "signature": null}))
+        }
         ("post", "/login") => {
             Some(json!({"username": "admin", "password": "AdminPass123!"}))
         }
@@ -1019,8 +1021,7 @@ impl TestServer {
     ) -> Option<(Self, Vec<TempDir>)> {
         let (app, vec_dir, port, runners, graceful_token) =
             build_test_router(enable_auth, always_accept, node).await;
-        Self::bind_and_serve(app, port, runners, graceful_token, vec_dir)
-            .await
+        Self::bind_and_serve(app, port, runners, graceful_token, vec_dir).await
     }
 
     pub async fn build_with_options(
@@ -1028,8 +1029,7 @@ impl TestServer {
     ) -> Option<(Self, Vec<TempDir>)> {
         let (app, vec_dir, port, runners, graceful_token) =
             build_test_router_with_options(options).await;
-        Self::bind_and_serve(app, port, runners, graceful_token, vec_dir)
-            .await
+        Self::bind_and_serve(app, port, runners, graceful_token, vec_dir).await
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -1182,7 +1182,10 @@ fn build_app_request(
     req
 }
 
-async fn app_oneshot(app: &TestApp, req: Request<Body>) -> (StatusCode, Vec<u8>) {
+async fn app_oneshot(
+    app: &TestApp,
+    req: Request<Body>,
+) -> (StatusCode, Vec<u8>) {
     let resp = app.app.clone().oneshot(req).await.expect("request failed");
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX)

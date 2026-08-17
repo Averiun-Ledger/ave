@@ -28,11 +28,7 @@ use ave_http::auth::{
     system_handlers::update_system_config,
 };
 use ave_http::extract::{ApiJson, ApiPath, ApiQuery};
-use axum::{
-    Extension, Json,
-    extract::FromRequestParts,
-    http::StatusCode,
-};
+use axum::{Extension, Json, extract::FromRequestParts, http::StatusCode};
 use std::collections::BTreeSet;
 
 fn metric_value(metrics: &str, name: &str) -> f64 {

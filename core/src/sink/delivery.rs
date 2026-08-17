@@ -523,7 +523,10 @@ mod tests {
         );
     }
 
-    fn light_event(sn: u64, event_type: ave_common::SinkTypes) -> ave_common::LightEvent {
+    fn light_event(
+        sn: u64,
+        event_type: ave_common::SinkTypes,
+    ) -> ave_common::LightEvent {
         ave_common::LightEvent {
             subject_id: format!("subject-{sn}"),
             schema_id: "schema".to_owned(),
@@ -613,8 +616,7 @@ mod tests {
         // Guaranteed-unset variable: the success path is covered end-to-end
         // by the SASL / proxy / OAuth2 integration tests.
         let env_var = format!("AVE_TEST_UNSET_{:016x}", fastrand::u64(..));
-        let Err(err) = load_required_secret("my-sink", &env_var, "SASL")
-        else {
+        let Err(err) = load_required_secret("my-sink", &env_var, "SASL") else {
             panic!("an unset secret must fail");
         };
         let SinkError::ClientBuild(message) = err else {
@@ -640,7 +642,9 @@ mod tests {
                 governance_id: None,
                 subject_id: "subject-9".to_owned(),
                 owner: "owner".to_owned(),
-                schema_id: ave_common::SchemaType::Type("full-schema".to_owned()),
+                schema_id: ave_common::SchemaType::Type(
+                    "full-schema".to_owned(),
+                ),
                 namespace: String::new(),
                 sn: 0,
                 gov_version: 1,
@@ -681,8 +685,8 @@ mod tests {
 
     #[test]
     fn serialize_json_payload_success_and_permanent_error() {
-        let payload =
-            serialize_json_payload(&serde_json::json!({"a": 1})).expect("payload serializes");
+        let payload = serialize_json_payload(&serde_json::json!({"a": 1}))
+            .expect("payload serializes");
         assert_eq!(payload, br#"{"a":1}"#.to_vec());
 
         // Maps with non-string keys cannot be serialized to JSON.
@@ -706,8 +710,14 @@ mod tests {
     #[test]
     fn group_events_by_type_without_routing_keeps_single_group() {
         let events = vec![
-            IncomingSinkEvent::Light(light_event(1, ave_common::SinkTypes::Create)),
-            IncomingSinkEvent::Light(light_event(2, ave_common::SinkTypes::Fact)),
+            IncomingSinkEvent::Light(light_event(
+                1,
+                ave_common::SinkTypes::Create,
+            )),
+            IncomingSinkEvent::Light(light_event(
+                2,
+                ave_common::SinkTypes::Fact,
+            )),
         ];
         let groups = group_events_by_type(events, false);
         assert_eq!(groups.len(), 1);
@@ -719,9 +729,18 @@ mod tests {
     #[test]
     fn group_events_by_type_routes_preserving_order() {
         let events = vec![
-            IncomingSinkEvent::Light(light_event(1, ave_common::SinkTypes::Fact)),
-            IncomingSinkEvent::Light(light_event(2, ave_common::SinkTypes::Create)),
-            IncomingSinkEvent::Light(light_event(3, ave_common::SinkTypes::Fact)),
+            IncomingSinkEvent::Light(light_event(
+                1,
+                ave_common::SinkTypes::Fact,
+            )),
+            IncomingSinkEvent::Light(light_event(
+                2,
+                ave_common::SinkTypes::Create,
+            )),
+            IncomingSinkEvent::Light(light_event(
+                3,
+                ave_common::SinkTypes::Fact,
+            )),
         ];
         let groups = group_events_by_type(events, true);
         assert_eq!(groups.len(), 2);

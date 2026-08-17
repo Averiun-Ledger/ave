@@ -442,7 +442,11 @@ async fn test_http_unblock_sink_permissions_and_safe_mode() {
 
     // A role without node_sink permissions is still rejected.
     let data_key = create_role_user_and_login(
-        &server, &client, &admin_key, "data", "data_user",
+        &server,
+        &client,
+        &admin_key,
+        "data",
+        "data_user",
     )
     .await;
 
@@ -1171,7 +1175,11 @@ async fn test_http_replay_sink_events_permissions_and_safe_mode() {
 
     // A role without node_sink permissions is still rejected.
     let data_key = create_role_user_and_login(
-        &server, &client, &admin_key, "data", "data_user",
+        &server,
+        &client,
+        &admin_key,
+        "data",
+        "data_user",
     )
     .await;
     let (status, _body) = make_request(
@@ -1507,14 +1515,9 @@ async fn test_http_sink_role_has_common_base() {
     let sink_key =
         create_sink_user_and_login(&server, &client, &admin_key).await;
 
-    let (status, body) = make_request(
-        &client,
-        &server.url("/me"),
-        "GET",
-        Some(&sink_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_request(&client, &server.url("/me"), "GET", Some(&sink_key), None)
+            .await;
     assert_eq!(status, 200, "sink role must reach /me: {body}");
     assert_eq!(body["username"], "sink_user");
 

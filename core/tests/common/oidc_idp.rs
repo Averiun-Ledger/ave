@@ -20,9 +20,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer,
-};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde_json::{Value, json};
 
 use super::test_sink::TestTlsMaterial;
@@ -191,7 +189,10 @@ impl MockOidcIdp {
     /// and JWKS (Redpanda cannot trust a custom CA for its own OIDC fetch),
     /// while the producer's token endpoint is the HTTPS one, so the sink
     /// must trust `ca_pem` via `tls.ca_certificate` to obtain tokens.
-    pub async fn start_with_https(host_for_broker: &str, audience: &str) -> Self {
+    pub async fn start_with_https(
+        host_for_broker: &str,
+        audience: &str,
+    ) -> Self {
         Self::start_inner(host_for_broker, audience, true).await
     }
 
@@ -255,9 +256,8 @@ impl MockOidcIdp {
                     .expect("server cert/key should be valid");
             server_config.alpn_protocols =
                 vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            let rustls_config = RustlsConfig::from_config(Arc::new(
-                server_config,
-            ));
+            let rustls_config =
+                RustlsConfig::from_config(Arc::new(server_config));
 
             let tls_listener = std::net::TcpListener::bind("127.0.0.1:0")
                 .expect("IdP TLS should bind an ephemeral port");

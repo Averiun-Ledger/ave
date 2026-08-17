@@ -328,7 +328,8 @@ impl Handler<Self> for SinkWorker {
                             "Failed to ensure subject worker for live delivery"
                         );
                         self.recover_unreachable_subject_worker(
-                            &subject_id, ctx,
+                            &subject_id,
+                            ctx,
                         )
                         .await;
                         return Err(e);
@@ -349,7 +350,8 @@ impl Handler<Self> for SinkWorker {
                     return Err(e);
                 }
 
-                *self.live_in_flight.entry(subject_id.clone()).or_insert(0) += 1;
+                *self.live_in_flight.entry(subject_id.clone()).or_insert(0) +=
+                    1;
                 self.schedule_child_shutdown(ctx, subject_id.clone());
 
                 Ok(SinkWorkerResponse::Ok)
@@ -437,10 +439,11 @@ impl Handler<Self> for SinkWorker {
                         // its idle state to the manager so inactive workers can be
                         // shut down and recreated on demand.
                         if self.blocked.is_none() {
-                            let delay_secs = crate::sink::healthcheck_delay_secs(
-                                &self.server.healthcheck_intervals_secs,
-                                0,
-                            );
+                            let delay_secs =
+                                crate::sink::healthcheck_delay_secs(
+                                    &self.server.healthcheck_intervals_secs,
+                                    0,
+                                );
                             let delay_secs =
                                 crate::sink::add_jitter(delay_secs);
                             self.schedule_healthcheck(ctx, delay_secs);
@@ -545,7 +548,8 @@ impl Handler<Self> for SinkWorker {
                                     "Failed to ensure subject worker for catch-up restart"
                                 );
                                 self.recover_unreachable_subject_worker(
-                                    &subject_id, ctx,
+                                    &subject_id,
+                                    ctx,
                                 )
                                 .await;
                                 return Ok(SinkWorkerResponse::Ok);
@@ -613,26 +617,25 @@ impl Handler<Self> for SinkWorker {
                 self.last_activity = Instant::now();
                 self.idle_reported = false;
 
-                let child_ref = match self
-                    .ensure_subject_worker(&subject_id, ctx)
-                    .await
-                {
-                    Ok(child_ref) => child_ref,
-                    Err(e) => {
-                        error!(
-                            msg_type = "EnsureSubjectWorker",
-                            sink = %self.sink_name,
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to ensure subject worker for catch-up"
-                        );
-                        self.recover_unreachable_subject_worker(
-                            &subject_id, ctx,
-                        )
-                        .await;
-                        return Ok(SinkWorkerResponse::Ok);
-                    }
-                };
+                let child_ref =
+                    match self.ensure_subject_worker(&subject_id, ctx).await {
+                        Ok(child_ref) => child_ref,
+                        Err(e) => {
+                            error!(
+                                msg_type = "EnsureSubjectWorker",
+                                sink = %self.sink_name,
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to ensure subject worker for catch-up"
+                            );
+                            self.recover_unreachable_subject_worker(
+                                &subject_id,
+                                ctx,
+                            )
+                            .await;
+                            return Ok(SinkWorkerResponse::Ok);
+                        }
+                    };
                 if let Err(e) = child_ref
                     .tell(crate::sink::subject_worker::SinkSubjectWorkerMessage::CatchUpBatch {
                         from_sn,

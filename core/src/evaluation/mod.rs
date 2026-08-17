@@ -1332,7 +1332,8 @@ pub mod tests {
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
-            .await.is_ok()
+            .await
+            .is_ok()
         {
             panic!("Invalid response")
         }
@@ -1664,16 +1665,10 @@ pub mod tests {
         );
         assert_eq!(metadata.genesis_gov_version, 0);
 
-        assert_eq!(
-            metadata.schema_id.to_string(),
-            subject_data.schema_id
-        );
+        assert_eq!(metadata.schema_id.to_string(), subject_data.schema_id);
         assert_eq!(metadata.schema_id, SchemaType::Governance);
 
-        assert_eq!(
-            metadata.namespace.to_string(),
-            subject_data.namespace
-        );
+        assert_eq!(metadata.namespace.to_string(), subject_data.namespace);
         assert_eq!(metadata.namespace, Namespace::new());
 
         assert!(subject_data.new_owner.is_none());
@@ -2489,7 +2484,8 @@ pub mod tests {
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
-            .await.is_ok()
+            .await
+            .is_ok()
         {
             panic!("Invalid response")
         }

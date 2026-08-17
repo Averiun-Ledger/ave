@@ -345,8 +345,9 @@ pub async fn rotate_api_key(
     }
 
     // Audit details only when a body was sent (a body-less rotation has none)
-    let audit_details =
-        req.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default());
+    let audit_details = req
+        .as_ref()
+        .map(|r| serde_json::to_string(r).unwrap_or_default());
 
     let existing_id = existing.id.clone();
     let auth_ctx_for_db = auth_ctx.clone();

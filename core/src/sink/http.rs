@@ -17,21 +17,19 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
-use crate::config::{
-    SinkCompression, HttpSinkConfig, HttpTlsVersion,
-};
+use crate::config::{HttpSinkConfig, HttpTlsVersion, SinkCompression};
 use crate::sink::SinkError;
-use crate::sink::read_limited_body;
-use crate::sink::read_tls_file;
 use crate::sink::delivery::{
     DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
     SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, StaticAuth,
+    SN_HEADER, SUBJECT_ID_HEADER, StaticAuth, TEST_HEADER,
     batch_group_schema_id, generate_request_id, group_events_by_type,
     is_sink_reserved_header, load_required_secret, resolve_static_auth,
     serialize_json_payload, sign_delivery, sink_password_env_var,
     sink_proxy_password_env_var, test_delivery_payload, timed_sink_request,
 };
+use crate::sink::read_limited_body;
+use crate::sink::read_tls_file;
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
 use ave_common::{
@@ -753,12 +751,10 @@ impl HttpTransport {
                     })
             }
             SinkCompression::Zstd => {
-                zstd::bulk::compress(&raw, 0).map_err(|e| {
-                    SinkError::Delivery {
-                        message: format!("zstd compression failed: {}", e),
-                        retryable: false,
-                        retry_after_ms: None,
-                    }
+                zstd::bulk::compress(&raw, 0).map_err(|e| SinkError::Delivery {
+                    message: format!("zstd compression failed: {}", e),
+                    retryable: false,
+                    retry_after_ms: None,
                 })
             }
         })
@@ -810,9 +806,8 @@ impl SinkTransport for HttpTransport {
             .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
-                self.url_template.render_url_encoded_with_event_type(
-                    "-", "-", "-",
-                )
+                self.url_template
+                    .render_url_encoded_with_event_type("-", "-", "-")
             });
 
         let request_id = generate_request_id();
@@ -1016,8 +1011,7 @@ async fn map_error_response(
         None
     };
     let body =
-        read_limited_body(response.bytes_stream(), max_error_body_bytes)
-            .await;
+        read_limited_body(response.bytes_stream(), max_error_body_bytes).await;
     let message = format!("{label} {status} ({request_id}): {body}");
     if status == 401 || status == 403 {
         SinkError::Auth {
@@ -1253,7 +1247,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             std::env::remove_var(env_var);
         }
         let expected = BASE64_STANDARD.encode("ave:s3cret");
-        assert_eq!(header.as_deref(), Some(format!("Basic {expected}").as_str()));
+        assert_eq!(
+            header.as_deref(),
+            Some(format!("Basic {expected}").as_str())
+        );
     }
 
     #[tokio::test]
@@ -1261,8 +1258,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let mut config = base_config();
         config.auth = Some(SinkAuthMethod::BearerToken);
         let err = client_build_error(
-            HttpTransport::new("unit-no-bearer".to_owned(), config, None)
-                .await,
+            HttpTransport::new("unit-no-bearer".to_owned(), config, None).await,
         );
         assert!(
             err.contains("AVE_SINK_TOKEN_UNIT_NO_BEARER"),
@@ -1278,8 +1274,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             username: "ave".to_owned(),
         });
         let err = client_build_error(
-            HttpTransport::new("unit-no-basic".to_owned(), config, None)
-                .await,
+            HttpTransport::new("unit-no-basic".to_owned(), config, None).await,
         );
         assert!(
             err.contains("AVE_SINK_PASSWORD_UNIT_NO_BASIC"),
@@ -1644,10 +1639,7 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         }
         // Regular custom headers pass through.
         for name in ["x-custom-tenant", "x-ave", "traceparent"] {
-            assert!(
-                !is_reserved_header(name),
-                "{name} must not be reserved"
-            );
+            assert!(!is_reserved_header(name), "{name} must not be reserved");
         }
     }
 
@@ -1966,13 +1958,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let mut config = base_config();
         config.url = url;
         config.max_redirects = 1;
-        let transport = HttpTransport::new(
-            "unit-redirect-302".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
+        let transport =
+            HttpTransport::new("unit-redirect-302".to_owned(), config, None)
+                .await
+                .expect("transport should build");
 
         let result = transport.health_check().await;
         assert!(
@@ -2003,8 +1992,9 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                     break;
                 };
                 let code = status_server.load(Ordering::SeqCst);
-                let response =
-                    format!("HTTP/1.1 {code} Status\r\nContent-Length: 2\r\n\r\nok");
+                let response = format!(
+                    "HTTP/1.1 {code} Status\r\nContent-Length: 2\r\n\r\nok"
+                );
                 // Drain enough of the request to avoid RST on some platforms.
                 let mut tmp = [0u8; 1024];
                 let _ = stream.read(&mut tmp).await;
@@ -2026,13 +2016,10 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
         let (url, status) = start_status_server().await;
         let mut config = base_config();
         config.url = url;
-        let transport = HttpTransport::new(
-            "unit-status-taxonomy".to_owned(),
-            config,
-            None,
-        )
-        .await
-        .expect("transport should build");
+        let transport =
+            HttpTransport::new("unit-status-taxonomy".to_owned(), config, None)
+                .await
+                .expect("transport should build");
 
         // 401/403 → Auth (token invalidation + re-authentication).
         for code in [401u16, 403] {
@@ -2055,7 +2042,13 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                 .await
                 .expect_err("a retryable status must fail the health check");
             assert!(
-                matches!(err, SinkError::Delivery { retryable: true, .. }),
+                matches!(
+                    err,
+                    SinkError::Delivery {
+                        retryable: true,
+                        ..
+                    }
+                ),
                 "{code} must map to retryable Delivery, got {err:?}"
             );
         }
