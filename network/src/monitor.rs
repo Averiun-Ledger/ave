@@ -82,6 +82,12 @@ impl Handler<Self> for Monitor {
     ) -> Result<MonitorResponse, ActorError> {
         match msg {
             MonitorMessage::Network(event) => {
+                // One-way latch by design: `Running` means "bootstrap succeeded
+                // at least once". Peer-based signals (closed connections, failed
+                // dials) cannot distinguish "we are down" from "peers are down",
+                // so they would produce false positives; the only unambiguous
+                // local failure (listener death) is rare enough that it is only
+                // logged by the worker.
                 if matches!(
                     event,
                     NetworkEvent::StateChanged(NetworkState::Running)
