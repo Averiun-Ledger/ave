@@ -1812,12 +1812,12 @@ async fn test_crlf_injection_prevented_in_text_fields() {
 async fn test_cors_configuration_security() {
     use ave_bridge::CorsConfig;
 
-    // Test 1: Default configuration (permissive - development mode)
+    // Test 1: Default configuration (secure by default - deny all origins)
     let default_config = CorsConfig::default();
     assert!(default_config.enabled, "CORS should be enabled by default");
     assert!(
-        default_config.allow_any_origin,
-        "Default allows any origin (for development)"
+        !default_config.allow_any_origin,
+        "Default denies any origin (secure by default)"
     );
     assert_eq!(default_config.allowed_origins.len(), 0);
     assert!(

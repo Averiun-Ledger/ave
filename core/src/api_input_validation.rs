@@ -18,9 +18,11 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::error::Error;
 
-/// Maximum number of events a single sink replay/query page may request.
-/// Keeps a malicious or misconfigured client from forcing unbounded reads.
-const MAX_SINK_EVENTS_LIMIT: u64 = 1000;
+/// Maximum number of items a single query page may request. Shared by every
+/// paginated/limited endpoint (events, aborts, sink events, first/last
+/// events). Keeps a malicious or misconfigured client from forcing
+/// unbounded in-memory reads.
+const MAX_QUERY_LIMIT: u64 = 1000;
 
 /// Rejects `0` with a message that names the field.
 pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {
@@ -31,6 +33,18 @@ pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {
     } else {
         Ok(())
     }
+}
+
+/// Rejects `0` and values above the shared page-size cap
+/// [`MAX_QUERY_LIMIT`], with a message that names the field.
+pub fn require_query_limit(name: &str, value: u64) -> Result<(), Error> {
+    require_positive_u64(name, value)?;
+    if value > MAX_QUERY_LIMIT {
+        return Err(Error::InvalidQueryParams(format!(
+            "{name} must not exceed {MAX_QUERY_LIMIT}"
+        )));
+    }
+    Ok(())
 }
 
 /// Rejects an empty [`DigestIdentifier`] used as a subject id.
@@ -94,7 +108,7 @@ pub fn parse_request_id(request_id: &str) -> Result<DigestIdentifier, Error> {
 /// Validates pagination and time-range fields of an [`EventsQuery`].
 pub fn validate_events_query(query: &EventsQuery) -> Result<(), Error> {
     if let Some(quantity) = query.quantity {
-        require_positive_u64("quantity", quantity)?;
+        require_query_limit("quantity", quantity)?;
     }
     for (name, value) in [
         ("event_request_ts_from", &query.event_request_ts_from),
@@ -134,10 +148,10 @@ pub fn validate_sink_events_query(
         ));
     }
     if let Some(limit) = query.limit
-        && limit > MAX_SINK_EVENTS_LIMIT
+        && limit > MAX_QUERY_LIMIT
     {
         return Err(Error::InvalidQueryParams(format!(
-            "Replay limit must not exceed {MAX_SINK_EVENTS_LIMIT}"
+            "Replay limit must not exceed {MAX_QUERY_LIMIT}"
         )));
     }
     if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn)
@@ -156,7 +170,7 @@ pub fn validate_aborts_query(query: &AbortsQuery) -> Result<(), Error> {
         parse_request_id(request_id)?;
     }
     if let Some(quantity) = query.quantity {
-        require_positive_u64("quantity", quantity)?;
+        require_query_limit("quantity", quantity)?;
     }
     // Page numbering starts at 0, so no positive-only check is needed.
     Ok(())
@@ -272,4 +286,67 @@ pub fn validate_event_request(request: &EventRequest) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_query_limit_accepts_within_cap_and_rejects_beyond() {
+        assert!(require_query_limit("quantity", 1).is_ok());
+        assert!(require_query_limit("quantity", MAX_QUERY_LIMIT).is_ok());
+
+        let zero = require_query_limit("quantity", 0)
+            .expect_err("zero must be rejected");
+        assert!(
+            zero.to_string().contains("quantity must be greater than zero")
+        );
+
+        let over = require_query_limit("quantity", MAX_QUERY_LIMIT + 1)
+            .expect_err("over the cap must be rejected");
+        assert!(
+            over.to_string().contains("quantity must not exceed 1000"),
+            "unexpected message: {over}"
+        );
+    }
+
+    #[test]
+    fn events_query_quantity_is_capped() {
+        let ok = EventsQuery {
+            quantity: Some(MAX_QUERY_LIMIT),
+            ..EventsQuery::default()
+        };
+        validate_events_query(&ok).expect("the cap itself must be accepted");
+
+        let over = EventsQuery {
+            quantity: Some(u64::MAX),
+            ..EventsQuery::default()
+        };
+        assert!(validate_events_query(&over).is_err());
+    }
+
+    #[test]
+    fn aborts_query_quantity_is_capped() {
+        let base = AbortsQuery {
+            request_id: None,
+            sn: None,
+            quantity: None,
+            page: None,
+            reverse: None,
+        };
+        validate_aborts_query(&base).expect("no quantity is valid");
+
+        let ok = AbortsQuery {
+            quantity: Some(MAX_QUERY_LIMIT),
+            ..base.clone()
+        };
+        validate_aborts_query(&ok).expect("the cap itself must be accepted");
+
+        let over = AbortsQuery {
+            quantity: Some(MAX_QUERY_LIMIT + 1),
+            ..base
+        };
+        assert!(validate_aborts_query(&over).is_err());
+    }
 }

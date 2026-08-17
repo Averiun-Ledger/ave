@@ -168,6 +168,10 @@ impl Bridge {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = sigterm.recv() => {},
+                // The bridge is shutting down through its own token (test
+                // teardown, embedder-driven shutdown): this handler has
+                // nothing left to do — exit instead of leaking the task.
+                _ = cancellation_token.cancelled() => return,
             }
 
             cancellation_token.cancel();
@@ -260,10 +264,10 @@ impl Bridge {
         let res = self.api.get_approvals(state).await?;
 
         Ok(res
-            .iter()
+            .into_iter()
             .map(|x| ApprovalEntry {
-                request: core_approval_req_to_common(x.0.clone()),
-                state: x.1.clone(),
+                request: core_approval_req_to_common(x.0),
+                state: x.1,
             })
             .collect())
     }
@@ -315,10 +319,7 @@ impl Bridge {
         &self,
     ) -> Result<Vec<TransferSubject>, BridgeError> {
         let res = self.api.get_pending_transfers().await?;
-        Ok(res
-            .iter()
-            .map(|x| core_tranfer_subject_to_common(x.clone()))
-            .collect())
+        Ok(res.into_iter().map(core_tranfer_subject_to_common).collect())
     }
 
     ///////// Sink

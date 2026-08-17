@@ -26,6 +26,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 tracing = { workspace = true }
 getrandom = { workspace = true }
 axum = { workspace = true, optional = true }
+ip_network = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

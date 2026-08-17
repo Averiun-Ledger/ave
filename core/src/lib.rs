@@ -75,9 +75,10 @@ use validation::{Validation, ValidationMessage};
 
 pub use crate::api_input_validation::{
     parse_request_id, require_non_empty_str, require_positive_u64,
-    validate_aborts_query, validate_event_request, validate_events_query,
-    validate_governance_id, validate_request_id, validate_sink_events_query,
-    validate_sink_replay_request, validate_sinks_query, validate_subject_id,
+    require_query_limit, validate_aborts_query, validate_event_request,
+    validate_events_query, validate_governance_id, validate_request_id,
+    validate_sink_events_query, validate_sink_replay_request,
+    validate_sinks_query, validate_subject_id,
 };
 use crate::approval::request::ApprovalReq;
 use crate::helpers::db::{
@@ -2127,7 +2128,7 @@ impl Api {
     ) -> Result<Vec<LedgerDB>, Error> {
         validate_subject_id(&subject_id)?;
         if let Some(quantity) = quantity {
-            require_positive_u64("quantity", quantity)?;
+            require_query_limit("quantity", quantity)?;
         }
         let subject_id_str = subject_id.to_string();
 

@@ -1021,9 +1021,9 @@ http:
         assert!(!config.auth.durability);
         assert_eq!(config.auth.api_key.prefix, "ave_node_");
 
-        // http.cors defaults
+        // http.cors defaults (secure by default: deny all origins)
         assert!(config.http.cors.enabled);
-        assert!(config.http.cors.allow_any_origin);
+        assert!(!config.http.cors.allow_any_origin);
         assert!(config.http.cors.allowed_origins.is_empty());
         assert!(!config.http.cors.allow_credentials);
 

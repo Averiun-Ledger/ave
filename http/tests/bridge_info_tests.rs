@@ -1810,6 +1810,51 @@ async fn test_subject_deserialization() {
     assert_eq!(status, 400, "invalid timestamp must be rejected: {body}");
 }
 
+/// The shared query cap (`MAX_QUERY_LIMIT` = 1000) is enforced end-to-end:
+/// quantities above it are rejected with 400 before any database read, on
+/// every paginated events endpoint.
+#[test(tokio::test)]
+async fn test_events_query_quantity_cap_is_enforced() {
+    let Some((server, _dirs)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let body = create_governance(&client, &server, None).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    let governance_id = request_data.subject_id;
+    wait_request_finish(&client, &server, None, &request_data.request_id)
+        .await;
+
+    for path in [
+        format!("/subjects/{governance_id}/events?quantity=1001"),
+        format!("/subjects/{governance_id}/events-first-last?quantity=1001"),
+        format!("/subjects/{governance_id}/aborts?quantity=1001"),
+    ] {
+        let (status, body) =
+            make_request(&client, &server.url(&path), "GET", None, None).await;
+        assert_eq!(
+            status, 400,
+            "quantity over the cap must be rejected on {path}: {body}"
+        );
+    }
+
+    // The cap itself is accepted on every endpoint.
+    for path in [
+        format!("/subjects/{governance_id}/events?quantity=1000"),
+        format!("/subjects/{governance_id}/events-first-last?quantity=1000"),
+        format!("/subjects/{governance_id}/aborts?quantity=1000"),
+    ] {
+        let (status, body) =
+            make_request(&client, &server.url(&path), "GET", None, None).await;
+        assert!(
+            status.is_success(),
+            "the cap itself must be accepted on {path}: {body}"
+        );
+    }
+}
+
 #[test(tokio::test)]
 async fn test_sink_events_deserialization_includes_failed_governance_events() {
     let Some((server1, _dirs1)) = TestServer::build(false, true, None).await
@@ -2278,7 +2323,7 @@ async fn test_system_info_deserialization() {
 
     // CORS defaults (not set in test config → defaults)
     assert!(config.http.cors.enabled);
-    assert!(config.http.cors.allow_any_origin);
+    assert!(!config.http.cors.allow_any_origin);
     assert!(config.http.cors.allowed_origins.is_empty());
     assert!(!config.http.cors.allow_credentials);
 

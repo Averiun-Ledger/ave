@@ -375,13 +375,10 @@ fn build_cors_layer(
         return Ok(Some(cors_layer.allow_origin(Any)));
     }
 
-    if cors_config.allowed_origins.is_empty() {
-        return Err(StartupError::CorsConfig(
-            "CORS is enabled but neither 'allow_any_origin' nor 'allowed_origins' are configured"
-                .to_string(),
-        ));
-    }
-
+    // An empty origins list with `allow_any_origin == false` is the secure
+    // default ("deny all cross-origin requests"): the layer matches no
+    // origin, so no CORS headers are ever emitted and browsers block every
+    // cross-origin read. It is a valid configuration, not an error.
     let origins: Vec<HeaderValue> = cors_config
         .allowed_origins
         .iter()
@@ -1009,5 +1006,125 @@ mod tests {
                 "config key '{path}' looks like a secret but is not redacted in the dump"
             );
         }
+    }
+
+    /// Serve a minimal app with the given CORS layer on an ephemeral port
+    /// and return its base URL. Requests are answered 200 at `/`.
+    async fn start_cors_app(cors: CorsLayer) -> String {
+        use axum::routing::get;
+
+        let app = Router::new().route("/", get(|| async { "ok" })).layer(cors);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}/")
+    }
+
+    /// GET `/` with the given `Origin` header and return the value of
+    /// `access-control-allow-origin` in the response, if present.
+    async fn cors_header_for_origin(url: &str, origin: &str) -> Option<String> {
+        let response = reqwest::Client::new()
+            .get(url)
+            .header("Origin", origin)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().expect("header is ASCII").to_owned())
+    }
+
+    /// Default configuration (deny all): no origin receives CORS headers.
+    #[tokio::test]
+    async fn cors_default_config_denies_every_origin() {
+        let cors = build_cors_layer(&ave_bridge::CorsConfig::default())
+            .expect("default CORS config should build")
+            .expect("CORS is enabled by default");
+        let url = start_cors_app(cors).await;
+
+        assert_eq!(
+            cors_header_for_origin(&url, "https://app.example.com").await,
+            None,
+            "the secure default must not emit CORS headers for any origin"
+        );
+    }
+
+    /// Allow-list: the configured origin gets the header, any other does not.
+    #[tokio::test]
+    async fn cors_allowed_origins_hit_and_miss() {
+        let cors = build_cors_layer(&ave_bridge::CorsConfig {
+            enabled: true,
+            allow_any_origin: false,
+            allowed_origins: vec!["https://app.example.com".to_owned()],
+            allow_credentials: false,
+        })
+        .expect("allow-list CORS config should build")
+        .expect("CORS is enabled");
+        let url = start_cors_app(cors).await;
+
+        assert_eq!(
+            cors_header_for_origin(&url, "https://app.example.com").await
+                .as_deref(),
+            Some("https://app.example.com"),
+            "the configured origin must receive the allow-origin header"
+        );
+        assert_eq!(
+            cors_header_for_origin(&url, "https://evil.example.com").await,
+            None,
+            "an unlisted origin must not receive CORS headers"
+        );
+    }
+
+    /// Wildcard opt-in: `allow_any_origin` emits `*` for every origin.
+    #[tokio::test]
+    async fn cors_allow_any_origin_emits_wildcard() {
+        let cors = build_cors_layer(&ave_bridge::CorsConfig {
+            enabled: true,
+            allow_any_origin: true,
+            allowed_origins: vec![],
+            allow_credentials: false,
+        })
+        .expect("wildcard CORS config should build")
+        .expect("CORS is enabled");
+        let url = start_cors_app(cors).await;
+
+        assert_eq!(
+            cors_header_for_origin(&url, "https://app.example.com").await
+                .as_deref(),
+            Some("*"),
+            "the wildcard opt-in must emit '*' for any origin"
+        );
+    }
+
+    /// Disabled CORS mounts no layer at all.
+    #[tokio::test]
+    async fn cors_disabled_mounts_no_layer() {
+        let layer = build_cors_layer(&ave_bridge::CorsConfig {
+            enabled: false,
+            ..ave_bridge::CorsConfig::default()
+        })
+        .expect("disabled CORS config should build");
+        assert!(layer.is_none(), "disabled CORS must mount no layer");
+    }
+
+    /// `allow_any_origin` combined with credentials is rejected.
+    #[tokio::test]
+    async fn cors_wildcard_with_credentials_is_rejected() {
+        let result = build_cors_layer(&ave_bridge::CorsConfig {
+            enabled: true,
+            allow_any_origin: true,
+            allowed_origins: vec![],
+            allow_credentials: true,
+        });
+        assert!(
+            matches!(result, Err(StartupError::CorsConfig(_))),
+            "wildcard + credentials must be rejected, got {result:?}"
+        );
     }
 }

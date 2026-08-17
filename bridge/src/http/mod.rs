@@ -128,12 +128,15 @@ impl SelfSignedCertConfig {
 pub struct CorsConfig {
     /// Enable CORS middleware
     pub enabled: bool,
-    /// Allow all origins (*). If false, use `allowed_origins` list
-    /// SECURITY WARNING: Setting this to true (default) allows ANY website to make requests
-    /// This is a CVSS 6.5 vulnerability if you plan to access the API from browsers
-    /// For production with web frontend, set to false and specify `allowed_origins`
+    /// Allow all origins (*). If false, only the `allowed_origins` list is
+    /// allowed; an empty list denies every cross-origin request (the secure
+    /// default: no CORS headers are emitted for any origin).
+    /// SECURITY WARNING: setting this to true allows ANY website to make
+    /// requests from browsers (CVSS 6.5 class). Enable it only for
+    /// development or fully trusted environments.
     pub allow_any_origin: bool,
-    /// List of allowed origins (only used if `allow_any_origin` is false)
+    /// List of allowed origins (only used if `allow_any_origin` is false).
+    /// Empty means "deny all cross-origin requests".
     /// Example: ["https://app.example.com", "https://dashboard.example.com"]
     pub allowed_origins: Vec<String>,
     /// Allow credentials (cookies, authorization headers) in CORS requests
@@ -234,16 +237,37 @@ impl ProxyConfig {
                     reason: "must not be empty".to_string(),
                 });
             }
+            // Same parsing as the HTTP middleware (`ip_network::IpNetwork`
+            // for CIDR, `IpAddr` for plain addresses): reject typos at
+            // config time instead of failing when the server starts.
+            if !is_valid_trusted_proxy(proxy) {
+                return Err(Error::InvalidConfiguration {
+                    component: format!("http.proxy.trusted_proxies[{i}]"),
+                    reason: format!(
+                        "must be an IP address or CIDR network, got '{proxy}'"
+                    ),
+                });
+            }
         }
         Ok(())
     }
+}
+
+/// Whether `entry` is a valid trusted proxy: a CIDR network or a plain IP
+/// address (mirrors `parse_trusted_proxy` in the HTTP middleware).
+fn is_valid_trusted_proxy(entry: &str) -> bool {
+    use std::str::FromStr;
+    ip_network::IpNetwork::from_str(entry).is_ok()
+        || entry.parse::<std::net::IpAddr>().is_ok()
 }
 
 impl Default for CorsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            allow_any_origin: true,
+            // Secure by default: no cross-origin request is allowed unless
+            // the operator opts in (`allow_any_origin` or `allowed_origins`).
+            allow_any_origin: false,
             allowed_origins: vec![],
             allow_credentials: false,
         }
@@ -252,13 +276,9 @@ impl Default for CorsConfig {
 
 impl CorsConfig {
     pub fn validate(&self) -> Result<(), Error> {
-        if !self.allow_any_origin && self.allowed_origins.is_empty() {
-            return Err(Error::InvalidConfiguration {
-                component: "http.cors.allowed_origins".to_string(),
-                reason: "must not be empty when allow_any_origin is false"
-                    .to_string(),
-            });
-        }
+        // An empty `allowed_origins` with `allow_any_origin == false` is a
+        // valid (maximally strict) configuration: deny every cross-origin
+        // request. It is the default, so it must not be an error.
         for (i, origin) in self.allowed_origins.iter().enumerate() {
             if origin.is_empty() {
                 return Err(Error::InvalidConfiguration {
@@ -268,5 +288,41 @@ impl CorsConfig {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_config_accepts_ips_and_cidrs() {
+        let proxy = ProxyConfig {
+            trusted_proxies: vec![
+                "10.0.0.1".to_owned(),
+                "192.168.0.0/16".to_owned(),
+                "::1".to_owned(),
+                "fd00::/8".to_owned(),
+            ],
+            ..ProxyConfig::default()
+        };
+        proxy.validate().expect("IPs and CIDRs must be accepted");
+    }
+
+    #[test]
+    fn proxy_config_rejects_invalid_entries_with_index() {
+        let proxy = ProxyConfig {
+            trusted_proxies: vec![
+                "10.0.0.1".to_owned(),
+                "not-an-ip".to_owned(),
+            ],
+            ..ProxyConfig::default()
+        };
+        let err = proxy.validate().expect_err("garbage must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("trusted_proxies[1]"),
+            "the error must point at the offending index: {message}"
+        );
     }
 }
