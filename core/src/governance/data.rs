@@ -480,7 +480,7 @@ impl GovernanceData {
         self.roles_tracker_schemas
             .remove_member_role(remove_members);
 
-        for (_, roles) in self.roles_schema.iter_mut() {
+        for roles in self.roles_schema.values_mut() {
             roles.remove_member_role(remove_members);
         }
     }
@@ -493,7 +493,7 @@ impl GovernanceData {
         self.roles_tracker_schemas.remove_member_role(&old_name);
         self.roles_tracker_schemas.remove_member_role(&owner_name);
 
-        for (_, roles) in self.roles_schema.iter_mut() {
+        for roles in self.roles_schema.values_mut() {
             roles.remove_member_role(&old_name);
             roles.remove_member_role(&owner_name);
         }

@@ -15,6 +15,7 @@ use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
 };
+use crate::metrics::try_core_metrics;
 use ave_network::ComunicateInfo;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -237,7 +238,17 @@ impl GovernanceVersionSync {
             return Ok(());
         }
 
-        let sync_peers = self.get_sync_peers(ctx).await?;
+        let sync_peers = match self.get_sync_peers(ctx).await {
+            Ok(peers) => peers,
+            Err(e) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_governance_version_sync_failure(
+                        "sync_peers_failed",
+                    );
+                }
+                return Err(e);
+            }
+        };
         let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
@@ -280,6 +291,14 @@ impl GovernanceVersionSync {
                 );
                 self.pending_peers.remove(&peer);
             }
+        }
+
+        if self.pending_peers.is_empty()
+            && let Some(metrics) = try_core_metrics()
+        {
+            metrics.observe_governance_version_sync_failure(
+                "all_peers_unreachable",
+            );
         }
 
         debug!(
@@ -354,6 +373,11 @@ impl Handler<Self> for GovernanceVersionSync {
                     self.round_open = false;
                     self.pending_peers.clear();
                     if let Err(error) = self.trigger_update_if_needed().await {
+                        if let Some(metrics) = try_core_metrics() {
+                            metrics.observe_governance_version_sync_failure(
+                                "trigger_update_failed",
+                            );
+                        }
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,
@@ -367,6 +391,11 @@ impl Handler<Self> for GovernanceVersionSync {
                     self.cancel_timeout(ctx);
                     self.round_open = false;
                     if let Err(error) = self.trigger_update_if_needed().await {
+                        if let Some(metrics) = try_core_metrics() {
+                            metrics.observe_governance_version_sync_failure(
+                                "trigger_update_failed",
+                            );
+                        }
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,

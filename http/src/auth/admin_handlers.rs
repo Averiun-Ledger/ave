@@ -3,33 +3,14 @@
 // REST API endpoints for user, role, permission, and API key management
 
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{DatabaseErrorMapping, run_db as shared_run_db};
+use super::http_api::{normalize_pagination, run_db_admin as run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{
-    Extension, Json,
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use crate::extract::{ApiJson, ApiPath, ApiQuery};
+use axum::{Extension, Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use utoipa::ToSchema;
-
-// =============================================================================
-// ERROR HANDLING
-// =============================================================================
-
-async fn run_db<T, F>(
-    db: &Arc<AuthDatabase>,
-    operation: &'static str,
-    work: F,
-) -> Result<T, (StatusCode, Json<ErrorResponse>)>
-where
-    T: Send + 'static,
-    F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
-{
-    shared_run_db(db, operation, DatabaseErrorMapping::admin(), work).await
-}
+use utoipa::{IntoParams, ToSchema};
 
 /// Check if a user has the superadmin role
 fn is_superadmin_user(
@@ -127,14 +108,7 @@ fn is_admin_account(
         return Ok(true);
     }
 
-    let admin_resources = [
-        "admin_users",
-        "admin_roles",
-        "admin_api_key",
-        "admin_system",
-        "user_api_key",
-        "node_maintenance",
-    ];
+    let admin_resources = super::ADMIN_RESOURCES;
 
     let effective_permissions = db.get_effective_permissions(user.id)?;
 
@@ -165,7 +139,7 @@ fn is_admin_account(
 pub async fn create_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Json(req): Json<CreateUserRequest>,
+    ApiJson(req): ApiJson<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserInfo>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "post")?;
@@ -242,11 +216,7 @@ pub async fn create_user(
     path = "/admin/users",
     operation_id = "listUsers",
     tag = "User Management",
-    params(
-        ("include_inactive" = Option<bool>, Query, description = "Include inactive users"),
-        ("limit" = Option<i64>, Query, description = "Maximum number of users to return (default: 100, max: 1000)"),
-        ("offset" = Option<i64>, Query, description = "Number of users to skip for pagination (default: 0)")
-    ),
+    params(ListUsersQuery),
     responses(
         (status = 200, description = "List of users", body = Vec<UserInfo>),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -256,15 +226,21 @@ pub async fn create_user(
 pub async fn list_users(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(params): Query<ListUsersQuery>,
+    ApiQuery(params): ApiQuery<ListUsersQuery>,
 ) -> Result<Json<Vec<UserInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "get")?;
 
     let default_limit = db.users_default_limit();
     let max_limit = db.users_max_limit();
-    let limit = params.limit.unwrap_or(default_limit).clamp(1, max_limit);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let (limit, offset) = normalize_pagination(
+        &PaginationQuery {
+            limit: params.limit,
+            offset: params.offset,
+        },
+        default_limit,
+        max_limit,
+    )?;
     let include_inactive = params.include_inactive.unwrap_or(false);
     let users = run_db(&db, "admin_list_users", move |db| {
         db.list_users(include_inactive, limit, offset)
@@ -274,8 +250,10 @@ pub async fn list_users(
     Ok(Json(users))
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListUsersQuery {
+    /// Include inactive users
     pub include_inactive: Option<bool>,
     /// Maximum number of users to return (default: 100, max: 1000)
     pub limit: Option<i64>,
@@ -302,7 +280,7 @@ pub struct ListUsersQuery {
 pub async fn get_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
+    ApiPath(user_id): ApiPath<i64>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "get")?;
@@ -348,8 +326,8 @@ pub async fn get_user(
 pub async fn update_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<UpdateUserRequest>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<UpdateUserRequest>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "put")?;
@@ -361,76 +339,31 @@ pub async fn update_user(
     .to_string();
     let auth_ctx_for_db = auth_ctx.clone();
     let user_info = run_db(&db, "admin_update_user", move |db| {
-        let target_user = db.get_user_by_id(user_id)?;
-        let is_target_superadmin = is_superadmin_user(&db, &target_user)?;
-
-        if is_target_superadmin {
-            if req.is_active == Some(false) {
-                return Err(DatabaseError::PermissionDenied(
-                    "Cannot deactivate superadmin account".to_string(),
-                ));
-            }
-
-            if req.password.is_some() {
-                return Err(DatabaseError::PermissionDenied(
-                    "Cannot change superadmin password through API. Use direct database access".to_string(),
-                ));
-            }
-
-            if req.role_ids.is_some() {
-                return Err(DatabaseError::PermissionDenied(
-                    "Cannot modify superadmin roles. Superadmin has all permissions automatically".to_string(),
-                ));
-            }
-        }
-
-        if let Some(role_ids) = &req.role_ids {
-            if !auth_ctx_for_db.is_superadmin()
-                && is_admin_account(&db, &target_user)?
-            {
-                return Err(DatabaseError::PermissionDenied(
-                    "Only superadmin can modify roles of other admins"
-                        .to_string(),
-                ));
-            }
-
-            let superadmin_role_id = get_superadmin_role_id(&db)?;
-            if let Some(sa_role_id) = superadmin_role_id {
-                let is_target_currently_superadmin =
-                    is_superadmin_user(&db, &target_user)?;
-
-                if role_ids.contains(&sa_role_id) {
-                    validate_superadmin_assignment(
-                        &db,
-                        &auth_ctx_for_db,
-                        user_id,
-                    )?;
-                } else if is_target_currently_superadmin {
-                    validate_superadmin_removal(&db, &auth_ctx_for_db, user_id)?;
-                }
-            }
-
-        }
-
-        let user = db.update_user_with_roles_transactional(
-            user_id,
-            req.password.as_deref(),
-            req.is_active,
-            req.role_ids.as_deref(),
-            Some(auth_ctx_for_db.user_id),
-            Some(crate::auth::database_audit::AuditLogParams {
-                user_id: Some(auth_ctx_for_db.user_id),
-                api_key_id: Some(&auth_ctx_for_db.api_key_id),
-                action_type: "user_updated",
-                endpoint: Some(&format!("/admin/users/{}", user_id)),
-                http_method: Some("PUT"),
-                ip_address: auth_ctx_for_db.ip_address.as_deref(),
-                user_agent: None,
-                request_id: None,
-                details: Some(&audit_details),
-                success: true,
-                error_message: None,
-            }),
+        // Validations and mutation run in a single Immediate transaction
+        // inside the DB layer: no concurrent write can interleave between
+        // them (TOCTOU).
+        let user = db.update_user_validated_transactional(
+            crate::auth::UpdateUserParams {
+                user_id,
+                password: req.password.as_deref(),
+                is_active: req.is_active,
+                role_ids: req.role_ids.as_deref(),
+                actor_is_superadmin: auth_ctx_for_db.is_superadmin(),
+                assigned_by: Some(auth_ctx_for_db.user_id),
+                audit: Some(crate::auth::database_audit::AuditLogParams {
+                    user_id: Some(auth_ctx_for_db.user_id),
+                    api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                    action_type: "user_updated",
+                    endpoint: Some(&format!("/admin/users/{}", user_id)),
+                    http_method: Some("PUT"),
+                    ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                    user_agent: None,
+                    request_id: None,
+                    details: Some(&audit_details),
+                    success: true,
+                    error_message: None,
+                }),
+            },
         )?;
 
         let roles = db.get_user_roles(user_id)?;
@@ -476,8 +409,8 @@ pub struct ResetPasswordRequest {
 pub async fn reset_user_password(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<ResetPasswordRequest>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<ResetPasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "post")?;
     run_db(&db, "admin_reset_user_password", move |db| {
@@ -485,6 +418,13 @@ pub async fn reset_user_password(
         if is_superadmin_user(&db, &target_user)? {
             return Err(DatabaseError::PermissionDenied(
                 "Cannot reset superadmin password through API. Use direct database access".to_string(),
+            ));
+        }
+
+        if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+            return Err(DatabaseError::PermissionDenied(
+                "Only superadmin can reset password of other admins"
+                    .to_string(),
             ));
         }
 
@@ -530,7 +470,7 @@ pub async fn reset_user_password(
 pub async fn delete_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
+    ApiPath(user_id): ApiPath<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "delete")?;
@@ -550,6 +490,12 @@ pub async fn delete_user(
         if is_superadmin_user(&db, &target_user)? {
             return Err(DatabaseError::PermissionDenied(
                 "Cannot delete superadmin account".to_string(),
+            ));
+        }
+
+        if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+            return Err(DatabaseError::PermissionDenied(
+                "Only superadmin can delete other admins".to_string(),
             ));
         }
 
@@ -595,7 +541,7 @@ pub async fn delete_user(
 pub async fn assign_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path((user_id, role_id)): Path<(i64, i64)>,
+    ApiPath((user_id, role_id)): ApiPath<(i64, i64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
@@ -665,7 +611,7 @@ pub async fn assign_role(
 pub async fn remove_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path((user_id, role_id)): Path<(i64, i64)>,
+    ApiPath((user_id, role_id)): ApiPath<(i64, i64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
@@ -737,7 +683,7 @@ pub async fn remove_role(
 pub async fn create_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Json(req): Json<CreateRoleRequest>,
+    ApiJson(req): ApiJson<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<Role>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "post")?;
@@ -812,7 +758,7 @@ pub async fn list_roles(
 pub async fn get_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
+    ApiPath(role_id): ApiPath<i64>,
 ) -> Result<Json<Role>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "get")?;
@@ -844,8 +790,8 @@ pub async fn get_role(
 pub async fn update_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
-    Json(req): Json<UpdateRoleRequest>,
+    ApiPath(role_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<UpdateRoleRequest>,
 ) -> Result<Json<Role>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "put")?;
@@ -895,7 +841,7 @@ pub async fn update_role(
 pub async fn delete_role(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
+    ApiPath(role_id): ApiPath<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "delete")?;
@@ -942,7 +888,7 @@ pub async fn delete_role(
 pub async fn get_role_permissions(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
+    ApiPath(role_id): ApiPath<i64>,
 ) -> Result<Json<Vec<Permission>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "get")?;
@@ -975,8 +921,8 @@ pub async fn get_role_permissions(
 pub async fn set_role_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
-    Json(req): Json<SetPermissionRequest>,
+    ApiPath(role_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<SetPermissionRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;
@@ -1047,7 +993,7 @@ pub async fn set_role_permission(
 pub async fn get_user_permissions(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
+    ApiPath(user_id): ApiPath<i64>,
 ) -> Result<Json<Vec<Permission>>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "get")?;
     let permissions = run_db(&db, "admin_get_user_permissions", move |db| {
@@ -1079,8 +1025,8 @@ pub async fn get_user_permissions(
 pub async fn set_user_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<Permission>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<Permission>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
@@ -1109,6 +1055,14 @@ pub async fn set_user_permission(
             return Err(DatabaseError::PermissionDenied(
                 "Only superadmin can modify permissions of other admins"
                     .to_string(),
+            ));
+        }
+
+        if !auth_ctx_for_db.is_superadmin()
+            && !auth_ctx_for_db.has_permission(&resource, &action)
+        {
+            return Err(DatabaseError::PermissionDenied(
+                "Cannot modify a permission you do not have".to_string(),
             ));
         }
 
@@ -1162,8 +1116,8 @@ pub async fn set_user_permission(
 pub async fn remove_user_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Query(params): Query<RemovePermissionQuery>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiQuery(params): ApiQuery<RemovePermissionQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
@@ -1191,6 +1145,14 @@ pub async fn remove_user_permission(
             return Err(DatabaseError::PermissionDenied(
                 "Only superadmin can modify permissions of other admins"
                     .to_string(),
+            ));
+        }
+
+        if !auth_ctx_for_db.is_superadmin()
+            && !auth_ctx_for_db.has_permission(&resource, &action)
+        {
+            return Err(DatabaseError::PermissionDenied(
+                "Cannot modify a permission you do not have".to_string(),
             ));
         }
 
@@ -1242,8 +1204,8 @@ pub async fn remove_user_permission(
 pub async fn remove_role_permission(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(role_id): Path<i64>,
-    Query(params): Query<RemovePermissionQuery>,
+    ApiPath(role_id): ApiPath<i64>,
+    ApiQuery(params): ApiQuery<RemovePermissionQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;

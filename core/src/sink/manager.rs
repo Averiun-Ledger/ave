@@ -25,13 +25,16 @@ use ave_common::{
 };
 
 use ave_common::sink::{
-    SinkServer, default_sink_healthcheck_intervals_secs,
+    SinkServer, SinkTransportConfig, default_sink_healthcheck_intervals_secs,
     default_sink_worker_idle_timeout_ms,
 };
 
 use crate::db::Storable;
 use crate::metrics::try_core_metrics;
+use crate::node::Node;
+use crate::sink::NodeSigner;
 use crate::sink::extract_sn;
+use crate::sink::transport::build_transport;
 use crate::sink::worker::{SinkWorker, SinkWorkerMessage};
 use crate::system::ConfigHelper;
 
@@ -47,6 +50,9 @@ pub struct SinkManagerInitParams {
     /// governance events). `false` when under a Governance (handles
     /// tracker events).
     pub is_governance: bool,
+    /// Public key of the node hosting this manager. Used by the Kafka
+    /// transport to derive a per-node default `transactional.id`.
+    pub node_public_key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +67,7 @@ pub enum SinkManagerMessage {
         subject_id: String,
         sn: u64,
         result: SendResult,
+        count: u64,
     },
     SinkRecovered {
         sink: String,
@@ -68,8 +75,8 @@ pub enum SinkManagerMessage {
     UnblockSink {
         sink: String,
     },
-    /// Safe Mode only: delete all persisted cursors and transient state for a sink.
-    DeleteSinkCursors {
+    /// Safe Mode only: reset all persisted cursors and transient state for a sink.
+    ResetSinkCursors {
         sink: String,
     },
     GetStatus,
@@ -77,6 +84,21 @@ pub enum SinkManagerMessage {
     /// Worker reports it has been idle for sink_worker_idle_timeout_ms.
     WorkerIdle {
         sink: String,
+    },
+    /// Death-watch notification: a sink worker has stopped.  Any event
+    /// notified to the worker but not yet delivered is lost silently
+    /// (non-critical messages are discarded during graceful shutdown), so
+    /// the manager re-evaluates cursors against last_seen for the sink.
+    WorkerStopped {
+        sink: String,
+    },
+    /// Idle-timeout shutdown of a sink worker. Processed inside the manager's
+    /// mailbox so the handler can wait for the worker to confirm shutdown
+    /// (`ask_stop`): a subsequent event then recreates the worker instead of
+    /// racing the old one's termination and losing the event.
+    WorkerShutdownTimeout {
+        sink: String,
+        generation: u64,
     },
     /// Remove all tracking state for a subject that has been deleted.
     RemoveSubject {
@@ -99,13 +121,38 @@ pub enum SinkManagerMessage {
     ReplayEvents {
         requests: Vec<SinkReplayItem>,
     },
+    /// Non-persistent end-to-end test of a sink: health check + test payload
+    /// delivery without advancing cursors.
+    TestSink {
+        sink: String,
+    },
     /// Node has finished starting all its children. Governance sinks can now
     /// start workers and catch-up because governance actors are guaranteed to
     /// be available.
     StartupReady,
+    /// Periodic healthcheck tick for a sink with lagging subjects. Routed
+    /// through the manager's mailbox so the worker reference is resolved (or
+    /// the worker recreated) at fire time — a captured `ActorRef` would keep
+    /// firing at a dead worker forever.
+    HealthcheckTick {
+        sink: String,
+    },
 }
 
 impl Message for SinkManagerMessage {}
+
+/// Failure of a non-persistent sink test ([`SinkManagerMessage::TestSink`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SinkTestError {
+    /// The sink is registered but has no server configuration (e.g. a
+    /// residual sink whose config entry was removed).
+    NotConfigured,
+    /// Node-side failure while preparing the test (signer, transport
+    /// construction).
+    Internal(String),
+    /// The test delivery itself failed (health check or payload).
+    Delivery(String),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SinkManagerResponse {
@@ -113,6 +160,7 @@ pub enum SinkManagerResponse {
     Status(Vec<SinkStatus>),
     DetailedStatus(SinkManagerDetailedStatus),
     ReplayResult(SinkReplayResponse),
+    TestResult(Result<(), SinkTestError>),
 }
 
 impl Response for SinkManagerResponse {}
@@ -123,6 +171,7 @@ pub struct SinkStatus {
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
     pub active: bool,
+    pub last_error: Option<String>,
 }
 
 /// Detailed runtime + configuration snapshot of a sink manager.
@@ -179,6 +228,10 @@ pub enum SinkWorkerError {
         subject_id: String,
         sn: u64,
     },
+    /// The per-subject worker died unexpectedly and was recreated. The manager
+    /// must reset its notification cursor so events lost in the dead worker
+    /// are recovered by catch-up instead of skipped by the sequential gate.
+    SubjectWorkerRestarted { sink: String, subject_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +272,19 @@ pub enum SinkManagerEvent {
     SinkCursorsDeleted {
         sink: String,
     },
+    /// A replay was accepted and its re-delivery is still pending. Persisted
+    /// so a node restart cannot silently drop it.
+    ReplayRegistered {
+        sink: String,
+        subject_id: String,
+        from_sn: u64,
+    },
+    /// A catch-up starting at or below the floor of a registered replay has
+    /// completed, so the replay is fully re-delivered.
+    ReplayCompleted {
+        sink: String,
+        subject_id: String,
+    },
 }
 
 impl Event for SinkManagerEvent {}
@@ -244,26 +310,64 @@ pub struct SinkManager {
     store_params: Option<SinkManagerInitParams>, // saved for pre_start
     #[serde(skip)]
     blocked_sinks: BTreeMap<String, String>, // sink_name -> reason
+    /// Accepted replays whose re-delivery is still pending, mapped to the
+    /// minimum `from_sn` to redeliver. Persisted (via Borsh) so a node
+    /// restart cannot silently drop an accepted replay: on startup each floor
+    /// triggers a catch-up from that SN. Cleared when a catch-up starting at
+    /// or below the floor completes.
+    #[serde(skip)]
+    replay_floors: BTreeMap<(String, String), u64>, // (sink, subject_id) -> min from_sn
     /// `true` when this manager handles governance events (under Node),
     /// `false` when it handles tracker events (under Governance).
     #[serde(skip)]
     is_governance: bool,
+    /// Public key of the node hosting this manager, from the init params.
+    #[serde(skip)]
+    node_public_key: String,
     /// F-5: Cancellation tokens for pending worker shutdown timers.  Each token
     /// is shared between the manager and the spawned timer task; cancelling the
     /// token aborts the timer *before* it sends `Stop`, eliminating the race
-    /// between `abort()` and a task that has already woken up.
+    /// between `abort()` and a task that has already woken up. The generation
+    /// stamps each schedule so a stale timeout message (already in the mailbox
+    /// when the timer was cancelled and re-armed) is discarded instead of
+    /// killing a worker with fresh activity.
     #[serde(skip)]
-    pending_worker_shutdowns: HashMap<String, CancellationToken>,
+    pending_worker_shutdowns: HashMap<String, (CancellationToken, u64)>,
+    /// Monotonic counter stamping every worker shutdown schedule.
+    #[serde(skip)]
+    next_worker_shutdown_generation: u64,
     /// Cancellation tokens for pending healthcheck timers.  When a sink has
     /// lagging subjects but no active worker, the manager schedules periodic
     /// healthchecks using `healthcheck_intervals_secs` to detect recovery.
     #[serde(skip)]
     pending_healthchecks: HashMap<String, CancellationToken>,
-    /// Subjects for which a catch-up has been requested but not yet completed.
-    /// Prevents duplicate catch-up triggers from sending the same event twice
-    /// while the first catch-up is still in flight.
+    /// Subjects for which a catch-up has been requested but not yet completed,
+    /// mapped to the `from_sn` the in-flight catch-up started from. Prevents
+    /// duplicate catch-up triggers from sending the same event twice while the
+    /// first catch-up is still in flight, and lets requests that rewind below
+    /// that start (e.g. a replay) restart the in-flight catch-up so the whole
+    /// range is re-delivered in order.
     #[serde(skip)]
-    catch_up_in_flight: HashSet<(String, String)>, // (sink, subject_id)
+    catch_up_in_flight: HashMap<(String, String), u64>, // (sink, subject_id) -> in-flight from_sn
+    /// Re-delivery catch-ups (e.g. replays) that were rejected by the worker
+    /// while the sink was unhealthy/blocked, mapped to the minimum `from_sn`
+    /// to redeliver. The normal lagging path cannot retry them because the
+    /// cursor is already ahead. Drained when a catch-up completes or the sink
+    /// recovers / is unblocked.
+    #[serde(skip)]
+    pending_catch_ups: HashMap<(String, String), u64>, // (sink, subject_id) -> min from_sn
+    /// Highest SN already forwarded to a sink/subject worker. Used for the
+    /// sequential gate instead of the delivery cursor so that live batching
+    /// can accumulate events while earlier events are still buffered. Not
+    /// persisted: it is rebuilt from forwarded events and reset to the cursor
+    /// on worker restart/recovery.
+    #[serde(skip)]
+    last_notified: HashMap<(String, String), u64>, // (sink, subject_id) -> sn
+    /// Last error reported by a sink worker for this sink. Kept in memory only:
+    /// it is cleared when the sink recovers, is unblocked, or has no lagging
+    /// subjects left.
+    #[serde(skip)]
+    last_errors: HashMap<String, String>, // sink_name -> last error message
 }
 
 impl std::fmt::Debug for SinkManager {
@@ -282,6 +386,7 @@ impl std::fmt::Debug for SinkManager {
                 "blocked_sinks",
                 &self.blocked_sinks.keys().collect::<Vec<_>>(),
             )
+            .field("last_errors", &self.last_errors.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -296,6 +401,7 @@ impl BorshSerialize for SinkManager {
         BorshSerialize::serialize(&self.active_sinks, writer)?;
         BorshSerialize::serialize(&self.version, writer)?;
         BorshSerialize::serialize(&self.blocked_sinks, writer)?;
+        BorshSerialize::serialize(&self.replay_floors, writer)?;
         Ok(())
     }
 }
@@ -319,6 +425,16 @@ impl BorshDeserialize for SinkManager {
                 BTreeMap::new()
             }
         };
+        // Backward compatibility: old snapshots may not include replay_floors.
+        let replay_floors =
+            match BTreeMap::<(String, String), u64>::deserialize_reader(reader)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(msg_type = "BorshCompat", field = "replay_floors", error = %e, "Using default for missing field");
+                    BTreeMap::new()
+                }
+            };
         Ok(Self {
             cursors,
             last_seen,
@@ -328,10 +444,16 @@ impl BorshDeserialize for SinkManager {
             lagging: BTreeMap::new(),
             store_params: None,
             blocked_sinks,
+            replay_floors,
             is_governance: false, // default from BorshDeserialize, will be overridden by create_initial
+            node_public_key: String::new(), // same: re-derived from init params
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
-            catch_up_in_flight: HashSet::new(),
+            catch_up_in_flight: HashMap::new(),
+            pending_catch_ups: HashMap::new(),
+            last_notified: HashMap::new(),
+            last_errors: HashMap::new(),
         })
     }
 }
@@ -361,10 +483,16 @@ impl PersistentActor for SinkManager {
             lagging: BTreeMap::new(),
             store_params: Some(params.clone()),
             blocked_sinks: BTreeMap::new(),
+            replay_floors: BTreeMap::new(),
             is_governance: params.is_governance,
+            node_public_key: params.node_public_key,
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
-            catch_up_in_flight: HashSet::new(),
+            catch_up_in_flight: HashMap::new(),
+            pending_catch_ups: HashMap::new(),
+            last_notified: HashMap::new(),
+            last_errors: HashMap::new(),
         }
     }
 
@@ -406,6 +534,24 @@ impl PersistentActor for SinkManager {
                 inner.cursors.retain(|(s, _), _| s != sink);
                 inner.lagging.remove(sink);
                 inner.blocked_sinks.remove(sink);
+                inner.last_errors.remove(sink);
+                inner.replay_floors.retain(|(s, _), _| s != sink);
+            }
+            SinkManagerEvent::ReplayRegistered {
+                sink,
+                subject_id,
+                from_sn,
+            } => {
+                inner
+                    .replay_floors
+                    .entry((sink.clone(), subject_id.clone()))
+                    .and_modify(|floor| *floor = (*floor).min(*from_sn))
+                    .or_insert(*from_sn);
+            }
+            SinkManagerEvent::ReplayCompleted { sink, subject_id } => {
+                inner
+                    .replay_floors
+                    .remove(&(sink.clone(), subject_id.clone()));
             }
         }
 
@@ -422,6 +568,8 @@ impl PersistentActor for SinkManager {
                         SinkManagerEvent::SinkCursorsDeleted { .. }
                     ) {
                         metrics.set_sink_lagging_subjects(sink, 0);
+                        metrics.set_sink_lagging_events(sink, 0);
+                        metrics.set_sink_lag_max_distance(sink, 0);
                     }
                 }
                 _ => {}
@@ -441,10 +589,16 @@ impl PersistentActor for SinkManager {
             lagging: self.lagging.clone(),
             store_params: self.store_params.clone(),
             blocked_sinks: self.blocked_sinks.clone(),
+            replay_floors: self.replay_floors.clone(),
             is_governance: self.is_governance,
+            node_public_key: self.node_public_key.clone(),
             pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
             pending_healthchecks: HashMap::new(),
             catch_up_in_flight: self.catch_up_in_flight.clone(),
+            pending_catch_ups: self.pending_catch_ups.clone(),
+            last_notified: self.last_notified.clone(),
+            last_errors: self.last_errors.clone(),
         })
     }
 
@@ -455,6 +609,11 @@ impl PersistentActor for SinkManager {
         self.active_sinks.clone_from(&state.active_sinks);
         self.version = state.version;
         self.blocked_sinks.clone_from(&state.blocked_sinks);
+        self.replay_floors.clone_from(&state.replay_floors);
+        // `apply` also mutates these two (e.g. `SinkCursorsDeleted` clears
+        // them); skipping them here would silently drop the mutation.
+        self.lagging.clone_from(&state.lagging);
+        self.last_errors.clone_from(&state.last_errors);
     }
 }
 
@@ -493,6 +652,13 @@ impl Actor for SinkManager {
                 .ok_or_else(|| ActorError::Functional {
                     description: "SinkManager missing init params".to_owned(),
                 })?;
+
+        // `is_governance` is set by `create_initial` and survives recovery
+        // because `set_state` does not overwrite transient fields. Re-derive it
+        // from the init params here so the decision below is robust even if the
+        // recovery path changes in the future.
+        self.is_governance = params.is_governance;
+        self.node_public_key = params.node_public_key.clone();
 
         // Validate sink server name uniqueness.
         let mut seen = HashSet::new();
@@ -556,7 +722,7 @@ impl Actor for SinkManager {
         // Workers are ephemeral and would be idle anyway because no new events
         // are processed, so we skip creating them.
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -592,12 +758,12 @@ impl Actor for SinkManager {
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl Handler<SinkManager> for SinkManager {
+impl Handler<Self> for SinkManager {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SinkManagerMessage,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SinkManagerResponse, ActorError> {
         match msg {
             SinkManagerMessage::NotifyNewEvent(data) => {
@@ -608,9 +774,12 @@ impl Handler<SinkManager> for SinkManager {
                 subject_id,
                 sn,
                 result,
+                count,
             } => {
-                self.handle_update_progress(sink, subject_id, sn, result, ctx)
-                    .await?;
+                self.handle_update_progress(
+                    sink, subject_id, sn, result, count, ctx,
+                )
+                .await?;
             }
             SinkManagerMessage::SinkRecovered { sink } => {
                 self.handle_sink_recovered(sink, ctx).await?;
@@ -618,8 +787,8 @@ impl Handler<SinkManager> for SinkManager {
             SinkManagerMessage::UnblockSink { sink } => {
                 self.handle_unblock_sink(sink, ctx).await?;
             }
-            SinkManagerMessage::DeleteSinkCursors { sink } => {
-                self.handle_delete_sink_cursors(sink, ctx).await?;
+            SinkManagerMessage::ResetSinkCursors { sink } => {
+                self.handle_reset_sink_cursors(sink, ctx).await?;
             }
             SinkManagerMessage::GetStatus => {
                 return Ok(SinkManagerResponse::Status(
@@ -645,8 +814,11 @@ impl Handler<SinkManager> for SinkManager {
                 // The worker is idle and will be stopped. Any catch-up it may
                 // have had in flight is no longer running, so clear the flag
                 // so recovery can retry with a fresh worker.
-                self.catch_up_in_flight.retain(|(s, _)| s != &sink);
+                self.catch_up_in_flight.retain(|(s, _), _| s != &sink);
                 self.schedule_worker_shutdown(sink, ctx).await;
+            }
+            SinkManagerMessage::WorkerStopped { sink } => {
+                self.handle_worker_stopped(sink, ctx).await?;
             }
             SinkManagerMessage::RemoveSubject { subject_id } => {
                 self.handle_remove_subject(&subject_id, ctx).await?;
@@ -656,8 +828,28 @@ impl Handler<SinkManager> for SinkManager {
                     .await?;
             }
             SinkManagerMessage::CatchUpRejected { sink, subject_id } => {
-                self.catch_up_in_flight
+                let rejected_from = self
+                    .catch_up_in_flight
                     .remove(&(sink.clone(), subject_id.clone()));
+                // If the rejected catch-up was a re-delivery starting at or
+                // below the cursor (e.g. a replay), lagging will never retry
+                // it because the cursor is already ahead: queue it back so it
+                // is drained once the sink recovers. Ranges above the cursor
+                // are retried through the normal lagging path.
+                if let Some(from_sn) = rejected_from {
+                    let cursor_sn = self
+                        .cursors
+                        .get(&(sink.clone(), subject_id.clone()))
+                        .copied();
+                    if cursor_sn.is_some_and(|cursor| from_sn <= cursor) {
+                        self.pending_catch_ups
+                            .entry((sink.clone(), subject_id.clone()))
+                            .and_modify(|pending| {
+                                *pending = (*pending).min(from_sn)
+                            })
+                            .or_insert(from_sn);
+                    }
+                }
                 // Ensure the subject is marked as lagging so recovery will retry
                 // the catch-up once the sink becomes available again.
                 self.try_insert_lagging(&sink, subject_id);
@@ -666,8 +858,79 @@ impl Handler<SinkManager> for SinkManager {
                 let response = self.handle_replay_events(requests, ctx).await?;
                 return Ok(SinkManagerResponse::ReplayResult(response));
             }
+            SinkManagerMessage::TestSink { sink } => {
+                let result = self.handle_test_sink(&sink, ctx).await;
+                return Ok(SinkManagerResponse::TestResult(result));
+            }
             SinkManagerMessage::StartupReady => {
                 self.handle_startup_ready(ctx).await?;
+            }
+            SinkManagerMessage::WorkerShutdownTimeout { sink, generation } => {
+                // Discard a stale timeout: it was emitted before the timer
+                // was cancelled and re-armed by newer activity, so stopping
+                // the worker now could destroy in-flight work.
+                match self.pending_worker_shutdowns.get(&sink) {
+                    Some((_, current)) if *current == generation => {
+                        self.pending_worker_shutdowns.remove(&sink);
+                    }
+                    _ => {
+                        return Ok(SinkManagerResponse::Ok);
+                    }
+                }
+                let child_name = format!("worker_{}", sink);
+                if let Ok(worker) =
+                    ctx.get_child::<SinkWorker>(&child_name).await
+                {
+                    debug!(
+                        msg_type = "SinkWorkerShutdown",
+                        sink = %sink,
+                        reason = "idle timeout",
+                        "Sink worker shutting down after idle timeout"
+                    );
+                    // Wait for the worker to confirm shutdown: only then is
+                    // its actor path free, so a subsequent event recreates it
+                    // instead of racing the old worker's termination and
+                    // losing the event. The worker is idle by definition (the
+                    // shutdown timer fired), so this returns quickly. The
+                    // death-watch (WorkerStopped) recovers anything pending.
+                    if let Err(e) = worker.ask_stop().await {
+                        error!(
+                            msg_type = "SinkWorkerShutdown",
+                            sink = %sink,
+                            error = %e,
+                            "Failed to confirm sink worker shutdown"
+                        );
+                    }
+                }
+            }
+            SinkManagerMessage::HealthcheckTick { sink } => {
+                // Skip when the sink left the config, is blocked, or has
+                // nothing lagging (recovery/block cancel the timer anyway;
+                // these guards cover the stale-tick race).
+                if !self.sink_servers.contains_key(&sink)
+                    || self.blocked_sinks.contains_key(&sink)
+                {
+                    return Ok(SinkManagerResponse::Ok);
+                }
+                if !self.lagging.get(&sink).is_some_and(|s| !s.is_empty()) {
+                    return Ok(SinkManagerResponse::Ok);
+                }
+                // Resolve the worker at fire time, recreating it if it was
+                // idle-killed: a lagging sink must keep being monitored or
+                // its recovery is never detected.
+                match self.ensure_worker(&sink, ctx).await {
+                    Ok(worker) => {
+                        self.cancel_worker_shutdown(&sink);
+                        if let Err(e) =
+                            worker.tell(SinkWorkerMessage::HealthCheck).await
+                        {
+                            error!(msg_type = "HealthcheckTick", sink = %sink, error = %e, "Failed to forward healthcheck to worker");
+                        }
+                    }
+                    Err(e) => {
+                        error!(msg_type = "HealthcheckTick", sink = %sink, error = %e, "Failed to ensure worker for healthcheck");
+                    }
+                }
             }
         }
         Ok(SinkManagerResponse::Ok)
@@ -676,7 +939,7 @@ impl Handler<SinkManager> for SinkManager {
     async fn on_child_error(
         &mut self,
         error: SinkWorkerError,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Some(metrics) = try_core_metrics() {
             match &error {
@@ -692,10 +955,58 @@ impl Handler<SinkManager> for SinkManager {
                 SinkWorkerError::SubjectNotFound { sink, .. } => {
                     metrics.observe_sink_event(sink, "subject_not_found");
                 }
+                SinkWorkerError::SubjectWorkerRestarted { .. } => {
+                    // No metric: this is a lifecycle signal, not a delivery
+                    // outcome.
+                }
             }
         }
 
         match error {
+            SinkWorkerError::SubjectWorkerRestarted { sink, subject_id } => {
+                info!(
+                    msg_type = "SubjectWorkerRestarted",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    "Subject worker recreated; resetting notification state"
+                );
+                // Any catch-up that was in flight in the dead worker is lost;
+                // clear the flag so a fresh catch-up can be scheduled.
+                self.catch_up_in_flight
+                    .remove(&(sink.clone(), subject_id.clone()));
+                self.reset_last_notified_for_subject(&sink, &subject_id);
+
+                // If the cursor is behind last_seen, events were lost or the
+                // subject was lagging; ensure catch-up recovers them in order.
+                // CR-4: no cursor at all means outdated even when last_sn == 0
+                // (e.g. a Create that failed before the cursor was persisted).
+                let cursor_sn = self
+                    .cursors
+                    .get(&(sink.clone(), subject_id.clone()))
+                    .copied();
+                let last_sn =
+                    self.last_seen.get(&subject_id).copied().unwrap_or(0);
+                let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
+                if is_outdated {
+                    self.try_insert_lagging(&sink, subject_id.clone());
+                    if let Err(e) = self
+                        .handle_request_catch_up(
+                            sink.clone(),
+                            vec![subject_id.clone()],
+                            ctx,
+                        )
+                        .await
+                    {
+                        error!(
+                            msg_type = "RestartCatchUp",
+                            sink = %sink,
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to trigger catch-up after subject worker restart"
+                        );
+                    }
+                }
+            }
             SinkWorkerError::DeliveryFailed {
                 sink,
                 subject_id,
@@ -703,6 +1014,7 @@ impl Handler<SinkManager> for SinkManager {
                 reason,
             } => {
                 error!(msg_type = "DeliveryFailed", sink = %sink, subject_id = %subject_id, sn = %sn, reason = %reason, "Sink delivery failed");
+                self.last_errors.insert(sink.clone(), reason.clone());
                 self.catch_up_in_flight
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
@@ -734,6 +1046,7 @@ impl Handler<SinkManager> for SinkManager {
                     error = %error,
                     "Auth failure; event kept in lagging for retry"
                 );
+                self.last_errors.insert(sink.clone(), error.clone());
                 self.catch_up_in_flight
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
@@ -764,13 +1077,18 @@ impl Handler<SinkManager> for SinkManager {
                     reason = %reason,
                     "Sink blocked due to permanent error; operator intervention required"
                 );
-                self.catch_up_in_flight.retain(|(s, _)| s != &sink);
+                self.catch_up_in_flight.retain(|(s, _), _| s != &sink);
                 // Cancel any periodic healthcheck: the sink is now blocked and
                 // will not recover until the operator unblocks it.
                 self.cancel_healthcheck(&sink);
                 // Keep the subject lagging so it is retried when the operator
-                // unblocks the sink.
-                self.try_insert_lagging(&sink, subject_id);
+                // unblocks the sink. Sink-wide blocks (e.g. flapping) carry an
+                // empty subject_id: there is no real subject to recover, and
+                // inserting `""` would make `handle_unblock_sink` request a
+                // phantom catch-up for a subject that does not exist.
+                if !subject_id.is_empty() {
+                    self.try_insert_lagging(&sink, subject_id);
+                }
                 if let Err(e) = self
                     .persist(
                         SinkManagerEvent::SinkBlocked {
@@ -797,6 +1115,7 @@ impl Handler<SinkManager> for SinkManager {
                         subject_id,
                         sn,
                         SendResult::SubjectNotFound,
+                        1,
                         ctx,
                     )
                     .await
@@ -830,16 +1149,59 @@ impl SinkManager {
                     .map(|s| s.len())
                     .unwrap_or(0),
                 active: self.active_sinks.contains(sink_name),
+                last_error: self.last_errors.get(sink_name).cloned(),
             })
             .collect()
+    }
+
+    /// Compute the SN distance between `last_seen` and the sink cursor for a
+    /// subject. A missing cursor means the subject is one event behind even if
+    /// `last_seen == 0`, matching the outdated logic in `rebuild_lagging`.
+    fn sink_lag_distance(&self, sink: &str, subject_id: &str) -> u64 {
+        let last_sn = self.last_seen.get(subject_id).copied().unwrap_or(0);
+        match self
+            .cursors
+            .get(&(sink.to_owned(), subject_id.to_owned()))
+            .copied()
+        {
+            Some(cursor) if cursor >= last_sn => 0,
+            Some(cursor) => last_sn - cursor,
+            None => last_sn + 1,
+        }
+    }
+
+    fn sink_lagging_totals(&self, sink: &str) -> (usize, u64, u64) {
+        let Some(subjects) = self.lagging.get(sink) else {
+            return (0, 0, 0);
+        };
+        let count = subjects.len();
+        if count == 0 {
+            return (0, 0, 0);
+        }
+        let mut total = 0u64;
+        let mut max = 0u64;
+        for subject_id in subjects {
+            let distance = self.sink_lag_distance(sink, subject_id);
+            total = total.saturating_add(distance);
+            max = max.max(distance);
+        }
+        (count, total, max)
+    }
+
+    fn update_sink_lag_metrics(&self, sink: &str) {
+        let Some(metrics) = try_core_metrics() else {
+            return;
+        };
+        let (count, total, max) = self.sink_lagging_totals(sink);
+        metrics.set_sink_lagging_subjects(sink, count as i64);
+        metrics.set_sink_lagging_events(sink, total as i64);
+        metrics.set_sink_lag_max_distance(sink, max as i64);
     }
 
     fn try_insert_lagging(&mut self, sink: &str, subject_id: String) {
         let set = self.lagging.entry(sink.to_string()).or_default();
         set.insert(subject_id);
-        if let Some(metrics) = try_core_metrics() {
-            metrics.set_sink_lagging_subjects(sink, set.len() as i64);
-        }
+        self.update_sink_lag_metrics(sink);
     }
 
     fn remove_lagging_subject(&mut self, sink: &str, subject_id: &str) {
@@ -847,12 +1209,37 @@ impl SinkManager {
             set.remove(subject_id);
             if set.is_empty() {
                 self.lagging.remove(sink);
+                self.last_errors.remove(sink);
             }
         }
-        if let Some(metrics) = try_core_metrics() {
-            let count =
-                self.lagging.get(sink).map(|s| s.len() as i64).unwrap_or(0);
-            metrics.set_sink_lagging_subjects(sink, count);
+        self.update_sink_lag_metrics(sink);
+    }
+
+    /// Reset the notification cursor for a single subject to the delivery
+    /// cursor. Called when a worker is recreated or catch-up state changes, so
+    /// that events lost in a dead worker are not skipped by the sequential gate.
+    fn reset_last_notified_for_subject(
+        &mut self,
+        sink: &str,
+        subject_id: &str,
+    ) {
+        let key = (sink.to_string(), subject_id.to_string());
+        if let Some(cursor) = self.cursors.get(&key).copied() {
+            self.last_notified.insert(key, cursor);
+        } else {
+            self.last_notified.remove(&key);
+        }
+    }
+
+    /// Reset the notification cursor for every subject of a sink to its
+    /// delivery cursor. Used when a sink worker stops or is recreated.
+    fn reset_last_notified_for_sink(&mut self, sink: &str) {
+        self.last_notified.retain(|(s, _), _| s != sink);
+        for ((s, subject_id), cursor) in self.cursors.iter() {
+            if s == sink {
+                self.last_notified
+                    .insert((s.clone(), subject_id.clone()), *cursor);
+            }
         }
     }
 
@@ -875,29 +1262,28 @@ impl SinkManager {
                 // CR-4: If there is no cursor at all, the subject is outdated even
                 // when last_sn == 0 (e.g. a Create event that failed before cursor
                 // could be persisted).  Otherwise, outdated means cursor < last_sn.
-                let is_outdated = match cursor_sn {
-                    Some(sn) => sn < last_sn,
-                    None => true,
-                };
+                let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
                 if is_outdated {
                     outdated.push(subject_id);
                 }
             }
             for subject_id in outdated {
-                self.try_insert_lagging(&sink_name, subject_id);
+                self.try_insert_lagging(sink_name, subject_id);
             }
         }
 
-        if let Some(metrics) = try_core_metrics() {
-            for sink_name in active_sinks {
-                let count = self
-                    .lagging
-                    .get(&sink_name)
-                    .map(|s| s.len() as i64)
-                    .unwrap_or(0);
-                metrics.set_sink_lagging_subjects(&sink_name, count);
-            }
+        for sink_name in &active_sinks {
+            self.update_sink_lag_metrics(sink_name);
         }
+
+        // Drop stale last-error entries for sinks that no longer have lagging
+        // subjects. Errors for sinks that are still behind remain visible.
+        self.last_errors.retain(|sink, _| {
+            self.lagging
+                .get(sink)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        });
     }
 
     /// Start workers for every configured sink and trigger catch-up for any
@@ -908,7 +1294,7 @@ impl SinkManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) {
-        for sink_name in self.sink_servers.keys().cloned().collect::<Vec<_>>() {
+        for sink_name in Vec::from_iter(self.sink_servers.keys().cloned()) {
             if let Err(e) = self.ensure_worker(&sink_name, ctx).await {
                 error!(
                     msg_type = "StartWorker",
@@ -943,6 +1329,40 @@ impl SinkManager {
                 );
             }
         }
+
+        // Re-deliver replays that were accepted but not completed before the
+        // restart. The normal lagging path cannot cover them when the cursor
+        // was already advanced past the floor by another catch-up.
+        let replay_floors: Vec<(String, String, u64)> = self
+            .replay_floors
+            .iter()
+            .map(|((sink, subject_id), from_sn)| {
+                (sink.clone(), subject_id.clone(), *from_sn)
+            })
+            .collect();
+        for (sink_name, subject_id, from_sn) in replay_floors {
+            if self.blocked_sinks.contains_key(&sink_name) {
+                continue;
+            }
+            info!(
+                msg_type = "ReplayResume",
+                sink = %sink_name,
+                subject_id = %subject_id,
+                from_sn = %from_sn,
+                "Resuming pending replay after node restart"
+            );
+            if let Err(e) = self
+                .send_catch_up(sink_name.clone(), subject_id, from_sn, ctx)
+                .await
+            {
+                error!(
+                    msg_type = "ReplayResume",
+                    sink = %sink_name,
+                    error = %e,
+                    "Failed to resume pending replay after node restart"
+                );
+            }
+        }
     }
 
     /// Start workers and trigger catch-up for the node-level governance sink
@@ -954,7 +1374,7 @@ impl SinkManager {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -989,18 +1409,67 @@ impl SinkManager {
                             ),
                         }
                     })?;
+                // Only sinks with signature enabled need the node identity to
+                // sign deliveries.
+                let signer = match &server.transport {
+                    SinkTransportConfig::Http(http) if http.signature => {
+                        let node = ctx
+                            .system()
+                            .get_actor::<Node>(&ActorPath::from("/user/node"))
+                            .await?;
+                        Some(NodeSigner::new(node))
+                    }
+                    SinkTransportConfig::Kafka(kafka) if kafka.signature => {
+                        let node = ctx
+                            .system()
+                            .get_actor::<Node>(&ActorPath::from("/user/node"))
+                            .await?;
+                        Some(NodeSigner::new(node))
+                    }
+                    SinkTransportConfig::Grpc(grpc) if grpc.signature => {
+                        let node = ctx
+                            .system()
+                            .get_actor::<Node>(&ActorPath::from("/user/node"))
+                            .await?;
+                        Some(NodeSigner::new(node))
+                    }
+                    _ => None,
+                };
                 let worker = SinkWorker::new(
                     sink_name.to_owned(),
                     server.clone(),
                     self.is_governance,
+                    signer,
+                    self.node_public_key.clone(),
                 )
+                .await
                 .map_err(|e| ActorError::Functional {
                     description: format!(
                         "Failed to create sink worker for {}: {}",
                         sink_name, e
                     ),
                 })?;
-                ctx.create_child(&child_name, worker).await
+                let worker_ref = ctx.create_child(&child_name, worker).await?;
+                // Death-watch: if the worker stops while a notification is in
+                // flight (e.g. racing its own idle shutdown), the manager
+                // re-evaluates cursors and recovers any lost event via
+                // catch-up.
+                let sink_for_watch = sink_name.to_owned();
+                if let Err(e) = ctx
+                    .watch(&worker_ref, move |_| {
+                        SinkManagerMessage::WorkerStopped {
+                            sink: sink_for_watch.clone(),
+                        }
+                    })
+                    .await
+                {
+                    error!(msg_type = "WatchWorker", sink = %sink_name, error = %e, "Failed to watch sink worker");
+                }
+                // Reset notification cursors for this sink: any events notified
+                // to the previous worker but not yet delivered are lost, so they
+                // must be recovered by catch-up rather than skipped by the gate.
+                self.reset_last_notified_for_sink(sink_name);
+                Ok(worker_ref)
             }
         }
     }
@@ -1011,38 +1480,54 @@ impl SinkManager {
     async fn schedule_worker_shutdown(
         &mut self,
         sink_name: String,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) {
         // Cancel any existing shutdown timer for this worker
-        if let Some(token) = self.pending_worker_shutdowns.remove(&sink_name) {
+        if let Some((token, _)) =
+            self.pending_worker_shutdowns.remove(&sink_name)
+        {
             token.cancel();
         }
         let child_name = format!("worker_{}", sink_name);
-        let Ok(worker) = ctx.get_child::<SinkWorker>(&child_name).await else {
+        if ctx.get_child::<SinkWorker>(&child_name).await.is_err() {
             // Worker is no longer alive; nothing to shut down.
             return;
-        };
+        }
         let shutdown_after_ms = self
             .sink_servers
             .get(&sink_name)
             .map(|s| s.sink_worker_idle_timeout_ms)
             .unwrap_or_else(default_sink_worker_idle_timeout_ms);
+        let self_ref = match ctx.reference().await {
+            Ok(self_ref) => self_ref,
+            Err(e) => {
+                error!(msg_type = "ScheduleWorkerShutdown", sink = %sink_name, error = %e, "Failed to get self reference for worker shutdown timer");
+                return;
+            }
+        };
+        self.next_worker_shutdown_generation += 1;
+        let generation = self.next_worker_shutdown_generation;
         let token = CancellationToken::new();
         let token_for_task = token.clone();
+        let sink_name_for_msg = sink_name.clone();
         let sink_name_for_log = sink_name.clone();
         ctx.spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(shutdown_after_ms)) => {
-                    // Only send Stop if the token was NOT cancelled.
+                    // Only fire if the token was NOT cancelled.
                     if !token_for_task.is_cancelled() {
-                        debug!(
-                            msg_type = "SinkWorkerShutdown",
-                            sink = %sink_name_for_log,
-                            reason = "idle timeout",
-                            shutdown_after_ms = %shutdown_after_ms,
-                            "Sink worker shutting down after idle timeout"
-                        );
-                        let _ = worker.tell(SinkWorkerMessage::Stop).await;
+                        // Route the shutdown through the manager's mailbox so
+                        // the worker is stopped synchronously (ask_stop) and
+                        // events can never race its termination.
+                        if let Err(e) = self_ref
+                            .tell(SinkManagerMessage::WorkerShutdownTimeout {
+                                sink: sink_name_for_msg,
+                                generation,
+                            })
+                            .await
+                        {
+                            error!(msg_type = "SinkWorkerShutdown", sink = %sink_name_for_log, error = %e, "Failed to send worker shutdown timeout to manager");
+                        }
                     }
                 }
                 _ = token_for_task.cancelled() => {
@@ -1052,52 +1537,123 @@ impl SinkManager {
         });
         // Keep the token for explicit per-sink cancellation.  The actor will
         // abort all spawned tasks automatically on stop/restart.
-        self.pending_worker_shutdowns.insert(sink_name, token);
+        self.pending_worker_shutdowns
+            .insert(sink_name, (token, generation));
     }
 
     /// Cancel pending worker shutdown timer for the given sink.
     fn cancel_worker_shutdown(&mut self, sink_name: &str) {
-        if let Some(token) = self.pending_worker_shutdowns.remove(sink_name) {
+        if let Some((token, _)) =
+            self.pending_worker_shutdowns.remove(sink_name)
+        {
             token.cancel();
         }
     }
 
+    /// A sink worker has stopped (death-watch).  An event notified to the
+    /// worker while it was already stopping is lost silently — non-critical
+    /// messages are discarded during graceful shutdown and `tell` reports
+    /// success as long as the mailbox accepts the message — so re-evaluate
+    /// every subject cursor against last_seen for this sink and recover
+    /// whatever is pending via catch-up (which recreates the worker).
+    /// On a normal idle shutdown with everything delivered this is a no-op.
+    async fn handle_worker_stopped(
+        &mut self,
+        sink: String,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // Drop the shutdown timer for the dead worker: cancel it if it was
+        // still pending (abnormal stop), no-op if it already fired.
+        if let Some((token, _)) = self.pending_worker_shutdowns.remove(&sink) {
+            token.cancel();
+        }
+        // Any catch-up running in the dead worker is no longer running.
+        self.catch_up_in_flight.retain(|(s, _), _| s != &sink);
+        // Events notified to the dead worker but not yet delivered are lost;
+        // reset notification cursors so the gate does not skip them.
+        self.reset_last_notified_for_sink(&sink);
+
+        let mut outdated = Vec::new();
+        for (subject_id, &last_sn) in &self.last_seen {
+            let cursor_sn = self
+                .cursors
+                .get(&(sink.clone(), subject_id.clone()))
+                .copied();
+            // Same rule as rebuild_lagging (CR-4): no cursor means outdated
+            // even when last_sn == 0.
+            let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
+            if is_outdated {
+                outdated.push(subject_id.clone());
+            }
+        }
+        if outdated.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            msg_type = "WorkerStoppedPending",
+            sink = %sink,
+            subjects = %outdated.len(),
+            "Worker stopped with undelivered events; recovering via catch-up"
+        );
+        for subject_id in &outdated {
+            self.try_insert_lagging(&sink, subject_id.clone());
+        }
+        if self.blocked_sinks.contains_key(&sink) {
+            // Keep the subjects lagging until the operator unblocks the sink.
+            return Ok(());
+        }
+        self.handle_request_catch_up(sink, outdated, ctx).await
+    }
+
     /// Schedule a periodic healthcheck for a sink that has lagging subjects.
-    /// The manager creates a worker, sends HealthCheck, and reschedules using
-    /// `healthcheck_intervals_secs`.  Cancelled when the sink recovers.
+    /// The task self-tells `HealthcheckTick` through the manager's mailbox,
+    /// where the worker reference is resolved (or the worker recreated) at
+    /// fire time — capturing the `ActorRef` here would keep firing tells at
+    /// a dead worker forever. Cancelled when the sink recovers or is blocked.
     async fn schedule_healthcheck(
         &mut self,
         sink_name: String,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) {
         if let Some(token) = self.pending_healthchecks.remove(&sink_name) {
             token.cancel();
         }
-        let child_name = format!("worker_{}", sink_name);
-        let Ok(worker) = ctx.get_child::<SinkWorker>(&child_name).await else {
-            // Worker is no longer alive; nothing to healthcheck.
-            return;
-        };
         let intervals = self
             .sink_servers
             .get(&sink_name)
             .map(|s| s.healthcheck_intervals_secs.clone())
             .unwrap_or_else(default_sink_healthcheck_intervals_secs);
+        let self_ref = match ctx.reference().await {
+            Ok(self_ref) => self_ref,
+            Err(e) => {
+                error!(msg_type = "ScheduleHealthcheck", sink = %sink_name, error = %e, "Failed to get self reference for healthcheck timer");
+                return;
+            }
+        };
         let token = CancellationToken::new();
         let token_for_task = token.clone();
+        let sink_name_for_task = sink_name.clone();
         ctx.spawn(async move {
             let mut interval_idx = 0usize;
-            let last_idx = intervals.len().saturating_sub(1);
             loop {
-                let delay_secs = intervals.get(interval_idx.min(last_idx)).copied().unwrap_or(60);
+                let delay_secs =
+                    crate::sink::healthcheck_delay_secs(&intervals, interval_idx);
                 let delay_secs = crate::sink::add_jitter(delay_secs);
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {
                         if token_for_task.is_cancelled() {
                             break;
                         }
-                        let _ = worker.tell(SinkWorkerMessage::HealthCheck).await;
-                        interval_idx = (interval_idx + 1).min(last_idx);
+                        if let Err(e) = self_ref
+                            .tell(SinkManagerMessage::HealthcheckTick {
+                                sink: sink_name_for_task.clone(),
+                            })
+                            .await
+                        {
+                            error!(msg_type = "HealthcheckTick", sink = %sink_name_for_task, error = %e, "Failed to send healthcheck tick to manager");
+                        }
+                        interval_idx = interval_idx.saturating_add(1);
                     }
                     _ = token_for_task.cancelled() => {
                         break;
@@ -1118,7 +1674,7 @@ impl SinkManager {
     async fn handle_notify_new_event(
         &mut self,
         data: Arc<DataToSink>,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let subject_id = data.payload.get_subject_schema().0;
         let sn = extract_sn(&data);
@@ -1161,17 +1717,24 @@ impl SinkManager {
                 continue;
             }
 
-            // Sequential delivery check: the next event must be exactly cursor+1
-            // (or 0 if no cursor exists). If there's a gap, the subject must
-            // enter lagging so catch-up delivers missing events in order.
+            // Sequential delivery check: the next event must be exactly the
+            // last forwarded SN + 1 (or cursor+1 if nothing has been forwarded
+            // yet). Using `last_notified` instead of the delivery cursor lets
+            // batching workers buffer multiple live events while earlier events
+            // are still in flight. The cursor is only used as a fallback after
+            // a worker restart, so events lost in a dead worker are recovered
+            // by catch-up instead of skipped.
             let cursor_sn = self
                 .cursors
                 .get(&(sink_name.clone(), subject_id.clone()))
                 .copied();
-            let expected_sn = match cursor_sn {
-                Some(sn) => sn + 1,
-                None => 0,
-            };
+            let expected_sn = self
+                .last_notified
+                .get(&(sink_name.clone(), subject_id.clone()))
+                .copied()
+                .or(cursor_sn)
+                .map(|sn| sn + 1)
+                .unwrap_or(0);
             if sn != expected_sn {
                 warn!(
                     msg_type = "SequentialGap",
@@ -1206,6 +1769,11 @@ impl SinkManager {
                             .entry(sink_name.clone())
                             .or_default()
                             .insert(subject_id.clone());
+                    } else {
+                        self.last_notified.insert(
+                            (sink_name.clone(), subject_id.clone()),
+                            sn,
+                        );
                     }
                 }
                 Err(e) => {
@@ -1227,12 +1795,13 @@ impl SinkManager {
         subject_id: String,
         sn: u64,
         result: SendResult,
-        ctx: &mut ActorContext<SinkManager>,
+        count: u64,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Some(metrics) = try_core_metrics() {
             match result {
                 SendResult::Success => {
-                    metrics.observe_sink_event(&sink, "success")
+                    metrics.observe_sink_event_n(&sink, "success", count)
                 }
                 SendResult::SubjectNotFound => {
                     metrics.observe_sink_event(&sink, "subject_not_found");
@@ -1265,11 +1834,13 @@ impl SinkManager {
                     .unwrap_or(false);
                 if sn >= last_sn && is_lagging {
                     self.remove_lagging_subject(&sink, &subject_id);
+                    self.reset_last_notified_for_subject(&sink, &subject_id);
                 } else if is_lagging && sn < last_sn {
                     // The subject is lagging and a new event just advanced the
                     // cursor. Start catch-up from the next SN so any events
                     // emitted while a delivery was in flight are recovered in
                     // order without duplicating the SN that was in flight.
+                    self.reset_last_notified_for_subject(&sink, &subject_id);
                     if let Err(e) = self
                         .handle_request_catch_up(
                             sink.clone(),
@@ -1318,19 +1889,83 @@ impl SinkManager {
         &mut self,
         sink: String,
         subject_id: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let cursor_sn = self
             .cursors
             .get(&(sink.clone(), subject_id.clone()))
             .copied();
         let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
-        self.catch_up_in_flight
+        let finished_from = self
+            .catch_up_in_flight
+            .remove(&(sink.clone(), subject_id.clone()));
+        // Reset notification cursor to the delivery cursor: from now on new live
+        // events will be gated against the delivered state.
+        self.reset_last_notified_for_subject(&sink, &subject_id);
+
+        // A catch-up that started at or below a registered replay floor has
+        // re-delivered the replay range: mark the replay as completed.
+        let replay_covered = self
+            .replay_floors
+            .get(&(sink.clone(), subject_id.clone()))
+            .is_some_and(|floor| {
+                finished_from.is_some_and(|from| from <= *floor)
+            });
+        if replay_covered {
+            self.persist(
+                SinkManagerEvent::ReplayCompleted {
+                    sink: sink.clone(),
+                    subject_id: subject_id.clone(),
+                },
+                ctx,
+            )
+            .await?;
+        }
+
+        let up_to_date = cursor_sn.is_some_and(|cursor| cursor >= last_sn);
+        if up_to_date {
+            self.remove_lagging_subject(&sink, &subject_id);
+        }
+
+        // A re-delivery queued after a rejection (e.g. a replay rejected by
+        // the unhealthy worker) must run now so its range is delivered.
+        let pending_from_sn = self
+            .pending_catch_ups
             .remove(&(sink.clone(), subject_id.clone()));
 
-        if cursor_sn.is_some_and(|cursor| cursor >= last_sn) {
-            self.remove_lagging_subject(&sink, &subject_id);
-        } else if !self.blocked_sinks.contains_key(&sink) {
+        if let Some(from_sn) = pending_from_sn {
+            if self.blocked_sinks.contains_key(&sink) {
+                // Keep the request queued: it will be drained when a catch-up
+                // completes after the sink is unblocked.
+                self.pending_catch_ups
+                    .insert((sink.clone(), subject_id.clone()), from_sn);
+            } else {
+                info!(
+                    msg_type = "CatchUpPending",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    from_sn = %from_sn,
+                    "Launching catch-up requested while another was in flight"
+                );
+                if let Err(e) = self
+                    .send_catch_up(
+                        sink.clone(),
+                        subject_id.clone(),
+                        from_sn,
+                        ctx,
+                    )
+                    .await
+                {
+                    error!(
+                        msg_type = "CatchUpPendingFailed",
+                        sink = %sink,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to launch pending catch-up after completion"
+                    );
+                }
+            }
+        } else if !up_to_date && !self.blocked_sinks.contains_key(&sink) {
             // last_seen moved forward while catch-up was running; keep going.
             info!(
                 msg_type = "CatchUpContinue",
@@ -1363,11 +1998,11 @@ impl SinkManager {
     async fn handle_replay_events(
         &mut self,
         requests: Vec<SinkReplayItem>,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SinkReplayResponse, ActorError> {
         // Defensive check: replay is a manual mutation and must not run in safe mode.
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -1506,6 +2141,18 @@ impl SinkManager {
                 .await?;
             }
 
+            // Register the replay as pending so a node restart cannot drop
+            // it: on startup each floor triggers a catch-up from that SN.
+            self.persist(
+                SinkManagerEvent::ReplayRegistered {
+                    sink: item.sink.clone(),
+                    subject_id: item.subject_id.clone(),
+                    from_sn: item.from_sn,
+                },
+                ctx,
+            )
+            .await?;
+
             self.try_insert_lagging(&item.sink, item.subject_id.clone());
             valid_by_sink
                 .entry(item.sink.clone())
@@ -1545,31 +2192,100 @@ impl SinkManager {
         Ok(SinkReplayResponse { processed, errors })
     }
 
+    async fn handle_test_sink(
+        &self,
+        sink_name: &str,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), SinkTestError> {
+        let server = match self.sink_servers.get(sink_name) {
+            Some(server) => server.clone(),
+            None => {
+                return Err(SinkTestError::NotConfigured);
+            }
+        };
+
+        let signer = match &server.transport {
+            SinkTransportConfig::Http(http) if http.signature => {
+                match ctx
+                    .system()
+                    .get_actor::<Node>(&ActorPath::from("/user/node"))
+                    .await
+                {
+                    Ok(node) => Some(NodeSigner::new(node)),
+                    Err(e) => {
+                        return Err(SinkTestError::Internal(format!(
+                            "failed to get node actor for sink test: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+            SinkTransportConfig::Kafka(kafka) if kafka.signature => {
+                match ctx
+                    .system()
+                    .get_actor::<Node>(&ActorPath::from("/user/node"))
+                    .await
+                {
+                    Ok(node) => Some(NodeSigner::new(node)),
+                    Err(e) => {
+                        return Err(SinkTestError::Internal(format!(
+                            "failed to get node actor for sink test: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+            SinkTransportConfig::Grpc(grpc) if grpc.signature => {
+                match ctx
+                    .system()
+                    .get_actor::<Node>(&ActorPath::from("/user/node"))
+                    .await
+                {
+                    Ok(node) => Some(NodeSigner::new(node)),
+                    Err(e) => {
+                        return Err(SinkTestError::Internal(format!(
+                            "failed to get node actor for sink test: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        let transport = build_transport(
+            &server,
+            signer,
+            Some(self.node_public_key.as_str()),
+        )
+        .await
+        .map_err(|e| {
+            SinkTestError::Internal(format!(
+                "failed to build sink transport: {}",
+                e
+            ))
+        })?;
+
+        transport.test().await.map_err(|e| {
+            warn!(
+                msg_type = "SinkTestFailed",
+                sink = %sink_name,
+                error = %e,
+                "Sink test delivery failed"
+            );
+            SinkTestError::Delivery(format!("sink test failed: {}", e))
+        })
+    }
+
     async fn handle_request_catch_up(
         &mut self,
         sink: String,
         subjects: Vec<String>,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             return Ok(());
         }
-        let worker_ref = match self.ensure_worker(&sink, ctx).await {
-            Ok(worker) => worker,
-            Err(e) => {
-                error!(msg_type = "EnsureWorker", sink = %sink, error = %e, "Failed to ensure worker for catch-up");
-                return Err(ActorError::Functional {
-                    description: format!(
-                        "No worker available for sink {}",
-                        sink
-                    ),
-                });
-            }
-        };
-
-        // Cancel pending shutdown before sending catch-up to prevent race
-        // where worker dies while processing.
-        self.cancel_worker_shutdown(&sink);
 
         for subject_id in subjects {
             let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
@@ -1577,10 +2293,7 @@ impl SinkManager {
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
                 .copied();
-            let from_sn = match cursor_sn {
-                Some(sn) => sn + 1,
-                None => 0,
-            };
+            let from_sn = cursor_sn.map_or(0, |sn| sn + 1);
 
             // If the cursor is already up-to-date, there is nothing to catch up.
             if cursor_sn.is_some_and(|sn| sn >= last_sn) {
@@ -1588,38 +2301,117 @@ impl SinkManager {
             }
 
             let in_flight_key = (sink.clone(), subject_id.clone());
-            if self.catch_up_in_flight.contains(&in_flight_key) {
+            if let Some(&in_flight_from) =
+                self.catch_up_in_flight.get(&in_flight_key)
+            {
+                // A lower from_sn (e.g. a replay that rewound the cursor
+                // mid-flight) merges with the in-flight catch-up by
+                // restarting it from the lower SN so the whole range is
+                // re-delivered in order; anything else is already covered
+                // by the in-flight catch-up.
+                if from_sn < in_flight_from
+                    && let Err(e) = self
+                        .send_catch_up(sink.clone(), subject_id, from_sn, ctx)
+                        .await
+                {
+                    error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up restart to worker");
+                }
                 continue;
             }
 
-            self.catch_up_in_flight.insert(in_flight_key);
-
-            let subject_id_for_remove = subject_id.clone();
-            if let Err(e) = worker_ref
-                .tell(SinkWorkerMessage::CatchUp {
-                    subject_id,
-                    from_sn,
-                })
+            if let Err(e) = self
+                .send_catch_up(sink.clone(), subject_id, from_sn, ctx)
                 .await
             {
                 error!(msg_type = "CatchUp", sink = %sink, error = %e, "Failed to send catch-up request to worker");
-                self.catch_up_in_flight
-                    .remove(&(sink.clone(), subject_id_for_remove));
             }
         }
         Ok(())
     }
 
+    /// Ensures the sink worker is running and sends it a catch-up request for
+    /// `subject_id` starting at `from_sn`, marking the pair as in flight.
+    async fn send_catch_up(
+        &mut self,
+        sink: String,
+        subject_id: String,
+        from_sn: u64,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let worker_ref = self.ensure_worker(&sink, ctx).await?;
+
+        // Cancel pending shutdown before sending catch-up to prevent race
+        // where worker dies while processing.
+        self.cancel_worker_shutdown(&sink);
+
+        self.catch_up_in_flight
+            .insert((sink.clone(), subject_id.clone()), from_sn);
+        if let Err(e) = worker_ref
+            .tell(SinkWorkerMessage::CatchUp {
+                subject_id: subject_id.clone(),
+                from_sn,
+            })
+            .await
+        {
+            self.catch_up_in_flight.remove(&(sink, subject_id));
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Launches catch-ups that were queued while the sink was unavailable
+    /// (e.g. a replay rejected by an unhealthy worker). Subjects with an
+    /// in-flight catch-up are left queued: their pending range is drained
+    /// when that catch-up completes.
+    async fn drain_pending_catch_ups(
+        &mut self,
+        sink: &str,
+        ctx: &mut ActorContext<Self>,
+    ) {
+        let pending: Vec<(String, u64)> = self
+            .pending_catch_ups
+            .iter()
+            .filter(|((s, _), _)| s == sink)
+            .map(|((_, subject_id), from_sn)| (subject_id.clone(), *from_sn))
+            .collect();
+        for (subject_id, from_sn) in pending {
+            let key = (sink.to_string(), subject_id.clone());
+            if self.catch_up_in_flight.contains_key(&key) {
+                continue;
+            }
+            self.pending_catch_ups.remove(&key);
+            if let Err(e) = self
+                .send_catch_up(
+                    sink.to_string(),
+                    subject_id.clone(),
+                    from_sn,
+                    ctx,
+                )
+                .await
+            {
+                error!(
+                    msg_type = "CatchUpPendingFailed",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Failed to launch queued catch-up after sink recovery"
+                );
+                self.pending_catch_ups.insert(key, from_sn);
+            }
+        }
+    }
+
     async fn handle_sink_recovered(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             return Ok(());
         }
         info!(msg_type = "SinkRecovered", sink = %sink, "Sink recovered, triggering catch-up");
         self.active_sinks.insert(sink.clone());
+        self.last_errors.remove(&sink);
 
         // Cancel periodic healthcheck — the sink is healthy again.
         self.cancel_healthcheck(&sink);
@@ -1637,6 +2429,10 @@ impl SinkManager {
             .await?;
         }
 
+        // Launch any catch-ups queued while the sink was down (e.g. replays
+        // rejected by the unhealthy worker).
+        self.drain_pending_catch_ups(&sink, ctx).await;
+
         self.persist(SinkManagerEvent::SinkRecovered { sink }, ctx)
             .await?;
         Ok(())
@@ -1645,10 +2441,11 @@ impl SinkManager {
     async fn handle_unblock_sink(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             info!(msg_type = "SinkUnblocked", sink = %sink, "Sink manually unblocked by operator");
+            self.last_errors.remove(&sink);
             // Cancel any stale healthcheck timer before unblocking. A fresh
             // worker will be created below and will run its own healthchecks if
             // needed.
@@ -1663,14 +2460,26 @@ impl SinkManager {
             if let Ok(worker) = self.ensure_worker(&sink, ctx).await {
                 // Cancel pending shutdown before sending messages to prevent race
                 self.cancel_worker_shutdown(&sink);
-                let _ = worker
+                // If these tells fail the worker is dying mid-shutdown; its
+                // replacement starts fresh (unblocked, zero recoveries), and
+                // the persisted `blocked_sinks` (already updated above) is the
+                // source of truth, so the states cannot diverge. A live
+                // blocked worker has an idle mailbox, so `MailboxFull` is not
+                // reachable here — anything else is logged for visibility.
+                if let Err(e) = worker
                     .tell(
                         crate::sink::worker::SinkWorkerMessage::ResetRecoveries,
                     )
-                    .await;
-                let _ = worker
+                    .await
+                {
+                    error!(msg_type = "ResetRecoveries", sink = %sink, error = %e, "Failed to reset worker flapping counter on unblock");
+                }
+                if let Err(e) = worker
                     .tell(crate::sink::worker::SinkWorkerMessage::ClearBlocked)
-                    .await;
+                    .await
+                {
+                    error!(msg_type = "ClearBlocked", sink = %sink, error = %e, "Failed to clear worker blocked state on unblock");
+                }
             }
             // Rebuild lagging for this sink and trigger catch-up to catch up on missed events.
             let subjects_to_add: Vec<String> = self
@@ -1681,10 +2490,7 @@ impl SinkManager {
                         .cursors
                         .get(&(sink.clone(), subject_id.clone()))
                         .copied();
-                    let is_outdated = match cursor_sn {
-                        Some(sn) => sn < last_sn,
-                        None => true,
-                    };
+                    let is_outdated = cursor_sn.is_none_or(|sn| sn < last_sn);
                     if is_outdated {
                         Some(subject_id.clone())
                     } else {
@@ -1698,23 +2504,26 @@ impl SinkManager {
             if let Some(subjects) = self.lagging.get(&sink).cloned() {
                 let subjects: Vec<String> = subjects.into_iter().collect();
                 if !subjects.is_empty() {
-                    self.handle_request_catch_up(sink, subjects, ctx).await?;
+                    self.handle_request_catch_up(sink.clone(), subjects, ctx)
+                        .await?;
                 }
             }
+            // Launch any catch-ups queued while the sink was blocked.
+            self.drain_pending_catch_ups(&sink, ctx).await;
         }
         Ok(())
     }
 
-    async fn handle_delete_sink_cursors(
+    async fn handle_reset_sink_cursors(
         &mut self,
         sink: String,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Double-check Safe Mode at the actor level: this operation is only valid
         // while the node is running in safe mode. In safe mode there are no
         // workers running, so we only need to clean persisted/transient state.
         let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
+            ctx.system().get_helper::<ConfigHelper>("config")
         {
             config.safe_mode
         } else {
@@ -1726,15 +2535,15 @@ impl SinkManager {
 
         if !safe_mode {
             return Err(ActorError::Functional {
-                description: "DeleteSinkCursors is only available in safe mode"
+                description: "ResetSinkCursors is only available in safe mode"
                     .to_owned(),
             });
         }
 
         info!(
-            msg_type = "DeleteSinkCursors",
+            msg_type = "ResetSinkCursors",
             sink = %sink,
-            "Deleting all sink cursors in Safe Mode"
+            "Resetting all sink cursors in Safe Mode"
         );
 
         let had_cursors = self.cursors.keys().any(|(s, _)| s == &sink);
@@ -1761,12 +2570,9 @@ impl SinkManager {
     async fn handle_remove_subject(
         &mut self,
         subject_id: &str,
-        ctx: &mut ActorContext<SinkManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         info!(msg_type = "RemoveSubject", subject_id = %subject_id, "Removing subject from all sinks");
-
-        // Collect all sinks that have this subject in cursors or lagging.
-        let mut affected_sinks: HashSet<String> = HashSet::new();
 
         // Remove from lagging.
         let sinks_with_subject: Vec<String> = self
@@ -1776,7 +2582,6 @@ impl SinkManager {
             .map(|(sink, _)| sink.clone())
             .collect();
         for sink in sinks_with_subject {
-            affected_sinks.insert(sink.clone());
             if let Some(set) = self.lagging.get_mut(&sink) {
                 set.remove(subject_id);
                 if set.is_empty() {
@@ -1793,7 +2598,6 @@ impl SinkManager {
             .map(|(sink, _)| sink.clone())
             .collect();
         for sink in sinks_with_cursor {
-            affected_sinks.insert(sink.clone());
             self.persist(
                 SinkManagerEvent::CursorRemoved {
                     sink,
@@ -1817,8 +2621,116 @@ impl SinkManager {
 
         // Clear any in-flight catch-up for the deleted subject so it does not
         // block future catch-ups for other subjects.
-        self.catch_up_in_flight.retain(|(_, sid)| sid != subject_id);
+        self.catch_up_in_flight
+            .retain(|(_, sid), _| sid != subject_id);
+        self.pending_catch_ups
+            .retain(|(_, sid), _| sid != subject_id);
+
+        // Complete any pending replay for the deleted subject so a restart
+        // does not resume a replay for a subject that no longer exists.
+        let sinks_with_floor: Vec<String> = self
+            .replay_floors
+            .keys()
+            .filter(|(_, sid)| sid == subject_id)
+            .map(|(sink, _)| sink.clone())
+            .collect();
+        for sink in sinks_with_floor {
+            self.persist(
+                SinkManagerEvent::ReplayCompleted {
+                    sink,
+                    subject_id: subject_id.to_string(),
+                },
+                ctx,
+            )
+            .await?;
+        }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager_with_state(
+        cursors: BTreeMap<(String, String), u64>,
+        last_seen: BTreeMap<String, u64>,
+    ) -> SinkManager {
+        SinkManager {
+            cursors,
+            last_seen,
+            active_sinks: BTreeSet::new(),
+            version: 1,
+            sink_servers: BTreeMap::new(),
+            lagging: BTreeMap::new(),
+            store_params: None,
+            blocked_sinks: BTreeMap::new(),
+            replay_floors: BTreeMap::new(),
+            is_governance: false,
+            node_public_key: String::new(),
+            pending_worker_shutdowns: HashMap::new(),
+            next_worker_shutdown_generation: 0,
+            pending_healthchecks: HashMap::new(),
+            catch_up_in_flight: HashMap::new(),
+            pending_catch_ups: HashMap::new(),
+            last_notified: HashMap::new(),
+            last_errors: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sink_lag_distance_with_missing_cursor_counts_one_event() {
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 0);
+        let manager = manager_with_state(BTreeMap::new(), last_seen);
+
+        // No cursor at all means the Create event (sn 0) is still pending.
+        assert_eq!(manager.sink_lag_distance("sink", "sub"), 1);
+    }
+
+    #[test]
+    fn sink_lag_distance_with_cursor_behind_last_seen() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "sub".to_owned()), 2);
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 5);
+        let manager = manager_with_state(cursors, last_seen);
+
+        assert_eq!(manager.sink_lag_distance("sink", "sub"), 3);
+    }
+
+    #[test]
+    fn sink_lag_distance_zero_when_fully_caught_up() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "sub".to_owned()), 5);
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 5);
+        let manager = manager_with_state(cursors, last_seen);
+
+        assert_eq!(manager.sink_lag_distance("sink", "sub"), 0);
+    }
+
+    #[test]
+    fn sink_lagging_totals_aggregate_distances() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "a".to_owned()), 2); // lag 3
+        cursors.insert(("sink".to_owned(), "b".to_owned()), 4); // lag 1
+        // c is missing, last_seen 0 -> lag 1
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("a".to_owned(), 5);
+        last_seen.insert("b".to_owned(), 5);
+        last_seen.insert("c".to_owned(), 0);
+
+        let mut manager = manager_with_state(cursors, last_seen);
+        manager.lagging.insert(
+            "sink".to_owned(),
+            HashSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()]),
+        );
+
+        let (count, total, max) = manager.sink_lagging_totals("sink");
+        assert_eq!(count, 3);
+        assert_eq!(total, 5); // 3 + 1 + 1
+        assert_eq!(max, 3);
     }
 }

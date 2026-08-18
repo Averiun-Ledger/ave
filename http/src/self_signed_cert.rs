@@ -79,6 +79,13 @@ pub async fn generate_self_signed_cert(
     // Write certificate and key to files
     fs::write(cert_path, cert.pem()).await?;
     fs::write(key_path, key_pair.serialize_pem()).await?;
+    // The private key must not be readable by other users.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
 
     info!(
         target: TARGET,
@@ -332,5 +339,28 @@ mod tests {
             cert_needs_renewal(&config_d, &cert_path, &key_path).await,
             "added SAN should trigger renewal"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_key_is_written_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cert_file = NamedTempFile::new().unwrap();
+        let key_file = NamedTempFile::new().unwrap();
+
+        generate_self_signed_cert(
+            &test_config(vec!["127.0.0.1".to_string()]),
+            cert_file.path(),
+            key_file.path(),
+        )
+        .await
+        .unwrap();
+
+        let mode = std::fs::metadata(key_file.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "private key must be owner-only");
     }
 }

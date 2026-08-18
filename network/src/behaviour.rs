@@ -487,26 +487,24 @@ mod tests {
 
         let peer_b = async move {
             loop {
-                match node_b.select_next_some().await {
-                    SwarmEvent::Behaviour(Event::ReqresMessage {
-                        message,
-                        ..
-                    }) => {
-                        match message {
-                            Message::Request {
-                                channel, request, ..
-                            } => {
-                                assert_eq!(request.0, b"Hello Node B".to_vec());
-                                // Send response to node a.
-                                let _ = node_b.behaviour_mut().send_response(
-                                    channel,
-                                    Bytes::from("Hello Node A"),
-                                );
-                            }
-                            Message::Response { .. } => {}
+                if let SwarmEvent::Behaviour(Event::ReqresMessage {
+                    message,
+                    ..
+                }) = node_b.select_next_some().await
+                {
+                    match message {
+                        Message::Request {
+                            channel, request, ..
+                        } => {
+                            assert_eq!(request.0, b"Hello Node B".to_vec());
+                            // Send response to node a.
+                            let _ = node_b.behaviour_mut().send_response(
+                                channel,
+                                Bytes::from("Hello Node A"),
+                            );
                         }
+                        Message::Response { .. } => {}
                     }
-                    _ => {}
                 }
             }
         };
@@ -587,19 +585,17 @@ mod tests {
 
         let boot_peer = async move {
             loop {
-                match boot_node.select_next_some().await {
-                    SwarmEvent::Behaviour(Event::Identified {
-                        peer_id,
-                        info,
-                        ..
-                    }) => {
-                        for addr in info.listen_addrs {
-                            boot_node
-                                .behaviour_mut()
-                                .add_self_reported_address(&peer_id, &addr);
-                        }
+                if let SwarmEvent::Behaviour(Event::Identified {
+                    peer_id,
+                    info,
+                    ..
+                }) = boot_node.select_next_some().await
+                {
+                    for addr in info.listen_addrs {
+                        boot_node
+                            .behaviour_mut()
+                            .add_self_reported_address(&peer_id, &addr);
                     }
-                    _ => {}
                 }
             }
         };

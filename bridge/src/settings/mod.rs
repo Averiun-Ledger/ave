@@ -1,11 +1,9 @@
 use config::Config;
-use std::collections::HashSet;
-use tracing::{error, warn};
+use tracing::error;
 
 pub mod command;
 use crate::config::Config as BridgeConfig;
 use crate::error::BridgeError;
-use ave_core::config::SinkTarget;
 
 pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
     // file configuration (json, yaml or toml)
@@ -27,285 +25,8 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
         BridgeConfig::default()
     };
 
-    // Validate HTTPS configuration
-    validate_https_config(&bridge_config)?;
-
-    // Validate network configuration
-    validate_network_config(&bridge_config)?;
-
-    // Validate sinks configuration
-    validate_sinks_config(&bridge_config)?;
-
     // Mix configurations.
     Ok(bridge_config)
-}
-
-/// Validate network configuration
-fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
-    let network = &config.node.network;
-
-    network.memory_limits.validate().map_err(|e| {
-        error!(error = %e, "Invalid network configuration");
-        BridgeError::ConfigBuild(e)
-    })?;
-
-    if network.max_app_message_bytes == 0 {
-        let msg =
-            "network.max_app_message_bytes must be greater than 0".to_owned();
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if network.max_pending_outbound_bytes_per_peer > 0
-        && network.max_pending_outbound_bytes_per_peer
-            < network.max_app_message_bytes
-    {
-        let msg = format!(
-            "network.max_pending_outbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
-            network.max_pending_outbound_bytes_per_peer,
-            network.max_app_message_bytes
-        );
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if network.max_pending_inbound_bytes_per_peer > 0
-        && network.max_pending_inbound_bytes_per_peer
-            < network.max_app_message_bytes
-    {
-        let msg = format!(
-            "network.max_pending_inbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
-            network.max_pending_inbound_bytes_per_peer,
-            network.max_app_message_bytes
-        );
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if network.max_pending_outbound_bytes_total > 0
-        && network.max_pending_outbound_bytes_total
-            < network.max_app_message_bytes
-    {
-        let msg = format!(
-            "network.max_pending_outbound_bytes_total ({}) must be >= network.max_app_message_bytes ({})",
-            network.max_pending_outbound_bytes_total,
-            network.max_app_message_bytes
-        );
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if network.max_pending_inbound_bytes_total > 0
-        && network.max_pending_inbound_bytes_total
-            < network.max_app_message_bytes
-    {
-        let msg = format!(
-            "network.max_pending_inbound_bytes_total ({}) must be >= network.max_app_message_bytes ({})",
-            network.max_pending_inbound_bytes_total,
-            network.max_app_message_bytes
-        );
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    for addr in &network.listen_addresses {
-        if addr.trim().is_empty() {
-            let msg =
-                "network.listen_addresses contains an empty address".to_owned();
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-    }
-
-    for addr in &network.external_addresses {
-        if addr.trim().is_empty() {
-            let msg = "network.external_addresses contains an empty address"
-                .to_owned();
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-    }
-
-    for (index, node) in network.boot_nodes.iter().enumerate() {
-        if node.peer_id.trim().is_empty() {
-            let msg = format!("network.boot_nodes[{index}].peer_id is empty");
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-        if node.address.is_empty() {
-            let msg = format!(
-                "network.boot_nodes[{index}] must contain at least one address"
-            );
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-        if node.address.iter().any(|addr| addr.trim().is_empty()) {
-            let msg = format!(
-                "network.boot_nodes[{index}] contains an empty address"
-            );
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-    }
-
-    let control_list = &network.control_list;
-    if control_list.get_interval_request().is_zero() {
-        let msg =
-            "network.control_list.interval_request must be greater than 0"
-                .to_owned();
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if control_list.get_request_timeout().is_zero() {
-        let msg = "network.control_list.request_timeout must be greater than 0"
-            .to_owned();
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if control_list.get_request_timeout() > control_list.get_interval_request()
-    {
-        let msg = format!(
-            "network.control_list.request_timeout ({:?}) must be <= network.control_list.interval_request ({:?})",
-            control_list.get_request_timeout(),
-            control_list.get_interval_request()
-        );
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    // `max_concurrent_requests = 0` is accepted and normalized at runtime to 1
-    // (see network/utils.rs request_peer_lists buffer_unordered max(1)).
-
-    for service in control_list.get_service_allow_list() {
-        if !(service.starts_with("http://") || service.starts_with("https://"))
-        {
-            let msg = format!(
-                "network.control_list.service_allow_list contains an invalid URL: {service}"
-            );
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-    }
-
-    for service in control_list.get_service_block_list() {
-        if !(service.starts_with("http://") || service.starts_with("https://"))
-        {
-            let msg = format!(
-                "network.control_list.service_block_list contains an invalid URL: {service}"
-            );
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-    }
-
-    if control_list.get_enable() {
-        let has_allow_source = !control_list.get_allow_list().is_empty()
-            || !control_list.get_service_allow_list().is_empty()
-            || !network.boot_nodes.is_empty();
-        if !has_allow_source {
-            let msg = "network.control_list.enable is true but there are no allow sources (allow_list, service_allow_list or boot_nodes)".to_owned();
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-
-        let allow: HashSet<String> = control_list
-            .get_allow_list()
-            .into_iter()
-            .map(|peer| peer.trim().to_owned())
-            .collect();
-        let block: HashSet<String> = control_list
-            .get_block_list()
-            .into_iter()
-            .map(|peer| peer.trim().to_owned())
-            .collect();
-        if let Some(peer) = allow.intersection(&block).next() {
-            let msg = format!(
-                "network.control_list has peer present in both allow_list and block_list: {peer}"
-            );
-            error!(error = %msg, "Invalid network configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-    }
-
-    Ok(())
-}
-
-/// Validate HTTPS configuration consistency
-fn validate_https_config(config: &BridgeConfig) -> Result<(), BridgeError> {
-    let http = &config.http;
-
-    if http.https_address.is_some()
-        && (http.https_cert_path.is_none()
-            || http.https_private_key_path.is_none())
-    {
-        let msg = "HTTPS is enabled (https_address is set) but https_cert_path \
-                   and/or https_private_key_path are missing";
-        error!(error = %msg, "Invalid HTTPS configuration");
-        return Err(BridgeError::ConfigBuild(msg.to_owned()));
-    }
-
-    if http.self_signed_cert.enabled && http.https_address.is_none() {
-        warn!(
-            "self_signed_cert.enabled is true but https_address is not set, \
-             self-signed certificates will not be used"
-        );
-    }
-
-    Ok(())
-}
-
-/// Validate sinks configuration consistency.
-fn validate_sinks_config(config: &BridgeConfig) -> Result<(), BridgeError> {
-    use std::collections::HashSet;
-
-    const GOVERNANCE_SCHEMA: &str = "governance";
-
-    let mut seen_names = HashSet::new();
-    for (index, entry) in config.sinks.iter().enumerate() {
-        let SinkTarget::Schema {
-            schema_id,
-            governance_id,
-        } = &entry.target;
-
-        if schema_id.trim().is_empty() {
-            let msg =
-                format!("sinks[{}].target.schema_id must not be empty", index);
-            error!(error = %msg, "Invalid sinks configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-
-        if schema_id == GOVERNANCE_SCHEMA {
-            if governance_id.is_some() {
-                let msg = format!(
-                    "sinks[{}].target.governance_id must not be set for the '{}' schema",
-                    index, GOVERNANCE_SCHEMA
-                );
-                error!(error = %msg, "Invalid sinks configuration");
-                return Err(BridgeError::ConfigBuild(msg));
-            }
-        } else if governance_id.as_ref().is_none_or(|id| id.trim().is_empty()) {
-            let msg = format!(
-                "sinks[{}].target.governance_id is required for schema '{}'",
-                index, schema_id
-            );
-            error!(error = %msg, "Invalid sinks configuration");
-            return Err(BridgeError::ConfigBuild(msg));
-        }
-
-        for server in &entry.servers {
-            if !seen_names.insert(server.server.clone()) {
-                let msg = format!(
-                    "duplicate sink name '{}' in sinks configuration",
-                    server.server
-                );
-                error!(error = %msg, "Invalid sinks configuration");
-                return Err(BridgeError::ConfigBuild(msg));
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -315,16 +36,14 @@ mod tests {
     use ave_common::SinkTypes;
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::config::{
-        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, LoggingOutput,
-        LoggingRotation, MachineSpec, SinkConfigEntry, SinkServer, SinkTarget,
+        AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, HttpSinkConfig,
+        LoggingOutput, LoggingRotation, MachineSpec, SinkCompression,
+        SinkConfigEntry, SinkServer, SinkTarget, SinkTransportConfig,
     };
     use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
 
-    use crate::{
-        config::Config as BridgeConfig, error::BridgeError,
-        settings::build_config,
-    };
+    use crate::{config::Config as BridgeConfig, settings::build_config};
 
     const FULL_TOML: &str = r#"
 keys_path = "/custom/keys"
@@ -369,8 +88,8 @@ node_type = "Addressable"
 listen_addresses = ["/ip4/127.0.0.1/tcp/5001", "/ip4/127.0.0.1/tcp/5002"]
 external_addresses = ["/ip4/10.0.0.1/tcp/7000"]
 boot_nodes = [
-    { peer_id = "12D3KooWNode1", address = ["/ip4/1.1.1.1/tcp/1000"] },
-    { peer_id = "12D3KooWNode2", address = ["/ip4/2.2.2.2/tcp/2000"] }
+    { peer_id = "12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc", address = ["/ip4/1.1.1.1/tcp/1000"] },
+    { peer_id = "12D3KooWKx2XmB57yFf5f6Bm95EmNynceBkfQ2SVJPTtpETiyEF1", address = ["/ip4/2.2.2.2/tcp/2000"] }
 ]
 max_app_message_bytes = 2097152
 max_pending_outbound_bytes_per_peer = 16777216
@@ -415,8 +134,11 @@ target = { type = "schema", schema_id = "primary", governance_id = "primary_gov"
 [[sinks.servers]]
 server = "SinkOne"
 events = ["create", "all"]
+
+[sinks.servers.transport]
+type = "http"
 url = "https://sink.one"
-auth = { auth_url = "https://auth.service", username = "sink-user" }
+auth = { type = "oauth2", auth_url = "https://auth.service", username = "sink-user" }
 connect_timeout_ms = 5000
 request_timeout_ms = 30000
 max_retries = 5
@@ -424,6 +146,9 @@ max_retries = 5
 [[sinks.servers]]
 server = "SinkTwo"
 events = ["transfer"]
+
+[sinks.servers.transport]
+type = "http"
 url = "https://sink.two"
 connect_timeout_ms = 3000
 request_timeout_ms = 15000
@@ -529,10 +254,10 @@ node:
     external_addresses:
       - /ip4/10.0.0.1/tcp/7000
     boot_nodes:
-      - peer_id: 12D3KooWNode1
+      - peer_id: 12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc
         address:
           - /ip4/1.1.1.1/tcp/1000
-      - peer_id: 12D3KooWNode2
+      - peer_id: 12D3KooWKx2XmB57yFf5f6Bm95EmNynceBkfQ2SVJPTtpETiyEF1
         address:
           - /ip4/2.2.2.2/tcp/2000
     max_app_message_bytes: 2097152
@@ -578,17 +303,21 @@ sinks:
     servers:
       - server: SinkOne
         events: [create, all]
-        url: https://sink.one
-        auth: { auth_url: https://auth.service, username: sink-user }
-        connect_timeout_ms: 5000
-        request_timeout_ms: 30000
-        max_retries: 5
+        transport:
+          type: http
+          url: https://sink.one
+          auth: { type: oauth2, auth_url: https://auth.service, username: sink-user }
+          connect_timeout_ms: 5000
+          request_timeout_ms: 30000
+          max_retries: 5
       - server: SinkTwo
         events: [transfer]
-        url: https://sink.two
-        connect_timeout_ms: 3000
-        request_timeout_ms: 15000
-        max_retries: 1
+        transport:
+          type: http
+          url: https://sink.two
+          connect_timeout_ms: 3000
+          request_timeout_ms: 15000
+          max_retries: 1
 auth:
   enable: true
   database_path: /var/db/auth.db
@@ -695,11 +424,11 @@ http:
       ],
       "boot_nodes": [
         {
-          "peer_id": "12D3KooWNode1",
+          "peer_id": "12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc",
           "address": ["/ip4/1.1.1.1/tcp/1000"]
         },
         {
-          "peer_id": "12D3KooWNode2",
+          "peer_id": "12D3KooWKx2XmB57yFf5f6Bm95EmNynceBkfQ2SVJPTtpETiyEF1",
           "address": ["/ip4/2.2.2.2/tcp/2000"]
         }
       ],
@@ -756,19 +485,25 @@ http:
         {
           "server": "SinkOne",
           "events": ["create", "all"],
-          "url": "https://sink.one",
-          "auth": { "auth_url": "https://auth.service", "username": "sink-user" },
-          "connect_timeout_ms": 5000,
-          "request_timeout_ms": 30000,
-          "max_retries": 5
+          "transport": {
+            "type": "http",
+            "url": "https://sink.one",
+            "auth": { "type": "oauth2", "auth_url": "https://auth.service", "username": "sink-user" },
+            "connect_timeout_ms": 5000,
+            "request_timeout_ms": 30000,
+            "max_retries": 5
+          }
         },
         {
           "server": "SinkTwo",
           "events": ["transfer"],
-          "url": "https://sink.two",
-          "connect_timeout_ms": 3000,
-          "request_timeout_ms": 15000,
-          "max_retries": 1
+          "transport": {
+            "type": "http",
+            "url": "https://sink.two",
+            "connect_timeout_ms": 3000,
+            "request_timeout_ms": 15000,
+            "max_retries": 1
+          }
         }
       ]
     }
@@ -973,11 +708,13 @@ http:
         );
         let expected_boot_nodes = vec![
             RoutingNode {
-                peer_id: "12D3KooWNode1".to_owned(),
+                peer_id: "12D3KooWHTVRgBSrQK3EmU1d2NoUgFUCLjF2pa4VZ1Qj14NdByEc"
+                    .to_owned(),
                 address: vec!["/ip4/1.1.1.1/tcp/1000".to_owned()],
             },
             RoutingNode {
-                peer_id: "12D3KooWNode2".to_owned(),
+                peer_id: "12D3KooWKx2XmB57yFf5f6Bm95EmNynceBkfQ2SVJPTtpETiyEF1"
+                    .to_owned(),
                 address: vec!["/ip4/2.2.2.2/tcp/2000".to_owned()],
             },
         ];
@@ -1053,7 +790,7 @@ http:
         assert_eq!(logging.max_files, 5);
         assert_eq!(logging.level, "debug");
 
-        use ave_common::sink::SinkAuthConfig;
+        use ave_common::sink::{SinkAuthConfig, SinkAuthMethod};
         let expected_sinks = vec![SinkConfigEntry {
             target: SinkTarget::Schema {
                 schema_id: "primary".to_owned(),
@@ -1063,45 +800,81 @@ http:
                 SinkServer {
                     server: "SinkOne".to_owned(),
                     events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
-                    url: "https://sink.one".to_owned(),
-                    auth: Some(SinkAuthConfig {
-                        auth_url: "https://auth.service".to_owned(),
-                        username: "sink-user".to_owned(),
-                        api_key: String::new(),
-                    }),
-                    connect_timeout_ms: 5_000,
-                    request_timeout_ms: 30_000,
-                    max_retries: 5,
-                    batch_size: 100,
+                    transport: SinkTransportConfig::Http(Box::new(
+                        HttpSinkConfig {
+                            url: "https://sink.one".to_owned(),
+                            auth: Some(SinkAuthMethod::OAuth2(
+                                SinkAuthConfig {
+                                    auth_url: "https://auth.service".to_owned(),
+                                    username: "sink-user".to_owned(),
+                                    ..SinkAuthConfig::default()
+                                },
+                            )),
+                            connect_timeout_ms: 5_000,
+                            request_timeout_ms: 30_000,
+                            max_retries: 5,
+                            retry_base_delay_ms: 500,
+                            health_check_url: None,
+                            token_refresh_margin_secs: 30,
+                            tls: None,
+                            signature: false,
+                            proxy: None,
+                            retry_max_delay_ms: 30_000,
+                            batch_delivery: false,
+                            batch_max_delay_ms: 100,
+                            compression: SinkCompression::None,
+                            max_error_body_bytes: 4_096,
+                            tcp_keepalive_secs: Some(60),
+                            pool_idle_timeout_secs: 90,
+                            pool_max_idle_per_host: 4,
+                            ..HttpSinkConfig::default()
+                        },
+                    )),
+                    catch_up_batch_size: 100,
+                    batch_delivery_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
                     max_catch_up_concurrency: 2,
-                    retry_base_delay_ms: 500,
-                    health_check_url: None,
                     sink_subject_worker_idle_timeout_ms: 2_000,
-                    token_refresh_margin_secs: 30,
-
                     max_recoveries_after_failure: 5,
+                    healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
                 },
                 SinkServer {
                     server: "SinkTwo".to_owned(),
                     events: BTreeSet::from([SinkTypes::Transfer]),
-                    url: "https://sink.two".to_owned(),
-                    auth: None,
-                    connect_timeout_ms: 3_000,
-                    request_timeout_ms: 15_000,
-                    max_retries: 1,
-                    batch_size: 100,
+                    transport: SinkTransportConfig::Http(Box::new(
+                        HttpSinkConfig {
+                            url: "https://sink.two".to_owned(),
+                            auth: None,
+                            connect_timeout_ms: 3_000,
+                            request_timeout_ms: 15_000,
+                            max_retries: 1,
+                            retry_base_delay_ms: 500,
+                            health_check_url: None,
+                            token_refresh_margin_secs: 30,
+                            tls: None,
+                            signature: false,
+                            proxy: None,
+                            retry_max_delay_ms: 30_000,
+                            batch_delivery: false,
+                            batch_max_delay_ms: 100,
+                            compression: SinkCompression::None,
+                            max_error_body_bytes: 4_096,
+                            tcp_keepalive_secs: Some(60),
+                            pool_idle_timeout_secs: 90,
+                            pool_max_idle_per_host: 4,
+                            ..HttpSinkConfig::default()
+                        },
+                    )),
+                    catch_up_batch_size: 100,
+                    batch_delivery_size: 100,
                     sink_worker_idle_timeout_ms: 10_000,
                     healthcheck_intervals_secs: vec![30, 60, 120, 300, 600],
                     max_catch_up_concurrency: 2,
-                    retry_base_delay_ms: 500,
-                    health_check_url: None,
                     sink_subject_worker_idle_timeout_ms: 2_000,
-                    token_refresh_margin_secs: 30,
-
                     max_recoveries_after_failure: 5,
+                    healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
                 },
             ],
@@ -1172,8 +945,8 @@ http:
         assert!(config.http.enable_doc);
 
         // Defaults remain for everything not provided.
-        assert_eq!(config.logging.output.stdout, true);
-        assert_eq!(config.logging.output.file, false);
+        assert!(config.logging.output.stdout);
+        assert!(!config.logging.output.file);
         assert_eq!(config.logging.rotation, LoggingRotation::Size);
         assert_eq!(config.logging.file_path, PathBuf::from("logs"));
         assert_eq!(config.logging.max_files, 3);
@@ -1248,9 +1021,9 @@ http:
         assert!(!config.auth.durability);
         assert_eq!(config.auth.api_key.prefix, "ave_node_");
 
-        // http.cors defaults
+        // http.cors defaults (secure by default: deny all origins)
         assert!(config.http.cors.enabled);
-        assert!(config.http.cors.allow_any_origin);
+        assert!(!config.http.cors.allow_any_origin);
         assert!(config.http.cors.allowed_origins.is_empty());
         assert!(!config.http.cors.allow_credentials);
 
@@ -1269,65 +1042,6 @@ http:
         assert_eq!(config.http.self_signed_cert.validity_days, 365);
         assert_eq!(config.http.self_signed_cert.renew_before_days, 30);
         assert_eq!(config.http.self_signed_cert.check_interval_secs, 3600);
-    }
-
-    #[test]
-    fn build_config_rejects_invalid_network_memory_limits() {
-        const INVALID_TOML: &str = r#"
-        [node.network.memory_limits]
-        type = "percentage"
-        value = 2.0
-        "#;
-
-        let path = write_config("toml", INVALID_TOML);
-        let err =
-            build_config(path.to_str().unwrap()).expect_err("invalid config");
-
-        match err {
-            BridgeError::ConfigBuild(msg) => {
-                assert!(msg.contains("network.memory_limits percentage"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_config_rejects_invalid_network_message_limits() {
-        const INVALID_TOML: &str = r#"
-        [node.network]
-        max_app_message_bytes = 0
-        "#;
-
-        let path = write_config("toml", INVALID_TOML);
-        let err =
-            build_config(path.to_str().unwrap()).expect_err("invalid config");
-
-        match err {
-            BridgeError::ConfigBuild(msg) => {
-                assert!(msg.contains("max_app_message_bytes"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_config_rejects_invalid_control_list_timeout() {
-        const INVALID_TOML: &str = r#"
-        [node.network.control_list]
-        interval_request = 30
-        request_timeout = 40
-        "#;
-
-        let path = write_config("toml", INVALID_TOML);
-        let err =
-            build_config(path.to_str().unwrap()).expect_err("invalid config");
-
-        match err {
-            BridgeError::ConfigBuild(msg) => {
-                assert!(msg.contains("request_timeout"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
     }
 
     #[test]

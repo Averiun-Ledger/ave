@@ -1,4 +1,3 @@
-use crate::model::common::contract::ContractError;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
@@ -148,28 +147,6 @@ impl std::fmt::Display for InvalidEventKind {
                 write!(f, "invalid quorum for {}: {}", context, details)
             }
             Self::Other { msg } => write!(f, "{}", msg),
-        }
-    }
-}
-
-impl From<ContractError> for RunnerError {
-    fn from(error: ContractError) -> Self {
-        match error {
-            ContractError::MemoryAllocationFailed { .. }
-            | ContractError::InvalidPointer { .. }
-            | ContractError::WriteOutOfBounds { .. }
-            | ContractError::AllocationTooLarge { .. }
-            | ContractError::TotalMemoryExceeded { .. }
-            | ContractError::AllocationOverflow => Self::MemoryError {
-                operation: "contract memory operation",
-                details: error.to_string(),
-            },
-            ContractError::LinkerError { function, details } => {
-                Self::WasmError {
-                    operation: function,
-                    details,
-                }
-            }
         }
     }
 }

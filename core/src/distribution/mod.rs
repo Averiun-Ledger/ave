@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -122,12 +122,25 @@ pub struct Distribution {
     distribution_type: DistributionType,
     subject_id: DigestIdentifier,
     request_id: DigestIdentifier,
+    start_time: Option<Instant>,
 }
 
 impl Distribution {
     fn observe_event(result: &'static str) {
         if let Some(metrics) = try_core_metrics() {
             metrics.observe_protocol_event("distribution", result);
+        }
+    }
+
+    fn observe_failure(reason: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_distribution_failure(reason);
+        }
+    }
+
+    fn observe_duration(kind: &'static str, start: Instant) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_distribution_duration(kind, start.elapsed());
         }
     }
 
@@ -142,6 +155,7 @@ impl Distribution {
             distribution_type,
             witnesses: HashSet::new(),
             subject_id: DigestIdentifier::default(),
+            start_time: None,
         }
     }
 
@@ -296,6 +310,8 @@ impl Handler<Self> for Distribution {
                     "Starting distribution to witnesses"
                 );
 
+                self.start_time = Some(Instant::now());
+
                 for entry in distribution_plan {
                     let ledger = match entry.mode {
                         DistributionPlanMode::Clear => clear_ledger.clone(),
@@ -309,7 +325,12 @@ impl Handler<Self> for Distribution {
                             })?,
                     };
 
-                    self.create_distributor(ctx, ledger, entry.node).await?
+                    if let Err(e) =
+                        self.create_distributor(ctx, ledger, entry.node).await
+                    {
+                        Self::observe_failure("coordinator_creation_failed");
+                        return Err(e);
+                    }
                 }
 
                 debug!(
@@ -343,6 +364,9 @@ impl Handler<Self> for Distribution {
 
                 if remaining_witnesses == 0 {
                     Self::observe_event("success");
+                    if let Some(start) = self.start_time.take() {
+                        Self::observe_duration("success", start);
+                    }
                     debug!(
                         msg_type = "Response",
                         subject_id = %self.subject_id,
@@ -350,6 +374,7 @@ impl Handler<Self> for Distribution {
                     );
 
                     if let Err(e) = self.end_request(ctx).await {
+                        Self::observe_failure("end_request_failed");
                         error!(
                             msg_type = "Response",
                             subject_id = %self.subject_id,

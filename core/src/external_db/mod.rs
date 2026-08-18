@@ -5,7 +5,7 @@ use ave_actors::{
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
-use crate::helpers::db::DatabaseError;
+use crate::{helpers::db::DatabaseError, metrics::try_core_metrics};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DBManager;
@@ -46,6 +46,9 @@ impl Handler<Self> for DBManager {
     ) -> Result<(), ActorError> {
         match msg {
             DBManagerMessage::Error(error) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_external_db_critical_error();
+                }
                 error!(
                     msg_type = "Error",
                     error = %error,

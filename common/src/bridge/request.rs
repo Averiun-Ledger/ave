@@ -2,9 +2,7 @@
 
 use std::fmt::Display;
 
-use crate::{
-    request::EventRequest, response::TimeRange, signature::BridgeSignature,
-};
+use crate::{request::EventRequest, signature::BridgeSignature};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,7 +55,10 @@ pub struct ApprovalQuery {
 }
 
 /// Pagination and time filters for event queries.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// Time ranges are flat `*_from` / `*_to` pairs (inclusive, ISO 8601), like
+/// every other query of the API.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -66,12 +67,18 @@ pub struct EventsQuery {
     pub quantity: Option<u64>,
     pub page: Option<u64>,
     pub reverse: Option<bool>,
-    #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
-    pub event_request_ts: Option<TimeRange>,
-    #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
-    pub event_ledger_ts: Option<TimeRange>,
-    #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
-    pub sink_ts: Option<TimeRange>,
+    /// Start of the event-request timestamp range (inclusive, ISO 8601).
+    pub event_request_ts_from: Option<String>,
+    /// End of the event-request timestamp range (inclusive, ISO 8601).
+    pub event_request_ts_to: Option<String>,
+    /// Start of the ledger timestamp range (inclusive, ISO 8601).
+    pub event_ledger_ts_from: Option<String>,
+    /// End of the ledger timestamp range (inclusive, ISO 8601).
+    pub event_ledger_ts_to: Option<String>,
+    /// Start of the sink timestamp range (inclusive, ISO 8601).
+    pub sink_ts_from: Option<String>,
+    /// End of the sink timestamp range (inclusive, ISO 8601).
+    pub sink_ts_to: Option<String>,
     pub event_type: Option<EventRequestType>,
 }
 
@@ -115,7 +122,6 @@ pub struct SinkReplayRequest {
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct SinksQuery {
-    pub name: Option<String>,
     pub target: Option<String>,
     pub schema_id: Option<String>,
     pub governance_id: Option<String>,
@@ -380,10 +386,8 @@ mod tests {
             "quantity": 5,
             "page": 2,
             "reverse": true,
-            "event_request_ts": {
-                "from": "2024-01-01T00:00:00Z",
-                "to": "2024-12-31T23:59:59Z"
-            },
+            "event_request_ts_from": "2024-01-01T00:00:00Z",
+            "event_request_ts_to": "2024-12-31T23:59:59Z",
             "event_type": "fact"
         }"#;
         let decoded: EventsQuery = serde_json::from_str(json).unwrap();
@@ -391,9 +395,14 @@ mod tests {
         assert_eq!(decoded.page, Some(2));
         assert!(decoded.reverse.unwrap());
         assert!(matches!(decoded.event_type, Some(EventRequestType::Fact)));
-        let range = decoded.event_request_ts.unwrap();
-        assert_eq!(range.from, Some("2024-01-01T00:00:00Z".to_string()));
-        assert_eq!(range.to, Some("2024-12-31T23:59:59Z".to_string()));
+        assert_eq!(
+            decoded.event_request_ts_from,
+            Some("2024-01-01T00:00:00Z".to_string())
+        );
+        assert_eq!(
+            decoded.event_request_ts_to,
+            Some("2024-12-31T23:59:59Z".to_string())
+        );
     }
 
     #[test]

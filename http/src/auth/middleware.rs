@@ -2,9 +2,9 @@
 //
 // Authentication and authorization middleware for Axum
 
-use crate::auth::middleware::uuid::Uuid;
-
+use super::crypto::generate_uuid;
 use super::database::{AuthDatabase, DatabaseError};
+use super::http_api::rate_limit_error_response;
 use super::http_api::request_result_from_status;
 use super::models::{AuthContext, ErrorResponse};
 use super::request_meta;
@@ -16,8 +16,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use rand::RngExt;
-use std::fmt::Display;
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{error, warn};
@@ -44,6 +42,13 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
+        // If a previous layer already authenticated this request, reuse its
+        // context instead of re-running the full pipeline (database auth,
+        // rate limiting and quota consumption must happen once per request).
+        if parts.extensions.get::<Arc<AuthContext>>().is_some() {
+            return Ok(Self);
+        }
+
         // Check if auth database is available
         let auth_db = parts.extensions.get::<Arc<AuthDatabase>>().cloned();
 
@@ -96,25 +101,21 @@ where
             })
             .await;
         pre_auth_result.map_err(|e| {
-            db.record_request_metrics(
-                "api_key_auth",
-                "rate_limited",
-                request_started.elapsed(),
-            );
-            {
+            if matches!(e, DatabaseError::RateLimitExceeded(_)) {
                 warn!(
                     target: TARGET,
                     ip = ?ip_address,
                     error = %e,
                     "pre-auth rate limit exceeded"
                 );
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: format!("Rate limit exceeded: {}", e),
-                    }),
-                )
             }
+            let response = rate_limit_error_response(e);
+            db.record_request_metrics(
+                "api_key_auth",
+                request_result_from_status(response.0),
+                request_started.elapsed(),
+            );
+            response
         })?;
 
         let request_path = parts.uri.path().to_string();
@@ -177,10 +178,14 @@ where
                         error = %e,
                         "api key authentication failed"
                     );
+                    // Generic message: the specific reason (revoked, expired,
+                    // inactive or locked account) must not leak to
+                    // unauthenticated callers. The detail stays in the
+                    // server-side log above.
                     (
                         StatusCode::UNAUTHORIZED,
                         Json(ErrorResponse {
-                            error: format!("Authentication failed: {}", e),
+                            error: "Invalid API key".to_string(),
                         }),
                     )
                 }
@@ -293,7 +298,7 @@ pub async fn audit_log_middleware(
 ) -> Response {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = generate_uuid();
 
     // SECURITY FIX: Get IP from socket address only, ignore client headers
     // X-Forwarded-For and X-Real-IP can be spoofed
@@ -409,30 +414,101 @@ pub async fn audit_log_middleware(
     response
 }
 
-// Need to add uuid dependency
-// For now, let's create a simple request ID generator
-mod uuid {
-    pub struct Uuid;
+/// Owned request metadata for auditing a rejected request.
+///
+/// Extracted synchronously from the request so the audit future does not
+/// hold a `&Request` across await points (`Request<Body>` is not `Sync`,
+/// which would make the middleware future non-`Send`).
+pub struct RejectionMeta {
+    db: Option<Arc<AuthDatabase>>,
+    method: String,
+    path: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+}
 
-    impl Uuid {
-        pub const fn new_v4() -> Self {
-            Self
+impl RejectionMeta {
+    pub fn new(req: &Request) -> Self {
+        let ip_address = match (
+            req.extensions().get::<ConnectInfo<SocketAddr>>(),
+            req.extensions().get::<Arc<ProxyConfig>>(),
+        ) {
+            (Some(conn), Some(proxy)) => request_meta::resolve_client_ip(
+                req.headers(),
+                conn.0,
+                proxy.as_ref(),
+            )
+            .map(|ip| ip.to_string()),
+            (Some(conn), None) => Some(conn.0.ip().to_string()),
+            _ => None,
+        };
+        Self {
+            db: req.extensions().get::<Arc<AuthDatabase>>().cloned(),
+            method: req.method().to_string(),
+            path: req.uri().path().to_string(),
+            ip_address,
+            user_agent: req
+                .headers()
+                .get("User-Agent")
+                .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
         }
     }
 }
 
-impl Display for Uuid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut rng = rand::rng();
-
-        write!(
-            f,
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            rng.random::<u32>(),
-            rng.random::<u16>(),
-            rng.random::<u16>(),
-            rng.random::<u16>(),
-            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
-        )
+/// Audit a request rejected before reaching the audit layer.
+///
+/// Authentication (401) and permission (403) rejections short-circuit the
+/// layer stack and never reach `audit_log_middleware`, so they are written
+/// from the rejection point with the same event shapes used there.
+pub async fn audit_rejected_request(
+    meta: RejectionMeta,
+    auth_ctx: Option<Arc<AuthContext>>,
+    status: StatusCode,
+) {
+    let Some(db) = meta.db else {
+        return;
+    };
+    let method = meta.method;
+    let path = meta.path;
+    let ip_address = meta.ip_address;
+    let user_agent = meta.user_agent;
+    let error_message = format!("HTTP {}", status);
+    let request_id = generate_uuid();
+    let result = db
+        .run_blocking("audit_rejected_request", move |db| {
+            let Some(ctx) = auth_ctx else {
+                let details = format!("{} {}", method, path);
+                return db.create_audit_log(
+                    crate::auth::database_audit::AuditLogParams {
+                        user_id: None,
+                        api_key_id: None,
+                        action_type: "unauthenticated_request_failed",
+                        endpoint: Some(&path),
+                        http_method: Some(&method),
+                        ip_address: ip_address.as_deref(),
+                        user_agent: user_agent.as_deref(),
+                        request_id: Some(&request_id),
+                        details: Some(&details),
+                        success: false,
+                        error_message: Some(&error_message),
+                    },
+                );
+            };
+            db.log_api_request(
+                &ctx,
+                crate::auth::database_audit::ApiRequestParams {
+                    path: &path,
+                    method: &method,
+                    ip_address: ip_address.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    request_id: &request_id,
+                    success: false,
+                    error_message: Some(&error_message),
+                },
+            )
+        })
+        .await;
+    if let Err(e) = result {
+        error!(target: TARGET, error = %e, "failed to write rejection audit log");
     }
 }

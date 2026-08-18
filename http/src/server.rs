@@ -3,12 +3,16 @@ use std::{collections::HashSet, sync::Arc};
 use crate::{
     auth::{
         AuthDatabase, admin_handlers, apikey_handlers, login_handler,
-        middleware::{ApiKeyAuthNew, audit_log_middleware, check_permission},
+        middleware::{
+            ApiKeyAuthNew, RejectionMeta, audit_log_middleware,
+            audit_rejected_request, check_permission,
+        },
         models::{AuthContext, ErrorResponse},
         system_handlers,
     },
     config_types::ConfigHttp,
-    error::HttpError,
+    error::{GovernanceHasTrackersError, HttpError},
+    extract::{ApiJson, ApiPath, ApiQuery},
 };
 
 use ave_bridge::ave_common::{
@@ -33,16 +37,16 @@ use ave_bridge::{
     },
     http::ProxyConfig,
 };
+use ave_core::metrics::try_core_metrics;
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{FromRequestParts, Path, Query, State},
+    extract::{DefaultBodyLimit, FromRequestParts, State},
     http::{Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
-use serde_qs::axum::QsQuery;
 use tower::ServiceBuilder;
 
 use crate::doc::ApiDoc;
@@ -96,6 +100,20 @@ async fn public_auth_safe_mode_layer(
     }
 
     next.run(req).await
+}
+
+async fn server_error_metrics_layer(
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    let response = next.run(req).await;
+    if response.status().is_server_error()
+        && let Some(metrics) = try_core_metrics()
+    {
+        metrics.observe_http_server_error();
+    }
+
+    response
 }
 
 ///////// General
@@ -230,7 +248,7 @@ pub async fn get_requests_in_manager(
 pub async fn get_requests_in_manager_subject_id(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<RequestsInManagerSubject>, HttpError> {
     Ok(Json(
         bridge
@@ -245,7 +263,7 @@ pub async fn get_requests_in_manager_subject_id(
 /// confirm, reject, and EOL event types.
 #[utoipa::path(
     post,
-    path = "/request",
+    path = "/requests",
     operation_id = "postEventRequest",
     tag = "Request",
     request_body = BridgeSignedEventRequest,
@@ -261,7 +279,7 @@ pub async fn get_requests_in_manager_subject_id(
 pub async fn post_event_request(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Json(request): Json<BridgeSignedEventRequest>,
+    ApiJson(request): ApiJson<BridgeSignedEventRequest>,
 ) -> Result<Json<RequestData>, HttpError> {
     Ok(Json(bridge.post_event_request(request).await?))
 }
@@ -271,7 +289,7 @@ pub async fn post_event_request(
 /// Returns the pending approval request for a specific subject, optionally filtered by state.
 #[utoipa::path(
     get,
-    path = "/approval/{subject_id}",
+    path = "/approvals/{subject_id}",
     operation_id = "getApproval",
     tag = "Approval",
     params(
@@ -279,9 +297,8 @@ pub async fn post_event_request(
         ApprovalQuery
     ),
     responses(
-        (status = 200, description = "Approval details for the subject", body = Option<ApprovalEntry>),
+        (status = 200, description = "Approval details for the subject (null when none is pending)", body = Option<ApprovalEntry>),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
-        (status = 404, description = "Approval not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -289,8 +306,8 @@ pub async fn post_event_request(
 pub async fn get_approval(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Query(parameters): Query<ApprovalQuery>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiQuery(parameters): ApiQuery<ApprovalQuery>,
 ) -> Result<Json<Option<ApprovalEntry>>, HttpError> {
     Ok(Json(
         bridge.get_approval(subject_id, parameters.state).await?,
@@ -302,7 +319,7 @@ pub async fn get_approval(
 /// Returns all pending approval requests, optionally filtered by state.
 #[utoipa::path(
     get,
-    path = "/approval",
+    path = "/approvals",
     operation_id = "getApprovals",
     tag = "Approval",
     params(ApprovalQuery),
@@ -315,7 +332,7 @@ pub async fn get_approval(
 pub async fn get_approvals(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Query(parameters): Query<ApprovalQuery>,
+    ApiQuery(parameters): ApiQuery<ApprovalQuery>,
 ) -> Result<Json<Vec<ApprovalEntry>>, HttpError> {
     Ok(Json(bridge.get_approvals(parameters.state).await?))
 }
@@ -325,7 +342,7 @@ pub async fn get_approvals(
 /// Approves or rejects a pending approval for the specified subject.
 #[utoipa::path(
     patch,
-    path = "/approval/{subject_id}",
+    path = "/approvals/{subject_id}",
     operation_id = "patchApproval",
     tag = "Approval",
     params(
@@ -344,8 +361,8 @@ pub async fn get_approvals(
 pub async fn patch_approve(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Json(state): Json<ApprovalStateRes>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiJson(state): ApiJson<ApprovalStateRes>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.patch_approve(subject_id, state).await?))
 }
@@ -355,7 +372,7 @@ pub async fn patch_approve(
 /// Manually aborts a pending event request for the specified subject.
 #[utoipa::path(
     post,
-    path = "/request-abort/{subject_id}",
+    path = "/subjects/{subject_id}/abort-request",
     operation_id = "postManualRequestAbort",
     tag = "Approval",
     params(
@@ -372,7 +389,7 @@ pub async fn patch_approve(
 pub async fn post_manual_request_abort(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.post_manual_request_abort(subject_id).await?))
 }
@@ -385,7 +402,7 @@ pub async fn post_manual_request_abort(
 /// Returns the current lifecycle state of a specific event request.
 #[utoipa::path(
     get,
-    path = "/request/{request_id}",
+    path = "/requests/{request_id}",
     operation_id = "getRequestState",
     tag = "Tracking",
     params(
@@ -402,7 +419,7 @@ pub async fn post_manual_request_abort(
 pub async fn get_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(request_id): Path<String>,
+    ApiPath(request_id): ApiPath<String>,
 ) -> Result<Json<RequestInfo>, HttpError> {
     Ok(Json(bridge.get_request_state(request_id).await?))
 }
@@ -412,7 +429,7 @@ pub async fn get_request_state(
 /// Returns the lifecycle state of all tracked event requests.
 #[utoipa::path(
     get,
-    path = "/request",
+    path = "/requests",
     operation_id = "getAllRequestStates",
     tag = "Tracking",
     responses(
@@ -459,7 +476,7 @@ pub async fn get_pending_transfers(
 ///
 /// Returns a complete view of every sink instance known to the node,
 /// including configuration, runtime state and whether it is currently running.
-/// Supports filtering by name, target type, schema, governance and status.
+/// Supports filtering by target type, schema, governance and status.
 #[utoipa::path(
     get,
     path = "/sinks",
@@ -476,9 +493,36 @@ pub async fn get_pending_transfers(
 pub async fn get_sinks(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Query(query): Query<SinksQuery>,
+    ApiQuery(query): ApiQuery<SinksQuery>,
 ) -> Result<Json<Vec<SinkInfo>>, HttpError> {
     Ok(Json(bridge.get_sinks(query).await?))
+}
+
+/// Get a sink by name
+///
+/// Returns the complete view of a single sink instance: configuration,
+/// runtime state and whether it is currently running.
+#[utoipa::path(
+    get,
+    path = "/sinks/{sink_name}",
+    operation_id = "getSink",
+    tag = "Sink",
+    params(
+        ("sink_name" = String, Path, description = "Sink name")
+    ),
+    responses(
+        (status = 200, description = "Sink information", body = SinkInfo),
+        (status = 404, description = "Sink not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sink(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiPath(sink_name): ApiPath<String>,
+) -> Result<Json<SinkInfo>, HttpError> {
+    Ok(Json(bridge.get_sink(sink_name).await?))
 }
 
 /// Get sinks status
@@ -517,6 +561,7 @@ pub async fn get_sinks_status(
     ),
     responses(
         (status = 200, description = "Sink unblocked successfully"),
+        (status = 404, description = "Sink not found in registry", body = ErrorResponse),
         (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
@@ -525,38 +570,73 @@ pub async fn get_sinks_status(
 pub async fn unblock_sink(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(sink_name): Path<String>,
+    ApiPath(sink_name): ApiPath<String>,
 ) -> Result<StatusCode, HttpError> {
     bridge.unblock_sink(sink_name).await?;
     Ok(StatusCode::OK)
 }
 
-/// Delete a sink's persisted cursors
+/// Test a sink
 ///
-/// Removes all cursors, lagging tracking and blocked state for the given sink.
-/// The sink manager is located through the sink registry, so only the sink
-/// name is required. Only available while the node is running in safe mode.
+/// Performs a non-persistent end-to-end test of the sink: a health check
+/// followed by a test payload delivery using the sink's configured
+/// authentication, signature and compression. No cursor is advanced and no
+/// state is persisted.
 #[utoipa::path(
-    delete,
-    path = "/sinks/{sink_name}",
-    operation_id = "deleteSinkCursors",
+    post,
+    path = "/sinks/{sink_name}/test",
+    operation_id = "testSink",
     tag = "Sink",
     params(
         ("sink_name" = String, Path, description = "Sink name")
     ),
     responses(
-        (status = 200, description = "Sink cursors deleted successfully"),
+        (status = 200, description = "Sink test succeeded"),
+        (status = 400, description = "Invalid sink name", body = ErrorResponse),
         (status = 404, description = "Sink not found in registry", body = ErrorResponse),
+        (status = 409, description = "Sink is registered but has no configuration", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 502, description = "Sink test delivery failed", body = ErrorResponse),
+        (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
-pub async fn delete_sink_cursors(
+pub async fn test_sink(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(sink_name): Path<String>,
+    ApiPath(sink_name): ApiPath<String>,
 ) -> Result<StatusCode, HttpError> {
-    bridge.delete_sink_cursors(sink_name).await?;
+    bridge.test_sink(sink_name).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Reset a sink's persisted cursors
+///
+/// Removes all cursors, lagging tracking and blocked state for the given sink.
+/// The sink manager is located through the sink registry, so only the sink
+/// name is required. Only available while the node is running in safe mode.
+#[utoipa::path(
+    post,
+    path = "/sinks/{sink_name}/reset-cursors",
+    operation_id = "resetSinkCursors",
+    tag = "Sink",
+    params(
+        ("sink_name" = String, Path, description = "Sink name")
+    ),
+    responses(
+        (status = 200, description = "Sink cursors reset successfully"),
+        (status = 404, description = "Sink not found in registry", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Node is not running in safe mode", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn reset_sink_cursors(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiPath(sink_name): ApiPath<String>,
+) -> Result<StatusCode, HttpError> {
+    bridge.reset_sink_cursors(sink_name).await?;
     Ok(StatusCode::OK)
 }
 
@@ -574,15 +654,16 @@ pub async fn delete_sink_cursors(
     request_body = SinkReplayRequest,
     responses(
         (status = 200, description = "Replay request processed", body = SinkReplayResponse),
-        (status = 400, description = "Invalid request or safe mode enabled", body = ErrorResponse),
+        (status = 400, description = "Invalid replay request", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Node is running in safe mode", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
 pub async fn replay_sink_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Json(request): Json<SinkReplayRequest>,
+    ApiJson(request): ApiJson<SinkReplayRequest>,
 ) -> Result<Json<SinkReplayResponse>, HttpError> {
     Ok(Json(bridge.replay_sink_events(request).await?))
 }
@@ -613,8 +694,8 @@ pub async fn replay_sink_events(
 pub async fn authorize_governance(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Json(witnesses): Json<Vec<String>>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiJson(witnesses): ApiJson<Vec<String>>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(
         bridge.authorize_governance(subject_id, witnesses).await?,
@@ -642,7 +723,7 @@ pub async fn authorize_governance(
 pub async fn disauthorize_governance(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.disauthorize_governance(subject_id).await?))
 }
@@ -689,7 +770,7 @@ pub async fn authorized_governances(
 pub async fn is_governance_authorized(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<bool>, HttpError> {
     Ok(Json(bridge.is_governance_authorized(subject_id).await?))
 }
@@ -716,7 +797,7 @@ pub async fn is_governance_authorized(
 pub async fn ban_tracker(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.ban_tracker(subject_id).await?))
 }
@@ -725,8 +806,8 @@ pub async fn ban_tracker(
 ///
 /// Removes the specified subject from the tracker banlist.
 #[utoipa::path(
-    put,
-    path = "/trackers/{subject_id}/unban",
+    delete,
+    path = "/trackers/{subject_id}/ban",
     operation_id = "unbanTracker",
     tag = "SubjectAccess",
     params(
@@ -742,7 +823,7 @@ pub async fn ban_tracker(
 pub async fn unban_tracker(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.unban_tracker(subject_id).await?))
 }
@@ -789,7 +870,7 @@ pub async fn banned_trackers(
 pub async fn is_tracker_banned(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<bool>, HttpError> {
     Ok(Json(bridge.is_tracker_banned(subject_id).await?))
 }
@@ -806,7 +887,7 @@ pub async fn is_tracker_banned(
         ("subject_id" = String, Path, description = "Subject identifier")
     ),
     responses(
-        (status = 200, description = "Set of sync peer public keys", body = Vec<String>),
+        (status = 200, description = "Set of sync peer public keys", body = HashSet<String>),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
         (status = 404, description = "Sync peers not found for subject", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -816,7 +897,7 @@ pub async fn is_tracker_banned(
 pub async fn get_sync_peers(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<HashSet<String>>, HttpError> {
     Ok(Json(bridge.get_sync_peers(subject_id).await?))
 }
@@ -843,26 +924,26 @@ pub async fn get_sync_peers(
 pub async fn add_sync_peer(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Json(peers): Json<Vec<String>>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiJson(peers): ApiJson<Vec<String>>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.add_sync_peer(subject_id, peers).await?))
 }
 
-/// Remove sync peers for a subject
+/// Remove a sync peer from a subject
 ///
-/// Removes the given public keys from the sync peers of the specified subject.
+/// Removes the given public key from the sync peers of the specified subject.
 #[utoipa::path(
     delete,
-    path = "/subjects/{subject_id}/sync-peers",
-    operation_id = "removeSyncPeers",
+    path = "/subjects/{subject_id}/sync-peers/{peer}",
+    operation_id = "removeSyncPeer",
     tag = "SubjectAccess",
     params(
-        ("subject_id" = String, Path, description = "Subject identifier")
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        ("peer" = String, Path, description = "Sync peer public key")
     ),
-    request_body = Vec<String>,
     responses(
-        (status = 200, description = "Sync peers removed", body = String),
+        (status = 200, description = "Sync peer removed", body = String),
         (status = 400, description = "Invalid subject ID or public key", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
@@ -871,10 +952,9 @@ pub async fn add_sync_peer(
 pub async fn remove_sync_peer(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Json(peers): Json<Vec<String>>,
+    ApiPath((subject_id, peer)): ApiPath<(String, String)>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.remove_sync_peer(subject_id, peers).await?))
+    Ok(Json(bridge.remove_sync_peer(subject_id, vec![peer]).await?))
 }
 
 /// List subjects with sync peers
@@ -906,7 +986,7 @@ pub async fn subjects_with_sync_peers(
 /// nodes explicitly configured as sync peers for the subject.
 #[utoipa::path(
     post,
-    path = "/update/{subject_id}",
+    path = "/subjects/{subject_id}/update",
     operation_id = "postUpdateSubject",
     tag = "SubjectAccess",
     params(
@@ -924,8 +1004,8 @@ pub async fn subjects_with_sync_peers(
 pub async fn post_update_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Query(query): Query<UpdateSubjectQuery>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<UpdateSubjectQuery>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.post_update_subject(subject_id, query).await?))
 }
@@ -945,6 +1025,7 @@ pub async fn post_update_subject(
     responses(
         (status = 200, description = "Subject deletion accepted", body = String),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 409, description = "Governance still has trackers", body = GovernanceHasTrackersError),
         (status = 503, description = "Safe mode required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
@@ -953,7 +1034,7 @@ pub async fn post_update_subject(
 pub async fn delete_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.delete_subject(subject_id).await?))
 }
@@ -966,7 +1047,7 @@ pub async fn delete_subject(
 /// Manually triggers event distribution to network peers for the specified subject.
 #[utoipa::path(
     post,
-    path = "/manual-distribution/{subject_id}",
+    path = "/subjects/{subject_id}/manual-distribution",
     operation_id = "postManualDistribution",
     tag = "Distribution",
     params(
@@ -983,7 +1064,7 @@ pub async fn delete_subject(
 pub async fn post_manual_distribution(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<String>, HttpError> {
     Ok(Json(bridge.post_manual_distribution(subject_id).await?))
 }
@@ -996,8 +1077,8 @@ pub async fn post_manual_distribution(
 /// Returns all governance structures, optionally filtered by active status.
 #[utoipa::path(
     get,
-    path = "/subjects",
-    operation_id = "getAllGovs",
+    path = "/governances",
+    operation_id = "getGovernances",
     tag = "Register",
     params(GovQuery),
     responses(
@@ -1009,7 +1090,7 @@ pub async fn post_manual_distribution(
 pub async fn get_all_govs(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Query(parameters): Query<GovQuery>,
+    ApiQuery(parameters): ApiQuery<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, HttpError> {
     Ok(Json(bridge.get_all_govs(parameters.active).await?))
 }
@@ -1020,8 +1101,8 @@ pub async fn get_all_govs(
 /// filtered by active status and schema ID.
 #[utoipa::path(
     get,
-    path = "/subjects/{governance_id}",
-    operation_id = "getAllSubjs",
+    path = "/governances/{governance_id}/subjects",
+    operation_id = "getGovernanceSubjects",
     tag = "Register",
     params(
         ("governance_id" = String, Path, description = "Governance identifier"),
@@ -1038,8 +1119,8 @@ pub async fn get_all_govs(
 pub async fn get_all_subjs(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(governance_id): Path<String>,
-    Query(parameters): Query<SubjectQuery>,
+    ApiPath(governance_id): ApiPath<String>,
+    ApiQuery(parameters): ApiQuery<SubjectQuery>,
 ) -> Result<Json<Vec<SubjsData>>, HttpError> {
     Ok(Json(
         bridge
@@ -1061,7 +1142,7 @@ pub async fn get_all_subjs(
 /// time range filters.
 #[utoipa::path(
     get,
-    path = "/events/{subject_id}",
+    path = "/subjects/{subject_id}/events",
     operation_id = "getEvents",
     tag = "Ledger",
     params(
@@ -1079,8 +1160,8 @@ pub async fn get_all_subjs(
 pub async fn get_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    QsQuery(parameters): QsQuery<EventsQuery>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiQuery(parameters): ApiQuery<EventsQuery>,
 ) -> Result<Json<PaginatorEvents>, HttpError> {
     Ok(Json(bridge.get_events(subject_id, parameters).await?))
 }
@@ -1091,9 +1172,9 @@ pub async fn get_events(
 /// subject ledger.
 #[utoipa::path(
     get,
-    path = "/sink-events/{subject_id}",
+    path = "/subjects/{subject_id}/sink-events",
     operation_id = "getSinkEvents",
-    tag = "Ledger",
+    tag = "Sink",
     params(
         ("subject_id" = String, Path, description = "Subject identifier"),
         SinkEventsQuery
@@ -1109,8 +1190,8 @@ pub async fn get_events(
 pub async fn get_sink_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Query(parameters): Query<SinkEventsQuery>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiQuery(parameters): ApiQuery<SinkEventsQuery>,
 ) -> Result<Json<SinkEventsPage>, HttpError> {
     Ok(Json(bridge.get_sink_events(subject_id, parameters).await?))
 }
@@ -1120,7 +1201,7 @@ pub async fn get_sink_events(
 /// Returns a paginated list of aborted events for the specified subject.
 #[utoipa::path(
     get,
-    path = "/aborts/{subject_id}",
+    path = "/subjects/{subject_id}/aborts",
     operation_id = "getAborts",
     tag = "Ledger",
     params(
@@ -1138,8 +1219,8 @@ pub async fn get_sink_events(
 pub async fn get_aborts(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Query(parameters): Query<AbortsQuery>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiQuery(parameters): ApiQuery<AbortsQuery>,
 ) -> Result<Json<PaginatorAborts>, HttpError> {
     Ok(Json(bridge.get_aborts(subject_id, parameters).await?))
 }
@@ -1149,7 +1230,7 @@ pub async fn get_aborts(
 /// Returns a specific event by its sequence number within a subject's ledger.
 #[utoipa::path(
     get,
-    path = "/events/{subject_id}/{sn}",
+    path = "/subjects/{subject_id}/events/{sn}",
     operation_id = "getEventSn",
     tag = "Ledger",
     params(
@@ -1167,7 +1248,7 @@ pub async fn get_aborts(
 pub async fn get_event_sn(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path((subject_id, sn)): Path<(String, u64)>,
+    ApiPath((subject_id, sn)): ApiPath<(String, u64)>,
 ) -> Result<Json<LedgerDB>, HttpError> {
     Ok(Json(bridge.get_event_sn(subject_id, sn).await?))
 }
@@ -1178,7 +1259,7 @@ pub async fn get_event_sn(
 /// genesis event or the latest events.
 #[utoipa::path(
     get,
-    path = "/events-first-last/{subject_id}",
+    path = "/subjects/{subject_id}/events-first-last",
     operation_id = "getFirstOrEndEvents",
     tag = "Ledger",
     params(
@@ -1196,8 +1277,8 @@ pub async fn get_event_sn(
 pub async fn get_first_or_end_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Query(parameters): Query<FirstEndEvents>,
+    ApiPath(subject_id): ApiPath<String>,
+    ApiQuery(parameters): ApiQuery<FirstEndEvents>,
 ) -> Result<Json<Vec<LedgerDB>>, HttpError> {
     Ok(Json(
         bridge
@@ -1216,7 +1297,7 @@ pub async fn get_first_or_end_events(
 /// Returns the current state of a subject including its metadata and properties.
 #[utoipa::path(
     get,
-    path = "/state/{subject_id}",
+    path = "/subjects/{subject_id}/state",
     operation_id = "getSubjectState",
     tag = "Ledger",
     params(
@@ -1233,7 +1314,7 @@ pub async fn get_first_or_end_events(
 pub async fn get_subject_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
+    ApiPath(subject_id): ApiPath<String>,
 ) -> Result<Json<SubjectDB>, HttpError> {
     Ok(Json(bridge.get_subject_state(subject_id).await?))
 }
@@ -1376,42 +1457,44 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/network-state", get_network_state, require NodeSystem Get);
         $callback!($($args)*, get, "/requests-in-manager", get_requests_in_manager, require NodeRequest Get);
         $callback!($($args)*, get, "/requests-in-manager/{subject_id}", get_requests_in_manager_subject_id, require NodeRequest Get);
-        $callback!($($args)*, get, "/approval", get_approvals, require NodeSubject Get);
-        $callback!($($args)*, get, "/approval/{subject_id}", get_approval, require NodeSubject Get);
-        $callback!($($args)*, patch, "/approval/{subject_id}", patch_approve, require NodeSubject Patch);
-        $callback!($($args)*, post, "/request-abort/{subject_id}", post_manual_request_abort, require NodeSubject Post);
-        $callback!($($args)*, post, "/request", post_event_request, require NodeRequest Post);
-        $callback!($($args)*, get, "/request", get_all_request_state, require NodeRequest Get);
-        $callback!($($args)*, get, "/request/{request_id}", get_request_state, require NodeRequest Get);
+        $callback!($($args)*, get, "/approvals", get_approvals, require NodeSubject Get);
+        $callback!($($args)*, get, "/approvals/{subject_id}", get_approval, require NodeSubject Get);
+        $callback!($($args)*, patch, "/approvals/{subject_id}", patch_approve, require NodeSubject Patch);
+        $callback!($($args)*, post, "/subjects/{subject_id}/abort-request", post_manual_request_abort, require NodeSubject Post);
+        $callback!($($args)*, post, "/requests", post_event_request, require NodeRequest Post);
+        $callback!($($args)*, get, "/requests", get_all_request_state, require NodeRequest Get);
+        $callback!($($args)*, get, "/requests/{request_id}", get_request_state, require NodeRequest Get);
         $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
         $callback!($($args)*, get, "/sinks", get_sinks, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
+        $callback!($($args)*, get, "/sinks/{sink_name}", get_sink, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
-        $callback!($($args)*, delete, "/sinks/{sink_name}", delete_sink_cursors, require NodeSink Delete);
+        $callback!($($args)*, post, "/sinks/{sink_name}/test", test_sink, require NodeSink Post);
+        $callback!($($args)*, post, "/sinks/{sink_name}/reset-cursors", reset_sink_cursors, require NodeSink Post);
         $callback!($($args)*, post, "/sinks/replay", replay_sink_events, require NodeSink Post);
         $callback!($($args)*, put, "/governances/{subject_id}/authorize", authorize_governance, require NodeSubject Put);
         $callback!($($args)*, delete, "/governances/{subject_id}/authorize", disauthorize_governance, require NodeSubject Delete);
         $callback!($($args)*, get, "/governances/authorized", authorized_governances, require NodeSubject Get);
         $callback!($($args)*, get, "/governances/{subject_id}/authorized", is_governance_authorized, require NodeSubject Get);
         $callback!($($args)*, put, "/trackers/{subject_id}/ban", ban_tracker, require NodeSubject Put);
-        $callback!($($args)*, put, "/trackers/{subject_id}/unban", unban_tracker, require NodeSubject Put);
+        $callback!($($args)*, delete, "/trackers/{subject_id}/ban", unban_tracker, require NodeSubject Delete);
         $callback!($($args)*, get, "/trackers/banned", banned_trackers, require NodeSubject Get);
         $callback!($($args)*, get, "/trackers/{subject_id}/banned", is_tracker_banned, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/sync-peers", get_sync_peers, require NodeSubject Get);
         $callback!($($args)*, put, "/subjects/{subject_id}/sync-peers", add_sync_peer, require NodeSubject Put);
-        $callback!($($args)*, delete, "/subjects/{subject_id}/sync-peers", remove_sync_peer, require NodeSubject Delete);
+        $callback!($($args)*, delete, "/subjects/{subject_id}/sync-peers/{peer}", remove_sync_peer, require NodeSubject Delete);
         $callback!($($args)*, get, "/sync-peers", subjects_with_sync_peers, require NodeSubject Get);
-        $callback!($($args)*, post, "/update/{subject_id}", post_update_subject, require NodeSubject Post);
+        $callback!($($args)*, post, "/subjects/{subject_id}/update", post_update_subject, require NodeSubject Post);
         $callback!($($args)*, delete, "/maintenance/subjects/{subject_id}", delete_subject, require NodeMaintenance Delete);
-        $callback!($($args)*, post, "/manual-distribution/{subject_id}", post_manual_distribution, require NodeSubject Post);
-        $callback!($($args)*, get, "/subjects", get_all_govs, require NodeSubject Get);
-        $callback!($($args)*, get, "/subjects/{governance_id}", get_all_subjs, require NodeSubject Get);
-        $callback!($($args)*, get, "/events/{subject_id}", get_events, require NodeSubject Get);
-        $callback!($($args)*, get, "/sink-events/{subject_id}", get_sink_events, require NodeSink Get);
-        $callback!($($args)*, get, "/events/{subject_id}/{sn}", get_event_sn, require NodeSubject Get);
-        $callback!($($args)*, get, "/aborts/{subject_id}", get_aborts, require NodeSubject Get);
-        $callback!($($args)*, get, "/events-first-last/{subject_id}", get_first_or_end_events, require NodeSubject Get);
-        $callback!($($args)*, get, "/state/{subject_id}", get_subject_state, require NodeSubject Get);
+        $callback!($($args)*, post, "/subjects/{subject_id}/manual-distribution", post_manual_distribution, require NodeSubject Post);
+        $callback!($($args)*, get, "/governances", get_all_govs, require NodeSubject Get);
+        $callback!($($args)*, get, "/governances/{governance_id}/subjects", get_all_subjs, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/events", get_events, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/sink-events", get_sink_events, require NodeSink Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/events/{sn}", get_event_sn, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/aborts", get_aborts, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/events-first-last", get_first_or_end_events, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{subject_id}/state", get_subject_state, require NodeSubject Get);
         $callback!($($args)*, external_get, "/metrics", metrics_endpoint, require NodeManagement Get);
     };
 }
@@ -1463,7 +1546,7 @@ macro_rules! auth_route_catalog {
         $callback!($($args)*, get, "/me/permissions/detailed", system_handlers::get_my_permissions_detailed, require User Get);
         $callback!($($args)*, post, "/me/api-keys", apikey_handlers::create_my_api_key, require UserApiKey Post);
         $callback!($($args)*, get, "/me/api-keys", apikey_handlers::list_my_api_keys, require UserApiKey Get);
-        $callback!($($args)*, delete, "/me/api-keys/{name}", apikey_handlers::revoke_my_api_key, require UserApiKey Delete);
+        $callback!($($args)*, delete, "/me/api-keys/{key_id}", apikey_handlers::revoke_my_api_key, require UserApiKey Delete);
     };
 }
 
@@ -1615,11 +1698,13 @@ pub fn build_routes(
 
     let mut main_routes = Router::new();
     main_route_catalog!(append_catalog_route, main_routes);
-    let main_routes = main_routes.layer(
-        ServiceBuilder::new()
-            .layer(Extension(bridge))
-            .layer(Extension(proxy.clone())),
-    );
+    let main_routes = main_routes
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(
+            ServiceBuilder::new()
+                .layer(Extension(bridge))
+                .layer(Extension(proxy.clone())),
+        );
 
     let doc_routes = if doc {
         Some(
@@ -1648,11 +1733,14 @@ pub fn build_routes(
         #[cfg(feature = "prometheus")]
         let authed =
             authed.merge(ave_bridge::prometheus::build_routes(registry));
-        let authed = authed.layer(protected_layers);
+        let authed = authed
+            .method_not_allowed_fallback(method_not_allowed)
+            .layer(protected_layers);
 
         let mut public_auth_routes = Router::new();
         public_auth_route_catalog!(append_public_route, public_auth_routes);
         let mut app = public_auth_routes
+            .method_not_allowed_fallback(method_not_allowed)
             .layer(
                 ServiceBuilder::new()
                     .layer(Extension(db))
@@ -1668,7 +1756,9 @@ pub fn build_routes(
             app = app.merge(doc_routes);
         }
 
-        app
+        app.fallback(route_not_found)
+            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+            .layer(middleware::from_fn(server_error_metrics_layer))
     } else {
         let app = main_routes;
         #[cfg(feature = "prometheus")]
@@ -1677,19 +1767,41 @@ pub fn build_routes(
         if let Some(doc_routes) = doc_routes {
             app = app.merge(doc_routes);
         }
-        app
+        app.fallback(route_not_found)
+            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+            .layer(middleware::from_fn(server_error_metrics_layer))
     }
+}
+
+/// Maximum request body size accepted by the API (2 MiB, the axum default
+/// made explicit). Larger bodies are rejected with 413 Payload Too Large.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Fallback for unmatched routes: 404 with the canonical error body.
+async fn route_not_found() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "Route not found".to_string(),
+        }),
+    )
+}
+
+/// Fallback for known routes hit with a wrong method: 405 with the canonical
+/// error body.
+async fn method_not_allowed() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(ErrorResponse {
+            error: "Method not allowed".to_string(),
+        }),
+    )
 }
 
 pub async fn permission_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    // Skip docs
-    if req.uri().path().starts_with("/doc") {
-        return next.run(req).await;
-    }
-
     let mut req = req;
 
     // Ensure auth context is present; if not, try to run the extractor inline
@@ -1724,6 +1836,12 @@ pub async fn permission_layer(
         && (req.uri().path().starts_with("/admin")
             || req.uri().path().starts_with("/me/api-keys"))
     {
+        audit_rejected_request(
+            RejectionMeta::new(&req),
+            Some(auth_ctx.clone()),
+            StatusCode::FORBIDDEN,
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -1736,6 +1854,12 @@ pub async fn permission_layer(
 
     match permission_for(req.method(), req.uri().path()) {
         None => {
+            audit_rejected_request(
+                RejectionMeta::new(&req),
+                Some(auth_ctx.clone()),
+                StatusCode::FORBIDDEN,
+            )
+            .await;
             return (
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
@@ -1749,6 +1873,12 @@ pub async fn permission_layer(
             if resource == Resource::NodeMaintenance
                 && !auth_ctx.is_management_key
             {
+                audit_rejected_request(
+                    RejectionMeta::new(&req),
+                    Some(auth_ctx.clone()),
+                    StatusCode::FORBIDDEN,
+                )
+                .await;
                 return (
                     StatusCode::FORBIDDEN,
                     Json(ErrorResponse {
@@ -1762,6 +1892,12 @@ pub async fn permission_layer(
             if let Err(resp) =
                 check_permission(&auth_ctx, resource.as_str(), action.as_str())
             {
+                audit_rejected_request(
+                    RejectionMeta::new(&req),
+                    Some(auth_ctx.clone()),
+                    StatusCode::FORBIDDEN,
+                )
+                .await;
                 return resp.into_response();
             }
         }
@@ -1802,8 +1938,9 @@ mod tests {
     }
 
     fn build_db() -> Arc<AuthDatabase> {
-        #[allow(deprecated)]
-        let tmp = tempfile::tempdir().unwrap().into_path();
+        // `keep` leaks the dir on purpose: the SQLite file must outlive the
+        // test that created the database.
+        let tmp = tempfile::tempdir().unwrap().keep();
         let config = AuthConfig {
             durability: false,
             enable: true,
@@ -1850,13 +1987,13 @@ mod tests {
 
     fn router() -> Router {
         Router::new()
-            .route("/events/abc", get(ok_handler))
-            .route("/subjects", get(ok_handler))
-            .route("/request", post(ok_handler).get(ok_handler))
-            .route("/request/123", get(ok_handler))
-            .route("/manual-distribution/abc", post(ok_handler))
+            .route("/subjects/abc/events", get(ok_handler))
+            .route("/governances", get(ok_handler))
+            .route("/requests", post(ok_handler).get(ok_handler))
+            .route("/requests/123", get(ok_handler))
+            .route("/subjects/abc/manual-distribution", post(ok_handler))
             .route("/governances/abc/authorize", delete(ok_handler))
-            .route("/approval/abc", get(ok_handler).patch(ok_handler))
+            .route("/approvals/abc", get(ok_handler).patch(ok_handler))
             .route("/peer-id", get(ok_handler))
             .layer(middleware::from_fn(permission_layer))
     }
@@ -1880,26 +2017,33 @@ mod tests {
         let app = router();
 
         // data role has node_subject:get - should be allowed
-        let status = call(&app, Method::GET, "/events/abc", ctx.clone()).await;
+        let status =
+            call(&app, Method::GET, "/subjects/abc/events", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         // data role has node_request:get - should be allowed
-        let status = call(&app, Method::GET, "/request/123", ctx.clone()).await;
+        let status =
+            call(&app, Method::GET, "/requests/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         // data role does NOT have node_sink:get - should be forbidden
         let status =
-            call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // data role does NOT have node_subject:post - should be forbidden
-        let status =
-            call(&app, Method::POST, "/manual-distribution/abc", ctx.clone())
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx.clone())
                 .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
+        // data role does NOT have node_subject:post - should be forbidden
+        let status = call(
+            &app,
+            Method::POST,
+            "/subjects/abc/manual-distribution",
+            ctx.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
         // data role does NOT have node_request:post - should be forbidden
-        let status = call(&app, Method::POST, "/request", ctx).await;
+        let status = call(&app, Method::POST, "/requests", ctx).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
@@ -1909,12 +2053,16 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "manager");
         let app = router();
 
-        let status =
-            call(&app, Method::POST, "/manual-distribution/abc", ctx.clone())
-                .await;
+        let status = call(
+            &app,
+            Method::POST,
+            "/subjects/abc/manual-distribution",
+            ctx.clone(),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
 
-        let status = call(&app, Method::POST, "/request", ctx).await;
+        let status = call(&app, Method::POST, "/requests", ctx).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -1924,31 +2072,37 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "sender");
         let app = router();
 
-        let ok_status = call(&app, Method::POST, "/request", ctx.clone()).await;
+        let ok_status =
+            call(&app, Method::POST, "/requests", ctx.clone()).await;
         assert_eq!(ok_status, StatusCode::OK);
 
-        let ok_get = call(&app, Method::GET, "/request/123", ctx.clone()).await;
+        let ok_get =
+            call(&app, Method::GET, "/requests/123", ctx.clone()).await;
         assert_eq!(ok_get, StatusCode::OK);
 
         let forbidden =
-            call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
+            call(&app, Method::POST, "/subjects/abc/manual-distribution", ctx)
+                .await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
-    async fn sink_role_only_allows_sink_replay_reads() {
+    async fn sink_role_scoped_to_sink_domain() {
         let db = build_db();
         let ctx = auth_ctx_for_role(&db, "sink");
         let app = router();
 
-        let ok = call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
+        let ok =
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx.clone())
+                .await;
         assert_ne!(ok, StatusCode::FORBIDDEN);
 
         let forbidden_subject =
-            call(&app, Method::GET, "/events/abc", ctx.clone()).await;
+            call(&app, Method::GET, "/subjects/abc/events", ctx.clone()).await;
         assert_eq!(forbidden_subject, StatusCode::FORBIDDEN);
 
-        let forbidden_request = call(&app, Method::POST, "/request", ctx).await;
+        let forbidden_request =
+            call(&app, Method::POST, "/requests", ctx).await;
         assert_eq!(forbidden_request, StatusCode::FORBIDDEN);
     }
 
@@ -1958,7 +2112,8 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "admin");
         let app = router();
 
-        let forbidden = call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        let forbidden =
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
@@ -1968,7 +2123,8 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "superadmin");
         let app = router();
 
-        let status = call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        let status =
+            call(&app, Method::GET, "/subjects/abc/sink-events", ctx).await;
         assert_ne!(status, StatusCode::FORBIDDEN);
     }
 

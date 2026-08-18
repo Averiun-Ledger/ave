@@ -3,11 +3,19 @@
 use crate::{
     DataToSink, SchemaType,
     bridge::request::{ApprovalState, EventRequestType, SinkReplayItem},
-    sink::{SinkServer, SinkTarget},
+    sink::{
+        GrpcSinkConfig, HttpSinkConfig, KafkaAcks, KafkaCompression,
+        KafkaKeyStrategy, KafkaSaslMechanism, KafkaSecurityConfig,
+        KafkaSinkConfig, SinkAuthMethod, SinkCompression, SinkServer,
+        SinkTarget, SinkTransportConfig, SinkTypes,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, fmt::Display};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt::Display,
+};
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
@@ -335,7 +343,249 @@ pub struct SinkInfo {
     pub running: bool,
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
-    pub server: Option<SinkServer>,
+    /// Last transient error reported by the sink worker, if any. Cleared when
+    /// the sink recovers, is unblocked, or has no lagging subjects.
+    pub last_error: Option<String>,
+    /// Delivery transport kind (`"http"`, `"kafka"`, `"grpc"`). `None` when
+    /// the sink is not present in the current configuration.
+    pub transport: Option<String>,
+    /// Sanitized view of the server configuration (see [`SinkServerView`]).
+    /// `None` when the sink is not present in the current configuration.
+    pub server: Option<SinkServerView>,
+}
+
+/// Sanitized view of a sink server configuration, as exposed by the API.
+///
+/// Mirrors the delivery-relevant parts of [`SinkServer`]: credentials
+/// (usernames, auth endpoints, proxy settings) and internal tuning
+/// (timeouts, retries, pool sizes, health-check internals) are omitted.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkServerView {
+    /// Event types delivered to this sink.
+    pub events: BTreeSet<SinkTypes>,
+    /// Delivery transport and its public configuration.
+    pub transport: SinkTransportView,
+}
+
+/// Sanitized delivery transport configuration, tagged like
+/// [`SinkTransportConfig`] (`"http"`, `"kafka"`, `"grpc"`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkTransportView {
+    Http(HttpSinkView),
+    Kafka(KafkaSinkView),
+    Grpc(GrpcSinkView),
+}
+
+/// Authentication method of a sink delivery, without credentials or
+/// endpoints.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkAuthKind {
+    BearerToken,
+    ApiKey,
+    Basic,
+    #[serde(rename = "oauth2")]
+    OAuth2,
+}
+
+/// Security posture of a Kafka sink, without credentials.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[serde(tag = "protocol", rename_all = "snake_case")]
+pub enum KafkaSecurityView {
+    Plaintext,
+    Ssl,
+    SaslPlaintext { mechanism: KafkaSaslMechanism },
+    SaslSsl { mechanism: KafkaSaslMechanism },
+}
+
+/// Public HTTP delivery configuration of a sink.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct HttpSinkView {
+    /// URL endpoint template (`{{schema-id}}`, `{{subject-id}}` and
+    /// `{{event-type}}` placeholders).
+    pub url: String,
+    /// Authentication method, if any. Credentials are omitted.
+    pub auth: Option<SinkAuthKind>,
+    /// Optional dedicated health-check URL.
+    pub health_check_url: Option<String>,
+    /// Whether TLS customization (extra CA, mTLS, pinning, minimum version)
+    /// is configured. Certificate paths are omitted.
+    pub tls: bool,
+    /// Deliveries are signed with the node's Ed25519 identity.
+    pub signature: bool,
+    pub signature_version: u8,
+    /// Events are delivered in batches (single POST with a JSON array).
+    pub batch_delivery: bool,
+    pub compression: SinkCompression,
+    /// Custom static headers added to every delivery.
+    pub headers: HashMap<String, String>,
+}
+
+/// Public Kafka delivery configuration of a sink.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct KafkaSinkView {
+    /// Comma-separated list of `host:port` bootstrap brokers.
+    pub bootstrap_servers: String,
+    /// Topic template (`{{schema-id}}`, `{{subject-id}}`, `{{event-type}}`
+    /// placeholders).
+    pub topic: String,
+    /// Producer client id.
+    pub client_id: String,
+    /// Security protocol and SASL mechanism. The username is omitted.
+    pub security: KafkaSecurityView,
+    /// Whether TLS customization (extra CA, mTLS) is configured. Certificate
+    /// paths are omitted.
+    pub tls: bool,
+    /// Deliveries are signed with the node's Ed25519 identity.
+    pub signature: bool,
+    pub signature_version: u8,
+    pub acks: KafkaAcks,
+    pub compression: KafkaCompression,
+    /// Strategy used to derive the message key of each delivery.
+    pub key_strategy: KafkaKeyStrategy,
+    /// Events are delivered in batches (single message with a JSON array).
+    pub batch_delivery: bool,
+    /// Kafka transactions are used for exactly-once producer semantics.
+    pub transactional: bool,
+    /// Custom static headers added to every delivered message.
+    pub headers: HashMap<String, String>,
+}
+
+/// Public gRPC delivery configuration of a sink.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct GrpcSinkView {
+    /// Server endpoint (`http://`, `https://` or `dns:///host:port`).
+    pub endpoint: String,
+    /// Authentication method, if any. Credentials are omitted.
+    pub auth: Option<SinkAuthKind>,
+    /// Whether TLS customization (extra CA, mTLS) is configured. Certificate
+    /// paths are omitted.
+    pub tls: bool,
+    /// Deliveries are signed with the node's Ed25519 identity.
+    pub signature: bool,
+    pub compression: SinkCompression,
+    /// Events are delivered in batches (single request with a JSON array
+    /// payload).
+    pub batch_delivery: bool,
+    /// Custom static metadata added to every RPC.
+    pub headers: HashMap<String, String>,
+}
+
+impl From<SinkServer> for SinkServerView {
+    fn from(value: SinkServer) -> Self {
+        Self {
+            events: value.events,
+            transport: value.transport.into(),
+        }
+    }
+}
+
+impl From<SinkTransportConfig> for SinkTransportView {
+    fn from(value: SinkTransportConfig) -> Self {
+        match value {
+            SinkTransportConfig::Http(config) => Self::Http((*config).into()),
+            SinkTransportConfig::Kafka(config) => Self::Kafka((*config).into()),
+            SinkTransportConfig::Grpc(config) => Self::Grpc((*config).into()),
+        }
+    }
+}
+
+impl From<SinkAuthMethod> for SinkAuthKind {
+    fn from(value: SinkAuthMethod) -> Self {
+        match value {
+            SinkAuthMethod::BearerToken => Self::BearerToken,
+            SinkAuthMethod::ApiKey => Self::ApiKey,
+            SinkAuthMethod::Basic { .. } => Self::Basic,
+            SinkAuthMethod::OAuth2(_) => Self::OAuth2,
+        }
+    }
+}
+
+impl From<KafkaSecurityConfig> for KafkaSecurityView {
+    fn from(value: KafkaSecurityConfig) -> Self {
+        match value {
+            KafkaSecurityConfig::Plaintext => Self::Plaintext,
+            KafkaSecurityConfig::Ssl => Self::Ssl,
+            KafkaSecurityConfig::SaslPlaintext { mechanism, .. } => {
+                Self::SaslPlaintext { mechanism }
+            }
+            KafkaSecurityConfig::SaslSsl { mechanism, .. } => {
+                Self::SaslSsl { mechanism }
+            }
+        }
+    }
+}
+
+impl From<HttpSinkConfig> for HttpSinkView {
+    fn from(value: HttpSinkConfig) -> Self {
+        Self {
+            url: value.url,
+            auth: value.auth.map(SinkAuthKind::from),
+            health_check_url: value.health_check_url,
+            tls: value.tls.is_some(),
+            signature: value.signature,
+            signature_version: value.signature_version,
+            batch_delivery: value.batch_delivery,
+            compression: value.compression,
+            headers: value.headers,
+        }
+    }
+}
+
+impl From<KafkaSinkConfig> for KafkaSinkView {
+    fn from(value: KafkaSinkConfig) -> Self {
+        Self {
+            bootstrap_servers: value.bootstrap_servers,
+            topic: value.topic,
+            client_id: value.client_id,
+            security: value.security.into(),
+            tls: value.tls.is_some(),
+            signature: value.signature,
+            signature_version: value.signature_version,
+            acks: value.acks,
+            compression: value.compression,
+            key_strategy: value.key_strategy,
+            batch_delivery: value.batch_delivery,
+            transactional: value.transactional,
+            headers: value.headers,
+        }
+    }
+}
+
+impl From<GrpcSinkConfig> for GrpcSinkView {
+    fn from(value: GrpcSinkConfig) -> Self {
+        Self {
+            endpoint: value.endpoint,
+            auth: value.auth.map(SinkAuthKind::from),
+            tls: value.tls.is_some(),
+            signature: value.signature,
+            compression: value.compression,
+            batch_delivery: value.batch_delivery,
+            headers: value.headers,
+        }
+    }
 }
 
 /// Reduced sink information for the quick `/sinks/status` view.
@@ -351,6 +601,12 @@ pub struct SinkStatusInfo {
     pub running: bool,
     pub blocked: Option<String>,
     pub lagging_subjects: usize,
+    /// Last transient error reported by the sink worker, if any. Cleared when
+    /// the sink recovers, is unblocked, or has no lagging subjects.
+    pub last_error: Option<String>,
+    /// Delivery transport kind (`"http"`, `"kafka"`, `"grpc"`). `None` when
+    /// the sink is not present in the current configuration.
+    pub transport: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

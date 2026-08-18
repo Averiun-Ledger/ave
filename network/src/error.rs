@@ -50,4 +50,13 @@ pub enum Error {
     /// Failed to forward a command to the network worker.
     #[error("failed to send command to network worker: {0}")]
     CommandSend(String),
+
+    /// Invalid network configuration.
+    #[error("invalid configuration for {component}: {reason}")]
+    InvalidConfiguration {
+        /// Configuration component that failed validation.
+        component: String,
+        /// Reason the configuration is invalid.
+        reason: String,
+    },
 }

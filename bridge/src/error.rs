@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 use ave_core::error::Error as CoreError;
-use ave_core::sink::SinkError;
 
 /// Bridge API errors.
 ///
@@ -93,23 +92,9 @@ pub enum BridgeError {
     InvalidEventRequest(String),
 
     // ========================================
-    // Sink Authentication Errors
-    // ========================================
-    /// Sink authentication failed during initialization.
-    #[error("Sink authentication failed: {0}")]
-    SinkAuth(#[from] SinkError),
-
-    // ========================================
     // Runtime Errors
     // ========================================
     /// Failed to register a process signal handler.
     #[error("Failed to register shutdown signal handler: {0}")]
     SignalRegistration(String),
-
-    // ========================================
-    // API Errors
-    // ========================================
-    /// Generic API error.
-    #[error("API error: {0}")]
-    Api(String),
 }

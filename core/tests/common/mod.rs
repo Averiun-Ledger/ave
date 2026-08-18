@@ -43,7 +43,35 @@ use tokio_util::sync::CancellationToken;
 pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Helper to set an environment variable for the duration of a test and clean
+/// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
+/// because concurrent mutation of the process environment is UB; tests that
+/// use distinct variable names and short-lived scopes are safe in practice.
 #[allow(dead_code)]
+pub struct TempEnvVar {
+    name: &'static str,
+}
+
+impl TempEnvVar {
+    #[allow(dead_code)]
+    pub fn set(name: &'static str, value: &str) -> Self {
+        unsafe { std::env::set_var(name, value) };
+        Self { name }
+    }
+}
+
+impl Drop for TempEnvVar {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(self.name) };
+    }
+}
+
+#[allow(dead_code)]
+pub mod grpc_test_sink;
+#[allow(dead_code)]
+pub mod kafka_setup;
+#[allow(dead_code)]
+pub mod oidc_idp;
 pub mod sink_setup;
 
 #[allow(dead_code)]
@@ -108,27 +136,29 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let local_db = if let Some(local_db) = local_db {
-        local_db
-    } else {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let local_db = dir.path().to_path_buf();
-        vec_dirs.push(dir);
+    let local_db = local_db.map_or_else(
+        || {
+            let dir =
+                tempfile::tempdir().expect("Can not create temporal directory");
+            let local_db = dir.path().to_path_buf();
+            vec_dirs.push(dir);
 
-        local_db
-    };
+            local_db
+        },
+        |local_db| local_db,
+    );
 
-    let ext_db = if let Some(ext_db) = ext_db {
-        ext_db
-    } else {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let ext_db = dir.path().to_path_buf();
-        vec_dirs.push(dir);
+    let ext_db = ext_db.map_or_else(
+        || {
+            let dir =
+                tempfile::tempdir().expect("Can not create temporal directory");
+            let ext_db = dir.path().to_path_buf();
+            vec_dirs.push(dir);
 
-        ext_db
-    };
+            ext_db
+        },
+        |ext_db| ext_db,
+    );
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -346,7 +376,7 @@ pub async fn create_and_authorize_governance(
         node.authorize_governance(
             governance_id.clone(),
             ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(&owner_node.public_key()).unwrap(),
+                PublicKey::from_str(owner_node.public_key()).unwrap(),
             ),
         )
         .await
@@ -543,12 +573,7 @@ pub async fn get_events(
                 subject_id.clone(),
                 EventsQuery {
                     quantity: Some(expected_len.max(1000) as u64),
-                    page: Some(0),
-                    reverse: Some(false),
-                    event_request_ts: None,
-                    event_ledger_ts: None,
-                    sink_ts: None,
-                    event_type: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -693,10 +718,10 @@ pub async fn node_running(
     node: &Api,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        if let Ok(state) = node.get_network_state().await {
-            if let MonitorNetworkState::Running = state {
-                break;
-            }
+        if let Ok(state) = node.get_network_state().await
+            && state == MonitorNetworkState::Running
+        {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }

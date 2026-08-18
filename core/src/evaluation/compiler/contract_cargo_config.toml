@@ -1,5 +1,0 @@
-[build]
-target-dir = "{target_dir}"
-
-[target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-arg=--allow-undefined"]

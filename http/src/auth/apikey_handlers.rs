@@ -2,30 +2,15 @@
 //
 // REST API endpoints for API key management
 
-use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{DatabaseErrorMapping, run_db as shared_run_db};
+use super::database::AuthDatabase;
+use super::http_api::run_db_admin as run_db;
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{
-    Extension, Json,
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use crate::extract::{ApiJson, ApiPath, ApiQuery, OptionalApiJson};
+use axum::{Extension, Json, http::StatusCode};
 use serde::Deserialize;
 use std::sync::Arc;
-use utoipa::ToSchema;
-
-async fn run_db<T, F>(
-    db: &Arc<AuthDatabase>,
-    operation: &'static str,
-    work: F,
-) -> Result<T, (StatusCode, Json<ErrorResponse>)>
-where
-    T: Send + 'static,
-    F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
-{
-    shared_run_db(db, operation, DatabaseErrorMapping::admin(), work).await
-}
+use utoipa::{IntoParams, ToSchema};
 
 // =============================================================================
 // API KEY MANAGEMENT ENDPOINTS (ADMIN)
@@ -52,8 +37,8 @@ where
 pub async fn create_api_key_for_user(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Json(req): Json<CreateApiKeyRequest>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiJson(req): ApiJson<CreateApiKeyRequest>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
@@ -117,9 +102,7 @@ pub async fn create_api_key_for_user(
     path = "/admin/api-keys",
     operation_id = "listAllApiKeys",
     tag = "API Key Management",
-    params(
-        ("include_revoked" = Option<bool>, Query, description = "Include revoked keys")
-    ),
+    params(ListApiKeysQuery),
     responses(
         (status = 200, description = "List of API keys", body = Vec<ApiKeyInfo>),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -129,7 +112,7 @@ pub async fn create_api_key_for_user(
 pub async fn list_all_api_keys(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(params): Query<ListApiKeysQuery>,
+    ApiQuery(params): ApiQuery<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
@@ -143,8 +126,10 @@ pub async fn list_all_api_keys(
     Ok(Json(keys))
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListApiKeysQuery {
+    /// Include revoked keys
     pub include_revoked: Option<bool>,
 }
 
@@ -156,7 +141,7 @@ pub struct ListApiKeysQuery {
     tag = "API Key Management",
     params(
         ("user_id" = i64, Path, description = "User ID"),
-        ("include_revoked" = Option<bool>, Query, description = "Include revoked keys")
+        ListApiKeysQuery
     ),
     responses(
         (status = 200, description = "List of user API keys", body = Vec<ApiKeyInfo>),
@@ -168,8 +153,8 @@ pub struct ListApiKeysQuery {
 pub async fn list_user_api_keys_admin(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(user_id): Path<i64>,
-    Query(params): Query<ListApiKeysQuery>,
+    ApiPath(user_id): ApiPath<i64>,
+    ApiQuery(params): ApiQuery<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
@@ -186,11 +171,11 @@ pub async fn list_user_api_keys_admin(
 /// Get API key info (admin)
 #[utoipa::path(
     get,
-    path = "/admin/api-keys/{id}",
+    path = "/admin/api-keys/{key_id}",
     operation_id = "getApiKey",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API Key ID (UUID)")
+        ("key_id" = String, Path, description = "API Key ID (UUID)")
     ),
     responses(
         (status = 200, description = "API key information", body = ApiKeyInfo),
@@ -202,7 +187,7 @@ pub async fn list_user_api_keys_admin(
 pub async fn get_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
@@ -216,15 +201,16 @@ pub async fn get_api_key(
 /// Revoke API key (admin)
 #[utoipa::path(
     delete,
-    path = "/admin/api-keys/{id}",
+    path = "/admin/api-keys/{key_id}",
     operation_id = "revokeApiKey",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API Key ID (UUID)")
+        ("key_id" = String, Path, description = "API Key ID (UUID)"),
+        RevokeApiKeyQuery
     ),
-    request_body(content = RevokeApiKeyRequest, description = "Optional revocation reason", content_type = "application/json"),
     responses(
         (status = 204, description = "API key revoked successfully"),
+        (status = 400, description = "Cannot revoke the currently used API key", body = ErrorResponse),
         (status = 403, description = "Permission denied", body = ErrorResponse),
         (status = 404, description = "API key not found", body = ErrorResponse),
     ),
@@ -233,8 +219,8 @@ pub async fn get_api_key(
 pub async fn revoke_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(id): Path<String>,
-    req: Option<Json<RevokeApiKeyRequest>>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<RevokeApiKeyQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
@@ -257,22 +243,20 @@ pub async fn revoke_api_key(
     })
     .await?;
 
-    // Only superadmin can revoke keys of other users
+    // Only superadmin can revoke keys of other users. A key owned by
+    // another user is reported as not found to avoid leaking key ids
+    // (same policy as the self-service route).
     if key_info.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
         return Err((
-            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: "Only superadmin can revoke API keys of other users"
-                    .to_string(),
+                error: "API key not found".to_string(),
             }),
         ));
     }
 
-    let reason = req.as_ref().and_then(|r| r.reason.clone());
-    let audit_details = req
-        .as_ref()
-        .map(|r| serde_json::to_string(&r.0).unwrap_or_default())
-        .unwrap_or_default();
+    let reason = query.reason.clone();
+    let audit_details = serde_json::to_string(&query).unwrap_or_default();
     let revoke_id = id.clone();
     let auth_ctx_for_db = auth_ctx.clone();
     run_db(&db, "revoke_api_key", move |db| {
@@ -303,15 +287,16 @@ pub async fn revoke_api_key(
 /// Rotate an existing API key (admin)
 #[utoipa::path(
     post,
-    path = "/admin/api-keys/{id}/rotate",
+    path = "/admin/api-keys/{key_id}/rotate",
     operation_id = "rotateApiKey",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API Key ID (UUID)")
+        ("key_id" = String, Path, description = "API Key ID (UUID)")
     ),
     request_body = RotateApiKeyRequest,
     responses(
         (status = 201, description = "API key rotated successfully", body = CreateApiKeyResponse),
+        (status = 400, description = "Cannot rotate the currently used API key", body = ErrorResponse),
         (status = 403, description = "Permission denied", body = ErrorResponse),
         (status = 404, description = "API key not found", body = ErrorResponse),
     ),
@@ -320,14 +305,25 @@ pub async fn revoke_api_key(
 pub async fn rotate_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(id): Path<String>,
-    req: Option<Json<RotateApiKeyRequest>>,
+    ApiPath(id): ApiPath<String>,
+    OptionalApiJson(req): OptionalApiJson<RotateApiKeyRequest>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
 > {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "post")?;
+
+    // Rotation revokes the old key: rotating the key in use would kill the
+    // caller's own session mid-request (same guard as revoke_api_key).
+    if id == auth_ctx.api_key_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot rotate the currently used API key".to_string(),
+            }),
+        ));
+    }
 
     // Fetch existing key for user and defaults
     let lookup_id = id.clone();
@@ -348,16 +344,17 @@ pub async fn rotate_api_key(
         ));
     }
 
-    // Extract request body or use defaults
-    let req = req.as_ref().map(|r| &r.0);
-    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    // Audit details only when a body was sent (a body-less rotation has none)
+    let audit_details = req
+        .as_ref()
+        .map(|r| serde_json::to_string(r).unwrap_or_default());
 
     let existing_id = existing.id.clone();
     let auth_ctx_for_db = auth_ctx.clone();
-    let req_name = req.and_then(|r| r.name.clone());
-    let req_description = req.and_then(|r| r.description.clone());
-    let req_expires = req.and_then(|r| r.expires_in_seconds);
-    let req_reason = req.and_then(|r| r.reason.clone());
+    let req_name = req.as_ref().and_then(|r| r.name.clone());
+    let req_description = req.as_ref().and_then(|r| r.description.clone());
+    let req_expires = req.as_ref().and_then(|r| r.expires_in_seconds);
+    let req_reason = req.as_ref().and_then(|r| r.reason.clone());
     let rotate_endpoint = format!("/admin/api-keys/{}/rotate", id);
     let (api_key, key_info) = run_db(&db, "rotate_api_key", move |db| {
         db.rotate_api_key_transactional(crate::auth::RotateApiKeyParams {
@@ -376,7 +373,7 @@ pub async fn rotate_api_key(
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,
                 request_id: None,
-                details: Some(&audit_details),
+                details: audit_details.as_deref(),
                 success: true,
                 error_message: None,
             }),
@@ -407,7 +404,7 @@ pub async fn rotate_api_key(
 pub async fn create_usage_plan(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Json(req): Json<CreateUsagePlanRequest>,
+    ApiJson(req): ApiJson<CreateUsagePlanRequest>,
 ) -> Result<(StatusCode, Json<UsagePlan>), (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
@@ -486,7 +483,7 @@ pub async fn list_usage_plans(
 pub async fn get_usage_plan(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(plan_id): Path<String>,
+    ApiPath(plan_id): ApiPath<String>,
 ) -> Result<Json<UsagePlan>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
@@ -517,8 +514,8 @@ pub async fn get_usage_plan(
 pub async fn update_usage_plan(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(plan_id): Path<String>,
-    Json(req): Json<UpdateUsagePlanRequest>,
+    ApiPath(plan_id): ApiPath<String>,
+    ApiJson(req): ApiJson<UpdateUsagePlanRequest>,
 ) -> Result<Json<UsagePlan>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "put")?;
 
@@ -573,7 +570,7 @@ pub async fn update_usage_plan(
 pub async fn delete_usage_plan(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(plan_id): Path<String>,
+    ApiPath(plan_id): ApiPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
 
@@ -607,11 +604,11 @@ pub async fn delete_usage_plan(
 /// Assign (or clear) usage plan from API key (admin)
 #[utoipa::path(
     put,
-    path = "/admin/api-keys/{id}/plan",
+    path = "/admin/api-keys/{key_id}/plan",
     operation_id = "assignApiKeyPlan",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API key id")
+        ("key_id" = String, Path, description = "API key id")
     ),
     request_body = AssignApiKeyPlanRequest,
     responses(
@@ -624,8 +621,8 @@ pub async fn delete_usage_plan(
 pub async fn assign_api_key_plan(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(id): Path<String>,
-    Json(req): Json<AssignApiKeyPlanRequest>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<AssignApiKeyPlanRequest>,
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "put")?;
 
@@ -659,20 +656,22 @@ pub async fn assign_api_key_plan(
     Ok(Json(updated))
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct QuotaStatusQuery {
+    /// UTC month in YYYY-MM (default: current month)
     pub usage_month: Option<String>,
 }
 
 /// Get monthly quota status for API key (admin)
 #[utoipa::path(
     get,
-    path = "/admin/api-keys/{id}/quota",
+    path = "/admin/api-keys/{key_id}/quota",
     operation_id = "getApiKeyQuotaStatus",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API key id"),
-        ("usage_month" = Option<String>, Query, description = "UTC month in YYYY-MM")
+        ("key_id" = String, Path, description = "API key id"),
+        QuotaStatusQuery
     ),
     responses(
         (status = 200, description = "API key quota status", body = ApiKeyQuotaStatus),
@@ -684,8 +683,8 @@ pub struct QuotaStatusQuery {
 pub async fn get_api_key_quota_status(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(id): Path<String>,
-    Query(params): Query<QuotaStatusQuery>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(params): ApiQuery<QuotaStatusQuery>,
 ) -> Result<Json<ApiKeyQuotaStatus>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
@@ -701,11 +700,11 @@ pub async fn get_api_key_quota_status(
 /// Add monthly quota extension for API key (admin)
 #[utoipa::path(
     post,
-    path = "/admin/api-keys/{id}/quota-extensions",
+    path = "/admin/api-keys/{key_id}/quota-extensions",
     operation_id = "addApiKeyQuotaExtension",
     tag = "API Key Management",
     params(
-        ("id" = String, Path, description = "API key id")
+        ("key_id" = String, Path, description = "API key id")
     ),
     request_body = CreateQuotaExtensionRequest,
     responses(
@@ -719,8 +718,8 @@ pub async fn get_api_key_quota_status(
 pub async fn add_api_key_quota_extension(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(id): Path<String>,
-    Json(req): Json<CreateQuotaExtensionRequest>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<CreateQuotaExtensionRequest>,
 ) -> Result<
     (StatusCode, Json<QuotaExtensionInfo>),
     (StatusCode, Json<ErrorResponse>),
@@ -778,13 +777,14 @@ pub async fn add_api_key_quota_extension(
     responses(
         (status = 201, description = "API key created successfully", body = CreateApiKeyResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 403, description = "Only management keys with user_api_key permission can create service keys", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
 pub async fn create_my_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Json(req): Json<CreateApiKeyRequest>,
+    ApiJson(req): ApiJson<CreateApiKeyRequest>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
@@ -851,18 +851,17 @@ pub async fn create_my_api_key(
     path = "/me/api-keys",
     operation_id = "listMyApiKeys",
     tag = "My Account",
-    params(
-        ("include_revoked" = Option<bool>, Query, description = "Include revoked keys")
-    ),
+    params(ListApiKeysQuery),
     responses(
         (status = 200, description = "List of own API keys", body = Vec<ApiKeyInfo>),
+        (status = 403, description = "Only management keys with user_api_key permission can list service keys", body = ErrorResponse),
     ),
     security(("api_key" = []))
 )]
 pub async fn list_my_api_keys(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(params): Query<ListApiKeysQuery>,
+    ApiQuery(params): ApiQuery<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     if !auth_ctx.is_management_key {
         return Err((
@@ -895,16 +894,17 @@ pub async fn list_my_api_keys(
 /// Revoke own API key
 #[utoipa::path(
     delete,
-    path = "/me/api-keys/{name}",
+    path = "/me/api-keys/{key_id}",
     operation_id = "revokeMyApiKey",
     tag = "My Account",
     params(
-        ("name" = String, Path, description = "API Key name")
+        ("key_id" = String, Path, description = "API Key ID (UUID)"),
+        RevokeApiKeyQuery
     ),
-    request_body = RevokeApiKeyRequest,
     responses(
         (status = 204, description = "API key revoked successfully"),
-        (status = 403, description = "Cannot revoke other user's key", body = ErrorResponse),
+        (status = 400, description = "Cannot revoke the currently used or the management API key", body = ErrorResponse),
+        (status = 403, description = "Only management keys with user_api_key permission can revoke service keys", body = ErrorResponse),
         (status = 404, description = "API key not found", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -912,8 +912,8 @@ pub async fn list_my_api_keys(
 pub async fn revoke_my_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(name): Path<String>,
-    req: Option<Json<RevokeApiKeyRequest>>,
+    ApiPath(key_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<RevokeApiKeyQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     if !auth_ctx.is_management_key {
         return Err((
@@ -933,13 +933,22 @@ pub async fn revoke_my_api_key(
         ));
     }
 
-    // Verify the key belongs to the user and is active by name
+    // Verify the key exists and belongs to the caller. A key owned by
+    // another user is reported as not found to avoid leaking key ids.
     let user_id = auth_ctx.user_id;
-    let lookup_name = name.clone();
-    let key_info = run_db(&db, "get_active_api_key_by_name", move |db| {
-        db.get_active_api_key_by_name(user_id, &lookup_name)
+    let lookup_id = key_id.clone();
+    let key_info = run_db(&db, "get_api_key_for_my_revoke", move |db| {
+        db.get_api_key_info(&lookup_id)
     })
     .await?;
+    if key_info.user_id != user_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "API key not found".to_string(),
+            }),
+        ));
+    }
 
     // Cannot revoke the current key
     if key_info.id == auth_ctx.api_key_id {
@@ -961,14 +970,11 @@ pub async fn revoke_my_api_key(
         ));
     }
 
-    let reason = req.as_ref().and_then(|r| r.reason.clone());
-    let audit_details = req
-        .as_ref()
-        .map(|r| serde_json::to_string(&r.0).unwrap_or_default())
-        .unwrap_or_default();
+    let reason = query.reason.clone();
+    let audit_details = serde_json::to_string(&query).unwrap_or_default();
     let revoke_id = key_info.id.clone();
     let auth_ctx_for_db = auth_ctx.clone();
-    let endpoint = format!("/me/api-keys/{}", name);
+    let endpoint = format!("/me/api-keys/{}", key_id);
     run_db(&db, "revoke_my_api_key", move |db| {
         db.revoke_api_key_transactional(
             &revoke_id,

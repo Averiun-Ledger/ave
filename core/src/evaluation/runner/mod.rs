@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
-    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -10,16 +9,17 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    ContractData, ContractResultData, Namespace, SchemaType, ValueWrapper,
-    identity::PublicKey, schematype::ReservedWords,
+    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
+    schematype::ReservedWords,
 };
-use borsh::{BorshDeserialize, to_vec};
+use ave_contract_sdk::runtime::{
+    CompiledModule, ContractRuntime, RuntimeError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{Span, debug, error, info_span};
-use types::{ContractResult, RunnerResult};
-use wasmtime::{Module, Store, Trap};
+use types::RunnerResult;
 
 use crate::{
     evaluation::runner::{error::RunnerError, types::EvaluateInfo},
@@ -38,10 +38,6 @@ use crate::{
             tracker_schemas_role_event_is_empty,
         },
         model::{CreatorWitness, RoleCreator, Schema},
-    },
-    metrics::try_core_metrics,
-    model::common::contract::{
-        MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
     },
 };
 
@@ -395,134 +391,52 @@ impl Runner {
         contract_name: &str,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
-        let Some(wasm_runtime) = ctx
+        let Some(contract_runtime) = ctx
             .system()
-            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
-            .await
+            .get_helper::<Arc<ContractRuntime>>("contract_runtime")
         else {
             return Err(RunnerError::MissingHelper {
-                name: "wasm_runtime",
+                name: "contract_runtime",
             });
         };
 
-        let Some(contracts) = ctx
-            .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
-                "contracts",
-            )
-            .await
-        else {
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
+        >>("contracts") else {
             return Err(RunnerError::MissingHelper { name: "contracts" });
         };
 
         let module = {
-            let contracts = contracts.read().await;
-            let Some(module) = contracts.get(contract_name) else {
+            let Some(module) =
+                contracts.read().await.get(contract_name).cloned()
+            else {
                 return Err(RunnerError::ContractNotFound {
                     name: contract_name.to_owned(),
                 });
             };
-            let result = module.clone();
-            drop(contracts);
-            result
+            module
         };
 
-        let (context, state_ptr, init_state_ptr, event_ptr) =
-            Self::generate_context(
-                state,
-                init_state,
-                payload,
-                &wasm_runtime.limits,
-            )?;
+        let (result, _stats) = contract_runtime
+            .execute(&module, state, init_state, payload, is_owner)
+            .map_err(map_runtime_error_to_runner_error)?;
 
-        let mut store = Store::new(&wasm_runtime.engine, context);
-
-        // Limit WASM linear memory and table growth to prevent resource exhaustion.
-        store.limiter(|data| &mut data.store_limits);
-
-        store
-            .set_fuel(MAX_FUEL)
-            .map_err(|e| RunnerError::WasmError {
-                operation: "set fuel",
-                details: e.to_string(),
-            })?;
-
-        let linker = generate_linker(&wasm_runtime.engine)?;
-
-        let instance =
-            linker.instantiate(&mut store, &module).map_err(|e| {
-                RunnerError::WasmError {
-                    operation: "instantiate",
-                    details: e.to_string(),
-                }
-            })?;
-
-        let contract_entrypoint = instance
-            .get_typed_func::<(u32, u32, u32, u32), u32>(
-                &mut store,
-                "main_function",
-            )
-            .map_err(|e| RunnerError::WasmError {
-                operation: "get entrypoint main_function",
-                details: e.to_string(),
-            })?;
-
-        let call_result = contract_entrypoint.call(
-            &mut store,
-            (
-                state_ptr,
-                init_state_ptr,
-                event_ptr,
-                if is_owner { 1 } else { 0 },
-            ),
-        );
-
-        // Collect resource metrics regardless of success or failure.
-        let remaining = store.get_fuel().unwrap_or(0);
-        let fuel_consumed = MAX_FUEL.saturating_sub(remaining);
-        let memory_bytes = instance
-            .get_memory(&mut store, "memory")
-            .map(|m| m.size(&store) * 64 * 1024)
-            .unwrap_or(0);
-
-        match call_result {
-            Ok(result_ptr) => {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_contract_fuel_consumed(
-                        "success",
-                        fuel_consumed,
-                    );
-                    metrics
-                        .observe_contract_memory_peak("success", memory_bytes);
-                }
-
-                let result = Self::get_result(&store, result_ptr)?;
-                Ok((
-                    RunnerResult {
-                        approval_required: false,
-                        final_state: result.final_state,
-                    },
-                    vec![],
-                ))
-            }
-            Err(e) => {
-                if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel)
-                    && let Some(metrics) = try_core_metrics()
-                {
-                    metrics.observe_contract_fuel_exhausted();
-                }
-
-                if let Some(metrics) = try_core_metrics() {
-                    metrics
-                        .observe_contract_fuel_consumed("error", fuel_consumed);
-                    metrics.observe_contract_memory_peak("error", memory_bytes);
-                }
-                Err(RunnerError::WasmError {
-                    operation: "call entrypoint",
-                    details: e.to_string(),
-                })
-            }
+        if !result.success {
+            return Err(RunnerError::ContractFailed {
+                details: format!(
+                    "Contract execution in running was not successful: {}",
+                    result.error
+                ),
+            });
         }
+
+        Ok((
+            RunnerResult {
+                approval_required: false,
+                final_state: result.final_state,
+            },
+            vec![],
+        ))
     }
 
     async fn execute_fact_gov(
@@ -1554,101 +1468,50 @@ impl Runner {
 
         Ok(remove_members)
     }
+}
 
-    fn generate_context(
-        state: &ValueWrapper,
-        init_state: &ValueWrapper,
-        event: &ValueWrapper,
-        limits: &WasmLimits,
-    ) -> Result<(MemoryManager, u32, u32, u32), RunnerError> {
-        let mut context = MemoryManager::from_limits(limits);
-
-        let state_data =
-            ContractData::from_json_value(&state.0).map_err(|e| {
-                RunnerError::SerializationError {
-                    context: "serialize state to JSON bytes",
-                    details: e.to_string(),
-                }
-            })?;
-        let state_bytes = to_vec(&state_data).map_err(|e| {
-            RunnerError::SerializationError {
-                context: "serialize state",
-                details: e.to_string(),
+fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
+    match error {
+        RuntimeError::EngineCreation(details)
+        | RuntimeError::PrecompileFailed(details)
+        | RuntimeError::DeserializationFailed(details) => {
+            RunnerError::WasmError {
+                operation: "compile module",
+                details,
             }
-        })?;
-        let state_ptr = context.add_data_raw(&state_bytes)?;
-
-        let init_state_data = ContractData::from_json_value(&init_state.0)
-            .map_err(|e| RunnerError::SerializationError {
-                context: "serialize init_state to JSON bytes",
-                details: e.to_string(),
-            })?;
-        let init_state_bytes = to_vec(&init_state_data).map_err(|e| {
-            RunnerError::SerializationError {
-                context: "serialize init_state",
-                details: e.to_string(),
+        }
+        RuntimeError::InvalidModule(kind) => RunnerError::WasmError {
+            operation: "validate module",
+            details: kind.to_string(),
+        },
+        RuntimeError::EntryPointNotFound { function } => {
+            RunnerError::WasmError {
+                operation: "resolve entrypoint",
+                details: format!("entry point not found: {}", function),
             }
-        })?;
-        let init_state_ptr = context.add_data_raw(&init_state_bytes)?;
-
-        let event_data =
-            ContractData::from_json_value(&event.0).map_err(|e| {
-                RunnerError::SerializationError {
-                    context: "serialize event to JSON bytes",
-                    details: e.to_string(),
-                }
-            })?;
-        let event_bytes = to_vec(&event_data).map_err(|e| {
-            RunnerError::SerializationError {
-                context: "serialize event",
-                details: e.to_string(),
+        }
+        RuntimeError::ContractExecutionFailed(details) => {
+            RunnerError::WasmError {
+                operation: "call entrypoint",
+                details,
             }
-        })?;
-        let event_ptr = context.add_data_raw(&event_bytes)?;
-
-        Ok((
-            context,
-            state_ptr as u32,
-            init_state_ptr as u32,
-            event_ptr as u32,
-        ))
-    }
-
-    fn get_result(
-        store: &Store<MemoryManager>,
-        pointer: u32,
-    ) -> Result<ContractResult, RunnerError> {
-        let bytes = store.data().read_data(pointer as usize)?;
-
-        let contract_result: ContractResultData =
-            BorshDeserialize::try_from_slice(bytes).map_err(|e| {
-                RunnerError::SerializationError {
-                    context: "deserialize ContractResultData",
-                    details: e.to_string(),
-                }
-            })?;
-
-        if contract_result.success {
-            let final_state_json = contract_result
-                .final_state
-                .to_json_value()
-                .map_err(|e| RunnerError::SerializationError {
-                    context: "parse final_state JSON",
-                    details: e.to_string(),
-                })?;
-
-            Ok(ContractResult {
-                final_state: ValueWrapper(final_state_json),
-                success: true,
-                error: String::new(),
-            })
-        } else {
-            Err(RunnerError::ContractFailed {
-                details: format!(
-                    "Contract execution in running was not successful: {}",
-                    contract_result.error
-                ),
-            })
+        }
+        RuntimeError::FuelLimitError(details) => RunnerError::WasmError {
+            operation: "set fuel",
+            details,
+        },
+        RuntimeError::InstantiationFailed(details) => RunnerError::WasmError {
+            operation: "instantiate",
+            details,
+        },
+        RuntimeError::MemoryAllocationFailed(details) => {
+            RunnerError::MemoryError {
+                operation: "contract memory operation",
+                details,
+            }
+        }
+        RuntimeError::SerializationError { context, details } => {
+            RunnerError::SerializationError { context, details }
         }
     }
 }
@@ -1699,15 +1562,8 @@ impl Handler<Self> for Runner {
         msg: RunnerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {
-        let started_at = Instant::now();
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
             Ok((result, compilations)) => {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_contract_execution(
-                        "success",
-                        started_at.elapsed(),
-                    );
-                }
                 debug!(
                     msg_type = "Execute",
                     approval_required = result.approval_required,
@@ -1721,12 +1577,6 @@ impl Handler<Self> for Runner {
                 })
             }
             Err(e) => {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_contract_execution(
-                        "error",
-                        started_at.elapsed(),
-                    );
-                }
                 error!(
                     msg_type = "Execute",
                     error = %e,

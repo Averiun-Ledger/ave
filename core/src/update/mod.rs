@@ -220,7 +220,7 @@ impl Update {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let children = ctx.system().children(ctx.path()).await;
+        let children = ctx.system().children(ctx.path());
         for child_path in children {
             let Ok(child) =
                 ctx.system().get_actor::<Updater>(&child_path).await
@@ -499,6 +499,9 @@ impl Handler<Self> for Update {
                 }
 
                 if attempt >= self.max_round_retries {
+                    if let Some(metrics) = crate::metrics::try_core_metrics() {
+                        metrics.observe_update_retries_exceeded();
+                    }
                     warn!(
                         msg_type = "RetryRound",
                         subject_id = %self.subject_id,

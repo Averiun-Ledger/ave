@@ -14,21 +14,21 @@ use std::{sync::Arc, time::Duration};
 use ave_http::auth::{
     AuthDatabase,
     admin_handlers::{
-        RemovePermissionQuery, assign_role, remove_role,
-        remove_role_permission, remove_user_permission, set_role_permission,
-        set_user_permission, update_user,
+        RemovePermissionQuery, ResetPasswordRequest, assign_role, delete_user,
+        remove_role, remove_role_permission, remove_user_permission,
+        reset_user_password, set_role_permission, set_user_permission,
+        update_user,
     },
-    middleware::AuthContextExtractor,
+    apikey_handlers::revoke_api_key,
+    middleware::{ApiKeyAuthNew, AuthContextExtractor},
     models::{
-        AuthContext, Permission, SetPermissionRequest, SystemConfigValue,
-        UpdateUserRequest,
+        AuthContext, Permission, RevokeApiKeyQuery, SetPermissionRequest,
+        SystemConfigValue, UpdateSystemConfigRequest, UpdateUserRequest, User,
     },
+    system_handlers::update_system_config,
 };
-use axum::{
-    Extension, Json,
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use ave_http::extract::{ApiJson, ApiPath, ApiQuery};
+use axum::{Extension, Json, extract::FromRequestParts, http::StatusCode};
 use std::collections::BTreeSet;
 
 fn metric_value(metrics: &str, name: &str) -> f64 {
@@ -652,8 +652,8 @@ async fn non_superadmin_cannot_modify_permissions_of_admin_via_role_inheritance(
     let result = set_user_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(target.id),
-        Json(Permission {
+        ApiPath(target.id),
+        ApiJson(Permission {
             resource: "admin_system".to_string(),
             action: "all".to_string(),
             allowed: true,
@@ -723,8 +723,8 @@ async fn non_superadmin_cannot_remove_permissions_of_admin_via_role_inheritance(
     let result = remove_user_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(target.id),
-        Query(RemovePermissionQuery {
+        ApiPath(target.id),
+        ApiQuery(RemovePermissionQuery {
             resource: "node_subject".to_string(),
             action: "get".to_string(),
         }),
@@ -732,6 +732,366 @@ async fn non_superadmin_cannot_remove_permissions_of_admin_via_role_inheritance(
     .await;
 
     assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+}
+
+// =============================================================================
+// ADMIN ESCALATION GUARDS
+// =============================================================================
+
+/// Build an AuthContext for a persisted user with its effective permissions
+fn auth_ctx_for_user(db: &AuthDatabase, user: &User) -> Arc<AuthContext> {
+    let permissions = db.get_effective_permissions(user.id).unwrap();
+    let roles = db.get_user_roles(user.id).unwrap();
+    Arc::new(AuthContext {
+        user_id: user.id,
+        username: user.username.clone(),
+        roles,
+        permissions,
+        api_key_id: "test-key".to_string(),
+        is_management_key: true,
+        ip_address: None,
+    })
+}
+
+/// Create a role holding `admin_users:all` plus the given extra permissions
+fn create_admin_role(
+    db: &AuthDatabase,
+    name: &str,
+    extra: &[(&str, &str)],
+) -> i64 {
+    let role = db.create_role(name, Some("Test admin role")).unwrap();
+    db.set_role_permission(role.id, "admin_users", "all", true)
+        .unwrap();
+    for (resource, action) in extra {
+        db.set_role_permission(role.id, resource, action, true)
+            .unwrap();
+    }
+    role.id
+}
+
+fn create_user_with_role(
+    db: &AuthDatabase,
+    username: &str,
+    role_id: i64,
+) -> User {
+    db.create_user(username, "Password123!", Some(vec![role_id]), None, None)
+        .unwrap()
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_grant_permission_they_do_not_have() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "escalation_grant_actor", &[]);
+    let actor = create_user_with_role(&db, "escalation_grant_actor", role_id);
+    let target = db
+        .create_user(
+            "escalation_grant_puppet",
+            "Password123!",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    let result = set_user_permission(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(Permission {
+            resource: "node_sink".to_string(),
+            action: "all".to_string(),
+            allowed: true,
+            is_system: None,
+            source: None,
+            role_name: None,
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    assert!(
+        !db.get_effective_permissions(target.id)
+            .unwrap()
+            .iter()
+            .any(|p| p.resource == "node_sink" && p.allowed),
+        "puppet must not gain permissions the granter does not have"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_can_grant_permission_they_have() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id =
+        create_admin_role(&db, "delegation_actor", &[("node_subject", "get")]);
+    let actor = create_user_with_role(&db, "delegation_actor", role_id);
+    let target = db
+        .create_user("delegation_target", "Password123!", None, None, None)
+        .unwrap();
+
+    let result = set_user_permission(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(Permission {
+            resource: "node_subject".to_string(),
+            action: "get".to_string(),
+            allowed: true,
+            is_system: None,
+            source: None,
+            role_name: None,
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(StatusCode::OK)));
+    assert!(
+        db.get_effective_permissions(target.id)
+            .unwrap()
+            .iter()
+            .any(|p| p.resource == "node_subject"
+                && p.action == "get"
+                && p.allowed),
+        "legitimate delegation must persist the override"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_remove_permission_they_do_not_have() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "escalation_remove_actor", &[]);
+    let actor = create_user_with_role(&db, "escalation_remove_actor", role_id);
+    let target = db
+        .create_user(
+            "escalation_remove_target",
+            "Password123!",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    db.set_user_permission(
+        target.id,
+        "node_subject",
+        "get",
+        true,
+        Some(actor.id),
+    )
+    .unwrap();
+
+    let result = remove_user_permission(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiQuery(RemovePermissionQuery {
+            resource: "node_subject".to_string(),
+            action: "get".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    assert!(
+        db.get_effective_permissions(target.id)
+            .unwrap()
+            .iter()
+            .any(|p| p.resource == "node_subject"
+                && p.action == "get"
+                && p.allowed),
+        "override must survive an unauthorized removal attempt"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_reset_password_of_admin() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "reset_guard_role", &[]);
+    let actor = create_user_with_role(&db, "reset_guard_actor", role_id);
+    let target = create_user_with_role(&db, "reset_guard_target", role_id);
+
+    let result = reset_user_password(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(ResetPasswordRequest {
+            password: "NewPass123!".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_delete_admin() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "delete_guard_role", &[]);
+    let actor = create_user_with_role(&db, "delete_guard_actor", role_id);
+    let target = create_user_with_role(&db, "delete_guard_target", role_id);
+
+    let result = delete_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+    )
+    .await;
+
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    assert!(
+        db.get_user_by_id(target.id).is_ok(),
+        "admin target must survive an unauthorized delete attempt"
+    );
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_cannot_update_admin_account() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "update_guard_role", &[]);
+    let actor = create_user_with_role(&db, "update_guard_actor", role_id);
+    let target = create_user_with_role(&db, "update_guard_target", role_id);
+
+    // Deactivation attempt
+    let result = update_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(UpdateUserRequest {
+            password: None,
+            is_active: Some(false),
+            role_ids: None,
+        }),
+    )
+    .await;
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+
+    // Password change attempt
+    let result = update_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(UpdateUserRequest {
+            password: Some("NewPass123!".to_string()),
+            is_active: None,
+            role_ids: None,
+        }),
+    )
+    .await;
+    assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+
+    let persisted = db.get_user_by_id(target.id).unwrap();
+    assert!(persisted.is_active, "admin target must stay active");
+}
+
+#[test(tokio::test)]
+async fn non_superadmin_can_manage_regular_users() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id = create_admin_role(&db, "regular_admin_role", &[]);
+    let actor = create_user_with_role(&db, "regular_admin_actor", role_id);
+    let target = db
+        .create_user("regular_admin_target", "Password123!", None, None, None)
+        .unwrap();
+
+    let result = reset_user_password(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(ResetPasswordRequest {
+            password: "NewPass123!".to_string(),
+        }),
+    )
+    .await;
+    assert!(matches!(result, Ok(StatusCode::OK)));
+
+    let result = update_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+        ApiJson(UpdateUserRequest {
+            password: None,
+            is_active: Some(true),
+            role_ids: None,
+        }),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "admin must update regular users: {result:?}"
+    );
+
+    let result = delete_user(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(target.id),
+    )
+    .await;
+    assert!(matches!(result, Ok(StatusCode::NO_CONTENT)));
+}
+
+// =============================================================================
+// API KEY EXTRACTOR
+// =============================================================================
+
+#[test(tokio::test)]
+async fn api_key_extractor_reuses_auth_context_from_previous_layer() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let build_parts = |with_previous_context: bool| {
+        let request = axum::http::Request::builder()
+            .uri("/peer-id")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        parts.extensions.insert(db.clone());
+        if with_previous_context {
+            // Simulates the authentication layer having already validated
+            // the request (the handler-level extraction must reuse it)
+            parts.extensions.insert(Arc::new(AuthContext {
+                user_id: 1,
+                username: "layer-authenticated".to_string(),
+                roles: vec![],
+                permissions: vec![],
+                api_key_id: "test-key".to_string(),
+                is_management_key: true,
+                ip_address: None,
+            }));
+        }
+        parts
+    };
+
+    // Without a previous layer context, the extractor runs the full pipeline
+    // and rejects the missing credentials
+    let mut parts = build_parts(false);
+    let result = <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
+        &mut parts,
+        &(),
+    )
+    .await;
+    assert!(matches!(result, Err((StatusCode::UNAUTHORIZED, _))));
+
+    // With a context already authenticated by the layer, the extractor must
+    // not re-run the pipeline: no credentials required, no extra DB auth,
+    // rate-limit or quota consumption
+    let mut parts = build_parts(true);
+    let result = <ApiKeyAuthNew as FromRequestParts<()>>::from_request_parts(
+        &mut parts,
+        &(),
+    )
+    .await;
+    assert!(result.is_ok());
 }
 
 #[test(tokio::test)]
@@ -1452,12 +1812,12 @@ async fn test_crlf_injection_prevented_in_text_fields() {
 async fn test_cors_configuration_security() {
     use ave_bridge::CorsConfig;
 
-    // Test 1: Default configuration (permissive - development mode)
+    // Test 1: Default configuration (secure by default - deny all origins)
     let default_config = CorsConfig::default();
     assert!(default_config.enabled, "CORS should be enabled by default");
     assert!(
-        default_config.allow_any_origin,
-        "Default allows any origin (for development)"
+        !default_config.allow_any_origin,
+        "Default denies any origin (secure by default)"
     );
     assert_eq!(default_config.allowed_origins.len(), 0);
     assert!(
@@ -1980,8 +2340,8 @@ async fn test_cannot_escalate_privileges_via_role_permission_modification() {
     let result = set_role_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(role_manager_role.id),
-        Json(SetPermissionRequest {
+        ApiPath(role_manager_role.id),
+        ApiJson(SetPermissionRequest {
             resource: "admin_users".to_string(),
             action: "all".to_string(),
             allowed: true,
@@ -2041,8 +2401,8 @@ async fn test_cannot_remove_role_permission_denials() {
     let result = remove_role_permission(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(limited_admin_role.id),
-        Query(RemovePermissionQuery {
+        ApiPath(limited_admin_role.id),
+        ApiQuery(RemovePermissionQuery {
             resource: "admin_system".to_string(),
             action: "all".to_string(),
         }),
@@ -2341,8 +2701,8 @@ async fn test_cannot_change_superadmin_password_via_update() {
     let result = update_user(
         AuthContextExtractor(auth_ctx),
         Extension(db.clone()),
-        Path(superadmin.id),
-        Json(UpdateUserRequest {
+        ApiPath(superadmin.id),
+        ApiJson(UpdateUserRequest {
             password: Some("HackedPass123!".to_string()),
             is_active: None,
             role_ids: None,
@@ -2446,6 +2806,180 @@ async fn test_api_keys_blocked_when_must_change_password() {
         auth_result.is_ok(),
         "API key should work after password has been changed"
     );
+}
+
+/// SECURITY REGRESSION TEST:
+/// API keys of a deleted user must fail authentication with a generic
+/// permission error (401), not an internal error (500).
+#[test(tokio::test)]
+async fn test_api_key_of_deleted_user_is_rejected_as_invalid() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("doomed_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (api_key, _) = db
+        .create_api_key(user.id, Some("doomed_key"), None, None, true)
+        .unwrap();
+
+    // The key authenticates while the user exists.
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
+
+    db.delete_user(user.id).unwrap();
+
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    assert!(
+        matches!(result, Err(DatabaseError::PermissionDenied(_))),
+        "deleted user's key must be a permission error, got {result:?}"
+    );
+}
+
+/// SECURITY REGRESSION TEST:
+/// Failed current-password attempts on the change-password flow feed the
+/// same lockout counter as the login flow, and every rejection uses the
+/// generic "Invalid username or password" message (no account-state
+/// oracle).
+#[test(tokio::test)]
+async fn test_change_password_feeds_lockout_and_stays_generic() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("lockme", "InitialPass123!", None, None, Some(false))
+        .unwrap();
+    // Force the password change requirement so the endpoint is usable.
+    db.admin_reset_password(user.id, "ResetPass123!").unwrap();
+
+    // Wrong current passwords must increment the counter and, at the
+    // threshold, lock the account.
+    for _ in 0..5 {
+        let result = db.change_password_with_credentials(
+            "lockme",
+            "WrongPass!",
+            "AnotherPass123!",
+        );
+        assert!(
+            matches!(result, Err(DatabaseError::PermissionDenied(_))),
+            "wrong current password must be denied: {result:?}"
+        );
+    }
+
+    // Once locked, even the correct current password is rejected with the
+    // generic message.
+    let result = db.change_password_with_credentials(
+        "lockme",
+        "ResetPass123!",
+        "AnotherPass123!",
+    );
+    match result {
+        Err(DatabaseError::PermissionDenied(message)) => {
+            assert_eq!(message, "Invalid username or password");
+        }
+        other => panic!("expected generic PermissionDenied, got {other:?}"),
+    }
+
+    // Valid credentials without the change requirement are rejected with
+    // the same generic message (no "password is correct" oracle).
+    db.create_user("plain", "PlainPass123!", None, None, Some(false))
+        .unwrap();
+    let result = db.change_password_with_credentials(
+        "plain",
+        "PlainPass123!",
+        "NewPlainPass123!",
+    );
+    match result {
+        Err(DatabaseError::PermissionDenied(message)) => {
+            assert_eq!(message, "Invalid username or password");
+        }
+        other => panic!("expected generic PermissionDenied, got {other:?}"),
+    }
+}
+
+/// SECURITY REGRESSION TEST:
+/// Revoking another user's key as a non-superadmin must return 404 — the
+/// same status as a nonexistent key — so key ids cannot be enumerated via
+/// the 403/404 split.
+#[test(tokio::test)]
+async fn non_superadmin_revoke_other_user_key_is_indistinguishable_from_missing()
+ {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id =
+        create_admin_role(&db, "key_revoker", &[("admin_api_key", "delete")]);
+    let actor = create_user_with_role(&db, "key_revoker", role_id);
+    let victim = db
+        .create_user("key_victim", "Password123!", None, None, None)
+        .unwrap();
+    let (_, victim_key) = db
+        .create_api_key(victim.id, Some("victim_key"), None, None, false)
+        .unwrap();
+
+    // Another user's key -> 404 (not 403)
+    let result = revoke_api_key(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath(victim_key.id.clone()),
+        ApiQuery(RevokeApiKeyQuery { reason: None }),
+    )
+    .await;
+    match result {
+        Err((StatusCode::NOT_FOUND, _)) => {}
+        other => panic!("expected 404 for another user's key, got {other:?}"),
+    }
+
+    // A nonexistent key -> also 404
+    let result = revoke_api_key(
+        AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+        Extension(db.clone()),
+        ApiPath("00000000-0000-0000-0000-000000000000".to_string()),
+        ApiQuery(RevokeApiKeyQuery { reason: None }),
+    )
+    .await;
+    match result {
+        Err((StatusCode::NOT_FOUND, _)) => {}
+        other => panic!("expected 404 for a missing key, got {other:?}"),
+    }
+
+    // The victim's key is untouched
+    assert!(!db.get_api_key_info(&victim_key.id).unwrap().revoked);
+}
+
+/// SECURITY REGRESSION TEST:
+/// The rate-limit geometry switches (`rate_limit_limit_by_ip` /
+/// `rate_limit_limit_by_key`) are security-sensitive: only the superadmin
+/// may flip them, like `rate_limit_enable` and `audit_enable`.
+#[test(tokio::test)]
+async fn non_superadmin_cannot_change_rate_limit_geometry() {
+    let (db, _dirs) = common::create_test_db();
+    let db = Arc::new(db);
+
+    let role_id =
+        create_admin_role(&db, "config_actor", &[("admin_system", "put")]);
+    let actor = create_user_with_role(&db, "config_actor", role_id);
+
+    for key in [
+        "rate_limit_limit_by_ip",
+        "rate_limit_limit_by_key",
+        "rate_limit_enable",
+        "audit_enable",
+    ] {
+        let result = update_system_config(
+            AuthContextExtractor(auth_ctx_for_user(&db, &actor)),
+            Extension(db.clone()),
+            ApiPath(key.to_string()),
+            ApiJson(UpdateSystemConfigRequest {
+                value: SystemConfigValue::Boolean(false),
+            }),
+        )
+        .await;
+        match result {
+            Err((StatusCode::FORBIDDEN, _)) => {}
+            other => panic!("expected 403 flipping {key}, got {other:?}"),
+        }
+    }
 }
 
 /// SECURITY TEST: Superadmin can change their own password
@@ -2618,8 +3152,8 @@ async fn test_deleting_role_removes_from_all_users() {
     db.assign_role_to_user(user2.id, role.id, None).unwrap();
 
     // Verify both have permissions
-    assert!(db.get_effective_permissions(user1.id).unwrap().len() > 0);
-    assert!(db.get_effective_permissions(user2.id).unwrap().len() > 0);
+    assert!(!db.get_effective_permissions(user1.id).unwrap().is_empty());
+    assert!(!db.get_effective_permissions(user2.id).unwrap().is_empty());
 
     // Delete role
     db.delete_role(role.id).unwrap();
@@ -2853,7 +3387,7 @@ async fn test_admin_cannot_assign_role_to_other_admin() {
     let result = assign_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((admin_target.id, editor_role.id)),
+        ApiPath((admin_target.id, editor_role.id)),
     )
     .await;
 
@@ -2924,7 +3458,7 @@ async fn test_admin_cannot_remove_role_from_other_admin() {
     let result = remove_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((admin_target.id, system_admin_role.id)),
+        ApiPath((admin_target.id, system_admin_role.id)),
     )
     .await;
 
@@ -2993,7 +3527,7 @@ async fn test_admin_can_assign_role_to_regular_user() {
     let result = assign_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((regular_user.id, viewer_role.id)),
+        ApiPath((regular_user.id, viewer_role.id)),
     )
     .await;
 
@@ -3050,7 +3584,7 @@ async fn test_superadmin_can_assign_role_to_admin() {
     let result = assign_role(
         AuthContextExtractor(auth_ctx.clone()),
         Extension(db.clone()),
-        Path((other_admin.id, admin_role.id)),
+        ApiPath((other_admin.id, admin_role.id)),
     )
     .await;
 
@@ -3118,7 +3652,7 @@ async fn test_permission_source_field_distinguishes_direct_and_role_permissions(
     let result = get_user_permissions(
         AuthContextExtractor(auth_ctx),
         Extension(Arc::new(db.clone())),
-        Path(user.id),
+        ApiPath(user.id),
     )
     .await;
 
@@ -3231,7 +3765,7 @@ async fn test_direct_permission_overrides_role_permission() {
     let result = get_user_permissions(
         AuthContextExtractor(auth_ctx),
         Extension(Arc::new(db.clone())),
-        Path(user.id),
+        ApiPath(user.id),
     )
     .await;
 
@@ -3254,10 +3788,7 @@ async fn test_direct_permission_overrides_role_permission() {
     );
 
     // Should be denied
-    assert_eq!(
-        perm.allowed, false,
-        "Direct deny should override role allow"
-    );
+    assert!(!perm.allowed, "Direct deny should override role allow");
 
     // Should NOT have role_name since it's a direct permission
     assert!(
@@ -3323,8 +3854,8 @@ async fn test_direct_deny_blocks_role_allow_functionally() {
 
     // CRITICAL: The effective permission should be DENIED (false)
     // because direct permission overrides role permission
-    assert_eq!(
-        get_perm.allowed, false,
+    assert!(
+        !get_perm.allowed,
         "Direct deny should override role 'all' permission - user should be BLOCKED"
     );
 
@@ -3344,7 +3875,7 @@ async fn test_direct_deny_blocks_role_allow_functionally() {
     let user_roles = db.get_user_roles(user.id).unwrap();
     let auth_ctx = AuthContext {
         user_id: user.id,
-        username: user.username.clone(),
+        username: user.username,
         roles: user_roles,
         permissions: effective_perms,
         api_key_id: "test-key".to_string(),
@@ -3376,7 +3907,7 @@ async fn test_service_key_cannot_manage_api_keys() {
     use ave_http::auth::apikey_handlers::{
         create_my_api_key, revoke_my_api_key,
     };
-    use ave_http::auth::models::CreateApiKeyRequest;
+    use ave_http::auth::models::{CreateApiKeyRequest, RevokeApiKeyQuery};
 
     let (db, _dirs) = common::create_test_db();
 
@@ -3421,7 +3952,7 @@ async fn test_service_key_cannot_manage_api_keys() {
     let result = create_my_api_key(
         AuthContextExtractor(management_ctx.clone()),
         Extension(Arc::new(db.clone())),
-        Json(create_req),
+        ApiJson(create_req),
     )
     .await;
 
@@ -3460,7 +3991,7 @@ async fn test_service_key_cannot_manage_api_keys() {
     let result = create_my_api_key(
         AuthContextExtractor(service_ctx.clone()),
         Extension(Arc::new(db.clone())),
-        Json(create_req2),
+        ApiJson(create_req2),
     )
     .await;
 
@@ -3480,8 +4011,8 @@ async fn test_service_key_cannot_manage_api_keys() {
     let result = revoke_my_api_key(
         AuthContextExtractor(service_ctx),
         Extension(Arc::new(db.clone())),
-        Path(service_info.name.clone()),
-        None,
+        ApiPath(service_info.name.clone()),
+        ApiQuery(RevokeApiKeyQuery { reason: None }),
     )
     .await;
 

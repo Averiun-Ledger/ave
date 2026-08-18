@@ -1,6 +1,8 @@
 mod common;
 
-use std::{collections::BTreeSet, sync::atomic::Ordering};
+use std::{
+    collections::BTreeSet, collections::HashMap, sync::atomic::Ordering,
+};
 
 use ave_common::{
     SinkTarget, SinkTypes,
@@ -12,7 +14,11 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
-    sink::{DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
+    sink::{
+        DataToSinkEvent, HttpProxyConfig, HttpTlsConfig, IncomingSinkEvent,
+        OAuth2GrantType, SinkAuthConfig, SinkAuthMethod, SinkCompression,
+        SinkTransportConfig,
+    },
 };
 use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
 use ave_network::NodeType;
@@ -24,10 +30,10 @@ use tracing_test::traced_test;
 
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
-    create_and_authorize_governance, create_node, create_nodes_and_connections,
-    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
-    emit_fact_viewpoints, emit_reject, emit_transfer, get_subject,
-    node_running,
+    TempEnvVar, create_and_authorize_governance, create_node,
+    create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
+    emit_eol, emit_fact, emit_fact_viewpoints, emit_reject, emit_transfer,
+    get_subject, node_running,
     sink_setup::{
         assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
@@ -46,16 +52,51 @@ use crate::common::{
         example_schema_governance_fact, example_sink_config,
         flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
-        make_governance_sink_entry, make_sink_entry, make_sink_entry_with_auth,
-        make_sink_entry_with_concurrency, restart_config,
-        restart_config_safe_mode, restart_config_with_peers, sample_sinks,
-        short_idle_sink_config, transient_error_sink_config,
-        wait_for_sink_blocked, wait_for_sink_lagging_subjects,
-        wait_for_sink_unblocked,
+        make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
+        make_sink_entry_with_auth, make_sink_entry_with_concurrency,
+        make_sink_entry_with_headers, make_sink_entry_with_proxy,
+        make_sink_entry_with_retry_policy, make_sink_entry_with_signature,
+        make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
+        restart_config, restart_config_safe_mode, restart_config_with_peers,
+        sample_sinks, short_idle_sink_config, transient_error_sink_config,
+        wait_for_sink_blocked, wait_for_sink_caught_up,
+        wait_for_sink_lagging_subjects, wait_for_sink_unblocked,
     },
-    test_sink::{AuthResponseMode, ResponseMode, TestSink},
+    test_sink::{AuthResponseMode, ResponseMode, TestProxy, TestSink},
 };
 use ave_network::RoutingNode;
+
+/// Poll the test sink until the number of raw events stabilizes (no new
+/// arrivals for a few consecutive checks), tolerating slow or loaded systems.
+/// Returns the final raw event list.
+async fn wait_for_sink_events_stable(
+    sink: &TestSink,
+) -> Vec<IncomingSinkEvent> {
+    let mut attempts = 0;
+    let mut last_count = 0;
+    let mut stable_iterations = 0;
+    loop {
+        let events = sink.snapshot().await;
+        let current_count = events.len();
+        if current_count == last_count {
+            stable_iterations += 1;
+            if stable_iterations >= 3 {
+                return events;
+            }
+        } else {
+            stable_iterations = 0;
+        }
+        last_count = current_count;
+        if attempts > 40 {
+            panic!(
+                "sink event count did not stabilize after 4s; current: {}",
+                current_count
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+}
 
 #[traced_test]
 #[tokio::test]
@@ -112,11 +153,336 @@ async fn get_sinks_status_returns_configured_sinks() {
     let names: Vec<_> = statuses.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"gov-sink"));
     assert!(names.contains(&"schema-sink"));
+    assert!(
+        statuses
+            .iter()
+            .all(|s| s.transport.as_deref() == Some("http")),
+        "sample sinks should report the http transport kind"
+    );
 }
 
 #[traced_test]
 #[tokio::test]
-async fn delete_sink_cursors_fails_outside_safe_mode() {
+async fn sink_custom_headers_are_delivered_and_internal_headers_override() {
+    let sink = TestSink::start().await;
+    let mut headers = HashMap::new();
+    headers.insert("X-Custom-Header".to_owned(), "custom-value".to_owned());
+    // Internal headers take precedence: the sink must still send JSON.
+    headers.insert("Content-Type".to_owned(), "text/plain".to_owned());
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_headers(
+            "example-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            headers,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    create_subject(&node.api, governance_id, "Example", "", true)
+        .await
+        .unwrap();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    assert_eq!(
+        sink.last_header("X-Custom-Header").await.as_deref(),
+        Some("custom-value")
+    );
+    assert_eq!(
+        sink.last_header("Content-Type").await.as_deref(),
+        Some("application/json")
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn sink_event_type_url_template_routes_by_type() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "example-sink",
+            format!("{}/{{{{event-type}}}}", sink.url()),
+            Some(governance_id.to_string()),
+            // Filtered to Create: facts arrive as lightweight events, so the
+            // test exercises the `{{event-type}}` routing of both `send`
+            // (full create) and `send_light` (light fact).
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+    let governance_id_str = governance_id.to_string();
+    emit_fact(&node.api, subject_id, json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+
+    sink.wait_for_count(2, true).await;
+
+    // Deliveries are ordered per subject: create (sn 0) before fact (sn 1).
+    assert_eq!(sink.paths().await, vec!["/events/create", "/events/fact"]);
+
+    // The create arrived as a full event and the fact as a light one.
+    let events = sink.snapshot().await;
+    assert_sink_contains_create(&events, &subject_id_str, 0);
+    assert_sink_contains_light_fact(
+        &events,
+        &subject_id_str,
+        &governance_id_str,
+        1,
+        true,
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_event_type_url_groups_by_type() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "example-sink",
+            format!("{}/{{{{event-type}}}}", sink.url()),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    sink.wait_for_count(3, true).await;
+
+    // Every POST went to the route of its event type; the exact flush split
+    // depends on batch timing, so only the routing is asserted.
+    let paths = sink.paths().await;
+    assert!(
+        paths
+            .iter()
+            .all(|p| p == "/events/create" || p == "/events/fact"),
+        "unexpected request paths: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().filter(|p| *p == "/events/create").count(),
+        1,
+        "the create event must be delivered exactly once: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "/events/fact"),
+        "fact events must reach the fact route: {paths:?}"
+    );
+    let lens = sink.batch_lens().await;
+    assert_eq!(
+        lens.iter().sum::<usize>(),
+        3,
+        "all three events must be accepted: {lens:?}"
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn sink_last_error_is_reported_after_delivery_failure() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+
+    sink.wait_for_count(1, true).await;
+
+    // Make the sink fail every delivery.
+    sink.set_mode(ResponseMode::ServerError).await;
+
+    emit_fact(&node.api, subject_id, json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+
+    // The worker schedules periodic healthchecks that may clear last_error on
+    // recovery; poll briefly to observe the error before any transient recovery.
+    let mut found = false;
+    for _ in 0..20 {
+        let statuses = node.api.get_sinks_status().await.unwrap();
+        if let Some(status) = statuses.iter().find(|s| s.name == "example-sink")
+            && status.last_error.is_some()
+        {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "last_error should be set after a delivery failure");
+}
+
+#[traced_test]
+#[tokio::test]
+async fn reset_sink_cursors_fails_outside_safe_mode() {
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
@@ -129,7 +495,7 @@ async fn delete_sink_cursors_fails_outside_safe_mode() {
 
     let err = node
         .api
-        .delete_sink_cursors("gov-sink".to_owned())
+        .reset_sink_cursors("gov-sink".to_owned())
         .await
         .unwrap_err();
     assert!(
@@ -254,6 +620,7 @@ async fn replay_single_subject_after_sink_loss() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(6, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 6);
@@ -267,6 +634,15 @@ async fn replay_single_subject_after_sink_loss() {
             Some(json!({"ModOne": {"data": i}})),
         );
     }
+
+    // A sink without `signature: true` must not send signature headers.
+    let signature_headers = sink.signature_headers().await;
+    assert!(
+        signature_headers.iter().all(|h| h.signature.is_none()
+            && h.timestamp.is_none()
+            && h.public_key.is_none()),
+        "a sink without `signature: true` must not send X-Ave-Signature* headers"
+    );
 
     // Simulate a crashed sink: accept TCP but never respond to delivery requests.
     sink.set_mode(ResponseMode::Drop).await;
@@ -290,6 +666,7 @@ async fn replay_single_subject_after_sink_loss() {
     // Bring the sink back online. The worker should automatically catch up.
     sink.set_mode(ResponseMode::Accept).await;
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     let recovered = sink.snapshot().await;
     assert_eq!(recovered.len(), 8);
@@ -332,6 +709,7 @@ async fn replay_single_subject_after_sink_loss() {
     assert_eq!(processed.subject_id, subject_id.to_string());
     assert_eq!(processed.from_sn, 5);
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     let replayed = sink.snapshot().await;
     assert_eq!(replayed.len(), 8);
@@ -465,6 +843,7 @@ async fn replay_multiple_subjects_and_sinks() {
     let s1_str = s1.to_string();
     let s2_str = s2.to_string();
 
+    wait_for_sink_caught_up(&node.api, "example-sink-all").await;
     sink_all.wait_for_count(6, true).await;
     let all_events = sink_all.snapshot().await;
     assert_eq!(all_events.len(), 6);
@@ -576,6 +955,7 @@ async fn replay_multiple_subjects_and_sinks() {
         .collect();
     assert_eq!(actual_items, expected_items);
 
+    wait_for_sink_caught_up(&node.api, "example-sink-all").await;
     sink_all.wait_for_count(8, true).await;
     let all_after = sink_all.snapshot().await;
     assert_eq!(all_after.len(), 8);
@@ -722,7 +1102,7 @@ async fn replay_filters_and_combinations() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
         true,
     )
     .await
@@ -826,8 +1206,7 @@ async fn replay_filters_and_combinations() {
     .await
     .unwrap();
 
-    let new_owner_pk =
-        PublicKey::from_str(&new_owner.api.public_key()).unwrap();
+    let new_owner_pk = PublicKey::from_str(new_owner.api.public_key()).unwrap();
     emit_transfer(&owner.api, subject_id.clone(), new_owner_pk, true)
         .await
         .unwrap();
@@ -840,7 +1219,7 @@ async fn replay_filters_and_combinations() {
         .await
         .unwrap();
 
-    let owner_pk = PublicKey::from_str(&owner.api.public_key()).unwrap();
+    let owner_pk = PublicKey::from_str(owner.api.public_key()).unwrap();
     emit_transfer(&new_owner.api, subject_id.clone(), owner_pk, true)
         .await
         .unwrap();
@@ -850,6 +1229,11 @@ async fn replay_filters_and_combinations() {
         .unwrap();
 
     emit_reject(&owner.api, subject_id.clone(), true)
+        .await
+        .unwrap();
+    // Ensure NewOwner has seen the reject (SN 6) before it issues the EOL
+    // (SN 7), otherwise it would build the EOL as a duplicate SN 6.
+    get_subject(&new_owner.api, subject_id.clone(), Some(6), true)
         .await
         .unwrap();
 
@@ -898,6 +1282,7 @@ async fn replay_filters_and_combinations() {
     assert_eq!(reject_events.len(), 1);
     assert_sink_contains_reject(&reject_events, &subject_id_str, 6);
 
+    wait_for_sink_caught_up(&owner.api, "sink-all").await;
     sinks[5].wait_for_count(8, true).await;
     let all_events = sinks[5].snapshot().await;
     assert_eq!(all_events.len(), 8);
@@ -993,6 +1378,7 @@ async fn replay_filters_and_combinations() {
     assert_eq!(reject_after.len(), 1);
     assert_event_is_reject(&reject_after[0], &subject_id_str, 6);
 
+    wait_for_sink_caught_up(&owner.api, "sink-all").await;
     sinks[5].wait_for_count(8, true).await;
     let all_after = sinks[5].snapshot().await;
     assert_eq!(all_after.len(), 8);
@@ -1479,6 +1865,7 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
         .unwrap();
 
     // Automatic catch-up should deliver Create + 3 facts.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -1535,6 +1922,7 @@ async fn replay_when_sink_starts_late_and_unblock_edge_cases() {
     assert_eq!(processed.subject_id, subject_id_str);
     assert_eq!(processed.from_sn, 2);
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -1700,6 +2088,7 @@ async fn replay_after_sink_returns_bad_data() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 3);
@@ -1754,6 +2143,7 @@ async fn replay_after_sink_returns_bad_data() {
         .await
         .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -1810,6 +2200,7 @@ async fn replay_after_sink_returns_bad_data() {
     assert_eq!(processed.subject_id, subject_id_str);
     assert_eq!(processed.from_sn, 2);
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -1950,6 +2341,7 @@ async fn replay_endpoint_response_shape() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 8);
@@ -2053,6 +2445,7 @@ async fn replay_endpoint_response_shape() {
     );
 
     // The valid replay re-sends S1 facts from SN 1 to SN 3.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(11, true).await;
     let after = sink.snapshot().await;
     assert_eq!(after.len(), 11);
@@ -2260,6 +2653,7 @@ async fn sink_permanent_failure_and_manual_recovery() {
     // The replay from SN 1 is merged with the existing cursor (SN 2), so the
     // worker re-sends SN 1..4. SN 1 and 2 are therefore duplicated while SN 3
     // and 4 are delivered for the first time, giving 7 stored events in total.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(7, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 7);
@@ -2482,6 +2876,7 @@ async fn sink_flapping_blocks_after_repeated_recovery() {
     // Confirm through the API that the sink is no longer blocked.
     assert_sink_unblocked(&node.api, "example-sink").await;
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -2622,6 +3017,7 @@ async fn sink_recovery_across_node_restart() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 3);
@@ -2686,6 +3082,7 @@ async fn sink_recovery_across_node_restart() {
     // The restart must have auto-unblocked the sink.
     assert_sink_unblocked(&node.api, "example-sink").await;
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 4);
@@ -2764,6 +3161,7 @@ async fn sink_recovery_across_node_restart() {
     node_running(&node.api).await.unwrap();
 
     // Total stored events: 4 from S1 + Create + 2 facts from S2 = 7.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(7, true).await;
     let events = sink.snapshot().await;
     assert_eq!(events.len(), 7);
@@ -2830,13 +3228,14 @@ async fn sink_recovery_across_node_restart() {
     )
     .await
     .unwrap();
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(8, true).await;
     assert_sink_not_lagging(&node.api, "example-sink").await;
 
-    // Wait longer than the worker idle timeout so the manager stops it.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Second event: a fresh worker must be created to deliver it.
+    // Second event: a fresh worker must be created to deliver it. The
+    // previous worker is expected to have been stopped by the idle timeout
+    // (200 ms); if the old worker is still alive it will deliver the event
+    // instead, which is also correct behavior.
     emit_fact(
         &node.api,
         subject_two.clone(),
@@ -2845,6 +3244,7 @@ async fn sink_recovery_across_node_restart() {
     )
     .await
     .unwrap();
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(9, true).await;
 
     let events = sink.snapshot().await;
@@ -3015,6 +3415,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
 
     // Part A — normal delivery with partial filters. The create-only sinks must
     // receive Create events as full payloads and facts as lightweight events.
+    wait_for_sink_caught_up(&node.api, "create-only").await;
     create_only_sink.wait_for_count(6, true).await;
     let create_only_events = create_only_sink.snapshot().await;
     assert_eq!(create_only_events.len(), 6);
@@ -3054,6 +3455,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_no_fact_full_events(&create_only_events);
 
     // The conc2 sink must behave identically during normal delivery.
+    wait_for_sink_caught_up(&node.api, "create-only-conc2").await;
     create_only_conc2_sink.wait_for_count(6, true).await;
     let conc2_initial = create_only_conc2_sink.snapshot().await;
     assert_eq!(conc2_initial.len(), 6);
@@ -3093,6 +3495,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_no_fact_full_events(&conc2_initial);
 
     // The all-events sink receives everything as full payloads.
+    wait_for_sink_caught_up(&node.api, "all").await;
     all_sink.wait_for_count(6, true).await;
     let all_events = all_sink.snapshot().await;
     assert_eq!(all_events.len(), 6);
@@ -3154,6 +3557,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     wait_for_sink_lagging_subjects(&node.api, "create-only-conc2", 2).await;
 
     create_only_sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "create-only").await;
     create_only_sink.wait_for_count(8, true).await;
     let caught_up = create_only_sink.snapshot().await;
     assert_eq!(caught_up.len(), 8, "catch-up must not deliver duplicates");
@@ -3179,6 +3583,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
 
     // The all-events sink kept receiving events while the create-only sinks
     // were failing; verify it has SN 3 for both subjects.
+    wait_for_sink_caught_up(&node.api, "all").await;
     all_sink.wait_for_count(8, true).await;
     let all_after_b = all_sink.snapshot().await;
     assert_eq!(all_after_b.len(), 8);
@@ -3226,6 +3631,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     assert_eq!(response.processed.len(), 2);
     assert!(response.errors.is_empty());
 
+    wait_for_sink_caught_up(&node.api, "create-only").await;
     create_only_sink.wait_for_count(8, true).await;
     let replayed = create_only_sink.snapshot().await;
     assert_eq!(replayed.len(), 8);
@@ -3285,6 +3691,7 @@ async fn sink_light_events_and_concurrent_catch_up() {
     // both subjects in parallel, but it must still deliver each event exactly
     // once and preserve per-subject ordering.
     create_only_conc2_sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "create-only-conc2").await;
     create_only_conc2_sink.wait_for_count(8, true).await;
     let conc2_events = create_only_conc2_sink.snapshot().await;
     assert_eq!(conc2_events.len(), 8, "conc2 sink must receive all events");
@@ -3361,6 +3768,7 @@ async fn replay_governance_sink() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "gov-sink").await;
     sink.wait_for_count(2, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 2);
@@ -3395,6 +3803,7 @@ async fn replay_governance_sink() {
     assert_eq!(processed.subject_id, gov_id_str);
     assert_eq!(processed.from_sn, 0);
 
+    wait_for_sink_caught_up(&node.api, "gov-sink").await;
     sink.wait_for_count(2, true).await;
     let replayed = sink.snapshot().await;
     assert_eq!(replayed.len(), 2);
@@ -3508,7 +3917,7 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_viewpoints_fact(&witness.api.public_key()),
+        governance_with_viewpoints_fact(witness.api.public_key()),
         true,
     )
     .await
@@ -3625,7 +4034,9 @@ async fn sink_fact_viewpoints_full_and_opaque() {
     .unwrap();
 
     // Wait for all events on both sinks.
+    wait_for_sink_caught_up(&owner.api, "full-sink").await;
     owner_sink.wait_for_count(4, true).await;
+    wait_for_sink_caught_up(&witness.api, "opaque-sink").await;
     witness_sink.wait_for_count(4, true).await;
 
     let full_events = owner_sink.snapshot().await;
@@ -4034,7 +4445,7 @@ async fn sink_non_fact_event_types_and_fields() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
         true,
     )
     .await
@@ -4128,9 +4539,12 @@ async fn sink_non_fact_event_types_and_fields() {
     )
     .await
     .unwrap();
+    get_subject(&new_owner.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // SN 2: transfer Owner -> NewOwner.
-    let new_owner_pk = PublicKey::from_str(&new_owner_pk_str).unwrap();
+    let new_owner_pk = PublicKey::from_str(new_owner_pk_str).unwrap();
     emit_transfer(&owner.api, subject_id.clone(), new_owner_pk, true)
         .await
         .unwrap();
@@ -4143,9 +4557,12 @@ async fn sink_non_fact_event_types_and_fields() {
     emit_confirm(&new_owner.api, subject_id.clone(), None, true)
         .await
         .unwrap();
+    get_subject(&owner.api, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
 
     // SN 4: transfer NewOwner -> Owner.
-    let owner_pk = PublicKey::from_str(&owner_pk_str).unwrap();
+    let owner_pk = PublicKey::from_str(owner_pk_str).unwrap();
     emit_transfer(&new_owner.api, subject_id.clone(), owner_pk, true)
         .await
         .unwrap();
@@ -4158,13 +4575,30 @@ async fn sink_non_fact_event_types_and_fields() {
     emit_reject(&owner.api, subject_id.clone(), true)
         .await
         .unwrap();
+    get_subject(&new_owner.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
 
     // SN 6: EOL by the current owner (NewOwner).
     emit_eol(&new_owner.api, subject_id.clone(), true)
         .await
         .unwrap();
+    get_subject(&owner.api, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
 
-    // Wait for all events on both sinks.
+    // Wait for both delivery pipelines to drain: once the sink reports the
+    // subject as caught up, the cursor is at the final SN and every HTTP
+    // response (including the one we need to count) has been processed, so
+    // the TestSink has already recorded the event. This is the only
+    // synchronization that holds under suite load; `get_subject` only proves
+    // the ledger state is current, not that the delivery pipeline finished.
+    wait_for_sink_caught_up(&owner.api, "owner-sink").await;
+    wait_for_sink_caught_up(&new_owner.api, "new-owner-sink").await;
+
+    // The pipelines are idle, so the receiver has everything. A small
+    // poll guards against the async gap between cursor update and event
+    // record visibility.
     owner_sink.wait_for_count(7, true).await;
     new_owner_sink.wait_for_count(7, true).await;
 
@@ -4716,7 +5150,9 @@ async fn sink_subject_deletion_cleans_tracking() {
     }
 
     // Both sinks must receive the initial Create + 2 facts.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink_a.wait_for_count(3, true).await;
+    wait_for_sink_caught_up(&node.api, "example-sink-2").await;
     sink_b.wait_for_count(3, true).await;
     let initial_a = sink_a.snapshot().await;
     let initial_b = sink_b.snapshot().await;
@@ -4851,8 +5287,35 @@ async fn sink_subject_deletion_cleans_tracking() {
     .await
     .unwrap();
 
-    // Give the sink workers time to process any pending work.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Poll until both sink event counts stabilize: no new events should arrive
+    // for the deleted subject. This is robust on slow systems where workers
+    // may still be draining queued events.
+    let mut attempts = 0;
+    let mut last_a = 0;
+    let mut last_b = 0;
+    let mut stable_iterations = 0;
+    loop {
+        let current_a = sink_a.snapshot().await.len();
+        let current_b = sink_b.snapshot().await.len();
+        if current_a == last_a && current_b == last_b {
+            stable_iterations += 1;
+            if stable_iterations >= 3 {
+                break;
+            }
+        } else {
+            stable_iterations = 0;
+        }
+        last_a = current_a;
+        last_b = current_b;
+        if attempts > 40 {
+            panic!(
+                "sink event counts did not stabilize after 4s; A: {}, B: {}",
+                current_a, current_b
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
 
     // Neither sink should have received new events for the deleted subject.
     let after_a = sink_a.snapshot().await;
@@ -4907,6 +5370,199 @@ async fn sink_subject_deletion_cleans_tracking() {
             replay_err.reason
         );
     }
+}
+
+/// Test 13b: `sink_governance_deletion_cleans_tracking`.
+///
+/// **Cases covered:** same as `sink_subject_deletion_cleans_tracking` but for
+/// a governance subject — the governance branch of the sink catch-up query
+/// (a missing governance actor must be classified as a genuine `NotFound`,
+/// cleaning the cursor and the shared `last_seen`).
+///
+/// **Setup:**
+/// - Bootstrap node with a governance sink (`gov-sink`).
+/// - Governance with Create + 2 facts delivered; a 3rd fact fails (sink in
+///   500 mode) so the governance subject stays lagging with persisted state.
+/// - Safe-mode restart, delete the governance (it has no trackers), normal
+///   restart with the sink accepting.
+///
+/// **Assertions:**
+/// - No new events are delivered for the deleted governance.
+/// - The sink reports no lagging subjects and is not blocked.
+/// - Replay for the deleted governance reports "subject has no known events"
+///   on the sink, confirming the tracking state was cleaned up.
+#[traced_test]
+#[tokio::test]
+async fn sink_governance_deletion_cleans_tracking() {
+    let sink_a = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        sinks: governance_sink_config(sink_a.url()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    let gov_id_str = governance_id.to_string();
+
+    // Two governance facts, delivered live (sn 1 and 2).
+    let member_one =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "One", "key": member_one}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let member_two =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "Two", "key": member_two}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&node.api, "gov-sink").await;
+    sink_a.wait_for_count(3, true).await;
+    let initial = sink_a.snapshot().await;
+    assert_eq!(initial.len(), 3);
+    assert_no_duplicate_events(&initial);
+    assert_subject_sn_sequence(&initial, &gov_id_str, 0, 2);
+    assert_event_is_create(&initial[0], &gov_id_str, 0);
+
+    // Sink in failure mode and a third fact: the governance subject becomes
+    // lagging with persisted cursor/lagging state to clean up after deletion.
+    sink_a.set_mode(ResponseMode::ServerError).await;
+    let member_three =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "Three", "key": member_three}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_lagging_subjects(&node.api, "gov-sink", 1).await;
+
+    // Restart in safe mode and delete the governance (it has no trackers).
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config_safe_mode(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(sink_a.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let delete_result = node
+        .api
+        .delete_subject(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(delete_result, "Governance deleted successfully");
+
+    // Restart in normal mode with the sink accepting again.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    sink_a.set_mode(ResponseMode::Accept).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        governance_sink_config(sink_a.url()),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Poll until the sink event count stabilizes: no new events should arrive
+    // for the deleted governance.
+    let mut attempts = 0;
+    let mut last = 0;
+    let mut stable_iterations = 0;
+    loop {
+        let current = sink_a.snapshot().await.len();
+        if current == last {
+            stable_iterations += 1;
+            if stable_iterations >= 3 {
+                break;
+            }
+        } else {
+            stable_iterations = 0;
+        }
+        last = current;
+        if attempts > 40 {
+            panic!(
+                "sink event count did not stabilize after 4s; count: {}",
+                current
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+
+    let after = sink_a.snapshot().await;
+    assert_eq!(
+        after.len(),
+        3,
+        "no new events should be delivered for a deleted governance"
+    );
+    assert_eq!(count_events_for_subject(&after, &gov_id_str), 3);
+
+    // The sink must report no lagging and remain unblocked.
+    assert_sink_not_lagging(&node.api, "gov-sink").await;
+    assert_sink_unblocked(&node.api, "gov-sink").await;
+
+    // Replay for the deleted governance must report that the subject has no
+    // known events, confirming tracking was cleaned up.
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "gov-sink".to_owned(),
+                subject_id: gov_id_str.clone(),
+                from_sn: 0,
+            }],
+        })
+        .await
+        .unwrap();
+    assert!(response.processed.is_empty());
+    assert_eq!(response.errors.len(), 1);
+    let replay_err = &response.errors[0];
+    assert!(replay_err.subject_id == gov_id_str);
+    assert_eq!(replay_err.from_sn, 0);
+    assert!(
+        replay_err.reason.contains("subject has no known events"),
+        "unexpected replay error reason: {}",
+        replay_err.reason
+    );
 }
 
 /// Test 14: `sink_transient_errors_and_fast_events`.
@@ -5013,6 +5669,7 @@ async fn sink_transient_errors_and_fast_events() {
             .unwrap();
     let s1_str = s1.to_string();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(1, true).await;
     let initial = sink.snapshot().await;
     assert_eq!(initial.len(), 1);
@@ -5036,6 +5693,7 @@ async fn sink_transient_errors_and_fast_events() {
     );
 
     sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(2, true).await;
     let recovered = sink.snapshot().await;
     assert_eq!(recovered.len(), 2);
@@ -5068,6 +5726,7 @@ async fn sink_transient_errors_and_fast_events() {
     // Allow enough time for ordered delivery of the 4 new facts. The fast async
     // emissions produced a sequential gap (logged as SequentialGap) that must be
     // resolved by ordered catch-up.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(6, true).await;
     let fast = sink.snapshot().await;
     assert_eq!(fast.len(), 6);
@@ -5093,7 +5752,7 @@ async fn sink_transient_errors_and_fast_events() {
 /// **Cases covered:** adding a sink in config between restarts, removing a sink
 /// from config (residual state in `SinkRegistry`), cursor deletion in safe mode,
 /// advanced `get_sinks` filters, ordering, and blocked sink visibility.
-/// Exercises `get_sinks`, `get_sinks_status`, and `delete_sink_cursors`.
+/// Exercises `get_sinks`, `get_sinks_status`, and `reset_sink_cursors`.
 ///
 /// **Setup:**
 /// - Bootstrap node, governance and schema `Example`.
@@ -5118,8 +5777,7 @@ async fn sink_transient_errors_and_fast_events() {
 ///    Some("Example".to_owned()), .. })` includes `new-sink`.
 ///
 /// **Part B — advanced filters and ordering:**
-/// 1. Verify that `api.get_sinks(SinksQuery { name:
-///    Some("new-sink".to_owned()), .. })` returns only `new-sink`.
+/// 1. Verify that `api.get_sink("new-sink")` returns only that sink.
 /// 2. Verify that `api.get_sinks(SinksQuery { governance_id:
 ///    Some(governance_id.to_string()), .. })` returns `new-sink` (its target
 ///    `Example` belongs to that governance) and **not** `gov-sink` (its target
@@ -5135,18 +5793,19 @@ async fn sink_transient_errors_and_fast_events() {
 ///    `gov-sink`).
 /// 2. Call `api.get_sinks(SinksQuery { in_config: Some(false), .. })` and
 ///    verify that `new-sink` still appears with `in_config: false`.
-/// 3. Verify that `api.get_sinks_status()` does not include `new-sink` and that
-///    all returned sinks have `in_config: true`.
+/// 3. Verify that `api.get_sinks_status()` includes `new-sink` flagged with
+///    `in_config: false` (residual sinks must stay visible: they are the ones
+///    that need unblock/reset).
 /// 4. Verify that `api.get_sinks(SinksQuery { running: Some(false), .. })`
 ///    includes `new-sink`.
 ///
 /// **Part D — cleanup in safe mode:**
 /// 1. Restart the node in `safe_mode: true`.
-/// 2. Call `api.delete_sink_cursors("missing-sink")` and verify it returns
+/// 2. Call `api.reset_sink_cursors("missing-sink")` and verify it returns
 ///    `Error::SinkNotFound`.
-/// 3. Call `api.delete_sink_cursors("new-sink")` (residual sink) and verify it
+/// 3. Call `api.reset_sink_cursors("new-sink")` (residual sink) and verify it
 ///    disappears from the registry.
-/// 4. Call `api.delete_sink_cursors("gov-sink")` (in-config sink) and verify it
+/// 4. Call `api.reset_sink_cursors("gov-sink")` (in-config sink) and verify it
 ///    still appears in `get_sinks_status` with `lagging_subjects == 0` and
 ///    `blocked: None`.
 /// 5. Restart in normal mode.
@@ -5169,8 +5828,7 @@ async fn sink_transient_errors_and_fast_events() {
 ///    `Accept` mode.
 /// 2. Change the `TestSink` to `422 Unprocessable Entity` mode.
 /// 3. Emit a fact on `S1` and wait for the sink to block.
-/// 4. Verify that `api.get_sinks(SinksQuery { name:
-///    Some("new-sink".to_owned()), .. })` returns the sink with `blocked:
+/// 4. Verify that `api.get_sink("new-sink")` returns the sink with `blocked:
 ///    Some(reason)`.
 /// 5. Verify that `api.get_sinks_status()` shows `new-sink` with `blocked:
 ///    Some(reason)` and `lagging_subjects > 0`.
@@ -5179,14 +5837,14 @@ async fn sink_transient_errors_and_fast_events() {
 /// - A new in-config sink performs automatic historical catch-up.
 /// - A sink removed from config persists in the registry as residual
 ///   (`in_config: false`).
-/// - `delete_sink_cursors` returns `SinkNotFound` for a non-existent sink.
-/// - `delete_sink_cursors` clears cursors and `lagging` state and, if the sink
+/// - `reset_sink_cursors` returns `SinkNotFound` for a non-existent sink.
+/// - `reset_sink_cursors` clears cursors and `lagging` state and, if the sink
 ///   is not in config, removes it from the registry.
 /// - `get_sinks` distinguishes between in-config and residual sinks and
 ///   supports filters by `name`, `governance_id`, and combinations.
 /// - `get_sinks` respects ordering by `manager` and `name`.
 /// - `get_sinks` and `get_sinks_status` correctly reflect a blocked sink.
-/// - `get_sinks_status` only shows configured sinks.
+/// - `get_sinks_status` shows residual sinks flagged with `in_config: false`.
 #[traced_test]
 #[tokio::test]
 async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
@@ -5292,6 +5950,7 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     node_running(&node.api).await.unwrap();
 
     // new-sink must catch up Create + 3 facts automatically.
+    wait_for_sink_caught_up(&node.api, "new-sink").await;
     new_sink.wait_for_count(4, true).await;
     let new_events = new_sink.snapshot().await;
     assert_eq!(new_events.len(), 4);
@@ -5348,17 +6007,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     assert_eq!(example_query.len(), 1);
     assert_eq!(example_query[0].name, "new-sink");
 
-    // Part B — advanced filters and ordering.
-    let by_name = node
-        .api
-        .get_sinks(SinksQuery {
-            name: Some("new-sink".to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(by_name.len(), 1);
-    assert_eq!(by_name[0].name, "new-sink");
+    // Part B — single-resource fetch, advanced filters and ordering.
+    let by_name = node.api.get_sink("new-sink".to_owned()).await.unwrap();
+    assert_eq!(by_name.name, "new-sink");
 
     let by_gov = node
         .api
@@ -5400,18 +6051,16 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     assert_eq!(combined.len(), 1);
     assert_eq!(combined[0].name, "new-sink");
 
-    // Filter that matches nothing -> empty result.
-    let empty = node
+    // Unknown sink name -> SinkNotFound.
+    let err = node
         .api
-        .get_sinks(SinksQuery {
-            name: Some("no-such-sink".to_owned()),
-            ..Default::default()
-        })
+        .get_sink("no-such-sink".to_owned())
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(
-        empty.is_empty(),
-        "query with no matches should return empty list"
+        matches!(err, Error::SinkNotFound(_)),
+        "expected SinkNotFound, got {:?}",
+        err
     );
 
     let all_sinks = node.api.get_sinks(SinksQuery::default()).await.unwrap();
@@ -5458,15 +6107,18 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     let residual = residuals.iter().find(|s| s.name == "new-sink").unwrap();
     assert!(!residual.in_config);
 
-    // get_sinks_status does not include new-sink (only in_config sinks).
+    // get_sinks_status includes new-sink flagged as residual (in_config=false).
     let statuses = node.api.get_sinks_status().await.unwrap();
-    let status_names: Vec<_> =
-        statuses.iter().map(|s| s.name.as_str()).collect();
-    assert!(!status_names.contains(&"new-sink"));
-    assert!(
-        statuses.iter().all(|s| s.in_config),
-        "get_sinks_status should only return in_config sinks"
-    );
+    let residual_status = statuses
+        .iter()
+        .find(|s| s.name == "new-sink")
+        .expect("residual sink must appear in get_sinks_status");
+    assert!(!residual_status.in_config);
+    let in_config_status = statuses
+        .iter()
+        .find(|s| s.name == "gov-sink")
+        .expect("in-config sink must appear in get_sinks_status");
+    assert!(in_config_status.in_config);
 
     // Filter running=false includes the residual new-sink.
     let not_running = node
@@ -5500,10 +6152,10 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
 
-    // delete_sink_cursors on missing sink returns SinkNotFound.
+    // reset_sink_cursors on missing sink returns SinkNotFound.
     let err = node
         .api
-        .delete_sink_cursors("missing-sink".to_owned())
+        .reset_sink_cursors("missing-sink".to_owned())
         .await
         .unwrap_err();
     assert!(
@@ -5512,9 +6164,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         err
     );
 
-    // delete_sink_cursors on residual new-sink removes it from registry.
+    // reset_sink_cursors on residual new-sink removes it from registry.
     node.api
-        .delete_sink_cursors("new-sink".to_owned())
+        .reset_sink_cursors("new-sink".to_owned())
         .await
         .unwrap();
     let residuals = node
@@ -5530,9 +6182,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
         "new-sink residual should be removed"
     );
 
-    // delete_sink_cursors on in-config gov-sink keeps it but clears cursors/lagging.
+    // reset_sink_cursors on in-config gov-sink keeps it but clears cursors/lagging.
     node.api
-        .delete_sink_cursors("gov-sink".to_owned())
+        .reset_sink_cursors("gov-sink".to_owned())
         .await
         .unwrap();
     let statuses = node.api.get_sinks_status().await.unwrap();
@@ -5618,6 +6270,7 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 
     // new-sink must replay all S1 events from SN 0 because its cursors were
     // deleted in safe mode.
+    wait_for_sink_caught_up(&node.api, "new-sink").await;
     new_sink.wait_for_count(4, true).await;
     let s1_events: Vec<_> = new_sink
         .snapshot()
@@ -5640,17 +6293,9 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 
     wait_for_sink_lagging_subjects(&node.api, "new-sink", 1).await;
 
-    let blocked_info = node
-        .api
-        .get_sinks(SinksQuery {
-            name: Some("new-sink".to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(blocked_info.len(), 1);
+    let blocked_info = node.api.get_sink("new-sink".to_owned()).await.unwrap();
     assert!(
-        blocked_info[0].blocked.is_some(),
+        blocked_info.blocked.is_some(),
         "new-sink should be reported as blocked"
     );
 
@@ -5673,10 +6318,13 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 ///   password from `AVE_SINK_PASSWORD_AUTH_SINK`.
 ///
 /// **Part A — API key:**
-/// 1. Configure a sink with `auth.api_key: "secret-key"`.
-/// 2. Emit a fact.
-/// 3. Verify that `TestSink` receives the header `Authorization: Api-Key
-///    secret-key` and the fact.
+/// 1. Restart with a sink configured with `auth.api_key: "secret-key"` while
+///    `TestSink` returns 500, and emit a fact. The failing deliveries
+///    guarantee no cursor is persisted, and a status query guarantees
+///    `last_seen` is persisted before the next shutdown.
+/// 2. Restart again with the sink healthy: startup catch-up must deliver
+///    Create + 3 facts.
+/// 3. Verify that every delivery carries `Authorization: Api-Key secret-key`.
 ///
 /// **Part B — OAuth2 + refresh on 401:**
 /// 1. Configure a sink with OAuth2.
@@ -5705,8 +6353,8 @@ async fn sink_config_changes_safe_mode_get_sinks_and_blocked() {
 /// > - `TestSink` supports `UnauthorizedOnce` (401 on first delivery, then 200)
 /// >   and `UnauthorizedAlways` (persistent 401) modes to exercise OAuth2
 /// >   refresh and auth failures.
-/// > - `make_sink_entry_with_auth` allows configuring `SinkAuthConfig` (API key
-/// >   or OAuth2) in tests.
+/// > - `make_sink_entry_with_auth` allows configuring `SinkAuthMethod`
+/// >   (bearer, API key, basic or OAuth2) in tests.
 #[traced_test]
 #[tokio::test]
 async fn sink_auth_token_refresh() {
@@ -5746,8 +6394,20 @@ async fn sink_auth_token_refresh() {
     let s1_str = s1.to_string();
 
     // Part A — API key authentication.
+    //
+    // The sink starts in ServerError mode so that no delivery can succeed
+    // (and therefore no cursor can be persisted) while the node is up. After
+    // emitting the last fact, a `get_sinks_status` call acts as a
+    // mailbox-order barrier: the status ask is queued after the
+    // `NotifyNewEvent` for SN 3, so its response guarantees the manager has
+    // processed it and `last_seen` is persisted. This removes the race
+    // between the fire-and-forget sink notification and the graceful
+    // shutdown, which discards non-critical mailbox messages.
     let api_key_sink = TestSink::start().await;
+    api_key_sink.set_mode(ResponseMode::ServerError).await;
     let api_key = "secret-key".to_owned();
+    // The API key travels in `AVE_SINK_APIKEY_{{SERVER}}` (never in config).
+    let _api_key_guard = TempEnvVar::set("AVE_SINK_APIKEY_AUTH_SINK", &api_key);
     let initial_keys = node.keys.clone();
     let initial_local_db = dirs[0].path().to_path_buf();
     let initial_ext_db = dirs[1].path().to_path_buf();
@@ -5765,11 +6425,7 @@ async fn sink_auth_token_refresh() {
             api_key_sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
-                auth_url: String::new(),
-                username: String::new(),
-                api_key: api_key.clone(),
-            },
+            SinkAuthMethod::ApiKey,
         )],
     ))
     .await;
@@ -5780,6 +6436,43 @@ async fn sink_auth_token_refresh() {
         .await
         .unwrap();
 
+    // Mailbox-order barrier: guarantees last_seen=3 is persisted.
+    let statuses = node.api.get_sinks_status().await.unwrap();
+    assert!(
+        statuses.iter().any(|s| s.name == "auth-sink"),
+        "auth-sink must be registered after the restart"
+    );
+
+    // Restart with the sink healthy: startup catch-up must deliver SN 0-3.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    // Baseline taken with the node stopped: failed delivery attempts also
+    // record Authorization headers, and only later deliveries are asserted.
+    let headers_baseline = api_key_sink.authorization_headers().await.len();
+    api_key_sink.set_mode(ResponseMode::Accept).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "auth-sink",
+            api_key_sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::ApiKey,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "auth-sink").await;
     api_key_sink.wait_for_count(4, true).await;
     let api_key_events = api_key_sink.full_snapshot().await;
     assert_eq!(
@@ -5799,7 +6492,7 @@ async fn sink_auth_token_refresh() {
     let headers = api_key_sink.authorization_headers().await;
     let expected_api_key = format!("Api-Key {}", api_key);
     assert_eq!(
-        headers.len(),
+        headers.len() - headers_baseline,
         api_key_events.len(),
         "every delivered event should have a recorded Authorization header"
     );
@@ -5813,12 +6506,10 @@ async fn sink_auth_token_refresh() {
     let oauth_sink = TestSink::start().await;
     let password = "oauth-password".to_owned();
     // Match the environment variable name built by sink_password_env_var.
-    let password_env = "AVE_SINK_PASSWORD_AUTH_SINK".to_owned();
-    unsafe {
-        std::env::set_var(&password_env, &password);
-    }
+    let password_env = "AVE_SINK_PASSWORD_AUTH_SINK";
+    let _password_guard = TempEnvVar::set(password_env, &password);
     assert_eq!(
-        std::env::var(&password_env).unwrap(),
+        std::env::var(password_env).unwrap(),
         password,
         "password env var should be set"
     );
@@ -5840,11 +6531,11 @@ async fn sink_auth_token_refresh() {
             oauth_sink.url(),
             Some(governance_id.to_string()),
             BTreeSet::from([SinkTypes::All]),
-            SinkAuthConfig {
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
                 auth_url: oauth_sink.auth_url(),
                 username: "test-user".to_owned(),
-                api_key: String::new(),
-            },
+                ..SinkAuthConfig::default()
+            }),
         )],
     ))
     .await;
@@ -5860,7 +6551,19 @@ async fn sink_auth_token_refresh() {
     .await
     .expect("worker should fetch a token eagerly on startup");
 
+    // Wait for any startup catch-up (triggered when the cursor was not
+    // persisted before the previous shutdown) to finish, then reset the sink
+    // so the refresh assertions only observe the new fact.
+    wait_for_sink_caught_up(&node.api, "auth-sink").await;
+    oauth_sink.clear().await;
+    let oauth_headers_baseline = oauth_sink.authorization_headers().await.len();
+
     oauth_sink.set_mode(ResponseMode::UnauthorizedOnce).await;
+    // Baseline before the 401: the absolute number of token fetches is not
+    // stable because the worker can be recreated by the idle shutdown under
+    // load (each recreation fetches a fresh token), so the refresh is
+    // asserted as a delta instead of a fixed count.
+    let auth_baseline = oauth_sink.auth_requests().await.len();
 
     emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 4}}), true)
         .await
@@ -5884,10 +6587,9 @@ async fn sink_auth_token_refresh() {
     );
 
     let auth_requests = oauth_sink.auth_requests().await;
-    assert_eq!(
-        auth_requests.len(),
-        2,
-        "expected eager token fetch + refresh after 401"
+    assert!(
+        auth_requests.len() > auth_baseline,
+        "the 401 must trigger a token refresh before the retry"
     );
     assert!(
         auth_requests
@@ -5898,7 +6600,7 @@ async fn sink_auth_token_refresh() {
 
     let headers = oauth_sink.authorization_headers().await;
     assert_eq!(
-        headers.len(),
+        headers.len() - oauth_headers_baseline,
         2,
         "expected failed 401 request + successful retry with refreshed token"
     );
@@ -5937,10 +6639,665 @@ async fn sink_auth_token_refresh() {
         1,
         "subject should only have the previously delivered SN 4 in the sink"
     );
+}
 
-    unsafe {
-        std::env::remove_var(&password_env);
+/// API key authentication through the `AVE_SINK_APIKEY_{{SERVER}}`
+/// environment variable instead of the configuration file.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with an `envkey-sink` with `SinkAuthMethod::ApiKey`; the key
+///    is only read from the environment.
+/// 3. Startup catch-up delivers the subject's create event.
+///
+/// **Verifications:**
+/// - The delivery carries `Authorization: Api-Key <env value>`.
+///
+/// > **Implementation note:** the sink is named `envkey-sink`, so the
+/// > environment variable is `AVE_SINK_APIKEY_ENVKEY_SINK`. The name must
+/// > stay unique in this file: the variable would also take precedence in
+/// > any other concurrently running test reusing the same sink name.
+#[traced_test]
+#[tokio::test]
+async fn sink_api_key_from_env_var() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    // The API key is read from the environment (never from the config).
+    let api_key_env = "AVE_SINK_APIKEY_ENVKEY_SINK";
+    let _api_key_guard = TempEnvVar::set(api_key_env, "env-secret-key");
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "envkey-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::ApiKey,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up delivers the subject's create event.
+    wait_for_sink_caught_up(&node.api, "envkey-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers
+            .iter()
+            .flatten()
+            .any(|h| h == "Api-Key env-secret-key"),
+        "deliveries must carry the API key from the environment variable"
+    );
+}
+
+/// Static credentials (parity with the gRPC sink): a sink with
+/// `SinkAuthMethod::BearerToken` sends `Authorization: Bearer <token>` and a
+/// sink with `SinkAuthMethod::Basic` sends `Authorization: Basic
+/// base64(username:password)`, both read from the environment.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with two sinks, `bearer-sink` and `basic-sink`, whose secrets
+///    live in `AVE_SINK_TOKEN_BEARER_SINK` and
+///    `AVE_SINK_PASSWORD_BASIC_SINK`.
+/// 3. Startup catch-up delivers the subject's create event to both.
+///
+/// **Verifications:**
+/// - The bearer sink receives `Authorization: Bearer <env token>`.
+/// - The basic sink receives `Authorization: Basic base64(user:pass)`.
+#[traced_test]
+#[tokio::test]
+async fn sink_bearer_and_basic_auth() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let bearer_sink = TestSink::start().await;
+    let basic_sink = TestSink::start().await;
+    let _token_guard =
+        TempEnvVar::set("AVE_SINK_TOKEN_BEARER_SINK", "static-token");
+    let _password_guard =
+        TempEnvVar::set("AVE_SINK_PASSWORD_BASIC_SINK", "basic-secret");
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![
+            make_sink_entry_with_auth(
+                "bearer-sink",
+                bearer_sink.url(),
+                Some(governance_id.to_string()),
+                BTreeSet::from([SinkTypes::All]),
+                SinkAuthMethod::BearerToken,
+            ),
+            make_sink_entry_with_auth(
+                "basic-sink",
+                basic_sink.url(),
+                Some(governance_id.to_string()),
+                BTreeSet::from([SinkTypes::All]),
+                SinkAuthMethod::Basic {
+                    username: "sink-user".to_owned(),
+                },
+            ),
+        ],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "bearer-sink").await;
+    wait_for_sink_caught_up(&node.api, "basic-sink").await;
+    bearer_sink.wait_for_count(1, true).await;
+    basic_sink.wait_for_count(1, true).await;
+
+    let bearer_headers = bearer_sink.authorization_headers().await;
+    assert!(
+        bearer_headers
+            .iter()
+            .flatten()
+            .any(|h| h == "Bearer static-token"),
+        "deliveries must carry the bearer token from the environment"
+    );
+
+    let expected_basic = {
+        use base64::{Engine as _, prelude::BASE64_STANDARD};
+        format!("Basic {}", BASE64_STANDARD.encode("sink-user:basic-secret"))
+    };
+    let basic_headers = basic_sink.authorization_headers().await;
+    assert!(
+        basic_headers.iter().flatten().any(|h| h == &expected_basic),
+        "deliveries must carry the basic credentials from the environment"
+    );
+}
+
+/// Credential rotation for static auth: a bearer sink whose token is wrong
+/// gets persistent 401s and the subject stays lagging; after rotating the
+/// token in the environment and restarting the node (env secrets are read
+/// when the transport is built), catch-up recovers and deliveries carry the
+/// new token.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with `rotation-sink` (wrong token) against a sink that always
+///    answers 401: the subject goes lagging and attempts carry the wrong
+///    token.
+/// 3. Rotate the env token, switch the sink to accept and restart again:
+///    catch-up delivers the pending event with the new token.
+///
+/// **Verifications:**
+/// - Phase 1: lagging subject; attempts carry `Bearer wrong-token`.
+/// - Phase 2: caught up; deliveries carry `Bearer good-token`.
+///
+/// > **Implementation note:** the sink name must stay unique in this file —
+/// > the env var derived from it is process-global and tests run in
+/// > parallel (a collision with another test's sink name flips the token).
+#[traced_test]
+#[tokio::test]
+async fn sink_bearer_token_rotation() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::UnauthorizedAlways).await;
+    let token_env = "AVE_SINK_TOKEN_ROTATION_SINK";
+    let wrong_guard = TempEnvVar::set(token_env, "wrong-token");
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "rotation-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::BearerToken,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Every attempt is rejected: the subject goes lagging.
+    wait_for_sink_lagging_subjects(&node.api, "rotation-sink", 1).await;
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers.iter().flatten().any(|h| h == "Bearer wrong-token"),
+        "attempts must carry the wrong token from the environment"
+    );
+
+    // Rotate the token and restart: the worker reads the new secret when
+    // the transport is rebuilt, and catch-up recovers the pending event.
+    drop(wrong_guard);
+    let _good_guard = TempEnvVar::set(token_env, "good-token");
+    sink.set_mode(ResponseMode::Accept).await;
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "rotation-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::BearerToken,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "rotation-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers.iter().flatten().any(|h| h == "Bearer good-token"),
+        "deliveries after the rotation must carry the new token"
+    );
+}
+
+/// Delivery signatures: every HTTP delivery of a sink with
+/// `signature: true` must carry the node identity signature headers,
+/// both for full events and for lightweight (non-matching filter) events.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a sink configured with `signature: true` and an event
+///    filter of only `Create`, so the create event is delivered full and
+///    the two facts are delivered as lightweight events.
+/// 3. Startup catch-up delivers the three events.
+///
+/// **Verifications:**
+/// - `X-Ave-Signature`, `X-Ave-Signature-Timestamp` and `X-Ave-Public-Key`
+///   are present on every delivery, full or lightweight.
+/// - The public key is the node identity.
+/// - Each signature verifies cryptographically against the exact received
+///   body, recomputing `BLAKE3(borsh(body, timestamp))` as the receiver
+///   would.
+/// - The first event is full (create) and the other two are lightweight.
+#[traced_test]
+#[tokio::test]
+async fn sink_signature_headers_verify() {
+    use ave_common::identity::{
+        BLAKE3_HASHER, Hash as _, SignatureIdentifier, TimeStamp,
+    };
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
     }
+
+    let keys = node.keys.clone();
+    let expected_public_key = keys.public_key();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_signature(
+            "signed-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up delivers the create event (SN 0, full) plus the two
+    // facts as lightweight events.
+    wait_for_sink_caught_up(&node.api, "signed-sink").await;
+    sink.wait_for_count(3, true).await;
+
+    let events = sink.snapshot().await;
+    assert!(
+        matches!(events.first(), Some(IncomingSinkEvent::Full(_))),
+        "the create event must be delivered full"
+    );
+    assert!(
+        events[1..]
+            .iter()
+            .all(|e| matches!(e, IncomingSinkEvent::Light(_))),
+        "facts must be delivered as lightweight events"
+    );
+
+    let signature_headers = sink.signature_headers().await;
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(signature_headers.len(), raw_bodies.len());
+    assert!(!signature_headers.is_empty());
+
+    for (headers, body) in signature_headers.iter().zip(raw_bodies.iter()) {
+        let signature = headers
+            .signature
+            .as_ref()
+            .expect("X-Ave-Signature header must be present");
+        let timestamp = headers
+            .timestamp
+            .as_ref()
+            .expect("X-Ave-Signature-Timestamp header must be present");
+        let public_key = headers
+            .public_key
+            .as_ref()
+            .expect("X-Ave-Public-Key header must be present");
+
+        assert_eq!(
+            public_key,
+            &expected_public_key.to_string(),
+            "the signer must be the node identity"
+        );
+
+        // Rebuild the signed payload exactly as `Signature::new` does:
+        // borsh(content, timestamp), then BLAKE3.
+        let content = body.clone();
+        let timestamp = TimeStamp::from_nanos(
+            timestamp
+                .parse::<u64>()
+                .expect("timestamp must be nanoseconds"),
+        );
+        let payload_bytes = borsh::to_vec(&(&content, &timestamp)).unwrap();
+        let hash = BLAKE3_HASHER.hash(&payload_bytes);
+
+        let signer = PublicKey::from_str(public_key).unwrap();
+        let signature = SignatureIdentifier::from_str(signature).unwrap();
+        signer
+            .verify(hash.hash_bytes(), &signature)
+            .expect("delivery signature must verify against the received body");
+    }
+}
+
+/// Signature v2 over a zstd-compressed delivery: the signature must bind
+/// the exact wire bytes (the compressed body) and the canonical headers,
+/// including `content-encoding: zstd`. A receiver that verifies against
+/// the decompressed body — or without the encoding header — must fail.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink configured with `signature: true`,
+///    `signature_version: 2` and `compression: zstd`.
+/// 3. Startup catch-up delivers the subject's create event.
+///
+/// **Verifications:**
+/// - `Content-Encoding: zstd` on the wire; the raw body is zstd and
+///   decompresses to the event JSON.
+/// - The signature verifies against the canonical v2 payload rebuilt from
+///   the recorded headers and the COMPRESSED body.
+/// - Verification against the decompressed body fails (the signature binds
+///   the compressed wire payload).
+#[traced_test]
+#[tokio::test]
+async fn sink_signature_v2_zstd_verify() {
+    use ave_common::identity::{
+        BLAKE3_HASHER, Hash as _, PublicKey, SignatureIdentifier, TimeStamp,
+    };
+    use ave_core::sink::delivery::{DeliveryMeta, canonical_payload};
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![SinkConfigEntry {
+            target: SinkTarget::Schema {
+                schema_id: "Example".to_owned(),
+                governance_id: Some(governance_id.to_string()),
+            },
+            servers: vec![ave_core::config::SinkServer {
+                server: "signed-zstd-sink".to_owned(),
+                events: BTreeSet::from([SinkTypes::All]),
+                transport: ave_core::config::SinkTransportConfig::Http(
+                    Box::new(ave_core::config::HttpSinkConfig {
+                        url: sink.url(),
+                        signature: true,
+                        signature_version: 2,
+                        compression: SinkCompression::Zstd,
+                        max_retries: 0,
+                        request_timeout_ms: 2000,
+                        connect_timeout_ms: 1000,
+                        ..Default::default()
+                    }),
+                ),
+                healthcheck_intervals_secs: vec![1],
+                startup_healthcheck_delay_secs: 0,
+                ..Default::default()
+            }],
+        }],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "signed-zstd-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    let signature_headers = sink.signature_headers().await;
+    let idempotency_headers = sink.idempotency_headers().await;
+    let content_encodings = sink.content_encodings().await;
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(raw_bodies.len(), 1);
+
+    assert_eq!(content_encodings[0].as_deref(), Some("zstd"));
+    let body = &raw_bodies[0];
+    assert!(
+        body.len() > 4
+            && body[0] == 0x28
+            && body[1] == 0xb5
+            && body[2] == 0x2f
+            && body[3] == 0xfd,
+        "the wire body must be zstd-compressed"
+    );
+    let decompressed = zstd::bulk::decompress(body, 1024 * 1024)
+        .expect("the body must be valid zstd");
+    serde_json::from_slice::<serde_json::Value>(&decompressed)
+        .expect("the decompressed body must be JSON");
+
+    let headers = &signature_headers[0];
+    let signature = headers
+        .signature
+        .as_ref()
+        .expect("X-Ave-Signature header must be present");
+    let timestamp = headers
+        .timestamp
+        .as_ref()
+        .expect("X-Ave-Signature-Timestamp header must be present");
+    let public_key = headers
+        .public_key
+        .as_ref()
+        .expect("X-Ave-Public-Key header must be present");
+
+    let idem = &idempotency_headers[0];
+    let meta = DeliveryMeta {
+        subject_id: idem.subject_id.clone().expect("subject id header"),
+        sn: idem
+            .sn
+            .as_ref()
+            .expect("sn header")
+            .parse()
+            .expect("sn is a number"),
+        event_type: idem.event_type.clone().expect("event type header"),
+    };
+    assert_eq!(meta.subject_id, subject_id.to_string());
+
+    // The signature binds the canonical v2 headers (with content-encoding)
+    // and the COMPRESSED wire body.
+    let canonical = canonical_payload(
+        body,
+        2,
+        &[("content-encoding", "zstd")],
+        Some(&meta),
+    );
+    let timestamp =
+        TimeStamp::from_nanos(timestamp.parse().expect("nanos timestamp"));
+    let payload_bytes = borsh::to_vec(&(canonical, timestamp)).unwrap();
+    let hash = BLAKE3_HASHER.hash(&payload_bytes);
+    let signer = PublicKey::from_str(public_key).unwrap();
+    let signature = SignatureIdentifier::from_str(signature).unwrap();
+    signer
+        .verify(hash.hash_bytes(), &signature)
+        .expect("signature must verify against the compressed wire body");
+
+    // Verifying against the decompressed body must fail.
+    let wrong_canonical = canonical_payload(
+        &decompressed,
+        2,
+        &[("content-encoding", "zstd")],
+        Some(&meta),
+    );
+    let wrong_bytes = borsh::to_vec(&(wrong_canonical, timestamp)).unwrap();
+    let wrong_hash = BLAKE3_HASHER.hash(&wrong_bytes);
+    assert!(
+        signer.verify(wrong_hash.hash_bytes(), &signature).is_err(),
+        "the signature must not verify against the decompressed body"
+    );
 }
 
 /// Poll `condition` until it returns `true`. Panics on timeout.
@@ -6048,6 +7405,7 @@ async fn sink_worker_idle_shutdown_and_recreate() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(2, true).await;
     let events_after_first = sink.full_snapshot().await;
     assert_eq!(
@@ -6105,6 +7463,7 @@ async fn sink_worker_idle_shutdown_and_recreate() {
     .await
     .unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let events_after_second = sink.full_snapshot().await;
     assert_eq!(
@@ -6119,6 +7478,114 @@ async fn sink_worker_idle_shutdown_and_recreate() {
         2,
         true,
         Some(json!({"ModOne": {"data": 2}})),
+    );
+    assert_sink_running(&node.api, "example-sink").await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+}
+
+/// Covers the recovery of a lagging sink whose worker was idle-killed while
+/// the backend was down: the manager's periodic healthcheck tick must
+/// recreate the worker (it is gone), detect the recovery and drive the
+/// catch-up that delivers the pending fact.
+///
+/// **Setup:** node with a short-idle sink (200ms) and 1s healthchecks
+/// (`short_idle_sink_config`); subject created and Create delivered; sink in
+/// 500 mode so a fact becomes lagging; the worker is idle-killed while the
+/// sink is still down (observed via the `SinkWorkerShutdown` production log,
+/// same pattern as `sink_worker_idle_shutdown_and_recreate`).
+///
+/// **Assertions:** once the sink accepts again, the pending fact is
+/// delivered (Create + fact, sns 0-1) and the sink reports running and not
+/// lagging.
+#[traced_test]
+#[tokio::test]
+async fn sink_recovers_after_worker_idle_shutdown_while_lagging() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        short_idle_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    // Sink down: the fact fails and the subject becomes lagging.
+    sink.set_mode(ResponseMode::ServerError).await;
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_lagging_subjects(&node.api, "example-sink", 1).await;
+
+    // Wait (with polling) until the manager idle-kills the worker while the
+    // sink is still down: from here on, only the manager's healthcheck tick
+    // can detect the recovery — the worker's own chain died with it.
+    wait_for_condition(|| logs_contain("SinkWorkerShutdown")).await;
+
+    // The sink comes back: the tick must recreate the worker, detect the
+    // recovery and drive the catch-up that delivers the pending fact.
+    sink.set_mode(ResponseMode::Accept).await;
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(2, true).await;
+    let events = sink.full_snapshot().await;
+    assert_eq!(
+        events.len(),
+        2,
+        "Create + pending fact should be delivered after worker recreation"
+    );
+    assert_subject_sn_sequence(&events, &subject_id_str, 0, 1);
+    assert_event_is_fact_full(
+        &events[1],
+        &subject_id_str,
+        1,
+        true,
+        Some(json!({"ModOne": {"data": 1}})),
     );
     assert_sink_running(&node.api, "example-sink").await;
     assert_sink_not_lagging(&node.api, "example-sink").await;
@@ -6160,10 +7627,10 @@ async fn wait_for_sink_not_lagging(api: &Api, sink_name: &str) {
     let mut attempts = 0;
     loop {
         let statuses = api.get_sinks_status().await.unwrap();
-        if let Some(status) = statuses.iter().find(|s| s.name == sink_name) {
-            if status.lagging_subjects == 0 {
-                return;
-            }
+        if let Some(status) = statuses.iter().find(|s| s.name == sink_name)
+            && status.lagging_subjects == 0
+        {
+            return;
         }
         if attempts > 100 {
             panic!(
@@ -6262,6 +7729,7 @@ async fn sink_eol_keeps_cursor_and_stops_delivery() {
         .unwrap();
     }
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(3, true).await;
     let events_before_eol = sink.full_snapshot().await;
     assert_eq!(
@@ -6274,6 +7742,7 @@ async fn sink_eol_keeps_cursor_and_stops_delivery() {
     // Emit EOL and verify it is delivered as the next event.
     emit_eol(&node.api, subject_id.clone(), true).await.unwrap();
 
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
     let events_after_eol = sink.full_snapshot().await;
     assert_eq!(events_after_eol.len(), 4, "EOL should be delivered");
@@ -6384,7 +7853,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
     emit_fact(
         &owner.api,
         governance_id.clone(),
-        governance_with_transfer_roles_fact(&new_owner.api.public_key()),
+        governance_with_transfer_roles_fact(new_owner.api.public_key()),
         true,
     )
     .await
@@ -6471,8 +7940,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         .unwrap();
 
     // SN 3: successful transfer Owner -> NewOwner.
-    let new_owner_pk =
-        PublicKey::from_str(&new_owner.api.public_key()).unwrap();
+    let new_owner_pk = PublicKey::from_str(new_owner.api.public_key()).unwrap();
     emit_transfer(
         &owner.api,
         governance_id.clone(),
@@ -6516,7 +7984,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         .unwrap();
 
     // SN 5: successful transfer NewOwner -> Owner.
-    let owner_pk = PublicKey::from_str(&owner_pk_str).unwrap();
+    let owner_pk = PublicKey::from_str(owner_pk_str).unwrap();
     emit_transfer(&new_owner.api, governance_id.clone(), owner_pk, true)
         .await
         .unwrap();
@@ -6537,7 +8005,9 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
     .unwrap();
 
     // Wait for all events on both sinks.
+    wait_for_sink_caught_up(&owner.api, "owner-sink").await;
     owner_sink.wait_for_count(7, true).await;
+    wait_for_sink_caught_up(&new_owner.api, "new-owner-sink").await;
     new_owner_sink.wait_for_count(7, true).await;
 
     let owner_events = owner_sink.snapshot().await;
@@ -6559,7 +8029,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         2,
         false,
-        &owner_pk_str,
+        owner_pk_str,
         &unknown_key_str,
         1,
     );
@@ -6568,8 +8038,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         3,
         true,
-        &owner_pk_str,
-        &new_owner_pk_str,
+        owner_pk_str,
+        new_owner_pk_str,
         1,
     );
     assert_sink_contains_confirm_with_name(
@@ -6585,8 +8055,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         5,
         true,
-        &new_owner_pk_str,
-        &owner_pk_str,
+        new_owner_pk_str,
+        owner_pk_str,
         3,
     );
     assert_sink_contains_confirm_with_name(
@@ -6604,7 +8074,7 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         2,
         false,
-        &owner_pk_str,
+        owner_pk_str,
         &unknown_key_str,
         1,
     );
@@ -6613,8 +8083,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         3,
         true,
-        &owner_pk_str,
-        &new_owner_pk_str,
+        owner_pk_str,
+        new_owner_pk_str,
         1,
     );
     assert_sink_contains_confirm_with_name(
@@ -6630,8 +8100,8 @@ async fn sink_unsuccessful_transfer_and_governance_confirm() {
         &governance_id_str,
         5,
         true,
-        &new_owner_pk_str,
-        &owner_pk_str,
+        new_owner_pk_str,
+        owner_pk_str,
         3,
     );
     assert_sink_contains_confirm_with_name(
@@ -7158,12 +8628,12 @@ async fn replay_during_active_catch_up() {
     // Step 6: wait until the sink has received at least the 4 distinct SNs for
     // this subject, tolerating duplicate HTTP deliveries caused by overlapping
     // catch-up and replay.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
     sink.wait_for_distinct_sn_count(&subject_id_str, 4, true)
         .await;
 
     // Allow any in-flight retries to settle, then verify stability.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let raw_events = sink.snapshot().await;
+    let raw_events = wait_for_sink_events_stable(&sink).await;
     let events = deduplicate_events_by_sn(&raw_events);
 
     // The raw sink may receive duplicate deliveries when automatic catch-up
@@ -7206,12 +8676,2688 @@ async fn replay_during_active_catch_up() {
     );
 
     // Stability: after waiting, no new distinct SNs appear.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let raw_events_later = sink.snapshot().await;
+    let raw_events_later = wait_for_sink_events_stable(&sink).await;
     let events_later = deduplicate_events_by_sn(&raw_events_later);
     let sns_later: Vec<u64> = events_later.iter().map(|e| e.sn()).collect();
     assert_eq!(
         sns_later, expected_sns,
         "distinct SNs should remain stable after settling"
     );
+}
+
+/// TLS with a custom CA: the node must deliver to an HTTPS sink whose server
+/// certificate chains to a CA configured via `tls.ca_certificate`.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit one fact.
+/// 2. Restart with a sink pointing at an HTTPS `TestSink` (server certificate
+///    signed by a throwaway CA) configured with `tls.ca_certificate`.
+///
+/// **Verifications:**
+/// - Startup catch-up delivers the create event and the fact over HTTPS.
+/// - The sink passes the healthcheck (it is reported running), proving the
+///   CA is used for healthcheck requests too.
+#[traced_test]
+#[tokio::test]
+async fn sink_tls_custom_ca_delivery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (sink, tls_material) = TestSink::start_tls(false).await;
+    let tls_dir = tempfile::tempdir().unwrap();
+    let ca_path = tls_dir.path().join("ca.pem");
+    std::fs::write(&ca_path, &tls_material.ca_pem).unwrap();
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_tls(
+            "tls-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpTlsConfig {
+                ca_certificate: ca_path.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up delivers the create event (SN 0) and the fact (SN 1).
+    wait_for_sink_caught_up(&node.api, "tls-sink").await;
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 2, true)
+        .await;
+    assert_sink_running(&node.api, "tls-sink").await;
+}
+
+/// TLS without the CA: delivery to an HTTPS sink must fail when the node does
+/// not trust the sink's CA (no `tls.ca_certificate` configured).
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink pointing at an HTTPS `TestSink` but with no TLS
+///    configuration, so rustls rejects the unknown CA.
+///
+/// **Verifications:**
+/// - The subject is reported lagging for the sink.
+/// - No request body ever reaches the sink (the handshake fails).
+#[traced_test]
+#[tokio::test]
+async fn sink_tls_missing_ca_fails() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (sink, _tls_material) = TestSink::start_tls(false).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "tls-no-ca-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The TLS handshake fails, so the subject never catches up.
+    wait_for_sink_lagging_subjects(&node.api, "tls-no-ca-sink", 1).await;
+    assert!(
+        sink.raw_bodies().await.is_empty(),
+        "no delivery request must complete the TLS handshake"
+    );
+    assert!(
+        sink.snapshot().await.is_empty(),
+        "no event must be accepted by the sink"
+    );
+}
+
+/// Mutual TLS: the node must present the configured client certificate and
+/// deliver to an HTTPS sink that requires it.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit one fact.
+/// 2. Restart with a sink pointing at an mTLS `TestSink` (client certificate
+///    required) configured with `tls.ca_certificate`, `tls.client_certificate`
+///    and `tls.client_key`.
+///
+/// **Verifications:**
+/// - Startup catch-up delivers the create event and the fact over mTLS.
+#[traced_test]
+#[tokio::test]
+async fn sink_mtls_delivery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (sink, tls_material) = TestSink::start_tls(true).await;
+    let tls_dir = tempfile::tempdir().unwrap();
+    let ca_path = tls_dir.path().join("ca.pem");
+    let client_cert_path = tls_dir.path().join("client.pem");
+    let client_key_path = tls_dir.path().join("client-key.pem");
+    std::fs::write(&ca_path, &tls_material.ca_pem).unwrap();
+    std::fs::write(&client_cert_path, &tls_material.client_cert_pem).unwrap();
+    std::fs::write(&client_key_path, &tls_material.client_key_pem).unwrap();
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_tls(
+            "mtls-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpTlsConfig {
+                ca_certificate: ca_path.to_string_lossy().into_owned(),
+                client_certificate: client_cert_path
+                    .to_string_lossy()
+                    .into_owned(),
+                client_key: client_key_path.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up delivers the create event (SN 0) and the fact (SN 1).
+    wait_for_sink_caught_up(&node.api, "mtls-sink").await;
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 2, true)
+        .await;
+    assert_sink_running(&node.api, "mtls-sink").await;
+}
+
+/// TLS certificate pinning: the sink must accept only the pinned server
+/// certificate and reject a different one.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with an HTTPS sink configured with `pinned_certificate` set to
+///    the TestSink's server certificate: delivery must succeed.
+/// 3. Restart again with `pinned_certificate` set to the TestSink's CA
+///    certificate instead of the server certificate: the handshake must fail.
+///
+/// **Verifications:**
+/// - With the correct pin, startup catch-up delivers the create event.
+/// - With the wrong pin, the subject is reported lagging and no body reaches
+///   the sink.
+#[traced_test]
+#[tokio::test]
+async fn sink_tls_pinning() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let (sink, tls_material) = TestSink::start_tls(false).await;
+    let tls_dir = tempfile::tempdir().unwrap();
+    let server_cert_path = tls_dir.path().join("server.pem");
+    let ca_cert_path = tls_dir.path().join("ca.pem");
+    std::fs::write(&server_cert_path, &tls_material.server_cert_pem).unwrap();
+    std::fs::write(&ca_cert_path, &tls_material.ca_pem).unwrap();
+
+    // Correct pin: the exact server certificate.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_tls(
+            "pinned-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpTlsConfig {
+                pinned_certificate: server_cert_path
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Default::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "pinned-sink").await;
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
+        .await;
+    assert_sink_running(&node.api, "pinned-sink").await;
+
+    // Wrong pin: the CA certificate is not the server certificate.
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_tls(
+            "pinned-wrong-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpTlsConfig {
+                pinned_certificate: ca_cert_path.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_lagging_subjects(&node.api, "pinned-wrong-sink", 1).await;
+}
+
+/// Signature reuse across retries: the delivery payload is signed once and
+/// the same signature is sent on every retry attempt.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink configured with `signature: true` and
+///    `max_retries: 1`, with the `TestSink` rejecting deliveries (HTTP 500).
+/// 3. Startup catch-up attempts the create event twice.
+///
+/// **Verifications:**
+/// - Both attempts carry identical `X-Ave-Signature` and
+///   `X-Ave-Signature-Timestamp` headers (the payload is signed once).
+/// - The shared signature verifies cryptographically against the received
+///   body.
+/// - Once the sink accepts again, the event is delivered.
+#[traced_test]
+#[tokio::test]
+async fn sink_signature_reused_across_retries() {
+    use ave_common::identity::{
+        BLAKE3_HASHER, Hash as _, SignatureIdentifier, TimeStamp,
+    };
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ServerError).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_signature_and_retries(
+            "signed-retry-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The initial attempt plus one retry both reach the sink as raw
+    // deliveries (failures are recorded before the response mode applies).
+    sink.wait_for_raw_count(2, true).await;
+
+    let signature_headers = sink.signature_headers().await;
+    let first = &signature_headers[0];
+    let second = &signature_headers[1];
+
+    let signature = first
+        .signature
+        .as_ref()
+        .expect("X-Ave-Signature header must be present");
+    let timestamp = first
+        .timestamp
+        .as_ref()
+        .expect("X-Ave-Signature-Timestamp header must be present");
+    assert_eq!(
+        first.signature, second.signature,
+        "the retry must reuse the signature of the first attempt"
+    );
+    assert_eq!(
+        first.timestamp, second.timestamp,
+        "the retry must reuse the timestamp of the first attempt"
+    );
+    assert_eq!(
+        first.public_key, second.public_key,
+        "the retry must reuse the public key of the first attempt"
+    );
+
+    // The shared signature must verify against the delivered body.
+    let content = sink.raw_bodies().await[0].clone();
+    let timestamp = TimeStamp::from_nanos(
+        timestamp
+            .parse::<u64>()
+            .expect("timestamp must be nanoseconds"),
+    );
+    let payload_bytes = borsh::to_vec(&(&content, &timestamp)).unwrap();
+    let hash = BLAKE3_HASHER.hash(&payload_bytes);
+    let signer = PublicKey::from_str(
+        first
+            .public_key
+            .as_ref()
+            .expect("public key must be present"),
+    )
+    .unwrap();
+    let signature = SignatureIdentifier::from_str(signature).unwrap();
+    signer
+        .verify(hash.hash_bytes(), &signature)
+        .expect("delivery signature must verify against the received body");
+
+    // When the sink accepts again, the worker catches up.
+    sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "signed-retry-sink").await;
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
+        .await;
+}
+
+/// Idempotency headers: every individual HTTP delivery must carry
+/// `X-Ave-Subject-Id`, `X-Ave-SN`, `X-Ave-Event-Type` and `Idempotency-Key`
+/// so receivers can deduplicate without parsing the body.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a sink whose filter is only `Create`, so the create event
+///    is delivered full and the two facts as lightweight events.
+/// 3. Startup catch-up delivers the three events.
+///
+/// **Verifications:**
+/// - Each delivery carries the four headers with values matching the
+///   delivered event: subject, sn, event type and an idempotency key of the
+///   form `<subject_id>-<sn>`.
+#[traced_test]
+#[tokio::test]
+async fn sink_idempotency_headers() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "idem-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup catch-up delivers the create event (SN 0, full) plus the two
+    // facts as lightweight events.
+    wait_for_sink_caught_up(&node.api, "idem-sink").await;
+    sink.wait_for_count(3, true).await;
+
+    let events = sink.snapshot().await;
+    let headers = sink.idempotency_headers().await;
+    assert_eq!(events.len(), 3);
+    assert_eq!(headers.len(), 3);
+
+    for (headers, event) in headers.iter().zip(events.iter()) {
+        assert_eq!(
+            headers.subject_id.as_deref(),
+            Some(event.subject_id()),
+            "X-Ave-Subject-Id must match the delivered event"
+        );
+        assert_eq!(
+            headers.sn.as_deref(),
+            Some(event.sn().to_string()).as_deref(),
+            "X-Ave-SN must match the delivered event"
+        );
+        assert_eq!(
+            headers.event_type.as_deref(),
+            Some(event.event_type().as_str()),
+            "X-Ave-Event-Type must match the delivered event"
+        );
+        assert_eq!(
+            headers.key.as_deref(),
+            Some(format!("{}-{}", event.subject_id(), event.sn())).as_deref(),
+            "Idempotency-Key must be '<subject_id>-<sn>'"
+        );
+    }
+}
+
+/// Proxy deliveries: a sink configured with `proxy` must route its requests
+/// through the forward proxy instead of connecting directly to the sink.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit one fact.
+/// 2. Restart with a sink whose URL is the real sink but with a proxy
+///    configured (no credentials).
+///
+/// **Verifications:**
+/// - The sink receives both events (the proxy forwards correctly).
+/// - The proxy recorded the delivery requests in absolute-URI form.
+#[traced_test]
+#[tokio::test]
+async fn sink_proxy_delivery() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let proxy = TestProxy::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_proxy(
+            "proxy-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpProxyConfig {
+                url: proxy.url(),
+                username: String::new(),
+                no_proxy: vec![],
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "proxy-sink").await;
+    sink.wait_for_count(2, true).await;
+
+    let proxied = proxy.proxied_requests().await;
+    let post_line = format!("POST {}", sink.url());
+    assert!(
+        proxied
+            .iter()
+            .filter(|r| r.request_line == post_line)
+            .count()
+            >= 2,
+        "the proxy must record the two deliveries to {}, got {:?}",
+        post_line,
+        proxied
+            .iter()
+            .map(|r| r.request_line.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        proxied.iter().all(|r| r.proxy_authorization.is_none()),
+        "no proxy credentials are configured, none must be sent"
+    );
+}
+
+/// Proxy authentication: with `proxy.username` set, the worker must read the
+/// password from `AVE_SINK_PROXY_PASSWORD_{{SERVER}}` and send proxy basic
+/// auth on every request.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink behind a proxy with credentials; the password is
+///    provided through the environment variable.
+///
+/// **Verifications:**
+/// - The delivery succeeds through the proxy.
+/// - The proxy receives the `Proxy-Authorization` header with the basic auth
+///   credentials.
+#[traced_test]
+#[tokio::test]
+async fn sink_proxy_delivery_with_auth() {
+    let proxy_password_env = "AVE_SINK_PROXY_PASSWORD_PROXY_AUTH_SINK";
+    let _proxy_password_guard =
+        TempEnvVar::set(proxy_password_env, "proxy-secret");
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let proxy = TestProxy::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_proxy(
+            "proxy-auth-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpProxyConfig {
+                url: proxy.url(),
+                username: "ave".to_owned(),
+                no_proxy: vec![],
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "proxy-auth-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    use base64::Engine as _;
+    let expected_auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("ave:proxy-secret")
+    );
+    let proxied = proxy.proxied_requests().await;
+    assert!(
+        proxied.iter().any(|r| r.proxy_authorization.as_deref()
+            == Some(expected_auth.as_str())),
+        "the proxy must receive the basic auth header, got {:?}",
+        proxied
+    );
+}
+
+/// `Retry-After` handling: a 429 response with a `Retry-After` header must
+/// delay the next delivery attempt by at least the server-provided time,
+/// even when the configured backoff is shorter.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a sink that rejects the first delivery with 429 and
+///    `Retry-After: 2`, with a fast configured backoff (100 ms).
+///
+/// **Verifications:**
+/// - The first delivery is retried and all events arrive.
+/// - The time between the first attempt and the retry is at least ~2
+///   seconds, not the configured 100 ms backoff.
+#[traced_test]
+#[tokio::test]
+async fn sink_retry_after_respected() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::RateLimitOnce(2)).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_retry_policy(
+            "ratelimit-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+            100,
+            30_000,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // First attempt (429) plus the retry. Only a lower bound is asserted:
+    // the configured sleep is exact, and a loaded machine can only make the
+    // observed delta larger, never smaller.
+    sink.wait_for_raw_count(2, true).await;
+    let received_at = sink.received_at().await;
+    let delta = received_at[1].duration_since(received_at[0]);
+    assert!(
+        delta >= Duration::from_millis(1_900),
+        "the retry must honor Retry-After (~2s), waited {:?}",
+        delta
+    );
+
+    // Every event is delivered after the successful retry.
+    sink.wait_for_count(3, true).await;
+}
+
+/// `retry_max_delay_ms` cap: the server-provided `Retry-After` hint must be
+/// capped by the sink's configured maximum retry delay.
+///
+/// **Flow:**
+/// Same as `sink_retry_after_respected`, but the sink asks for 10 seconds
+/// while `retry_max_delay_ms` is set to 500 ms.
+///
+/// **Verifications:**
+/// - The retry happens after ~500 ms: well above the configured 100 ms base
+///   backoff (so the hint was not ignored) and far below the requested 10
+///   seconds (so the cap applied).
+#[traced_test]
+#[tokio::test]
+async fn sink_retry_after_capped() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::RateLimitOnce(10)).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_retry_policy(
+            "ratelimit-capped-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+            100,
+            500,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The sink asks for 10 s but `retry_max_delay_ms` caps the wait at
+    // 500 ms. The bounds discriminate the three possible behaviors rather
+    // than measuring a fixed duration: ignoring the hint would wait ~100 ms
+    // (the configured base backoff) and honoring it would wait ~10 s; both
+    // fall outside the window on any machine.
+    sink.wait_for_raw_count(2, true).await;
+    let received_at = sink.received_at().await;
+    let delta = received_at[1].duration_since(received_at[0]);
+    assert!(
+        delta >= Duration::from_millis(400),
+        "the retry must wait the capped delay (~500ms), waited {:?}",
+        delta
+    );
+    assert!(
+        delta < Duration::from_secs(5),
+        "retry_max_delay_ms must cap the 10s Retry-After hint, waited {:?}",
+        delta
+    );
+
+    sink.wait_for_count(1, true).await;
+}
+
+/// HTTP 408 (Request Timeout) is retryable per RFC 9110 §15.6.9: the worker
+/// must retry the delivery instead of treating it as a permanent rejection
+/// (which would block the sink).
+///
+/// **Flow:**
+/// A subject is created with no sink registered; the node restarts with the
+/// sink configured and the sink answers the first catch-up delivery with
+/// 408, then accepts the retry.
+///
+/// **Verifications:**
+/// - The event is delivered after the retry; without the retryable
+///   classification the sink would block and the wait would time out.
+#[traced_test]
+#[tokio::test]
+async fn sink_request_timeout_status_is_retried() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    create_subject(&node.api, governance_id.clone(), "Example", "", true)
+        .await
+        .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::RequestTimeoutOnce).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "request-timeout-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    sink.wait_for_count(1, true).await;
+}
+/// 1. Create governance, schema and a subject; emit three facts.
+/// 2. Restart with a batch sink; startup catch-up delivers the four pending
+///    events.
+///
+/// **Verifications:**
+/// - Exactly one POST reaches the sink, with a JSON array of the four
+///   events in SN order.
+/// - Batch deliveries do not carry the per-event `X-Ave-*` /
+///   `Idempotency-Key` headers.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_catch_up() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "batch-sink").await;
+    sink.wait_for_count(4, true).await;
+
+    // A single POST delivered the whole catch-up batch.
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(
+        raw_bodies.len(),
+        1,
+        "the catch-up must be a single batch POST"
+    );
+    let body: Vec<serde_json::Value> = serde_json::from_slice(&raw_bodies[0])
+        .expect("body must be a JSON array");
+    assert_eq!(body.len(), 4, "the batch must contain the four events");
+
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(batch_lens, vec![4]);
+
+    // Events arrive in SN order and nothing is duplicated.
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+
+    // Batch deliveries carry no per-event idempotency headers.
+    let headers = sink.idempotency_headers().await;
+    assert_eq!(headers.len(), 1);
+    assert!(headers[0].subject_id.is_none());
+    assert!(headers[0].sn.is_none());
+    assert!(headers[0].event_type.is_none());
+    assert!(headers[0].key.is_none());
+}
+
+/// Batch delivery with gzip: with `compression = "gzip"` the batch body is
+/// sent gzip-compressed with the `Content-Encoding: gzip` header.
+///
+/// **Flow:**
+/// Same as `sink_batch_delivery_catch_up` with gzip compression enabled.
+///
+/// **Verifications:**
+/// - The request carries `Content-Encoding: gzip`.
+/// - The raw body is gzip (magic bytes) and decompresses to the JSON array
+///   of the four events.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_gzip() {
+    use std::io::Read as _;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-gzip-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkCompression::Gzip,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "batch-gzip-sink").await;
+    sink.wait_for_count(4, true).await;
+
+    let content_encodings = sink.content_encodings().await;
+    assert_eq!(content_encodings.len(), 1);
+    assert_eq!(content_encodings[0].as_deref(), Some("gzip"));
+
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(raw_bodies.len(), 1);
+    let body = &raw_bodies[0];
+    assert!(
+        body.len() > 2 && body[0] == 0x1f && body[1] == 0x8b,
+        "the body must be gzip-compressed"
+    );
+
+    let mut decoder = flate2::read::GzDecoder::new(body.as_slice());
+    let mut decompressed = Vec::new();
+    decoder
+        .read_to_end(&mut decompressed)
+        .expect("the body must gunzip");
+    let events: Vec<serde_json::Value> = serde_json::from_slice(&decompressed)
+        .expect("the decompressed body must be a JSON array");
+    assert_eq!(events.len(), 4, "the batch must contain the four events");
+}
+
+/// Batch delivery with zstd: with `compression = "zstd"` the batch body is
+/// sent zstd-compressed with the `Content-Encoding: zstd` header.
+///
+/// **Flow:**
+/// Same as `sink_batch_delivery_gzip` with zstd compression enabled.
+///
+/// **Verifications:**
+/// - The request carries `Content-Encoding: zstd`.
+/// - The raw body is zstd (magic bytes) and decompresses to the JSON array
+///   of the four events.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_zstd() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-zstd-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkCompression::Zstd,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "batch-zstd-sink").await;
+    sink.wait_for_count(4, true).await;
+
+    let content_encodings = sink.content_encodings().await;
+    assert_eq!(content_encodings.len(), 1);
+    assert_eq!(content_encodings[0].as_deref(), Some("zstd"));
+
+    let raw_bodies = sink.raw_bodies().await;
+    assert_eq!(raw_bodies.len(), 1);
+    let body = &raw_bodies[0];
+    assert!(
+        body.len() > 4
+            && body[0] == 0x28
+            && body[1] == 0xb5
+            && body[2] == 0x2f
+            && body[3] == 0xfd,
+        "the body must be zstd-compressed"
+    );
+
+    let decompressed = zstd::bulk::decompress(body, 1024 * 1024)
+        .expect("the body must be valid zstd");
+    let events: Vec<serde_json::Value> = serde_json::from_slice(&decompressed)
+        .expect("the decompressed body must be a JSON array");
+    assert_eq!(events.len(), 4, "the batch must contain the four events");
+}
+
+/// Batch delivery of live events: in `batch_delivery` mode, events emitted
+/// while the node runs are buffered and flushed as JSON arrays (on size or
+/// delay), never as individual POSTs.
+///
+/// **Flow:**
+/// 1. Create governance and schema; restart with a batch sink.
+/// 2. Create a subject and emit three facts (live delivery).
+///
+/// **Verifications:**
+/// - Every delivery is a JSON array (no individual POSTs) and together they
+///   carry the four events of the subject in SN order.
+/// - No delivery carries the per-event idempotency headers.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_live() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-live-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Live deliveries after the restart.
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    wait_for_sink_caught_up(&node.api, "batch-live-sink").await;
+    sink.wait_for_count(4, true).await;
+
+    // Every raw delivery is a JSON array; together they carry the 4 events.
+    let raw_bodies = sink.raw_bodies().await;
+    assert!(!raw_bodies.is_empty());
+    for body in &raw_bodies {
+        assert!(
+            body.first() == Some(&b'['),
+            "every batch delivery must be a JSON array"
+        );
+    }
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(
+        batch_lens.iter().sum::<usize>(),
+        4,
+        "the batches must carry the four events in total"
+    );
+
+    // SN order is preserved across batches.
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id.to_string())
+        .map(|e| e.sn())
+        .collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+
+    // No individual headers on any batch delivery.
+    let headers = sink.idempotency_headers().await;
+    assert_eq!(headers.len(), raw_bodies.len());
+    assert!(
+        headers
+            .iter()
+            .all(|h| h.subject_id.is_none() && h.key.is_none()),
+        "batch deliveries must not carry per-event idempotency headers"
+    );
+}
+
+/// Batch delivery of a live burst: when several facts are emitted without
+/// awaiting each one, the manager must forward them all to the same worker so
+/// they are flushed as a single JSON-array POST, not diverted to catch-up.
+///
+/// **Flow:**
+/// 1. Create governance and schema; restart with a batch sink (`batch_size`
+///    equal to the total number of events, high `batch_max_delay_ms` so the
+///    timer does not interfere).
+/// 2. Create a subject and emit three facts asynchronously, then one final
+///    synchronous fact to flush the pipeline.
+///
+/// **Verifications:**
+/// - All five events (create + four facts) arrive in one single POST.
+/// - The sink never enters `lagging` state.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_burst_single_post() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let mut entry = make_sink_entry_batch(
+        "batch-burst-sink",
+        sink.url(),
+        Some(governance_id.to_string()),
+        BTreeSet::from([SinkTypes::All]),
+        SinkCompression::None,
+    );
+    // One batch for the whole burst; the timer must not fire during the test.
+    entry.servers[0].batch_delivery_size = 5;
+    if let SinkTransportConfig::Http(ref mut http) = entry.servers[0].transport
+    {
+        http.batch_max_delay_ms = 60_000;
+    }
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![entry],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Burst: three async facts followed by one sync fact that flushes the
+    // pipeline.
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 4}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&node.api, "batch-burst-sink").await;
+    sink.wait_for_count(5, true).await;
+
+    // The whole burst must have been delivered as a single JSON-array POST.
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(
+        batch_lens,
+        vec![5],
+        "the burst must be delivered as one batch of five events"
+    );
+
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id.to_string())
+        .map(|e| e.sn())
+        .collect();
+    assert_eq!(sns, vec![0, 1, 2, 3, 4]);
+
+    // The sequential gate must not have diverted any event to lagging.
+    assert_sink_not_lagging(&node.api, "batch-burst-sink").await;
+}
+
+/// Live burst without batch delivery: events emitted in a burst must be
+/// delivered in order without entering `lagging`, even when earlier events
+/// are still in flight.
+///
+/// **Flow:**
+/// 1. Create governance and schema; restart with a regular (non-batch) sink.
+/// 2. Create a subject and emit four facts asynchronously, then one final
+///    synchronous fact to flush the pipeline.
+///
+/// **Verifications:**
+/// - All six events (create + five facts) arrive in SN order.
+/// - The sink never enters `lagging` state.
+#[traced_test]
+#[tokio::test]
+async fn sink_live_burst_no_lagging() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "live-burst-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Slow the sink down so the burst arrives while the first delivery is
+    // still in flight. Without the notification gate this forces a
+    // SequentialGap and the subject would enter lagging.
+    sink.set_mode(ResponseMode::Timeout(50)).await;
+
+    // Burst: four async facts followed by one sync fact that flushes the
+    // pipeline.
+    for i in 1..=4 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 5}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wait_for_sink_caught_up(&node.api, "live-burst-sink").await;
+    sink.wait_for_count(6, true).await;
+
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events
+        .iter()
+        .filter(|e| e.subject_id() == subject_id.to_string())
+        .map(|e| e.sn())
+        .collect();
+    assert_eq!(sns, vec![0, 1, 2, 3, 4, 5]);
+
+    // The sequential gate must not have diverted any event to lagging.
+    assert_sink_not_lagging(&node.api, "live-burst-sink").await;
+}
+
+/// Proxy `no_proxy` bypass: hosts listed in `proxy.no_proxy` must be
+/// contacted directly, skipping the configured proxy.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink behind a proxy whose `no_proxy` list contains
+///    `127.0.0.1` (the sink's host).
+///
+/// **Verifications:**
+/// - The delivery succeeds (direct connection).
+/// - The proxy records no request at all.
+#[traced_test]
+#[tokio::test]
+async fn sink_proxy_no_proxy_bypass() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (_subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let proxy = TestProxy::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_proxy(
+            "proxy-bypass-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            HttpProxyConfig {
+                url: proxy.url(),
+                username: String::new(),
+                no_proxy: vec!["127.0.0.1".to_owned()],
+            },
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "proxy-bypass-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    assert!(
+        proxy.proxied_requests().await.is_empty(),
+        "no_proxy hosts must bypass the proxy entirely"
+    );
+}
+
+/// Idempotency key stability across retries: every retry of the same event
+/// carries the same `Idempotency-Key`, so the receiver can deduplicate
+/// retried deliveries.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject.
+/// 2. Restart with a sink with `max_retries: 1` while the `TestSink` rejects
+///    deliveries (HTTP 500).
+/// 3. Startup catch-up attempts the create event twice.
+///
+/// **Verifications:**
+/// - Both attempts carry identical `X-Ave-Subject-Id`, `X-Ave-SN`,
+///   `X-Ave-Event-Type` and `Idempotency-Key` headers.
+/// - Once the sink accepts again, the event is delivered.
+#[traced_test]
+#[tokio::test]
+async fn sink_idempotency_key_stable_across_retries() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ServerError).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_retry_policy(
+            "idem-retry-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+            100,
+            30_000,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The initial attempt plus one retry both reach the sink as raw
+    // deliveries (failures are recorded before the response mode applies).
+    sink.wait_for_raw_count(2, true).await;
+
+    let headers = sink.idempotency_headers().await;
+    let first = &headers[0];
+    let second = &headers[1];
+
+    assert_eq!(
+        first.subject_id.as_deref(),
+        Some(subject_id.to_string()).as_deref()
+    );
+    assert_eq!(first.subject_id, second.subject_id);
+    assert_eq!(first.sn, second.sn);
+    assert_eq!(first.event_type, second.event_type);
+    assert_eq!(
+        first.key.as_deref(),
+        Some(format!("{}-0", subject_id)).as_deref(),
+        "Idempotency-Key must be '<subject_id>-<sn>'"
+    );
+    assert_eq!(
+        first.key, second.key,
+        "the retry must reuse the idempotency key of the first attempt"
+    );
+
+    // When the sink accepts again, the worker catches up.
+    sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "idem-retry-sink").await;
+    sink.wait_for_distinct_sn_count(&subject_id.to_string(), 1, true)
+        .await;
+}
+
+/// Batch failure semantics: when a batch delivery fails, the cursor does not
+/// advance and the whole batch is delivered again by the next catch-up —
+/// nothing is lost and nothing is partially applied.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit three facts.
+/// 2. Restart with a batch sink while the `TestSink` rejects deliveries
+///    (HTTP 500); the subject goes lagging.
+/// 3. The sink accepts again and the automatic catch-up redelivers.
+///
+/// **Verifications:**
+/// - Failed attempts are also batch POSTs (JSON arrays), not individual
+///   events.
+/// - After recovery, the four events arrive exactly once and in SN order.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_failure_retries_whole_batch() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=3 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ServerError).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-fail-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The failed batch delivery sends the subject to lagging.
+    wait_for_sink_lagging_subjects(&node.api, "batch-fail-sink", 1).await;
+    sink.wait_for_raw_count(1, true).await;
+
+    // Failed attempts are batch POSTs (JSON arrays), never individual POSTs.
+    for body in &sink.raw_bodies().await {
+        assert!(
+            body.first() == Some(&b'['),
+            "failed deliveries must also be JSON arrays"
+        );
+    }
+    assert!(
+        sink.snapshot().await.is_empty(),
+        "no event is accepted while the sink returns 500"
+    );
+
+    // After recovery the whole batch is delivered again, exactly once and in
+    // order.
+    sink.set_mode(ResponseMode::Accept).await;
+    wait_for_sink_caught_up(&node.api, "batch-fail-sink").await;
+    sink.wait_for_count(4, true).await;
+
+    let events = sink.snapshot().await;
+    assert_no_duplicate_events(&events);
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2, 3]);
+}
+
+/// Mixed batch contents: with a filter that matches only part of the events,
+/// a batch delivery is a JSON array that mixes full events and lightweight
+/// projections, both decodable by the receiver.
+///
+/// **Flow:**
+/// 1. Create governance, schema and a subject; emit two facts.
+/// 2. Restart with a batch sink whose filter is only `Create`; startup
+///    catch-up delivers the three events in one batch.
+///
+/// **Verifications:**
+/// - A single POST carries the three events as a JSON array.
+/// - The create event is full and the two facts are lightweight, inside the
+///   same array.
+#[traced_test]
+#[tokio::test]
+async fn sink_batch_delivery_mixed_full_light() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_batch(
+            "batch-mixed-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+            SinkCompression::None,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "batch-mixed-sink").await;
+    sink.wait_for_count(3, true).await;
+
+    let batch_lens = sink.batch_lens().await;
+    assert_eq!(
+        batch_lens,
+        vec![3],
+        "the three events must arrive in a single batch"
+    );
+
+    let events = sink.snapshot().await;
+    assert!(
+        matches!(events.first(), Some(IncomingSinkEvent::Full(_))),
+        "the create event must be delivered full inside the batch"
+    );
+    assert!(
+        events[1..]
+            .iter()
+            .all(|e| matches!(e, IncomingSinkEvent::Light(_))),
+        "facts must be lightweight inside the batch"
+    );
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(sns, vec![0, 1, 2]);
+}
+
+/// Minimal OAuth2 token endpoint for `client_credentials` e2e tests.
+/// Captures the JSON body of the first token request and returns a fixed
+/// Bearer token. The captured body is read through the returned Arc<Mutex>.
+async fn start_client_credentials_auth_server() -> (
+    String,
+    std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+) {
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+
+    let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+    let app = Router::new()
+        .route(
+            "/token",
+            post(
+                |State(state): State<
+                    std::sync::Arc<
+                        tokio::sync::Mutex<Option<serde_json::Value>>,
+                    >,
+                >,
+                 Json(body): Json<serde_json::Value>| async move {
+                    *state.lock().await = Some(body);
+                    let token = serde_json::json!({
+                        "access_token": "cc-test-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                    });
+                    (StatusCode::OK, Json(token))
+                },
+            ),
+        )
+        .with_state(captured.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("auth server should bind");
+    let addr = listener
+        .local_addr()
+        .expect("auth server has local address");
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("http://{}/token", addr), captured)
+}
+
+/// Test 17: `sink_client_credentials_oauth2`.
+///
+/// **Case covered:** end-to-end delivery using OAuth2 `client_credentials`.
+///
+/// **Setup:**
+/// - Bootstrap node, governance and schema `Example`.
+/// - Start a `TestSink` for `/events` and a separate axum OAuth2 server for
+///   `/token` that records the token request body.
+/// - Restart the node with a sink configured with
+///   `grant_type: ClientCredentials`, `client_id` and the client secret read
+///   from `AVE_SINK_PASSWORD_CC_SINK`.
+///
+/// **Sequence:**
+/// 1. Emit a fact after the restart.
+/// 2. Wait for the event to be delivered.
+///
+/// **Verifications:**
+/// - The delivery carries `Authorization: Bearer cc-test-token`.
+/// - The token endpoint received `grant_type=client_credentials`, the
+///   configured `client_id`, and the secret from the environment variable.
+#[traced_test]
+#[tokio::test]
+async fn sink_client_credentials_oauth2() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (s1, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let sink = TestSink::start().await;
+    let (auth_url, captured_body) =
+        start_client_credentials_auth_server().await;
+
+    let auth_env = "AVE_SINK_PASSWORD_CC_SINK";
+    unsafe {
+        std::env::set_var(auth_env, "cc-client-secret");
+    }
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth(
+            "cc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
+                auth_url,
+                grant_type: OAuth2GrantType::ClientCredentials,
+                client_id: "cc-client-id".to_owned(),
+                scope: "events:read".to_owned(),
+                ..SinkAuthConfig::default()
+            }),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    emit_fact(&node.api, s1.clone(), json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+
+    sink.wait_for_count(2, true).await;
+
+    let headers = sink.authorization_headers().await;
+    assert!(
+        headers
+            .iter()
+            .flatten()
+            .any(|h| h == "Bearer cc-test-token"),
+        "deliveries must carry the Bearer token obtained via client_credentials"
+    );
+
+    let body = captured_body
+        .lock()
+        .await
+        .clone()
+        .expect("auth server should have received a token request");
+    assert_eq!(body["grant_type"], "client_credentials");
+    assert_eq!(body["client_id"], "cc-client-id");
+    assert_eq!(body["client_secret"], "cc-client-secret");
+    assert_eq!(body["scope"], "events:read");
+
+    unsafe {
+        std::env::remove_var(auth_env);
+    }
+}
+
+/// Test: `replay_restarts_inflight_catch_up_preserving_order`.
+///
+/// **Objective:** verify that a replay requested while a long catch-up is in
+/// flight **restarts** the catch-up from the lower `from_sn` instead of being
+/// queued behind it, and that the stale delivery chain is discarded
+/// (generation fencing in the subject worker), so events always arrive in
+/// order.
+///
+/// **Setup:**
+/// - Node with governance and a subject with SN 0..=19 created *before* the
+///   sink exists.
+/// - Restart the node with a slow sink (`ResponseMode::Timeout(200)` per
+///   request): the startup catch-up from SN 0 takes ~4 s, keeping it in
+///   flight.
+///
+/// **Action:**
+/// - Wait until the first 3 catch-up deliveries land, then request a replay
+///   from SN 10 while the catch-up is still running.
+///
+/// **Verifications:**
+/// - The replay is accepted (`processed`, no `errors`).
+/// - Once everything settles, the received SN sequence is an ordered prefix
+///   `0..M` (whatever the original catch-up delivered before the restart,
+///   strictly ordered, no interleaving) followed by the complete, strictly
+///   ordered sequence `10..=19` redelivered by the restarted catch-up. Any
+///   overlap between the prefix and the suffix is the expected at-least-once
+///   redelivery of events the original catch-up had already sent.
+#[traced_test]
+#[tokio::test]
+async fn replay_restarts_inflight_catch_up_preserving_order() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=18 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 19}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Restart with the sink configured and slow (200 ms per request) so the
+    // startup catch-up from SN 0 stays in flight for ~4 seconds.
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::Timeout(200)).await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The catch-up is running (200 ms per delivery). Wait for the first
+    // deliveries and request a replay from SN 10 while it is still in flight.
+    sink.wait_for_count(3, true).await;
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "example-sink".to_owned(),
+                subject_id: subject_id_str.clone(),
+                from_sn: 10,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.processed.len(), 1);
+    assert!(response.errors.is_empty());
+
+    // The restarted catch-up redelivers SN 10..=19, in order, at the end.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(13, true).await;
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+
+    let suffix: Vec<u64> = (10..=19).collect();
+    let split = sns.len() - suffix.len();
+    assert_eq!(
+        &sns[split..],
+        suffix.as_slice(),
+        "the restarted catch-up must redeliver SN 10..=19 in order at the end; got {sns:?}"
+    );
+    let expected_prefix: Vec<u64> = (0..split as u64).collect();
+    assert_eq!(
+        &sns[..split],
+        expected_prefix.as_slice(),
+        "events before the restart must be the strictly ordered prefix 0..M of the original catch-up; got {sns:?}"
+    );
+}
+
+/// Test: `pending_replay_survives_node_restart`.
+///
+/// **Objective:** an accepted replay whose re-delivery is still pending when
+/// the node stops must be resumed after the restart (persisted replay floor),
+/// even though the delivery cursor was already advanced past the replay's
+/// `from_sn` by the in-flight catch-up.
+///
+/// **Setup:**
+/// - The sink receives Create + 4 facts (SN 0..=4).
+/// - The sink drops deliveries; a replay from SN 1 is accepted: the cursor is
+///   rewound to 0 and the replay floor (SN 1) is persisted, but nothing can
+///   be delivered yet.
+/// - The sink becomes slow (400 ms per request) so the catch-up re-delivers
+///   the replay range one event at a time.
+///
+/// **Action:** restart the node after the first replayed event lands, while
+/// the rest of the replay is still in flight.
+///
+/// **Verifications:**
+/// - After the restart the pending replay is resumed and the full range
+///   SN 1..=4 is redelivered, in order. Without the persisted floor the
+///   cursor (already at SN 1) would make the manager resume from SN 2 and the
+///   final count would stay at 9, so waiting for 10 events distinguishes the
+///   fixed behaviour.
+#[traced_test]
+#[tokio::test]
+async fn pending_replay_survives_node_restart() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for i in 1..=4 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Restart with the sink configured: startup catch-up delivers SN 0..=4.
+    let sink = TestSink::start().await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(5, true).await;
+
+    // Sink down: the replay is accepted (floor SN 1 persisted, cursor rewound
+    // to 0) but its catch-up cannot deliver anything.
+    sink.set_mode(ResponseMode::Drop).await;
+    let response = node
+        .api
+        .replay_sink_events(SinkReplayRequest {
+            requests: vec![SinkReplayItem {
+                sink: "example-sink".to_owned(),
+                subject_id: subject_id_str.clone(),
+                from_sn: 1,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.processed.len(), 1);
+    assert!(response.errors.is_empty());
+
+    // Slow sink: the catch-up redelivers the replay range one event at a time
+    // (400 ms each). Restart the node right after the first replayed event
+    // lands, while the rest of the replay is still in flight.
+    sink.set_mode(ResponseMode::Timeout(400)).await;
+    sink.wait_for_count(6, true).await;
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // The pending replay is resumed: SN 1..=4 is redelivered, in order.
+    // Without the persisted floor the manager would resume from SN 2 and the
+    // count would stall at 9.
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(10, true).await;
+    let events = sink.snapshot().await;
+    let sns: Vec<u64> = events.iter().map(|e| e.sn()).collect();
+    assert_eq!(
+        &sns[sns.len() - 4..],
+        &[1, 2, 3, 4],
+        "the resumed replay must redeliver SN 1..=4 in order at the end; got {sns:?}"
+    );
+    assert_eq!(&sns[..5], &[0, 1, 2, 3, 4], "initial catch-up; got {sns:?}");
+}
+
+/// Test: `live_delivery_across_worker_idle_shutdowns`.
+///
+/// **Objective:** live events emitted right as the sink worker and its
+/// subject worker are being shut down for idleness must still be delivered,
+/// in order. Both shutdowns are synchronous (`ask_stop`): an event arriving
+/// during the shutdown waits in the parent's mailbox and the worker is
+/// recreated afterwards, instead of racing the old worker's termination and
+/// losing the event (or letting a later event advance the cursor past it).
+///
+/// **Setup:** sink with `sink_worker_idle_timeout_ms: 200` and
+/// `sink_subject_worker_idle_timeout_ms: 200`.
+///
+/// **Action:** emit facts paced ~250 ms apart, so every fact arrives while
+/// the previous workers are being torn down (or have just been).
+///
+/// **Verifications:** the sink stores Create + 5 facts, strictly in order,
+/// with no gaps and no duplicates.
+#[traced_test]
+#[tokio::test]
+async fn live_delivery_across_worker_idle_shutdowns() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: ave_network::NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    // Restart with the sink configured with very short idle timeouts so the
+    // sink worker and the subject worker are torn down between events.
+    let sink = TestSink::start().await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        short_idle_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    // Each fact arrives ~250 ms after the previous delivery, while the
+    // workers are being shut down for idleness (or have just been).
+    for i in 1..=5 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+        sink.wait_for_count((i + 1) as usize, true).await;
+    }
+
+    let events = sink.snapshot().await;
+    assert_eq!(
+        events.len(),
+        6,
+        "every live event must be delivered exactly once across idle shutdowns"
+    );
+    assert_subject_sn_sequence(&events, &subject_id_str, 0, 5);
 }

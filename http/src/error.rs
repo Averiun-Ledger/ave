@@ -6,12 +6,23 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use utoipa::ToSchema;
 
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     trackers: Option<Vec<String>>,
+}
+
+/// Error body returned when a governance cannot be deleted because it
+/// still has trackers attached (HTTP 409).
+#[derive(Serialize, ToSchema)]
+pub struct GovernanceHasTrackersError {
+    /// Human-readable error message
+    pub error: String,
+    /// Identifiers of the trackers that must be deleted first
+    pub trackers: Vec<String>,
 }
 
 /// HTTP error type for the Axum API layer.
@@ -74,17 +85,11 @@ const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
             StatusCode::INTERNAL_SERVER_ERROR
         }
 
-        // ── Sink authentication → 500 ──────────────────────────
-        BridgeError::SinkAuth(_) => StatusCode::INTERNAL_SERVER_ERROR,
-
         // ── Core errors → delegate ─────────────────────────────
         BridgeError::Core(core) => status_for_core_error(core),
 
         // ── Runtime errors → 500 ───────────────────────────────
         BridgeError::SignalRegistration(_) => StatusCode::INTERNAL_SERVER_ERROR,
-
-        // ── Generic API errors → 500 ───────────────────────────
-        BridgeError::Api(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -120,6 +125,7 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         CoreError::InvalidRequestState(_)
         | CoreError::InvalidApprovalState(_)
         | CoreError::SubjectNotActive(_)
+        | CoreError::SinkNotConfigured(_)
         | CoreError::GovernanceHasTrackers { .. } => StatusCode::CONFLICT,
 
         // ── 422 Unprocessable Entity ───────────────────────────
@@ -131,15 +137,16 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         CoreError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
 
         // ── 502 Bad Gateway ────────────────────────────────────
-        CoreError::Network(_) | CoreError::NetworkState(_) => {
-            StatusCode::BAD_GATEWAY
-        }
+        CoreError::Network(_)
+        | CoreError::NetworkState(_)
+        | CoreError::SinkTestFailed(_) => StatusCode::BAD_GATEWAY,
 
         // ── 504 Gateway Timeout ────────────────────────────────
         CoreError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
 
         // ── 500 Internal Server Error (everything else) ────────
         CoreError::SystemInit(_)
+        | CoreError::InvalidConfiguration { .. }
         | CoreError::ActorCreation { .. }
         | CoreError::MissingResource { .. }
         | CoreError::SigningFailed(_)

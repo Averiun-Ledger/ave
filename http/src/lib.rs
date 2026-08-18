@@ -7,6 +7,7 @@ pub mod config_types;
 pub mod directory_validation;
 pub mod doc;
 pub mod error;
+pub mod extract;
 pub mod logging;
 pub mod middleware;
 mod self_signed_cert;

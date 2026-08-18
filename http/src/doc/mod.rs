@@ -1,52 +1,58 @@
 use crate::config_types::MachineSpecHttp;
-use crate::server::{self};
+use crate::error::GovernanceHasTrackersError;
+use crate::server;
 use crate::{
     auth::{
-        admin_handlers::{self, ListUsersQuery, ResetPasswordRequest},
-        apikey_handlers::{self, ListApiKeysQuery, QuotaStatusQuery},
+        admin_handlers::{self, ResetPasswordRequest},
+        apikey_handlers,
         login_handler::{self, ChangePasswordRequest},
         models::{
             Action, ApiKeyInfo, ApiKeyQuotaStatus, AssignApiKeyPlanRequest,
-            AuditApiKeyCount, AuditLog, AuditLogPage, AuditLogQuery,
-            AuditStats, AuditUserCount, AuditValueCount, CreateApiKeyRequest,
+            AuditApiKeyCount, AuditLog, AuditLogPage, AuditStats,
+            AuditUserCount, AuditValueCount, CreateApiKeyRequest,
             CreateApiKeyResponse, CreateQuotaExtensionRequest,
             CreateRoleRequest, CreateUsagePlanRequest, CreateUserRequest,
-            ErrorResponse, LoginRequest, LoginResponse, PaginationQuery,
-            Permission, QuotaExtensionInfo, RateLimitApiKeyStats,
-            RateLimitEndpointStats, RateLimitIpEndpointStats, RateLimitIpStats,
-            RateLimitStats, Resource, RevokeApiKeyRequest, Role, RoleInfo,
-            RotateApiKeyRequest, SetPermissionRequest, SystemConfig,
-            SystemConfigPage, UpdateRoleRequest, UpdateSystemConfigRequest,
+            ErrorResponse, LoginRequest, LoginResponse, Permission,
+            QuotaExtensionInfo, RateLimitApiKeyStats, RateLimitEndpointStats,
+            RateLimitIpEndpointStats, RateLimitIpStats, RateLimitStats,
+            Resource, Role, RoleInfo, RotateApiKeyRequest,
+            SetPermissionRequest, SystemConfig, SystemConfigPage,
+            UpdateRoleRequest, UpdateSystemConfigRequest,
             UpdateUsagePlanRequest, UpdateUserRequest, UsagePlan, UserInfo,
         },
         system_handlers::{
-            self, AuditStatsQuery, DetailedPermissionsResponse,
-            RolePermissionsInfo,
+            self, DetailedPermissionsResponse, RolePermissionsInfo,
         },
     },
     config_types::{
-        ApiKeyConfigHttp, AuthConfigHttp, AveActorsStoreConfigHttp,
-        AveConfigHttp, AveStoreConfigHttp, ConfigHttp, ControlListConfigHttp,
-        CorsConfigHttp, EndpointRateLimitHttp, GovernanceSyncConfigHttp,
-        HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
-        NetworkConfigHttp, ProxyConfigHttp, RateLimitConfigHttp,
+        ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, AveStoreConfigHttp,
+        ConfigHttp, ControlListConfigHttp, CorsConfigHttp,
+        EndpointRateLimitHttp, GovernanceSyncConfigHttp, HashAlgorithmHttp,
+        HttpConfigHttp, HttpProxyConfigHttp, HttpSinkConfigHttp,
+        HttpTlsConfigHttp, HttpTlsVersionHttp, KafkaAcksHttp,
+        KafkaCompressionHttp, KafkaSaslMechanismHttp, KafkaSecurityConfigHttp,
+        KafkaSinkConfigHttp, KafkaTlsConfigHttp, KeyPairAlgorithmHttp,
+        LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, LoggingRotationHttp,
+        MemoryLimitsConfigHttp, NetworkConfigHttp, NodeTypeHttp,
+        OAuth2GrantTypeHttp, ProxyConfigHttp, RateLimitConfigHttp,
         RebootSyncConfigHttp, RoutingConfigHttp, RoutingNodeHttp,
-        SelfSignedCertConfigHttp, SessionConfigHttp, SinkConfigEntryHttp,
-        SinkConfigHttp, SinkServerHttp, SinkTargetHttp, SyncConfigHttp,
-        TrackerSyncConfigHttp, UpdateSyncConfigHttp,
+        SelfSignedCertConfigHttp, SessionConfigHttp, SinkAuthConfigHttp,
+        SinkAuthMethodHttp, SinkCompressionHttp, SinkConfigEntryHttp,
+        SinkConfigHttp, SinkServerHttp, SinkTargetHttp,
+        SinkTransportConfigHttp, SyncConfigHttp, TrackerSyncConfigHttp,
+        UpdateSyncConfigHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
 use ave_bridge::ave_common::{
-    Namespace, SchemaType,
+    SchemaType,
     bridge::{
         request::{
-            AbortsQuery, ApprovalQuery, ApprovalState, ApprovalStateRes,
-            BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
-            BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
-            BridgeSignedEventRequest, BridgeTransferRequest, EventRequestType,
-            EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery,
-            SubjectQuery, UpdateSubjectQuery,
+            ApprovalState, ApprovalStateRes, BridgeConfirmRequest,
+            BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest,
+            BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest,
+            BridgeTransferRequest, EventRequestType, SinkReplayItem,
+            SinkReplayRequest,
         },
         signature::BridgeSignature,
     },
@@ -54,8 +60,9 @@ use ave_bridge::ave_common::{
         AbortDB, ApprovalEntry, ApprovalReq, EvalResDB, GovsData, LedgerDB,
         Paginator, PaginatorAborts, PaginatorEvents, RequestData,
         RequestEventDB, RequestInfo, RequestInfoExtend, RequestState,
-        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SubjectDB,
-        SubjsData, TimeRange, TransferSubject,
+        RequestsInManager, RequestsInManagerSubject, SinkEventsPage, SinkInfo,
+        SinkManagerTarget, SinkReplayError, SinkReplayResponse, SinkStatusInfo,
+        SubjectDB, SubjsData, TransferSubject,
     },
 };
 
@@ -77,6 +84,19 @@ impl Modify for SecurityAddon {
     }
 }
 
+/// Removes paths whose routes only exist when certain cargo features are
+/// enabled, so the generated document always matches the binary.
+struct FeatureGatedPathsAddon;
+
+impl Modify for FeatureGatedPathsAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        #[cfg(not(feature = "prometheus"))]
+        openapi.paths.paths.remove("/metrics");
+        #[cfg(feature = "prometheus")]
+        let _ = openapi;
+    }
+}
+
 /// # Ave HTTP API
 ///
 /// RESTful API for interacting with Ave Ledger nodes.
@@ -84,8 +104,8 @@ impl Modify for SecurityAddon {
 #[openapi(
     info(
         title = "Ave HTTP API",
-        description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.",
-        version = "0.9.0",
+        description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.\n\nProtected endpoints return `401 Unauthorized` when the API key is missing or invalid, and `403 Forbidden` when the key does not hold the permission required by the endpoint.\nEndpoints that mutate node state return `503 Service Unavailable` while the node is running in safe mode.\n\n## Error format\n\nEvery error response carries the same JSON body: `{\"error\": \"…\"}`.\nThat includes framework-level rejections: unknown routes return `404 Not Found`, a known path hit with a method the API does not offer returns `405 Method Not Allowed` (authentication and permission checks run first, so unauthorized callers receive `401`/`403` instead), invalid path or query parameters return `400 Bad Request`, a malformed JSON body returns `400 Bad Request`, a well-formed JSON body that does not match the expected schema returns `422 Unprocessable Entity`, a missing or wrong `Content-Type` returns `415 Unsupported Media Type`, and bodies larger than 2 MiB return `413 Payload Too Large`.\n\n## URL conventions\n\nCollections use plural nouns (`/requests`, `/approvals`, `/sinks`, `/governances`).\nViews and actions over a single subject hang from its resource: `/subjects/{subject_id}/state`, `/subjects/{subject_id}/events`, `/subjects/{subject_id}/update`.\nActions over sinks hang from `/sinks/{sink_name}/...`.",
+        version = "0.12.0",
         contact(
             name = "Averiun",
             url = "https://www.averiun.com/",
@@ -106,6 +126,7 @@ impl Modify for SecurityAddon {
         server::get_public_key,
         server::get_config,
         server::get_network_state,
+        server::delete_subject,
 
         // ── Request ─────────────────────────────────────────────
         server::get_requests_in_manager,
@@ -149,7 +170,6 @@ impl Modify for SecurityAddon {
 
         // ── Ledger ──────────────────────────────────────────────
         server::get_events,
-        server::get_sink_events,
         server::get_aborts,
         server::get_event_sn,
         server::get_first_or_end_events,
@@ -210,14 +230,23 @@ impl Modify for SecurityAddon {
         system_handlers::get_rate_limit_stats,
         system_handlers::list_system_config,
         system_handlers::update_system_config,
-
-        // ── Observability ───────────────────────────────────────
         server::get_metrics,
+
+        // ── Sink ──────────────────────────────────────────────
+        server::get_sinks,
+        server::get_sink,
+        server::get_sinks_status,
+        server::unblock_sink,
+        server::test_sink,
+        server::reset_sink_cursors,
+        server::replay_sink_events,
+        server::get_sink_events,
     ),
     components(
         schemas(
             // ── Error ───────────────────────────────────────────
             ErrorResponse,
+            GovernanceHasTrackersError,
 
             // ── Authentication ──────────────────────────────────
             LoginRequest,
@@ -229,7 +258,6 @@ impl Modify for SecurityAddon {
             CreateUserRequest,
             UpdateUserRequest,
             ResetPasswordRequest,
-            ListUsersQuery,
 
             // ── Role management ─────────────────────────────────
             Role,
@@ -250,8 +278,6 @@ impl Modify for SecurityAddon {
             CreateApiKeyRequest,
             CreateApiKeyResponse,
             RotateApiKeyRequest,
-            RevokeApiKeyRequest,
-            ListApiKeysQuery,
             AssignApiKeyPlanRequest,
             CreateQuotaExtensionRequest,
             QuotaExtensionInfo,
@@ -259,36 +285,22 @@ impl Modify for SecurityAddon {
             UsagePlan,
             CreateUsagePlanRequest,
             UpdateUsagePlanRequest,
-            QuotaStatusQuery,
 
             // ── Audit & system ──────────────────────────────────
             AuditLog,
             AuditLogPage,
-            AuditLogQuery,
             AuditStats,
             AuditValueCount,
             AuditUserCount,
             AuditApiKeyCount,
-            AuditStatsQuery,
             RateLimitStats,
             RateLimitApiKeyStats,
             RateLimitIpStats,
             RateLimitEndpointStats,
             RateLimitIpEndpointStats,
-            PaginationQuery,
             SystemConfig,
             SystemConfigPage,
             UpdateSystemConfigRequest,
-
-            // ── Query parameters ────────────────────────────────
-            SubjectQuery,
-            UpdateSubjectQuery,
-            GovQuery,
-            ApprovalQuery,
-            EventsQuery,
-            SinkEventsQuery,
-            AbortsQuery,
-            FirstEndEvents,
 
             // ── Event request types ─────────────────────────────
             BridgeSignedEventRequest,
@@ -315,7 +327,6 @@ impl Modify for SecurityAddon {
             GovsData,
             SubjsData,
             SchemaType,
-            Namespace,
             TransferSubject,
             MonitorNetworkState,
             LedgerDB,
@@ -327,18 +338,30 @@ impl Modify for SecurityAddon {
             Paginator,
             AbortDB,
             SubjectDB,
-            TimeRange,
             EventRequestType,
+
+            // ── Sink response / request types ─────────────────────
+            SinkInfo,
+            SinkStatusInfo,
+            SinkManagerTarget,
+            SinkReplayRequest,
+            SinkReplayItem,
+            SinkReplayResponse,
+            SinkReplayError,
 
             // ── Configuration ───────────────────────────────────
             ConfigHttp,
             AveConfigHttp,
+            KeyPairAlgorithmHttp,
+            HashAlgorithmHttp,
             SyncConfigHttp,
             GovernanceSyncConfigHttp,
             TrackerSyncConfigHttp,
             UpdateSyncConfigHttp,
             RebootSyncConfigHttp,
             NetworkConfigHttp,
+            NodeTypeHttp,
+            MemoryLimitsConfigHttp,
             RoutingConfigHttp,
             RoutingNodeHttp,
             ControlListConfigHttp,
@@ -354,16 +377,31 @@ impl Modify for SecurityAddon {
             SessionConfigHttp,
             LoggingHttp,
             LoggingOutputHttp,
+            LoggingRotationHttp,
             SinkConfigHttp,
             SinkConfigEntryHttp,
             SinkServerHttp,
             SinkTargetHttp,
-            AveActorsStoreConfigHttp,
+            SinkTransportConfigHttp,
+            HttpSinkConfigHttp,
+            HttpProxyConfigHttp,
+            SinkCompressionHttp,
+            HttpTlsConfigHttp,
+            HttpTlsVersionHttp,
+            OAuth2GrantTypeHttp,
+            KafkaAcksHttp,
+            KafkaCompressionHttp,
+            KafkaSaslMechanismHttp,
+            KafkaSecurityConfigHttp,
+            KafkaSinkConfigHttp,
+            KafkaTlsConfigHttp,
+            SinkAuthConfigHttp,
+            SinkAuthMethodHttp,
             AveStoreConfigHttp,
             MachineSpecHttp
         )
     ),
-    modifiers(&SecurityAddon),
+    modifiers(&SecurityAddon, &FeatureGatedPathsAddon),
     tags(
         (name = "Authentication", description = "Login and password management. Use POST /login to obtain an API key."),
         (name = "Node", description = "Node identity, configuration, and network status."),
@@ -381,6 +419,7 @@ impl Modify for SecurityAddon {
         (name = "My Account", description = "Self-service endpoints for the authenticated user."),
         (name = "System", description = "System resources, actions, and configuration (admin only)."),
         (name = "Audit Logs", description = "Query and analyze audit log entries (admin only)."),
+        (name = "Sink", description = "Manage and inspect external sinks (HTTP, Kafka, gRPC)."),
     )
 )]
 pub struct ApiDoc;

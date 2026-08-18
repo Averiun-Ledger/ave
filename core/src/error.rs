@@ -15,6 +15,15 @@ pub enum Error {
     #[error("System initialization failed: {0}")]
     SystemInit(String),
 
+    /// Invalid node configuration.
+    #[error("Invalid configuration for {component}: {reason}")]
+    InvalidConfiguration {
+        /// Configuration component that failed validation.
+        component: String,
+        /// Reason the configuration is invalid.
+        reason: String,
+    },
+
     /// Failed to create a required actor.
     #[error("Failed to initialize {actor}: {reason}")]
     ActorCreation { actor: String, reason: String },
@@ -147,6 +156,14 @@ pub enum Error {
     /// Sink not found in the registry.
     #[error("Sink '{0}' not found")]
     SinkNotFound(String),
+
+    /// Sink is registered but has no server configuration.
+    #[error("Sink '{0}' is registered but not configured")]
+    SinkNotConfigured(String),
+
+    /// Non-persistent sink test delivery failed.
+    #[error("Sink test failed: {0}")]
+    SinkTestFailed(String),
 
     // ========================================
     // Validation Errors

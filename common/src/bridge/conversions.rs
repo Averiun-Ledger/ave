@@ -404,7 +404,7 @@ mod tests {
             payload: json!({"test": "value"}),
             viewpoints: vec!["vp1".to_string(), "vp2".to_string()],
         };
-        let fact: FactRequest = bridge_fact.clone().try_into().unwrap();
+        let fact: FactRequest = bridge_fact.try_into().unwrap();
         assert!(fact.viewpoints.contains("vp1"));
         assert!(fact.viewpoints.contains("vp2"));
         let back: BridgeFactRequest = fact.into();

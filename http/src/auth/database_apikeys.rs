@@ -2,7 +2,10 @@
 //
 // This module provides database operations for API keys
 
-use super::crypto::{extract_key_prefix, generate_api_key, hash_api_key};
+use super::VALIDATION_LIMITS;
+use super::crypto::{
+    extract_key_prefix, generate_api_key, generate_uuid, hash_api_key,
+};
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::*;
@@ -143,12 +146,26 @@ impl AuthDatabase {
                     None
                 }
             }
-            _ => unreachable!("Negative TTL already validated above"),
+            Some(ttl) => {
+                return Err(DatabaseError::Validation(format!(
+                    "Invalid TTL: {ttl} (must be positive or 0)"
+                )));
+            }
+        };
+        // Interactive (management) keys are login sessions, not long-lived
+        // credentials: they must always expire. An explicit TTL=0 or a zero
+        // system default would otherwise make them eternal, and oversized
+        // TTLs are clamped to the limit.
+        let effective_ttl = if is_management {
+            let max_ttl = VALIDATION_LIMITS.management_key_max_ttl_seconds;
+            Some(effective_ttl.map_or(max_ttl, |ttl| ttl.min(max_ttl)))
+        } else {
+            effective_ttl
         };
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 
         // Generate UUID for id
-        let key_id = Self::generate_uuid();
+        let key_id = generate_uuid();
 
         conn.execute(
             "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, name, description, expires_at, is_management)
@@ -317,7 +334,7 @@ impl AuthDatabase {
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let result = if is_management {
@@ -365,7 +382,7 @@ impl AuthDatabase {
 
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let result = if is_management {
@@ -403,52 +420,6 @@ impl AuthDatabase {
         Ok(result)
     }
 
-    pub fn issue_management_api_key_transactional(
-        &self,
-        user_id: i64,
-        name: Option<&str>,
-        description: Option<&str>,
-        expires_in_seconds: Option<i64>,
-        audit: Option<AuditLogParams>,
-    ) -> Result<(String, ApiKeyInfo), DatabaseError> {
-        let mut conn = self.lock_conn()?;
-        let tx_started = std::time::Instant::now();
-        let result = (|| {
-            let tx = conn
-                .transaction()
-                .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-
-            let (api_key, key_info) = self.issue_management_api_key_with_conn(
-                &tx,
-                user_id,
-                name,
-                description,
-                expires_in_seconds,
-            )?;
-
-            if let Some(audit) = audit {
-                Self::create_audit_log_with_conn(
-                    &tx,
-                    self.audit_enabled(),
-                    AuditLogParams {
-                        api_key_id: Some(&key_info.id),
-                        ..audit
-                    },
-                )?;
-            }
-
-            tx.commit()
-                .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-
-            Ok((api_key, key_info))
-        })();
-        self.record_transaction_duration(
-            "issue_management_api_key_transactional",
-            tx_started.elapsed(),
-        );
-        result
-    }
-
     pub fn rotate_api_key_transactional(
         &self,
         params: RotateApiKeyParams<'_>,
@@ -466,7 +437,7 @@ impl AuthDatabase {
         let tx_started = std::time::Instant::now();
         let result = (|| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             let existing = Self::get_api_key_info_internal(&tx, key_id)?;
@@ -599,33 +570,6 @@ impl AuthDatabase {
         Ok(keys)
     }
 
-    /// Get an active API key by name for a user
-    pub fn get_active_api_key_by_name(
-        &self,
-        user_id: i64,
-        name: &str,
-    ) -> Result<ApiKeyInfo, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        let key_id: String = conn
-            .query_row(
-                "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
-                params![user_id, name],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .ok_or_else(|| {
-                DatabaseError::NotFound(
-                    "API key not found for this user/name".into(),
-                )
-            })?;
-
-        let result = Self::get_api_key_info_internal(&conn, &key_id);
-        drop(conn);
-        result
-    }
-
     /// List all API keys (admin)
     pub fn list_all_api_keys(
         &self,
@@ -699,7 +643,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Self::revoke_api_key_internal(&tx, key_id, revoked_by, reason)?;
         if let Some(audit) = audit {
@@ -796,8 +740,18 @@ impl AuthDatabase {
             }
         }
 
-        // Get user
-        let user = Self::get_user_by_id_internal(conn, user_id)?;
+        // Get user. A key whose owner no longer exists (e.g. a deleted
+        // user) is treated as an invalid key, not an internal error.
+        let user =
+            Self::get_user_by_id_internal(conn, user_id).map_err(|e| {
+                if matches!(e, DatabaseError::NotFound(_)) {
+                    DatabaseError::PermissionDenied(
+                        "Invalid API key".to_string(),
+                    )
+                } else {
+                    e
+                }
+            })?;
 
         // Check if user is active
         if !user.is_active {
@@ -839,16 +793,9 @@ impl AuthDatabase {
 
         // Service keys cannot carry admin/panel permissions
         if !is_management {
-            let admin_resources = [
-                "admin_users",
-                "admin_roles",
-                "admin_api_key",
-                "admin_system",
-                "user_api_key",
-                "node_maintenance",
-            ];
-            permissions
-                .retain(|p| !admin_resources.contains(&p.resource.as_str()));
+            permissions.retain(|p| {
+                !super::ADMIN_RESOURCES.contains(&p.resource.as_str())
+            });
         }
 
         Ok(AuthContext {
@@ -875,8 +822,35 @@ impl AuthDatabase {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-            let auth_ctx =
-                self.verify_api_key_with_conn(&tx, api_key, ip_address)?;
+            let auth_ctx = match self
+                .verify_api_key_with_conn(&tx, api_key, ip_address)
+            {
+                Ok(auth_ctx) => auth_ctx,
+                Err(err) => {
+                    // Audit the rejection here: the extractor short-circuits
+                    // the request, so it never reaches the audit layer
+                    Self::create_audit_log_with_conn(
+                        &tx,
+                        self.audit_enabled(),
+                        AuditLogParams {
+                            user_id: None,
+                            api_key_id: None,
+                            action_type: "api_key_auth_failed",
+                            endpoint: Some(endpoint),
+                            http_method: None,
+                            ip_address,
+                            user_agent: None,
+                            request_id: None,
+                            details: Some("API key authentication failed"),
+                            success: false,
+                            error_message: Some(&err.to_string()),
+                        },
+                    )?;
+                    tx.commit()
+                        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+                    return Err(err);
+                }
+            };
 
             self.check_rate_limit_with_conn(
                 &tx,

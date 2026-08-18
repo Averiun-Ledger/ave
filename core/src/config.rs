@@ -6,9 +6,16 @@ use std::{
     time::Instant,
 };
 
+use ave_common::Error;
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 
-pub use ave_common::sink::{SinkConfigEntry, SinkServer, SinkTarget};
+pub use ave_common::sink::{
+    GrpcSinkConfig, GrpcTlsConfig, HttpSinkConfig, HttpTlsVersion, KafkaAcks,
+    KafkaCompression, KafkaKerberosConfig, KafkaKeyStrategy,
+    KafkaSaslMechanism, KafkaSecurityConfig, KafkaSinkConfig, KafkaTlsConfig,
+    SinkAuthConfig, SinkAuthMethod, SinkCompression, SinkConfigEntry,
+    SinkServer, SinkTarget, SinkTransportConfig,
+};
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -25,14 +32,11 @@ pub struct TokenResponse {
 
 impl TokenResponse {
     pub fn is_expired_or_expiring_soon(&self, margin_secs: u64) -> bool {
-        match self.obtained_at {
-            Some(t) => {
-                let elapsed = t.elapsed().as_secs();
-                self.expires_in > 0
-                    && elapsed + margin_secs >= self.expires_in as u64
-            }
-            None => true,
-        }
+        self.obtained_at.is_none_or(|t| {
+            let elapsed = t.elapsed().as_secs();
+            self.expires_in > 0
+                && elapsed + margin_secs >= self.expires_in as u64
+        })
     }
 }
 
@@ -90,6 +94,53 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Validates the node configuration, returning an error describing the
+    /// first invalid value found.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.contracts_path.as_os_str().is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "node.contracts_path".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if self.tracking_size == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "node.tracking_size".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+
+        self.internal_db.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "node.internal_db".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        self.external_db.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "node.external_db".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        self.sync
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "node.sync".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if let Some(spec) = &self.spec {
+            spec.validate().map_err(|e| Error::InvalidConfiguration {
+                component: "node.spec".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +161,44 @@ impl Default for SyncConfig {
             update: UpdateSyncConfig::default(),
             reboot: RebootSyncConfig::default(),
         }
+    }
+}
+
+impl SyncConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.ledger_batch_size == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.ledger_batch_size".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+
+        self.governance.validate().map_err(|e| {
+            Error::InvalidConfiguration {
+                component: "sync.governance".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        self.tracker
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "sync.tracker".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.update
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "sync.update".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.reboot
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "sync.reboot".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        Ok(())
     }
 }
 
@@ -138,6 +227,31 @@ impl Default for UpdateSyncConfig {
     }
 }
 
+impl UpdateSyncConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.round_retry_interval_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.update.round_retry_interval_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.witness_retry_count == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.update.witness_retry_count".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.witness_retry_interval_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.update.witness_retry_interval_secs"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
@@ -161,6 +275,34 @@ impl Default for RebootSyncConfig {
             timeout_retry_schedule_secs:
                 default_reboot_timeout_retry_schedule_secs(),
         }
+    }
+}
+
+impl RebootSyncConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.stability_check_interval_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.reboot.stability_check_interval_secs"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.stability_check_max_retries == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.reboot.stability_check_max_retries"
+                    .to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        validate_positive_vec(
+            "sync.reboot.diff_retry_schedule_secs",
+            &self.diff_retry_schedule_secs,
+        )?;
+        validate_positive_vec(
+            "sync.reboot.timeout_retry_schedule_secs",
+            &self.timeout_retry_schedule_secs,
+        )?;
+        Ok(())
     }
 }
 
@@ -196,6 +338,30 @@ impl Default for GovernanceSyncConfig {
     }
 }
 
+impl GovernanceSyncConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.interval_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.governance.interval_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.sample_size == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.governance.sample_size".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.response_timeout_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.governance.response_timeout_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
@@ -221,6 +387,42 @@ impl Default for TrackerSyncConfig {
             update_batch_size: 2,
             update_timeout_secs: 10,
         }
+    }
+}
+
+impl TrackerSyncConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.interval_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.interval_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.page_size == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.page_size".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.response_timeout_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.response_timeout_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.update_batch_size == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.update_batch_size".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.update_timeout_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.update_timeout_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -316,6 +518,29 @@ impl Display for MachineProfile {
             Self::Large => write!(f, "large"),
             Self::XLarge => write!(f, "xlarge"),
             Self::XXLarge => write!(f, "2xlarge"),
+        }
+    }
+}
+
+impl MachineSpec {
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Profile(_) => Ok(()),
+            Self::Custom { ram_mb, cpu_cores } => {
+                if *ram_mb == 0 {
+                    return Err(Error::InvalidConfiguration {
+                        component: "MachineSpec.custom.ram_mb".to_string(),
+                        reason: "must be greater than zero".to_string(),
+                    });
+                }
+                if *cpu_cores == 0 {
+                    return Err(Error::InvalidConfiguration {
+                        component: "MachineSpec.custom.cpu_cores".to_string(),
+                        reason: "must be greater than zero".to_string(),
+                    });
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -504,6 +729,32 @@ impl fmt::Display for AveInternalDBFeatureConfig {
     }
 }
 
+impl AveInternalDBConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        match &self.db {
+            #[cfg(feature = "rocksdb")]
+            AveInternalDBFeatureConfig::Rocksdb { path } => {
+                if path.as_os_str().is_empty() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "internal_db.db.path".to_string(),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+            }
+            #[cfg(feature = "sqlite")]
+            AveInternalDBFeatureConfig::Sqlite { path } => {
+                if path.as_os_str().is_empty() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "internal_db.db.path".to_string(),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct AveExternalDBConfig {
@@ -558,6 +809,23 @@ impl fmt::Display for AveExternalDBFeatureConfig {
     }
 }
 
+impl AveExternalDBConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        match &self.db {
+            #[cfg(feature = "ext-sqlite")]
+            AveExternalDBFeatureConfig::Sqlite { path } => {
+                if path.as_os_str().is_empty() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "external_db.db.path".to_string(),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct LoggingOutput {
     pub stdout: bool,
@@ -606,6 +874,9 @@ impl Display for LoggingRotation {
 #[serde(default)]
 pub struct LoggingConfig {
     pub output: LoggingOutput,
+    /// Endpoint that receives the log batches. `https://` is expected in
+    /// production: `http://` is accepted (e.g. collectors on localhost or a
+    /// trusted internal network) but ships the logs unencrypted.
     pub api_url: Option<String>,
     pub file_path: PathBuf, // ruta base de logs
     pub rotation: LoggingRotation,
@@ -635,4 +906,74 @@ impl LoggingConfig {
     pub const fn logs(&self) -> bool {
         self.output.api || self.output.file || self.output.stdout
     }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.output.api {
+            let url = self.api_url.as_deref().unwrap_or("");
+            if url.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: "logging.api_url".to_string(),
+                    reason: "must be set when output.api is true".to_string(),
+                });
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(Error::InvalidConfiguration {
+                    component: "logging.api_url".to_string(),
+                    reason: format!("must be an http/https URL, got {url}"),
+                });
+            }
+        }
+
+        if self.output.file {
+            if self.file_path.as_os_str().is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: "logging.file_path".to_string(),
+                    reason: "must be set when output.file is true".to_string(),
+                });
+            }
+            if self.max_files == 0 {
+                return Err(Error::InvalidConfiguration {
+                    component: "logging.max_files".to_string(),
+                    reason:
+                        "must be greater than zero when output.file is true"
+                            .to_string(),
+                });
+            }
+        }
+
+        if self.rotation == LoggingRotation::Size && self.max_size == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "logging.max_size".to_string(),
+                reason: "must be greater than zero when rotation is Size"
+                    .to_string(),
+            });
+        }
+
+        if self.level.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "logging.level".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_positive_vec(component: &str, values: &[u64]) -> Result<(), Error> {
+    if values.is_empty() {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    for (i, value) in values.iter().enumerate() {
+        if *value == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: format!("{component}[{i}]"),
+                reason: "must be greater than zero, got 0".to_string(),
+            });
+        }
+    }
+    Ok(())
 }

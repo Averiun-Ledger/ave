@@ -215,6 +215,9 @@ impl Handler<Self> for Reboot {
                 }
 
                 if self.count >= self.stability_check_max_retries {
+                    if let Some(metrics) = crate::metrics::try_core_metrics() {
+                        metrics.observe_reboot_max_retries_reached();
+                    }
                     debug!(
                         msg_type = "Update",
                         request_id = %self.request_id,

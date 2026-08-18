@@ -135,6 +135,61 @@ async fn test_permissions_change_when_role_removed() {
         && p.allowed));
 }
 
+/// The permissions reported to the client (the login response uses
+/// `get_user_effective_permissions`) must mirror exactly what the server
+/// enforces (`get_effective_permissions`): role aggregation is allow-wins
+/// and a user override always wins.
+#[test(tokio::test)]
+async fn test_reported_permissions_match_enforcement() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let allow_role = db.create_role("allow_role", None).unwrap();
+    let deny_role = db.create_role("deny_role", None).unwrap();
+
+    // The contested pair: one role allows, another denies
+    db.set_role_permission(allow_role.id, "node_subject", "get", true)
+        .unwrap();
+    db.set_role_permission(deny_role.id, "node_subject", "get", false)
+        .unwrap();
+    db.assign_role_to_user(user.id, allow_role.id, None)
+        .unwrap();
+    db.assign_role_to_user(user.id, deny_role.id, None).unwrap();
+
+    let reported = db.get_user_effective_permissions(user.id).unwrap();
+    let enforced = db.get_effective_permissions(user.id).unwrap();
+
+    // Allow-wins: exactly one row for the contested pair, and allowed
+    let contested: Vec<bool> = reported
+        .iter()
+        .filter(|p| p.resource == "node_subject" && p.action == "get")
+        .map(|p| p.allowed)
+        .collect();
+    assert_eq!(contested, vec![true], "allow-wins, exactly one row");
+
+    // Both views must be identical
+    let tuples = |perms: &[ave_http::auth::models::Permission]| {
+        perms
+            .iter()
+            .map(|p| (p.resource.clone(), p.action.clone(), p.allowed))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tuples(&reported), tuples(&enforced));
+
+    // A user override always wins over the role aggregation
+    db.set_user_permission(user.id, "node_subject", "get", false, None)
+        .unwrap();
+    let reported = db.get_user_effective_permissions(user.id).unwrap();
+    let contested: Vec<bool> = reported
+        .iter()
+        .filter(|p| p.resource == "node_subject" && p.action == "get")
+        .map(|p| p.allowed)
+        .collect();
+    assert_eq!(contested, vec![false], "user override wins");
+}
+
 #[test(tokio::test)]
 async fn test_multiple_role_changes() {
     let (db, _dirs) = common::create_test_db();
@@ -370,7 +425,7 @@ fn user_api_key_routes() -> BTreeSet<(String, String)> {
     server_auth_route_catalog()
         .into_iter()
         .filter(|(_, path)| {
-            *path == "/me/api-keys" || *path == "/me/api-keys/{name}"
+            *path == "/me/api-keys" || *path == "/me/api-keys/{key_id}"
         })
         .collect()
 }
@@ -713,7 +768,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -726,7 +781,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Get Admin role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -746,7 +801,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Create test user with Admin role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_admin_user",
@@ -764,7 +819,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Login as test admin user to get management key
     let test_login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(
             &json!({"username": "test_admin_user", "password": "TestPass123!"}),
         )
@@ -779,7 +834,7 @@ async fn test_admin_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -860,7 +915,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -873,7 +928,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Get Sender role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -893,7 +948,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Create test user with Sender role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_sender_user",
@@ -911,7 +966,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Login as test sender user to get management key
     let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
+            .post(server.url("/login"))
             .json(&json!({"username": "test_sender_user", "password": "TestPass123!"}))
             .send()
             .await
@@ -924,7 +979,7 @@ async fn test_sender_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -946,22 +1001,22 @@ async fn test_sender_role_endpoints_access() {
 
     let sender_node_access = [
         // node_request:post
-        ("post", "/request", true),
+        ("post", "/requests", true),
         // node_request:get
-        ("get", "/request", true),
-        ("get", "/request/{request_id}", true),
+        ("get", "/requests", true),
+        ("get", "/requests/{request_id}", true),
         ("get", "/requests-in-manager", true),
         ("get", "/requests-in-manager/{subject_id}", true),
         // node_subject:get
-        ("get", "/state/{subject_id}", true),
-        ("get", "/events/{subject_id}", true),
-        ("get", "/events/{subject_id}/{sn}", true),
-        ("get", "/events-first-last/{subject_id}", true),
-        ("get", "/aborts/{subject_id}", true),
-        ("get", "/subjects", true),
-        ("get", "/subjects/{governance_id}", true),
-        ("get", "/approval", true),
-        ("get", "/approval/{subject_id}", true),
+        ("get", "/subjects/{subject_id}/state", true),
+        ("get", "/subjects/{subject_id}/events", true),
+        ("get", "/subjects/{subject_id}/events/{sn}", true),
+        ("get", "/subjects/{subject_id}/events-first-last", true),
+        ("get", "/subjects/{subject_id}/aborts", true),
+        ("get", "/governances", true),
+        ("get", "/governances/{governance_id}/subjects", true),
+        ("get", "/approvals", true),
+        ("get", "/approvals/{subject_id}", true),
         ("get", "/governances/authorized", true),
         ("get", "/governances/{subject_id}/authorized", true),
         ("get", "/subjects/{subject_id}/sync-peers", true),
@@ -1045,7 +1100,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -1058,7 +1113,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Get Manager role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -1078,7 +1133,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Create test user with Manager role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_manager_user",
@@ -1096,7 +1151,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Login as test manager user to get management key
     let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
+            .post(server.url("/login"))
             .json(&json!({"username": "test_manager_user", "password": "TestPass123!"}))
             .send()
             .await
@@ -1109,7 +1164,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -1136,9 +1191,11 @@ async fn test_manager_role_endpoints_access() {
     let manager_overrides: &[(&str, &str, bool)] = &[
         ("get", "/sinks", false),
         ("get", "/sinks/status", false),
-        ("get", "/sink-events/{subject_id}", false),
+        ("get", "/sinks/{sink_name}", false),
+        ("get", "/subjects/{subject_id}/sink-events", false),
         ("post", "/sinks/{sink_name}/unblock", false),
-        ("delete", "/sinks/{sink_name}", false),
+        ("post", "/sinks/{sink_name}/test", false),
+        ("post", "/sinks/{sink_name}/reset-cursors", false),
         ("post", "/sinks/replay", false),
         ("delete", "/maintenance/subjects/{subject_id}", false),
     ];
@@ -1211,7 +1268,7 @@ async fn test_data_role_endpoints_access() {
 
     // Login as default admin to create test user
     let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(&json!({"username": "admin", "password": "AdminPass123!"}))
         .send()
         .await
@@ -1224,7 +1281,7 @@ async fn test_data_role_endpoints_access() {
 
     // Get Data role ID
     let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
+        .get(server.url("/admin/roles"))
         .header("X-API-Key", admin_api_key)
         .send()
         .await
@@ -1244,7 +1301,7 @@ async fn test_data_role_endpoints_access() {
 
     // Create test user with Data role via HTTP
     let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
+        .post(server.url("/admin/users"))
         .header("X-API-Key", admin_api_key)
         .json(&json!({
             "username": "test_data_user",
@@ -1262,7 +1319,7 @@ async fn test_data_role_endpoints_access() {
 
     // Login as test data user to get management key
     let test_login_response: serde_json::Value = client
-        .post(&server.url("/login"))
+        .post(server.url("/login"))
         .json(
             &json!({"username": "test_data_user", "password": "TestPass123!"}),
         )
@@ -1277,7 +1334,7 @@ async fn test_data_role_endpoints_access() {
 
     // Create service key via /me/api-keys
     let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
+        .post(server.url("/me/api-keys"))
         .header("X-API-Key", test_mgmt_key)
         .json(&json!({
             "name": "service_key",
@@ -1306,15 +1363,15 @@ async fn test_data_role_endpoints_access() {
         ("get", "/network-state", true),
         // /config requires node_management:get - data does NOT have it
         // node_subject:get
-        ("get", "/state/{subject_id}", true),
-        ("get", "/events/{subject_id}", true),
-        ("get", "/events/{subject_id}/{sn}", true),
-        ("get", "/events-first-last/{subject_id}", true),
-        ("get", "/aborts/{subject_id}", true),
-        ("get", "/subjects", true),
-        ("get", "/subjects/{governance_id}", true),
-        ("get", "/approval", true),
-        ("get", "/approval/{subject_id}", true),
+        ("get", "/subjects/{subject_id}/state", true),
+        ("get", "/subjects/{subject_id}/events", true),
+        ("get", "/subjects/{subject_id}/events/{sn}", true),
+        ("get", "/subjects/{subject_id}/events-first-last", true),
+        ("get", "/subjects/{subject_id}/aborts", true),
+        ("get", "/governances", true),
+        ("get", "/governances/{governance_id}/subjects", true),
+        ("get", "/approvals", true),
+        ("get", "/approvals/{subject_id}", true),
         ("get", "/governances/authorized", true),
         ("get", "/governances/{subject_id}/authorized", true),
         ("get", "/subjects/{subject_id}/sync-peers", true),
@@ -1323,8 +1380,8 @@ async fn test_data_role_endpoints_access() {
         ("get", "/sync-peers", true),
         ("get", "/pending-transfers", true),
         // node_request:get
-        ("get", "/request", true),
-        ("get", "/request/{request_id}", true),
+        ("get", "/requests", true),
+        ("get", "/requests/{request_id}", true),
         ("get", "/requests-in-manager", true),
         ("get", "/requests-in-manager/{subject_id}", true),
     ];
@@ -1405,4 +1462,75 @@ fn role_tests_cover_all_protected_http_route_catalogs() {
         missing.is_empty() && stale.is_empty(),
         "Role test route matrix is out of sync with protected HTTP route catalogs. Missing: {missing:?}. Stale: {stale:?}"
     );
+}
+
+/// Defensive test: every catalog endpoint must resolve to a permission and be
+/// reachable by at least one seeded non-superadmin role.
+///
+/// Fails when someone adds an endpoint whose `require Resource Action` pair is
+/// granted to no role (the M14 class of bug), or when a catalog entry falls
+/// through `permission_for` (silent 403 for every caller). Endpoints that are
+/// intentionally superadmin-only must be listed explicitly in
+/// `SUPERADMIN_ONLY`, which forces a conscious decision.
+#[test(tokio::test)]
+async fn test_every_endpoint_is_covered_by_a_role() {
+    let (db, _dirs) = common::create_test_db();
+
+    // Permissions granted to seeded roles. Superadmin is excluded: its
+    // role-name short-circuit in `has_permission` would make the check
+    // vacuous.
+    let mut grants: BTreeSet<(String, String)> = BTreeSet::new();
+    for role in db.list_roles().expect("list roles") {
+        if role.name == "superadmin" {
+            continue;
+        }
+        for perm in db.get_role_permissions(role.id).expect("role permissions")
+        {
+            if perm.allowed {
+                grants.insert((perm.resource, perm.action));
+            }
+        }
+    }
+
+    // Endpoints intentionally restricted to superadmin (destructive,
+    // safe-mode-only operations). Each entry needs a justification here.
+    const SUPERADMIN_ONLY: &[(&str, &str)] =
+        &[("delete", "/maintenance/subjects/{subject_id}")];
+
+    let catalog: BTreeSet<(String, String)> = server_main_route_catalog()
+        .into_iter()
+        .chain(server_auth_route_catalog())
+        .collect();
+
+    for (method, path) in &catalog {
+        let http_method =
+            axum::http::Method::from_bytes(method.to_uppercase().as_bytes())
+                .expect("catalog methods are valid HTTP methods");
+        let requirement = ave_http::server::permission_for(&http_method, path);
+        let Some(requirement) = requirement else {
+            panic!(
+                "endpoint {method} {path} has no permission mapping (permission_for returned None)"
+            );
+        };
+        let ave_http::server::PermissionResult::Require(resource, action) =
+            requirement
+        else {
+            // allow_any: admin routes check permissions inline in the handler.
+            continue;
+        };
+        if SUPERADMIN_ONLY.contains(&(method.as_str(), path.as_str())) {
+            continue;
+        }
+
+        // `has_permission` semantics: a grant matches the exact action or the
+        // "all" wildcard on the same resource.
+        let exact = (resource.as_str().to_owned(), action.as_str().to_owned());
+        let wildcard = (resource.as_str().to_owned(), "all".to_owned());
+        assert!(
+            grants.contains(&exact) || grants.contains(&wildcard),
+            "endpoint {method} {path} requires {}:{} but no seeded role grants it",
+            resource.as_str(),
+            action.as_str()
+        );
+    }
 }

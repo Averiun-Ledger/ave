@@ -936,7 +936,7 @@ impl Actor for Tracker {
         }
 
         let Some(config): Option<crate::system::ConfigHelper> =
-            ctx.system().get_helper("config").await
+            ctx.system().get_helper("config")
         else {
             return Err(ActorError::Helper {
                 name: "config".to_owned(),

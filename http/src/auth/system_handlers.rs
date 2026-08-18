@@ -4,63 +4,12 @@
 
 use super::VALIDATION_LIMITS;
 use super::database::AuthDatabase;
-use super::http_api::{DatabaseErrorMapping, HttpErrorResponse, run_db};
+use super::http_api::{DatabaseErrorMapping, normalize_pagination, run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{
-    Extension, Json,
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use crate::extract::{ApiJson, ApiPath, ApiQuery};
+use axum::{Extension, Json, http::StatusCode};
 use std::sync::Arc;
-
-fn normalize_pagination(
-    query: &PaginationQuery,
-    default_limit: i64,
-    max_limit: i64,
-) -> Result<(i64, i64), HttpErrorResponse> {
-    let limit = match query.limit {
-        Some(limit) if limit > 0 && limit <= max_limit => limit,
-        Some(limit) if limit <= 0 => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Limit must be positive (got {})", limit),
-                }),
-            ));
-        }
-        Some(limit) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Limit must not exceed {} (got {})",
-                        max_limit, limit
-                    ),
-                }),
-            ));
-        }
-        None => default_limit,
-    };
-
-    let offset = match query.offset {
-        Some(offset) if offset >= 0 => offset,
-        Some(offset) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Offset must be non-negative (got {})",
-                        offset
-                    ),
-                }),
-            ));
-        }
-        None => 0,
-    };
-
-    Ok((limit, offset))
-}
 
 // =============================================================================
 // RESOURCES AND ACTIONS
@@ -136,19 +85,7 @@ pub async fn list_actions(
     path = "/admin/audit-logs",
     operation_id = "queryAuditLogs",
     tag = "Audit Logs",
-    params(
-        ("user_id" = Option<i64>, Query, description = "Filter by user ID"),
-        ("api_key_id" = Option<String>, Query, description = "Filter by API key ID"),
-        ("endpoint" = Option<String>, Query, description = "Filter by endpoint path"),
-        ("http_method" = Option<String>, Query, description = "Filter by HTTP method"),
-        ("ip_address" = Option<String>, Query, description = "Filter by IP address"),
-        ("user_agent" = Option<String>, Query, description = "Filter by User-Agent"),
-        ("success" = Option<bool>, Query, description = "Filter by success status"),
-        ("start_timestamp" = Option<i64>, Query, description = "Start timestamp (Unix)"),
-        ("end_timestamp" = Option<i64>, Query, description = "End timestamp (Unix)"),
-        ("limit" = Option<i64>, Query, description = "Maximum number of results"),
-        ("offset" = Option<i64>, Query, description = "Offset for pagination")
-    ),
+    params(AuditLogQuery),
     responses(
         (status = 200, description = "Audit log entries", body = AuditLogPage),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -158,7 +95,7 @@ pub async fn list_actions(
 pub async fn query_audit_logs(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(query): Query<AuditLogQuery>,
+    ApiQuery(query): ApiQuery<AuditLogQuery>,
 ) -> Result<Json<AuditLogPage>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
@@ -180,9 +117,7 @@ pub async fn query_audit_logs(
     path = "/admin/audit-logs/stats",
     operation_id = "getAuditStats",
     tag = "Audit Logs",
-    params(
-        ("days" = Option<u32>, Query, description = "Number of days to include (default 7)")
-    ),
+    params(AuditStatsQuery),
     responses(
         (status = 200, description = "Audit statistics", body = AuditStats),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -192,7 +127,7 @@ pub async fn query_audit_logs(
 pub async fn get_audit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(params): Query<AuditStatsQuery>,
+    ApiQuery(params): ApiQuery<AuditStatsQuery>,
 ) -> Result<Json<AuditStats>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
@@ -209,8 +144,10 @@ pub async fn get_audit_stats(
     Ok(Json(stats))
 }
 
-#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AuditStatsQuery {
+    /// Number of days to include (default 7)
     pub days: Option<u32>,
 }
 
@@ -224,10 +161,7 @@ pub struct AuditStatsQuery {
     path = "/admin/config",
     operation_id = "listSystemConfig",
     tag = "System",
-    params(
-        ("limit" = Option<i64>, Query, description = "Maximum number of results"),
-        ("offset" = Option<i64>, Query, description = "Offset for pagination")
-    ),
+    params(PaginationQuery),
     responses(
         (status = 200, description = "System configuration", body = SystemConfigPage),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -237,7 +171,7 @@ pub struct AuditStatsQuery {
 pub async fn list_system_config(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(query): Query<PaginationQuery>,
+    ApiQuery(query): ApiQuery<PaginationQuery>,
 ) -> Result<Json<SystemConfigPage>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "get")?;
@@ -288,11 +222,31 @@ pub async fn list_system_config(
 pub async fn update_system_config(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(key): Path<String>,
-    Json(req): Json<UpdateSystemConfigRequest>,
+    ApiPath(key): ApiPath<String>,
+    ApiJson(req): ApiJson<UpdateSystemConfigRequest>,
 ) -> Result<Json<SystemConfig>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_system", "put")?;
+
+    // Security-sensitive switches (audit trail, rate limiting and its
+    // geometry) can only be flipped by the superadmin: disabling them at
+    // runtime weakens the node's auditability and brute-force protection
+    let is_security_sensitive = [
+        super::system_config::SystemConfigKey::AuditEnable.as_str(),
+        super::system_config::SystemConfigKey::RateLimitEnable.as_str(),
+        super::system_config::SystemConfigKey::RateLimitLimitByKey.as_str(),
+        super::system_config::SystemConfigKey::RateLimitLimitByIp.as_str(),
+    ]
+    .contains(&key.as_str());
+    if is_security_sensitive && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify security-sensitive configuration"
+                    .to_string(),
+            }),
+        ));
+    }
 
     let endpoint = format!("/admin/config/{}", key);
     let value = req.value.clone();
@@ -416,18 +370,17 @@ pub async fn get_my_permissions_detailed(
         move |db| {
             let mut role_permissions = Vec::new();
             for role_name in &roles {
-                if let Ok(role) = db.get_role_by_name(role_name)
-                    && let Ok(perms) = db.get_role_permissions(role.id)
-                {
-                    role_permissions.push(RolePermissionsInfo {
-                        role_name: role_name.clone(),
-                        permissions: perms,
-                    });
-                }
+                // DB errors must surface: a 200 with partial data would
+                // misreport what the user can actually do.
+                let role = db.get_role_by_name(role_name)?;
+                let perms = db.get_role_permissions(role.id)?;
+                role_permissions.push(RolePermissionsInfo {
+                    role_name: role_name.clone(),
+                    permissions: perms,
+                });
             }
 
-            let user_overrides =
-                db.get_user_permissions(user_id).unwrap_or_default();
+            let user_overrides = db.get_user_permissions(user_id)?;
 
             Ok((role_permissions, user_overrides))
         },
@@ -452,7 +405,7 @@ pub async fn get_my_permissions_detailed(
     get,
     path = "/admin/rate-limits/stats",
     operation_id = "getRateLimitStats",
-    tag = "Audit Logs",
+    tag = "System",
     params(
         ("hours" = Option<u32>, Query, description = "Time window in hours (default 24)")
     ),
@@ -465,7 +418,7 @@ pub async fn get_my_permissions_detailed(
 pub async fn get_rate_limit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Query(query): Query<RateLimitStatsQuery>,
+    ApiQuery(query): ApiQuery<RateLimitStatsQuery>,
 ) -> Result<Json<RateLimitStats>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_system", "get")?;
 

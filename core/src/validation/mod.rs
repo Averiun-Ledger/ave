@@ -697,7 +697,7 @@ pub mod tests {
         spawn_dummy_network(command_receiver);
         let network = Arc::new(NetworkSender::new(command_sender));
 
-        system.add_helper("network", network.clone()).await;
+        system.add_helper("network", network.clone());
 
         let public_key = Arc::new(node_keys.public_key());
         let node_actor = system
@@ -726,10 +726,7 @@ pub mod tests {
             .await
             .unwrap();
 
-        let ext_db = system
-            .get_helper::<Arc<ExternalDB>>("ext_db")
-            .await
-            .unwrap();
+        let ext_db = system.get_helper::<Arc<ExternalDB>>("ext_db").unwrap();
 
         let create_req = EventRequest::Create(CreateRequest {
             name: Some("Name".to_string()),
@@ -983,12 +980,12 @@ pub mod tests {
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
-        if !request_actor
+        if request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
             .await
-            .is_err()
+            .is_ok()
         {
             panic!("Invalid response")
         }

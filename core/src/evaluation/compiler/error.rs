@@ -1,5 +1,6 @@
-use crate::model::common::contract::ContractError;
 use thiserror::Error;
+
+pub use ave_contract_sdk::runtime::InvalidModuleKind;
 
 #[derive(Debug, Error, Clone)]
 pub enum CompilerError {
@@ -68,89 +69,4 @@ pub enum CompilerError {
 
     #[error("contract check failed: {error}")]
     ContractCheckFailed { error: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum InvalidModuleKind {
-    UnknownImportFunction { name: String },
-    NonFunctionImport { import_type: String },
-    MissingImports { missing: Vec<String> },
-}
-
-impl std::fmt::Display for InvalidModuleKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownImportFunction { name } => {
-                write!(
-                    f,
-                    "module has function '{}' that is not contemplated in the SDK",
-                    name
-                )
-            }
-            Self::NonFunctionImport { import_type } => {
-                write!(
-                    f,
-                    "module has a '{}' import that is not a function",
-                    import_type
-                )
-            }
-            Self::MissingImports { missing } => {
-                write!(
-                    f,
-                    "module is missing SDK imports: {}",
-                    missing.join(", ")
-                )
-            }
-        }
-    }
-}
-
-impl From<ContractError> for CompilerError {
-    fn from(error: ContractError) -> Self {
-        match error {
-            ContractError::MemoryAllocationFailed { details } => {
-                Self::MemoryAllocationFailed { details }
-            }
-            ContractError::InvalidPointer { pointer } => {
-                Self::MemoryAllocationFailed {
-                    details: format!("invalid pointer: {}", pointer),
-                }
-            }
-            ContractError::WriteOutOfBounds { offset, size } => {
-                Self::MemoryAllocationFailed {
-                    details: format!(
-                        "write out of bounds: offset {} >= size {}",
-                        offset, size
-                    ),
-                }
-            }
-            ContractError::AllocationTooLarge { size, max } => {
-                Self::MemoryAllocationFailed {
-                    details: format!(
-                        "allocation size {} exceeds maximum of {} bytes",
-                        size, max
-                    ),
-                }
-            }
-            ContractError::TotalMemoryExceeded { total, max } => {
-                Self::MemoryAllocationFailed {
-                    details: format!(
-                        "total memory {} exceeds maximum of {} bytes",
-                        total, max
-                    ),
-                }
-            }
-            ContractError::AllocationOverflow => Self::MemoryAllocationFailed {
-                details: "memory allocation would overflow".to_string(),
-            },
-            ContractError::LinkerError { function, details } => {
-                Self::InstantiationFailed {
-                    details: format!(
-                        "linker error [{}]: {}",
-                        function, details
-                    ),
-                }
-            }
-        }
-    }
 }

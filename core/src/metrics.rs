@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -17,17 +18,6 @@ struct RequestResultLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestPhaseLabels {
     phase: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ContractPrepareLabels {
-    kind: &'static str,
-    result: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ContractExecutionLabels {
-    result: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -63,6 +53,27 @@ struct SinkResultLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct DistributionFailureLabels {
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct DistributionDurationLabels {
+    kind: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct GovernanceVersionSyncFailureLabels {
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ContractPrepareLabels {
+    kind: &'static str,
+    result: &'static str,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
@@ -73,14 +84,6 @@ pub struct CoreMetrics {
     contract_preparations: Family<ContractPrepareLabels, Counter>,
     contract_prepare_seconds:
         Family<ContractPrepareLabels, Histogram, fn() -> Histogram>,
-    contract_executions: Family<ContractExecutionLabels, Counter>,
-    contract_execution_seconds:
-        Family<ContractExecutionLabels, Histogram, fn() -> Histogram>,
-    contract_fuel_consumed:
-        Family<ContractExecutionLabels, Histogram, fn() -> Histogram>,
-    contract_fuel_exhausted_total: Family<ContractExecutionLabels, Counter>,
-    contract_memory_peak_bytes:
-        Family<ContractExecutionLabels, Histogram, fn() -> Histogram>,
     tracker_sync_rounds: Family<TrackerSyncRoundLabels, Counter>,
     tracker_sync_updates: Family<TrackerSyncUpdateLabels, Counter>,
     protocol_events: Family<ProtocolEventLabels, Counter>,
@@ -91,6 +94,26 @@ pub struct CoreMetrics {
         Family<SinkResultLabels, Histogram, fn() -> Histogram>,
     sink_blocked: Family<SinkNameLabels, Gauge>,
     sink_lagging_subjects: Family<SinkNameLabels, Gauge>,
+    sink_lagging_events: Family<SinkNameLabels, Gauge>,
+    sink_lag_max_distance: Family<SinkNameLabels, Gauge>,
+    kafka_producer_queue_size: Family<SinkNameLabels, Gauge>,
+    kafka_producer_tx_errors: Family<SinkNameLabels, Counter>,
+    kafka_producer_rtt_seconds:
+        Family<SinkNameLabels, Histogram, fn() -> Histogram>,
+    kafka_producer_fatal_errors: Family<SinkNameLabels, Counter>,
+    grpc_stream_reconnects: Family<SinkNameLabels, Counter>,
+    grpc_in_flight_batches: Family<SinkNameLabels, Gauge>,
+    grpc_ack_roundtrip_seconds:
+        Family<SinkNameLabels, Histogram, fn() -> Histogram>,
+    distribution_failures: Family<DistributionFailureLabels, Counter>,
+    distribution_duration_seconds:
+        Family<DistributionDurationLabels, Histogram, fn() -> Histogram>,
+    update_retries_exceeded: Counter,
+    reboot_max_retries_reached: Counter,
+    external_db_critical_errors: Counter,
+    governance_version_sync_failures:
+        Family<GovernanceVersionSyncFailureLabels, Counter>,
+    http_server_errors: Counter,
 }
 
 static CORE_METRICS: OnceLock<Arc<CoreMetrics>> = OnceLock::new();
@@ -120,38 +143,6 @@ impl CoreMetrics {
                     60.0, 120.0,
                 ])
             }),
-            contract_executions: Family::default(),
-            contract_execution_seconds: Family::new_with_constructor(|| {
-                Histogram::new(vec![
-                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                    0.5, 1.0, 2.0, 5.0,
-                ])
-            }),
-            contract_fuel_consumed: Family::new_with_constructor(|| {
-                Histogram::new(vec![
-                    1_000.0,
-                    10_000.0,
-                    100_000.0,
-                    500_000.0,
-                    1_000_000.0,
-                    2_500_000.0,
-                    5_000_000.0,
-                    7_500_000.0,
-                    10_000_000.0,
-                ])
-            }),
-            contract_fuel_exhausted_total: Family::default(),
-            contract_memory_peak_bytes: Family::new_with_constructor(|| {
-                Histogram::new(vec![
-                    4_096.0,
-                    16_384.0,
-                    65_536.0,
-                    262_144.0,
-                    1_048_576.0,
-                    4_194_304.0,
-                    16_777_216.0,
-                ])
-            }),
             tracker_sync_rounds: Family::default(),
             tracker_sync_updates: Family::default(),
             protocol_events: Family::default(),
@@ -166,6 +157,37 @@ impl CoreMetrics {
             }),
             sink_blocked: Family::default(),
             sink_lagging_subjects: Family::default(),
+            sink_lagging_events: Family::default(),
+            sink_lag_max_distance: Family::default(),
+            kafka_producer_queue_size: Family::default(),
+            kafka_producer_tx_errors: Family::default(),
+            kafka_producer_rtt_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                    0.5, 1.0,
+                ])
+            }),
+            kafka_producer_fatal_errors: Family::default(),
+            grpc_stream_reconnects: Family::default(),
+            grpc_in_flight_batches: Family::default(),
+            grpc_ack_roundtrip_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                    0.5, 1.0, 2.5, 5.0,
+                ])
+            }),
+            distribution_failures: Family::default(),
+            distribution_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
+                    60.0, 120.0, 300.0,
+                ])
+            }),
+            update_retries_exceeded: Counter::default(),
+            reboot_max_retries_reached: Counter::default(),
+            external_db_critical_errors: Counter::default(),
+            governance_version_sync_failures: Family::default(),
+            http_server_errors: Counter::default(),
         }
     }
 
@@ -194,31 +216,6 @@ impl CoreMetrics {
             "core_contract_prepare_seconds",
             "Contract preparation duration labeled by kind and result.",
             self.contract_prepare_seconds.clone(),
-        );
-        registry.register(
-            "core_contract_executions",
-            "Contract execution attempts labeled by result.",
-            self.contract_executions.clone(),
-        );
-        registry.register(
-            "core_contract_execution_seconds",
-            "Contract execution duration labeled by result.",
-            self.contract_execution_seconds.clone(),
-        );
-        registry.register(
-            "core_contract_fuel_consumed",
-            "Contract fuel consumed per execution labeled by result.",
-            self.contract_fuel_consumed.clone(),
-        );
-        registry.register(
-            "core_contract_fuel_exhausted",
-            "Total number of contract executions that ran out of fuel.",
-            self.contract_fuel_exhausted_total.clone(),
-        );
-        registry.register(
-            "core_contract_memory_peak_bytes",
-            "Peak WASM linear memory used per contract execution labeled by result.",
-            self.contract_memory_peak_bytes.clone(),
         );
         registry.register(
             "core_tracker_sync_rounds",
@@ -264,6 +261,86 @@ impl CoreMetrics {
             "core_sink_lagging_subjects",
             "Number of subjects currently lagging behind for a sink.",
             self.sink_lagging_subjects.clone(),
+        );
+        registry.register(
+            "core_sink_lagging_events",
+            "Total event lag (sum of last_seen - cursor) across all lagging subjects of a sink.",
+            self.sink_lagging_events.clone(),
+        );
+        registry.register(
+            "core_sink_lag_max_distance",
+            "Maximum SN distance (last_seen - cursor) among lagging subjects of a sink.",
+            self.sink_lag_max_distance.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_queue_size",
+            "Current number of messages in the Kafka producer queue, labeled by sink.",
+            self.kafka_producer_queue_size.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_tx_errors",
+            "Total Kafka producer transmission errors and request timeouts, labeled by sink.",
+            self.kafka_producer_tx_errors.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_rtt_seconds",
+            "Kafka broker round-trip time reported by producer statistics, labeled by sink.",
+            self.kafka_producer_rtt_seconds.clone(),
+        );
+        registry.register(
+            "core_kafka_producer_fatal_errors",
+            "Total fatal Kafka producer errors (producer fenced, unsupported feature, ...), labeled by sink.",
+            self.kafka_producer_fatal_errors.clone(),
+        );
+        registry.register(
+            "core_sink_grpc_stream_reconnects",
+            "Total gRPC delivery stream reconnections (stream death followed by a lazy reopen), labeled by sink.",
+            self.grpc_stream_reconnects.clone(),
+        );
+        registry.register(
+            "core_sink_grpc_in_flight_batches",
+            "Current unacked deliveries on the gRPC delivery stream, labeled by sink.",
+            self.grpc_in_flight_batches.clone(),
+        );
+        registry.register(
+            "core_sink_grpc_ack_roundtrip_seconds",
+            "Delivery-to-ack round-trip time of gRPC stream messages, labeled by sink.",
+            self.grpc_ack_roundtrip_seconds.clone(),
+        );
+        registry.register(
+            "core_distribution_failures_total",
+            "Total distribution failures by reason.",
+            self.distribution_failures.clone(),
+        );
+        registry.register(
+            "core_distribution_duration_seconds",
+            "Distribution duration in seconds.",
+            self.distribution_duration_seconds.clone(),
+        );
+        registry.register(
+            "core_update_retries_exceeded_total",
+            "Total update processes that exceeded the retry threshold.",
+            self.update_retries_exceeded.clone(),
+        );
+        registry.register(
+            "core_reboot_max_retries_reached_total",
+            "Total reboot processes that reached the maximum stability checks.",
+            self.reboot_max_retries_reached.clone(),
+        );
+        registry.register(
+            "core_external_db_critical_errors_total",
+            "Total critical external database errors reported to DBManager.",
+            self.external_db_critical_errors.clone(),
+        );
+        registry.register(
+            "core_governance_version_sync_failures_total",
+            "Total governance version sync failures by reason.",
+            self.governance_version_sync_failures.clone(),
+        );
+        registry.register(
+            "core_http_server_errors_total",
+            "Total HTTP 5xx server errors.",
+            self.http_server_errors.clone(),
         );
     }
 
@@ -319,46 +396,6 @@ impl CoreMetrics {
             .observe(Self::seconds(duration));
     }
 
-    pub fn observe_contract_execution(
-        &self,
-        result: &'static str,
-        duration: Duration,
-    ) {
-        let labels = ContractExecutionLabels { result };
-        self.contract_executions.get_or_create(&labels).inc();
-        self.contract_execution_seconds
-            .get_or_create(&labels)
-            .observe(Self::seconds(duration));
-    }
-
-    pub fn observe_contract_fuel_consumed(
-        &self,
-        result: &'static str,
-        fuel: u64,
-    ) {
-        let labels = ContractExecutionLabels { result };
-        self.contract_fuel_consumed
-            .get_or_create(&labels)
-            .observe(fuel as f64);
-    }
-
-    pub fn observe_contract_fuel_exhausted(&self) {
-        self.contract_fuel_exhausted_total
-            .get_or_create(&ContractExecutionLabels { result: "error" })
-            .inc();
-    }
-
-    pub fn observe_contract_memory_peak(
-        &self,
-        result: &'static str,
-        bytes: u64,
-    ) {
-        let labels = ContractExecutionLabels { result };
-        self.contract_memory_peak_bytes
-            .get_or_create(&labels)
-            .observe(bytes as f64);
-    }
-
     pub fn observe_tracker_sync_round(&self, result: &'static str) {
         self.tracker_sync_rounds
             .get_or_create(&TrackerSyncRoundLabels { result })
@@ -392,12 +429,21 @@ impl CoreMetrics {
     }
 
     pub fn observe_sink_event(&self, sink: &str, result: &'static str) {
+        self.observe_sink_event_n(sink, result, 1);
+    }
+
+    pub fn observe_sink_event_n(
+        &self,
+        sink: &str,
+        result: &'static str,
+        n: u64,
+    ) {
         self.sink_events
             .get_or_create(&SinkResultLabels {
                 sink: sink.to_owned(),
                 result,
             })
-            .inc();
+            .inc_by(n);
     }
 
     pub fn observe_sink_retry(&self, sink: &str) {
@@ -436,6 +482,147 @@ impl CoreMetrics {
                 sink: sink.to_owned(),
             })
             .set(count);
+    }
+
+    pub fn set_sink_lagging_events(&self, sink: &str, count: i64) {
+        self.sink_lagging_events
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(count);
+    }
+
+    pub fn set_sink_lag_max_distance(&self, sink: &str, distance: i64) {
+        self.sink_lag_max_distance
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(distance);
+    }
+
+    /// Forwards a librdkafka producer statistics report to the Kafka
+    /// producer metrics. `last_tx_errors` holds the absolute error total of
+    /// the previous report (librdkafka reports cumulative values) so the
+    /// counter only advances by the delta.
+    pub fn observe_kafka_producer_stats(
+        &self,
+        sink: &str,
+        stats: &rdkafka::Statistics,
+        last_tx_errors: &AtomicU64,
+    ) {
+        self.kafka_producer_queue_size
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(stats.msg_cnt as i64);
+
+        let tx_errors: u64 = stats
+            .brokers
+            .values()
+            .map(|broker| broker.txerrs + broker.req_timeouts)
+            .sum();
+        let previous = last_tx_errors.swap(tx_errors, Ordering::Relaxed);
+        if tx_errors > previous {
+            self.kafka_producer_tx_errors
+                .get_or_create(&SinkNameLabels {
+                    sink: sink.to_owned(),
+                })
+                .inc_by(tx_errors - previous);
+        }
+
+        for broker in stats.brokers.values() {
+            if let Some(rtt) = &broker.rtt
+                && rtt.avg > 0
+            {
+                self.kafka_producer_rtt_seconds
+                    .get_or_create(&SinkNameLabels {
+                        sink: sink.to_owned(),
+                    })
+                    .observe(rtt.avg as f64 / 1_000_000.0);
+            }
+        }
+    }
+
+    /// Record a fatal error reported by the librdkafka client error callback
+    /// (producer fenced, unsupported feature, ...). Unlike the stats-derived
+    /// counters, a fatal error means the producer instance is dead.
+    pub fn observe_kafka_producer_fatal_error(&self, sink: &str) {
+        self.kafka_producer_fatal_errors
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .inc();
+    }
+
+    /// Record a gRPC delivery stream reconnection: the stream died and the
+    /// transport reopened it lazily.
+    pub fn observe_grpc_stream_reconnect(&self, sink: &str) {
+        self.grpc_stream_reconnects
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .inc();
+    }
+
+    /// Update the current number of unacked deliveries on a sink's gRPC
+    /// delivery stream.
+    pub fn set_grpc_in_flight_batches(&self, sink: &str, count: i64) {
+        self.grpc_in_flight_batches
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .set(count);
+    }
+
+    /// Record the delivery-to-ack round-trip time of one gRPC stream
+    /// message.
+    pub fn observe_grpc_ack_roundtrip(&self, sink: &str, duration: Duration) {
+        self.grpc_ack_roundtrip_seconds
+            .get_or_create(&SinkNameLabels {
+                sink: sink.to_owned(),
+            })
+            .observe(duration.as_secs_f64());
+    }
+
+    pub fn observe_distribution_failure(&self, reason: &'static str) {
+        self.distribution_failures
+            .get_or_create(&DistributionFailureLabels { reason })
+            .inc();
+    }
+
+    pub fn observe_distribution_duration(
+        &self,
+        kind: &'static str,
+        duration: Duration,
+    ) {
+        self.distribution_duration_seconds
+            .get_or_create(&DistributionDurationLabels { kind })
+            .observe(Self::seconds(duration));
+    }
+
+    pub fn observe_update_retries_exceeded(&self) {
+        self.update_retries_exceeded.inc();
+    }
+
+    pub fn observe_reboot_max_retries_reached(&self) {
+        self.reboot_max_retries_reached.inc();
+    }
+
+    pub fn observe_external_db_critical_error(&self) {
+        self.external_db_critical_errors.inc();
+    }
+
+    pub fn observe_governance_version_sync_failure(
+        &self,
+        reason: &'static str,
+    ) {
+        self.governance_version_sync_failures
+            .get_or_create(&GovernanceVersionSyncFailureLabels { reason })
+            .inc();
+    }
+
+    pub fn observe_http_server_error(&self) {
+        self.http_server_errors.inc();
     }
 }
 
@@ -482,17 +669,6 @@ mod tests {
         metrics.observe_request_invalid();
         metrics.observe_request_terminal("finished", Duration::from_millis(20));
         metrics.observe_request_phase("evaluation", Duration::from_millis(10));
-        metrics.observe_contract_prepare(
-            "registered",
-            "cwasm_hit",
-            Duration::from_millis(5),
-        );
-        metrics.observe_contract_prepare(
-            "registered",
-            "skipped",
-            Duration::default(),
-        );
-        metrics.observe_contract_execution("success", Duration::from_millis(1));
         metrics.observe_tracker_sync_round("completed");
         metrics.observe_tracker_sync_update("launched");
         metrics.observe_protocol_event("approval", "approved");
@@ -511,27 +687,6 @@ mod tests {
         );
         assert_eq!(
             metric_value(&text, "core_requests_total{result=\"finished\"}"),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_preparations_total{kind=\"registered\",result=\"cwasm_hit\"}"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_preparations_total{kind=\"registered\",result=\"skipped\"}"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_executions_total{result=\"success\"}"
-            ),
             1.0
         );
         assert_eq!(
@@ -573,12 +728,6 @@ mod tests {
         metrics.observe_request_terminal("aborted", Duration::from_millis(30));
         metrics
             .observe_request_phase("distribution", Duration::from_millis(12));
-        metrics.observe_contract_prepare(
-            "temporary",
-            "recompiled",
-            Duration::from_millis(8),
-        );
-        metrics.observe_contract_execution("error", Duration::from_millis(2));
 
         let mut text = String::new();
         encode(&mut text, &registry).expect("encode metrics");
@@ -594,74 +743,6 @@ mod tests {
             metric_value(
                 &text,
                 "core_request_phase_duration_seconds_count{phase=\"distribution\"}"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_prepare_seconds_count{kind=\"temporary\",result=\"recompiled\"}"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_execution_seconds_count{result=\"error\"}"
-            ),
-            1.0
-        );
-    }
-
-    #[test]
-    fn core_metrics_expose_contract_fuel_and_memory_series() {
-        let metrics = CoreMetrics::new();
-        let mut registry = Registry::default();
-        metrics.register_into(&mut registry);
-
-        metrics.observe_contract_fuel_consumed("success", 1_000_000);
-        metrics.observe_contract_fuel_consumed("success", 2_500_000);
-        metrics.observe_contract_fuel_consumed("error", 5_000_000);
-        metrics.observe_contract_fuel_exhausted();
-        metrics.observe_contract_fuel_exhausted();
-        metrics.observe_contract_memory_peak("success", 64 * 1024);
-        metrics.observe_contract_memory_peak("error", 128 * 1024);
-
-        let mut text = String::new();
-        encode(&mut text, &registry).expect("encode metrics");
-
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_fuel_consumed_count{result=\"success\"}"
-            ),
-            2.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_fuel_consumed_count{result=\"error\"}"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_fuel_exhausted_total{result=\"error\"}"
-            ),
-            2.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_memory_peak_bytes_count{result=\"success\"}"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "core_contract_memory_peak_bytes_count{result=\"error\"}"
             ),
             1.0
         );
@@ -696,6 +777,8 @@ mod tests {
 
         metrics.set_sink_blocked("schema-sink", true);
         metrics.set_sink_lagging_subjects("schema-sink", 3);
+        metrics.set_sink_lagging_events("schema-sink", 42);
+        metrics.set_sink_lag_max_distance("schema-sink", 17);
 
         let mut text = String::new();
         encode(&mut text, &registry).expect("encode metrics");
@@ -766,6 +849,89 @@ mod tests {
                 "core_sink_lagging_subjects{sink=\"schema-sink\"}"
             ),
             3.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_lagging_events{sink=\"schema-sink\"}"
+            ),
+            42.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_lag_max_distance{sink=\"schema-sink\"}"
+            ),
+            17.0
+        );
+    }
+
+    #[test]
+    fn kafka_producer_stats_expose_queue_errors_and_rtt() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        let last_tx_errors = AtomicU64::new(0);
+        let mut stats = rdkafka::Statistics {
+            msg_cnt: 7,
+            ..Default::default()
+        };
+        let broker = rdkafka::statistics::Broker {
+            txerrs: 3,
+            req_timeouts: 1,
+            rtt: Some(rdkafka::statistics::Window {
+                avg: 1_500,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        stats.brokers.insert("broker:9092/1".to_owned(), broker);
+
+        metrics.observe_kafka_producer_stats(
+            "unit-kafka-sink",
+            &stats,
+            &last_tx_errors,
+        );
+
+        // librdkafka reports cumulative values: the second report must only
+        // advance the error counter by the delta (6 - 4 = 2).
+        stats.msg_cnt = 0;
+        let mut broker = stats
+            .brokers
+            .remove("broker:9092/1")
+            .expect("broker present in stats");
+        broker.txerrs = 5;
+        stats.brokers.insert("broker:9092/1".to_owned(), broker);
+        metrics.observe_kafka_producer_stats(
+            "unit-kafka-sink",
+            &stats,
+            &last_tx_errors,
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_kafka_producer_queue_size{sink=\"unit-kafka-sink\"}"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_kafka_producer_tx_errors_total{sink=\"unit-kafka-sink\"}"
+            ),
+            6.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_kafka_producer_rtt_seconds_count{sink=\"unit-kafka-sink\"}"
+            ),
+            2.0
         );
     }
 }

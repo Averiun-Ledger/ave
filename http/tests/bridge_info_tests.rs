@@ -1,9 +1,14 @@
-use ave_http::config_types::ConfigHttp;
+use ave_http::config_types::{
+    ConfigHttp, HashAlgorithmHttp, KeyPairAlgorithmHttp, LoggingRotationHttp,
+    MemoryLimitsConfigHttp, NodeTypeHttp,
+};
+use ave_http::doc::ApiDoc;
 use std::{
     collections::{BTreeSet, HashSet},
     time::Duration,
 };
 use test_log::test;
+use utoipa::OpenApi;
 
 use ave_bridge::ave_common::{
     DataToSinkEvent, SchemaType,
@@ -22,7 +27,8 @@ use crate::common::{
     TestServer, add_example_schema_to_governance,
     add_governance_member_as_witness, create_governance, create_subject,
     make_request, materialize_role_test_path, role_test_request_body,
-    server_main_route_catalog, wait_request_finish,
+    server_auth_route_catalog, server_main_route_catalog,
+    server_public_auth_route_catalog, wait_request_finish,
 };
 
 pub mod common;
@@ -200,8 +206,8 @@ async fn fact_req_schema(
     });
 
     let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
+        client,
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -229,8 +235,8 @@ async fn transfer_req(
     });
 
     let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
+        client,
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -256,8 +262,8 @@ async fn reject_req(
     });
 
     let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
+        client,
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -284,8 +290,8 @@ async fn confirm_req(
     });
 
     let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
+        client,
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -311,8 +317,8 @@ async fn eol_req(
     });
 
     let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
+        client,
+        &server.url("/requests"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -325,9 +331,9 @@ async fn eol_req(
 
 #[test(tokio::test)]
 async fn test_request_deserialization() {
-    // GET /request/{request-id} -> RequestInfo
-    // GET /request -> Vec<RequestInfo>
-    // POST /request -> RequestData
+    // GET /requests/{request-id} -> RequestInfo
+    // GET /requests -> Vec<RequestInfo>
+    // POST /requests -> RequestData
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
         return;
@@ -341,7 +347,7 @@ async fn test_request_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -362,7 +368,8 @@ async fn test_request_deserialization() {
     assert_eq!(request_info.version, 0);
 
     let (.., body) =
-        make_request(&client, &server.url("/request"), "GET", None, None).await;
+        make_request(&client, &server.url("/requests"), "GET", None, None)
+            .await;
 
     let request_info: Vec<RequestInfoExtend> =
         serde_json::from_value(body).unwrap();
@@ -375,9 +382,9 @@ async fn test_request_deserialization() {
 // --- Approval Endpoints ---
 #[test(tokio::test)]
 async fn test_approval_deserialization() {
-    // GET /approval/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
-    // GET /approval?state={ApprovalState} -> Vec<ApprovalEntry>
-    // PATCH /approval/{subject_id} + Json<String> -> String
+    // GET /approvals/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
+    // GET /approvals?state={ApprovalState} -> Vec<ApprovalEntry>
+    // PATCH /approvals/{subject_id} + Json<String> -> String
 
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
@@ -387,6 +394,10 @@ async fn test_approval_deserialization() {
 
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
+    // The create request must be fully applied before emitting governance
+    // facts: under load the subject is not the node's owner yet and the fact
+    // is rejected with "not the owner of subject".
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
@@ -406,7 +417,7 @@ async fn test_approval_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/approval/{}", request_data.subject_id)),
+            &server.url(&format!("/approvals/{}", request_data.subject_id)),
             "GET",
             None,
             None,
@@ -432,7 +443,7 @@ async fn test_approval_deserialization() {
     let (.., body) = make_request(
         &client,
         &server.url(&format!(
-            "/approval/{}?state=accepted",
+            "/approvals/{}?state=accepted",
             request_data.subject_id
         )),
         "GET",
@@ -446,7 +457,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&format!("/approval")),
+        &server.url(&"/approvals".to_string()),
         "GET",
         None,
         None,
@@ -462,7 +473,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&format!("/approval?state=accepted")),
+        &server.url(&"/approvals?state=accepted".to_string()),
         "GET",
         None,
         None,
@@ -475,7 +486,7 @@ async fn test_approval_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/approval/{}", request_data.subject_id)),
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
         "PATCH",
         None,
         Some(json!("accepted")),
@@ -496,7 +507,7 @@ async fn test_approval_deserialization() {
     let (.., body) = make_request(
         &client,
         &server.url(&format!(
-            "/approval/{}?state=accepted",
+            "/approvals/{}?state=accepted",
             request_data.subject_id
         )),
         "GET",
@@ -514,7 +525,7 @@ async fn test_approval_deserialization() {
 
     let (.., body) = make_request(
         &client,
-        &server.url(&format!("/approval?state=accepted")),
+        &server.url(&"/approvals?state=accepted".to_string()),
         "GET",
         None,
         None,
@@ -629,11 +640,74 @@ async fn test_subject_access_endpoints_deserialization() {
     );
 }
 
+#[test(tokio::test)]
+async fn test_sync_peers_add_and_remove_by_path() {
+    // PUT two peers, DELETE one via its path parameter, GET must show only
+    // the remaining one.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+    let subject = "BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA";
+    let peer1 = "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
+    let peer2 = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers")),
+        "PUT",
+        None,
+        Some(json!([peer1, peer2])),
+    )
+    .await;
+    assert!(status.is_success(), "add sync peers failed: {body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let peers: HashSet<String> = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        peers,
+        HashSet::from_iter([peer1.to_string(), peer2.clone()])
+    );
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers/{peer1}")),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "remove sync peer failed: {body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-peers")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let peers: HashSet<String> = serde_json::from_value(body).unwrap();
+    assert_eq!(peers, HashSet::from_iter([peer2]));
+}
+
 // --- Subject Update & Transfer Endpoints ---
 #[test(tokio::test)]
 async fn test_update_and_transfer_deserialization() {
-    // POST /update/{subject_id} -> String
-    // POST /manual-distribution/{subject_id} -> String
+    // POST /subjects/{subject_id}/update -> String
+    // POST /subjects/{subject_id}/manual-distribution -> String
     // GET /pending-transfers -> Vec<TransferSubject>
 
     let Some((server, _dirs)) = TestServer::build(false, true, None).await
@@ -644,6 +718,10 @@ async fn test_update_and_transfer_deserialization() {
 
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
+    // The create request must be fully applied before operating on the
+    // governance: under load the subject is not the node's owner yet and
+    // follow-up requests are rejected with "not the owner of subject".
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let (status, _body) = make_request(
         &client,
@@ -660,7 +738,7 @@ async fn test_update_and_transfer_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/update/{}", request_data.subject_id)),
+        &server.url(&format!("/subjects/{}/update", request_data.subject_id)),
         "POST",
         None,
         None,
@@ -688,7 +766,7 @@ async fn test_update_and_transfer_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -711,7 +789,7 @@ async fn test_update_and_transfer_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -728,8 +806,10 @@ async fn test_update_and_transfer_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server
-            .url(&format!("/manual-distribution/{}", request_data.subject_id)),
+        &server.url(&format!(
+            "/subjects/{}/manual-distribution",
+            request_data.subject_id
+        )),
         "POST",
         None,
         None,
@@ -765,8 +845,8 @@ async fn test_update_and_transfer_deserialization() {
 // --- Gov Sub Endpoints ---
 #[test(tokio::test)]
 async fn test_gov_sub_deserialization() {
-    // GET /subjects/{governance_id}?active={bool}&schema={string} -> Vec<SubjsData>
-    // GET /subjects?active={bool} -> Vec<GovsData>
+    // GET /governances/{governance_id}/subjects?active={bool}&schema={string} -> Vec<SubjsData>
+    // GET /governances?active={bool} -> Vec<GovsData>
 
     let Some((server, _dirs)) = TestServer::build(false, true, None).await
     else {
@@ -780,7 +860,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -807,7 +887,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -873,7 +953,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -894,7 +974,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -915,7 +995,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -932,7 +1012,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{governance_id}")),
+        &server.url(&format!("/governances/{governance_id}/subjects")),
         "GET",
         None,
         None,
@@ -980,7 +1060,9 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{governance_id}?active=false")),
+        &server.url(&format!(
+            "/governances/{governance_id}/subjects?active=false"
+        )),
         "GET",
         None,
         None,
@@ -1012,7 +1094,9 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{governance_id}?schema_id=Example1")),
+        &server.url(&format!(
+            "/governances/{governance_id}/subjects?schema_id=Example1"
+        )),
         "GET",
         None,
         None,
@@ -1045,7 +1129,7 @@ async fn test_gov_sub_deserialization() {
     let (status, body) = make_request(
         &client,
         &server.url(&format!(
-            "/subjects/{governance_id}?active=false&schema_id=Example2"
+            "/governances/{governance_id}/subjects?active=false&schema_id=Example2"
         )),
         "GET",
         None,
@@ -1067,19 +1151,19 @@ async fn test_gov_sub_deserialization() {
     );
 
     let (status, body) =
-        make_request(&client, &server.url("/subjects"), "GET", None, None)
+        make_request(&client, &server.url("/governances"), "GET", None, None)
             .await;
     assert!(status.is_success());
     let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
-    assert_eq!(res[0].active, true);
+    assert!(res[0].active);
     assert_eq!(res[0].description, Some("A governance".to_string()));
     assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].governance_id, governance_id.clone());
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects?active=false"),
+        &server.url("/governances?active=false"),
         "GET",
         None,
         None,
@@ -1095,7 +1179,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/request/{}", request_data.request_id)),
+            &server.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1112,7 +1196,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects?active=true"),
+        &server.url("/governances?active=true"),
         "GET",
         None,
         None,
@@ -1124,7 +1208,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/subjects?active=false"),
+        &server.url("/governances?active=false"),
         "GET",
         None,
         None,
@@ -1133,7 +1217,7 @@ async fn test_gov_sub_deserialization() {
     assert!(status.is_success());
     let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
-    assert_eq!(res[0].active, false);
+    assert!(!res[0].active);
     assert_eq!(res[0].description, Some("A governance".to_string()));
     assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].governance_id, governance_id);
@@ -1142,11 +1226,11 @@ async fn test_gov_sub_deserialization() {
 // --- Event Endpoints ---
 #[test(tokio::test)]
 async fn test_subject_deserialization() {
-    // GET /events/{subject_id}? -> PaginatorEvents
-    // GET /events/{subject_id}/{sn} -> EventInfo
-    // GET /aborts/{subject_id}
-    // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
-    // GET /state/{subject_id} -> SubjectDB
+    // GET /subjects/{subject_id}/events? -> PaginatorEvents
+    // GET /subjects/{subject_id}/events/{sn} -> EventInfo
+    // GET /subjects/{subject_id}/aborts
+    // GET /subjects/{subject_id}/events-first-last?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
+    // GET /subjects/{subject_id}/state -> SubjectDB
 
     let Some((server1, _dirs)) = TestServer::build(false, true, None).await
     else {
@@ -1161,7 +1245,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1237,7 +1321,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1254,7 +1338,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/state/{}", governance_id)),
+        &server1.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1282,7 +1366,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1315,7 +1399,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1332,7 +1416,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1348,7 +1432,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/request/{}", request_data.request_id)),
+            &server2.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1365,7 +1449,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/update/{}", governance_id)),
+        &server1.url(&format!("/subjects/{}/update", governance_id)),
         "POST",
         None,
         None,
@@ -1377,7 +1461,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server1.url(&format!("/state/{}", governance_id)),
+        &server1.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1394,7 +1478,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1.url(&format!("/request/{}", request_data.request_id)),
+            &server1.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1411,7 +1495,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1427,7 +1511,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/request/{}", request_data.request_id)),
+            &server2.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1444,7 +1528,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1460,7 +1544,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/request/{}", request_data.request_id)),
+            &server2.url(&format!("/requests/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1477,7 +1561,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/state/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/state", governance_id)),
         "GET",
         None,
         None,
@@ -1486,12 +1570,15 @@ async fn test_subject_deserialization() {
     assert!(status.is_success());
     let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 6);
-    assert_eq!(subject.active, false);
+    assert!(!subject.active);
 
     // events/{subject_id}?quantity={u64}&page={u64}&reverse={bool} -> PaginatorEvents
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}?quantity=1&page=3", governance_id)),
+        &server2.url(&format!(
+            "/subjects/{}/events?quantity=1&page=3",
+            governance_id
+        )),
         "GET",
         None,
         None,
@@ -1506,7 +1593,7 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}", governance_id)),
+        &server2.url(&format!("/subjects/{}/events", governance_id)),
         "GET",
         None,
         None,
@@ -1521,7 +1608,8 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}?reverse=true", governance_id)),
+        &server2
+            .url(&format!("/subjects/{}/events?reverse=true", governance_id)),
         "GET",
         None,
         None,
@@ -1572,7 +1660,7 @@ async fn test_subject_deserialization() {
     // GET /event/{subject_id}?sn={u64} -> EventInfo
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events/{}/2", governance_id)),
+        &server2.url(&format!("/subjects/{}/events/2", governance_id)),
         "GET",
         None,
         None,
@@ -1589,7 +1677,7 @@ async fn test_subject_deserialization() {
     let (status, body) = make_request(
         &client,
         &server2.url(&format!(
-            "/events-first-last/{}?quantity=2&reverse=true",
+            "/subjects/{}/events-first-last?quantity=2&reverse=true",
             governance_id
         )),
         "GET",
@@ -1611,8 +1699,10 @@ async fn test_subject_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server2
-            .url(&format!("/events-first-last/{}?quantity=2", governance_id)),
+        &server2.url(&format!(
+            "/subjects/{}/events-first-last?quantity=2",
+            governance_id
+        )),
         "GET",
         None,
         None,
@@ -1632,11 +1722,11 @@ async fn test_subject_deserialization() {
     // Test date filters deserialization with a future date that returns no events
     let future_date = "2099-01-01T00:00:00Z";
 
-    // event_request_ts[from] with future date -> no events
+    // event_request_ts_from with future date -> no events
     let (status, ..) = make_request(
         &client,
         &server2.url(&format!(
-            "/events/{}?event_request_ts[from]={}",
+            "/subjects/{}/events?event_request_ts_from={}",
             governance_id, future_date
         )),
         "GET",
@@ -1646,11 +1736,11 @@ async fn test_subject_deserialization() {
     .await;
     assert!(!status.is_success());
 
-    // event_ledger_ts[from] with future date -> no events
+    // event_ledger_ts_from with future date -> no events
     let (status, ..) = make_request(
         &client,
         &server2.url(&format!(
-            "/events/{}?event_ledger_ts[from]={}",
+            "/subjects/{}/events?event_ledger_ts_from={}",
             governance_id, future_date
         )),
         "GET",
@@ -1661,11 +1751,11 @@ async fn test_subject_deserialization() {
 
     assert!(!status.is_success());
 
-    // sink_ts[from] with future date -> no events
+    // sink_ts_from with future date -> no events
     let (status, ..) = make_request(
         &client,
         &server2.url(&format!(
-            "/events/{}?sink_ts[from]={}",
+            "/subjects/{}/events?sink_ts_from={}",
             governance_id, future_date
         )),
         "GET",
@@ -1674,6 +1764,95 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(!status.is_success());
+
+    // event_request_ts_to in the past -> no events
+    let (status, ..) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_request_ts_to=2000-01-01T00:00:00Z",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(!status.is_success());
+
+    // Range covering the events -> all 7 events are returned
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_request_ts_from=2000-01-01T00:00:00Z&event_request_ts_to={}",
+            governance_id, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let paginator: PaginatorEvents = serde_json::from_value(body).unwrap();
+    assert_eq!(paginator.events.len(), 7);
+
+    // Invalid ISO 8601 timestamp -> 400 Bad Request
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_request_ts_from=not-a-date",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "invalid timestamp must be rejected: {body}");
+}
+
+/// The shared query cap (`MAX_QUERY_LIMIT` = 1000) is enforced end-to-end:
+/// quantities above it are rejected with 400 before any database read, on
+/// every paginated events endpoint.
+#[test(tokio::test)]
+async fn test_events_query_quantity_cap_is_enforced() {
+    let Some((server, _dirs)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let body = create_governance(&client, &server, None).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    let governance_id = request_data.subject_id;
+    wait_request_finish(&client, &server, None, &request_data.request_id)
+        .await;
+
+    for path in [
+        format!("/subjects/{governance_id}/events?quantity=1001"),
+        format!("/subjects/{governance_id}/events-first-last?quantity=1001"),
+        format!("/subjects/{governance_id}/aborts?quantity=1001"),
+    ] {
+        let (status, body) =
+            make_request(&client, &server.url(&path), "GET", None, None).await;
+        assert_eq!(
+            status, 400,
+            "quantity over the cap must be rejected on {path}: {body}"
+        );
+    }
+
+    // The cap itself is accepted on every endpoint.
+    for path in [
+        format!("/subjects/{governance_id}/events?quantity=1000"),
+        format!("/subjects/{governance_id}/events-first-last?quantity=1000"),
+        format!("/subjects/{governance_id}/aborts?quantity=1000"),
+    ] {
+        let (status, body) =
+            make_request(&client, &server.url(&path), "GET", None, None).await;
+        assert!(
+            status.is_success(),
+            "the cap itself must be accepted on {path}: {body}"
+        );
+    }
 }
 
 #[test(tokio::test)]
@@ -1778,7 +1957,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
     for _ in 0..60 {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/state/{}", governance_id)),
+            &server2.url(&format!("/subjects/{}/state", governance_id)),
             "GET",
             None,
             None,
@@ -1795,7 +1974,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
 
     let (status, body) = make_request(
         &client,
-        &server2.url("/request"),
+        &server2.url("/requests"),
         "POST",
         None,
         Some(json!({
@@ -1818,7 +1997,7 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
     for _ in 0..60 {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/sink-events/{}", governance_id)),
+            &server2.url(&format!("/subjects/{}/sink-events", governance_id)),
             "GET",
             None,
             None,
@@ -1917,7 +2096,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/request"),
+        &server.url("/requests"),
         "POST",
         None,
         Some(json!({
@@ -1942,7 +2121,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/sink-events/{}", tracker_id)),
+        &server.url(&format!("/subjects/{}/sink-events", tracker_id)),
         "GET",
         None,
         None,
@@ -2005,6 +2184,16 @@ async fn test_system_info_deserialization() {
     let (status, body) =
         make_request(&client, &server.url("/config"), "GET", None, None).await;
     assert!(status.is_success());
+    // The superadmin bootstrap username must never be exposed through the API
+    assert!(
+        body.pointer("/auth/superadmin").is_none(),
+        "superadmin username must not leak in /config response: {body}"
+    );
+    assert_eq!(
+        body.pointer("/auth/superadmin_configured"),
+        Some(&serde_json::Value::Bool(true)),
+        "/config must only report whether a superadmin is configured"
+    );
     let config: ConfigHttp = serde_json::from_value(body).unwrap();
 
     let expected_contracts_path = dirs[2].path().to_string_lossy().to_string();
@@ -2012,7 +2201,7 @@ async fn test_system_info_deserialization() {
     let expected_auth_db_path = dirs[4].path().to_string_lossy().to_string();
     let expected_listen_address = format!("/memory/{}", server.memory_port());
 
-    assert_eq!(config.node.keypair_algorithm, "Ed25519");
+    assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithmHttp::Ed25519);
     #[cfg(feature = "sqlite")]
     {
         assert_eq!(config.node.internal_db.db, "Sqlite");
@@ -2022,7 +2211,7 @@ async fn test_system_info_deserialization() {
         assert_eq!(config.node.internal_db.db, "Rocksdb");
     }
     assert_eq!(config.node.external_db.db, "Sqlite");
-    assert_eq!(config.node.hash_algorithm, "Blake3");
+    assert_eq!(config.node.hash_algorithm, HashAlgorithmHttp::Blake3);
 
     assert_eq!(config.node.tracking_size, 200);
     assert!(config.node.is_service);
@@ -2053,7 +2242,7 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);
 
-    assert_eq!(config.node.network.node_type, "Bootstrap");
+    assert_eq!(config.node.network.node_type, NodeTypeHttp::Bootstrap);
     assert_eq!(
         config.node.network.listen_addresses,
         vec![expected_listen_address]
@@ -2093,7 +2282,7 @@ async fn test_system_info_deserialization() {
     assert!(!config.logging.output.api);
     assert!(config.logging.api_url.is_none());
     assert_eq!(config.logging.file_path, "logs");
-    assert_eq!(config.logging.rotation, "Size");
+    assert_eq!(config.logging.rotation, LoggingRotationHttp::Size);
     assert_eq!(config.logging.max_size, 104_857_600);
     assert_eq!(config.logging.max_files, 3);
 
@@ -2101,7 +2290,7 @@ async fn test_system_info_deserialization() {
 
     assert!(!config.auth.enable);
     assert_eq!(config.auth.database_path, expected_auth_db_path);
-    assert_eq!(config.auth.superadmin, "admin");
+    assert!(config.auth.superadmin_configured);
     assert_eq!(config.auth.api_key.default_ttl_seconds, 3600);
     assert_eq!(config.auth.api_key.max_keys_per_user, 20);
     assert_eq!(config.auth.lockout.max_attempts, 3);
@@ -2134,7 +2323,7 @@ async fn test_system_info_deserialization() {
 
     // CORS defaults (not set in test config → defaults)
     assert!(config.http.cors.enabled);
-    assert!(config.http.cors.allow_any_origin);
+    assert!(!config.http.cors.allow_any_origin);
     assert!(config.http.cors.allowed_origins.is_empty());
     assert!(!config.http.cors.allow_credentials);
 
@@ -2151,7 +2340,10 @@ async fn test_system_info_deserialization() {
     assert!(config.node.spec.is_none());
 
     // Network buffer/message limits defaults
-    assert_eq!(config.node.network.memory_limits, "disabled");
+    assert_eq!(
+        config.node.network.memory_limits,
+        MemoryLimitsConfigHttp::Disabled
+    );
     assert_eq!(config.node.network.max_app_message_bytes, 1_048_576);
     assert_eq!(
         config.node.network.max_pending_inbound_bytes_per_peer,
@@ -2183,41 +2375,61 @@ async fn test_system_info_deserialization() {
 
 #[test]
 fn test_sink_server_http_fields() {
-    use ave_http::config_types::SinkServerHttp;
+    use ave_http::config_types::{SinkServerHttp, SinkTransportConfigHttp};
 
     // Verify SinkServerHttp has all expected fields by deserializing from JSON
     let json = serde_json::json!({
         "server": "TestSink",
         "events": ["Create", "Transfer"],
-        "url": "https://test.sink",
-        "auth": { "auth_url": "https://auth", "username": "u", "api_key": "k" },
-        "connect_timeout_ms": 5000,
-        "request_timeout_ms": 30000,
-        "max_retries": 5
+        "transport": {
+            "type": "http",
+            "url": "https://test.sink",
+            "auth": { "type": "oauth2", "auth_url": "https://auth", "username": "u" },
+            "connect_timeout_ms": 5000,
+            "request_timeout_ms": 30000,
+            "max_retries": 5
+        }
     });
 
     let http: SinkServerHttp = serde_json::from_value(json).unwrap();
 
     assert_eq!(http.server, "TestSink");
-    assert_eq!(http.url, "https://test.sink");
-    assert!(http.auth.is_some());
-    assert_eq!(http.connect_timeout_ms, 5000);
-    assert_eq!(http.request_timeout_ms, 30000);
-    assert_eq!(http.max_retries, 5);
+    let transport = match &http.transport {
+        SinkTransportConfigHttp::Http(t) => t,
+        SinkTransportConfigHttp::Kafka(_)
+        | SinkTransportConfigHttp::Grpc(_) => {
+            panic!("expected http transport")
+        }
+    };
+    assert_eq!(transport.url, "https://test.sink");
+    assert!(transport.auth.is_some());
+    assert_eq!(transport.connect_timeout_ms, 5000);
+    assert_eq!(transport.request_timeout_ms, 30000);
+    assert_eq!(transport.max_retries, 5);
 
     // Verify minimal deserialization
     let json2 = serde_json::json!({
         "server": "S2",
         "events": [],
-        "url": "https://s2",
-        "connect_timeout_ms": 2000,
-        "request_timeout_ms": 10000,
-        "max_retries": 3
+        "transport": {
+            "type": "http",
+            "url": "https://s2",
+            "connect_timeout_ms": 2000,
+            "request_timeout_ms": 10000,
+            "max_retries": 3
+        }
     });
 
     let http2: SinkServerHttp = serde_json::from_value(json2).unwrap();
     assert_eq!(http2.server, "S2");
-    assert!(http2.auth.is_none());
+    let transport2 = match &http2.transport {
+        SinkTransportConfigHttp::Http(t) => t,
+        SinkTransportConfigHttp::Kafka(_)
+        | SinkTransportConfigHttp::Grpc(_) => {
+            panic!("expected http transport")
+        }
+    };
+    assert!(transport2.auth.is_none());
 }
 
 #[test]
@@ -2260,4 +2472,74 @@ fn bridge_info_tests_cover_declared_main_http_routes() {
             );
         }
     });
+}
+
+#[test]
+fn openapi_json_snapshot_is_up_to_date() {
+    let generated: Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap())
+            .unwrap();
+    let committed: Value =
+        serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    assert_eq!(
+        generated, committed,
+        "http/openapi.json is stale; regenerate it with \
+         `cargo run -p ave-http --example dump_openapi > http/openapi.json`"
+    );
+}
+
+/// Path parameter names may differ between the route catalog and the
+/// OpenAPI document (`{key_id}` vs `{id}`); compare shapes, not names
+fn normalize_route_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                "{}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[test]
+fn openapi_covers_every_declared_route() {
+    let mut catalog = server_main_route_catalog();
+    catalog.extend(server_auth_route_catalog());
+    catalog.extend(server_public_auth_route_catalog());
+
+    let spec = ApiDoc::openapi();
+    let mut documented = BTreeSet::new();
+    for (path, item) in &spec.paths.paths {
+        for (method, operation) in [
+            ("get", &item.get),
+            ("post", &item.post),
+            ("put", &item.put),
+            ("delete", &item.delete),
+            ("patch", &item.patch),
+        ] {
+            if operation.is_some() {
+                documented
+                    .insert((method.to_string(), normalize_route_path(path)));
+            }
+        }
+    }
+
+    let declared: BTreeSet<(String, String)> = catalog
+        .iter()
+        .map(|(method, path)| (method.clone(), normalize_route_path(path)))
+        .collect();
+
+    let missing: Vec<_> = declared.difference(&documented).collect();
+    assert!(
+        missing.is_empty(),
+        "routes missing from the OpenAPI document: {missing:?}"
+    );
+
+    let stale: Vec<_> = documented.difference(&declared).collect();
+    assert!(
+        stale.is_empty(),
+        "OpenAPI documents routes that are not mounted: {stale:?}"
+    );
 }

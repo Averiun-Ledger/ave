@@ -9,17 +9,21 @@ use crate::{
     db::Database,
     external_db::DBManager,
     helpers::db::ExternalDB,
-    model::common::contract::WasmRuntime,
 };
 use ave_actors::{
     ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef,
 };
 use ave_common::identity::hash_borsh;
+#[cfg(feature = "prometheus")]
+use ave_contract_sdk::runtime::ContractMetrics;
+use ave_contract_sdk::runtime::{CompiledModule, ContractRuntime};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use wasmtime::Module;
+
+#[cfg(feature = "prometheus")]
+use prometheus_client::registry::Registry;
 
 pub mod error;
 
@@ -65,25 +69,44 @@ pub async fn system(
     password: &str,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
+    #[cfg(feature = "prometheus")] mut registry: Option<&mut Registry>,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
-    let (system, mut runner) =
+    let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
+    #[cfg(feature = "prometheus")]
+    if let Some(registry) = registry.as_mut() {
+        ave_actors::prometheus::register(registry, &mut system);
+    }
+
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
-    system.add_helper("config", config_helper).await;
+    system.add_helper("config", config_helper);
 
-    // Build engine + limits together; actors fetch both via a single helper access.
-    let wasm_runtime = WasmRuntime::new(config.spec.clone())
-        .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
-    system
-        .add_helper("wasm_runtime", Arc::new(wasm_runtime))
-        .await;
+    #[cfg(feature = "prometheus")]
+    let contract_metrics = registry.map(|registry| {
+        let metrics = Arc::new(ContractMetrics::new());
+        metrics.register_into(registry);
+        metrics
+    });
 
-    let contracts: HashMap<String, Arc<Module>> = HashMap::new();
-    system
-        .add_helper("contracts", Arc::new(RwLock::new(contracts)))
-        .await;
+    // Build engine + limits together via the SDK runtime.
+    let resolved = crate::config::resolve_spec(config.spec.as_ref());
+    let contract_runtime = ContractRuntime::with_metrics(
+        Some(ave_contract_sdk::runtime::ResolvedMachineSpec {
+            ram_mb: resolved.ram_mb,
+            cpu_cores: resolved.cpu_cores,
+        }),
+        #[cfg(feature = "prometheus")]
+        contract_metrics,
+        #[cfg(not(feature = "prometheus"))]
+        None,
+    )
+    .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
+    system.add_helper("contract_runtime", Arc::new(contract_runtime));
+
+    let contracts: HashMap<String, Arc<CompiledModule>> = HashMap::new();
+    system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
 
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
@@ -92,7 +115,7 @@ pub async fn system(
         Database::open(&config.internal_db, actor_spec)
             .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?,
     );
-    system.add_helper("store", db.clone()).await;
+    system.add_helper("store", db.clone());
 
     let pass_hash =
         hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string())
@@ -106,7 +129,7 @@ pub async fn system(
     let encrypted_key = EncryptedKey::new(&array_hash)
         .map_err(|e| SystemError::EncryptedKeyCreation(e.to_string()))?;
 
-    system.add_helper("encrypted_key", encrypted_key).await;
+    system.add_helper("encrypted_key", encrypted_key);
 
     let db_manager_actor = system
         .create_root_actor("db_manager", DBManager)
@@ -124,7 +147,7 @@ pub async fn system(
         .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
     );
 
-    system.add_helper("ext_db", Arc::clone(&ext_db)).await;
+    system.add_helper("ext_db", Arc::clone(&ext_db));
 
     let system_shutdown = system.clone();
     let runner = tokio::spawn(async move {
@@ -135,9 +158,8 @@ pub async fn system(
 
         // Remove the helper so the shared Arc<Database> reference is dropped
         // before we try to take ownership of the local one.
-        if let Some(helper) = system_shutdown
-            .remove_helper::<Arc<Database>>("store")
-            .await
+        if let Some(helper) =
+            system_shutdown.remove_helper::<Arc<Database>>("store")
         {
             drop(helper);
         }
@@ -198,11 +220,11 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_system() {
         let (system, _runner, _dirs) = create_system().await;
-        let db: Option<Arc<Database>> = system.get_helper("store").await;
+        let db: Option<Arc<Database>> = system.get_helper("store");
         assert!(db.is_some());
-        let ep: Option<EncryptedKey> = system.get_helper("encrypted_key").await;
+        let ep: Option<EncryptedKey> = system.get_helper("encrypted_key");
         assert!(ep.is_some());
-        let any: Option<Dummy> = system.get_helper("dummy").await;
+        let any: Option<Dummy> = system.get_helper("dummy");
         assert!(any.is_none());
     }
 
@@ -241,7 +263,7 @@ pub mod tests {
                 ..Default::default()
             },
             network: newtork_config,
-            contracts_path: contracts_path,
+            contracts_path,
             always_accept: false,
             tracking_size: 100,
             safe_mode: false,
@@ -267,12 +289,17 @@ pub mod tests {
             spec: None,
         };
 
+        #[cfg(feature = "prometheus")]
+        let mut registry = Registry::default();
+
         let (sys, handlers) = system(
             config.clone(),
             Vec::new(),
             "password",
             CancellationToken::new(),
             CancellationToken::new(),
+            #[cfg(feature = "prometheus")]
+            Some(&mut registry),
         )
         .await
         .unwrap();

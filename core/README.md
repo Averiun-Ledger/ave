@@ -149,6 +149,190 @@ The runtime includes outbound sink handling for propagating events to external s
 - timeout and retry policies
 - token bootstrap and token refresh flows
 
+## Kafka sink operations
+
+Operational notes for running a Kafka sink in production.
+
+### Broker ACLs
+
+The identity used by the sink needs at least:
+
+- `Write` and `Describe` on every target topic.
+- With idempotence enabled (the default when `acks=all`) or transactions
+  (`transactional: true`): `IdempotentWrite` / `InitProducerId` on the
+  cluster, plus `Write` and `Describe` on the transactional id resource when
+  transactions are used.
+
+A missing ACL surfaces as an auth error on delivery and sends the sink to
+the lagging/blocked state; it does not crash the node.
+
+### Environment variables
+
+Secrets are never written in the configuration file. They are read from
+environment variables named after the sink, upper-cased with every
+non-alphanumeric character replaced by `_`:
+
+- `AVE_SINK_PASSWORD_{{SERVER}}` — SASL password (PLAIN/SCRAM) or OIDC
+  client secret (OAUTHBEARER).
+- `AVE_SINK_APIKEY_{{SERVER}}` — API key, when configured.
+- `AVE_SINK_PROXY_PASSWORD_{{SERVER}}` — proxy password (HTTP sinks).
+
+Example: a sink named `billing-events.eu` reads
+`AVE_SINK_PASSWORD_BILLING_EVENTS_EU`.
+
+### SASL authentication
+
+- `PLAIN` / `SCRAM-SHA-256` / `SCRAM-SHA-512`: username in the sink config,
+  password in `AVE_SINK_PASSWORD_{{SERVER}}`.
+- `OAUTHBEARER` (OIDC): set `oauth_token_url` to the IdP token endpoint; the
+  SASL username is the OIDC client id and the client secret is read from
+  `AVE_SINK_PASSWORD_{{SERVER}}`. Tokens are fetched with the
+  `client_credentials` grant and refreshed automatically before expiry;
+  `oauth_scope` is optional. The token endpoint honors the sink's
+  `tls.ca_certificate` as an additional root CA (IdPs on corporate CAs) and
+  the standard `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables.
+- `GSSAPI` (Kerberos): fill the `kerberos` section (`service_name`,
+  `principal`, `keytab`); the realm is derived from the principal. The host
+  needs a working Kerberos setup (krb5.conf, keytab readable by the node
+  process) and a librdkafka build with Cyrus SASL (`sasl_gssapi` in
+  `builtin.features`).
+
+### Topics
+
+Pre-create the target topics with the desired partition count and
+replication factor. If broker-side auto-creation is disabled, deliveries
+fail with `UnknownTopicOrPartition` and are retried indefinitely: the sink
+does not die, but it does not deliver until the topic exists.
+
+### Transactions
+
+With `transactional: true` every delivery is its own Kafka transaction
+(begin/send/commit, abort on failure) and the producer fences zombie
+instances of itself at startup. The default `transactional.id` is
+`ave-sink-{sink_name}-{node_id}`, stable and unique per node, so several
+nodes can run the same sink without fencing each other. If you set
+`transactional_id` explicitly in a multi-node deployment, it must differ
+per node. Transactions require `acks=all`; the configuration is rejected
+otherwise.
+
+### Metrics to watch
+
+- `core_kafka_producer_queue_size{sink}` — producer queue depth; sustained
+  growth means the broker cannot keep up (backpressure).
+- `core_kafka_producer_tx_errors_total{sink}` — transmission errors and
+  request timeouts reported by librdkafka.
+- `core_kafka_producer_fatal_errors_total{sink}` — fatal producer errors
+  (fenced, unsupported feature). The producer instance is dead after one of
+  these; alert on any increase.
+- `core_kafka_producer_rtt_seconds{sink}` — broker round-trip time.
+- `core_sink_request_duration_seconds{sink,result}` — per-attempt delivery
+  latency.
+- `core_sink_events_total{sink,result}` and `core_sink_blocked{sink}` —
+  delivery outcomes and blocked state.
+
+### Poison messages
+
+A permanently rejected event (for example, a payload larger than the
+broker's `max.message.bytes`) blocks the sink: subsequent events queue
+behind it until the underlying cause is fixed and the sink is unblocked.
+There is no dead-letter queue yet; watch `core_sink_blocked{sink}` and the
+sink status API for the blocked reason.
+
+## gRPC sink: receiver guide
+
+How to implement a backend that receives events from a gRPC sink.
+
+### Contract
+
+The protobuf contract lives in `common/proto/ave/sink/v1/sink.proto` and is
+the single source of truth. Rust receivers depend on `ave-common` with the
+`sink-grpc` feature and implement the server from
+`ave_common::sink::pb::event_sink_server` — no `.proto` copying. Within
+`ave.sink.v1` only additive changes are allowed (new fields with new
+numbers, new RPCs); breaking changes require a `v2` package.
+
+The service has three RPCs:
+
+- `Deliver(DeliverRequest) -> DeliverResponse` — unary delivery. Required.
+- `Test(TestRequest) -> TestResponse` — non-persistent connectivity test
+  (node test button and health fallback). Required.
+- `DeliverStream(stream DeliverRequest) -> stream DeliverAck` — persistent
+  pipelined stream. Optional but recommended; nodes fall back to unary
+  `Deliver` when it answers `UNIMPLEMENTED`.
+
+Implementing `grpc.health.v1` for the service name `ave.sink.v1.EventSink`
+is optional: without it, the node health-checks through `Test`.
+
+### Status semantics
+
+Every event is delivered **at least once**. Your response decides what the
+node does next:
+
+| Outcome | Unary status | Stream ack | Node behavior |
+|---|---|---|---|
+| Accepted | `OK` | `error_code = 0` | Cursor advances |
+| Transient failure | `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `DEADLINE_EXCEEDED`, `INTERNAL`, `ABORTED`, ... | same codes in `error_code` | Retries with backoff, then lagging + automatic catch-up |
+| Auth failure | `UNAUTHENTICATED` | `16` | Token refresh and immediate retry (OAuth2 sinks) |
+| Permanent rejection | `INVALID_ARGUMENT`, `PERMISSION_DENIED`, `FAILED_PRECONDITION`, `UNIMPLEMENTED`, ... | same codes in `error_code` | Sink blocked until an operator unblocks it |
+
+On the stream, per-message failures travel inside `DeliverAck` (the stream
+survives); only a terminal stream status forces the node to reconnect.
+Backpressure hints are honored both ways: `google.rpc.RetryInfo` details on
+unary `RESOURCE_EXHAUSTED` and `DeliverAck.retry_after_ms` on the stream.
+
+### Idempotency
+
+Duplicates are expected (retries, reconnections, catch-up replays).
+Deduplicate on `EventMeta.idempotency_key` (`{subject_id}-{sn}`) before
+applying an event. `DeliverRequest.request_id` identifies the delivery
+**attempt**, not the event: use it for log correlation and stream acks,
+never for dedup.
+
+### Payloads
+
+`SignedPayload.payload` is the canonical JSON document, byte-identical to
+the HTTP sink body (same parsers work for both). It deserializes into
+`ave_common::DataToSink` (full events) or `ave_common::LightEvent`
+(`meta.light = true`). On batch deliveries (`batch_delivery: true`) `meta`
+is absent and the payload is a JSON array of events.
+
+### Signature verification
+
+With `signature: true` every delivery carries an Ed25519 signature in
+`SignedPayload` (`signature`, `signature_timestamp`, `public_key`) over the
+canonical v2 content: the critical delivery headers in lexicographic order
+(`content-type`, the idempotency/event headers, plus `content-encoding`
+when compressed) followed by the payload bytes. The reference
+implementation of the canonical form is `canonical_payload` in
+`core/src/sink/delivery.rs`, and `grpc_node_delivers_signed_events` in
+`core/tests/grpc_sink.rs` shows full verification (including a tampered
+payload that must not verify).
+
+### Auth and TLS
+
+Auth travels as gRPC metadata: `authorization: Bearer <token>` (OAuth2 or
+static token), `authorization: Basic <base64>` or `x-api-key: <key>`,
+depending on the sink configuration. TLS uses the system roots by default;
+the sink may add a custom CA and/or require a client certificate (mTLS).
+Connections are kept alive with TCP and HTTP/2 keepalives.
+
+### Metrics to watch
+
+- `core_sink_grpc_stream_reconnects_total{sink}` — stream reconnections;
+  sustained growth means an unstable network or an overloaded receiver.
+- `core_sink_grpc_in_flight_batches{sink}` — unacked deliveries; sustained
+  values at the configured window mean the receiver is the bottleneck.
+- `core_sink_grpc_ack_roundtrip_seconds{sink}` — delivery-to-ack latency.
+- `core_sink_request_duration_seconds{sink,result}` and
+  `core_sink_events_total{sink,result}` — per-attempt latency and outcomes,
+  shared with the other transports.
+
+### Reference implementation
+
+`core/tests/common/grpc_test_sink.rs` is a complete in-process receiver
+(~250 lines): unary and stream delivery, per-message acks, TLS/mTLS, health
+service and response-mode injection. Start there.
+
 ## Crate layout
 
 Public modules are grouped by responsibility:

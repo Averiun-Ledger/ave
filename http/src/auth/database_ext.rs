@@ -6,7 +6,8 @@ use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::*;
 use ave_actors::rusqlite::{
-    self, OptionalExtension, Result as SqliteResult, params,
+    self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
+    params,
 };
 
 // =============================================================================
@@ -192,7 +193,7 @@ impl AuthDatabase {
     ) -> Result<Role, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         let role = self.create_role_with_conn(&tx, name, description)?;
         if let Some(audit) = audit {
@@ -292,7 +293,7 @@ impl AuthDatabase {
     ) -> Result<Role, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         let role = self.update_role_with_conn(&tx, role_id, description)?;
         if let Some(audit) = audit {
@@ -330,7 +331,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Self::delete_role_with_conn(&tx, role_id)?;
         if let Some(audit) = audit {
@@ -518,7 +519,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         Self::set_role_permission_with_conn(
             &tx, role_id, resource, action, allowed,
@@ -577,7 +578,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Self::remove_role_permission_with_conn(&tx, role_id, resource, action)?;
         if let Some(audit) = audit {
@@ -707,7 +708,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         Self::set_user_permission_with_conn(
             &tx, user_id, resource, action, allowed, granted_by,
@@ -749,7 +750,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Self::remove_user_permission_with_conn(&tx, user_id, resource, action)?;
         if let Some(audit) = audit {
@@ -848,49 +849,15 @@ impl AuthDatabase {
 
     /// Get effective permissions for a user
     /// This combines role permissions with user-specific permission overrides
+    ///
+    /// Delegates to the same query the enforcement path uses
+    /// (`get_effective_permissions_internal`): role aggregation is allow-wins
+    /// via `MAX(allowed)` and a user override always wins. The login response
+    /// must mirror exactly what the server enforces.
     pub fn get_user_effective_permissions(
         &self,
         user_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        // Get all effective permissions combining role permissions and user overrides
-        let mut stmt = conn
-            .prepare(
-                "SELECT DISTINCT r.name as resource, a.name as action,
-                    COALESCE(up.allowed, rp.allowed, 0) as allowed
-             FROM resources r
-             CROSS JOIN actions a
-             LEFT JOIN user_roles ur ON ur.user_id = ?1
-             LEFT JOIN roles ro ON ro.id = ur.role_id AND ro.is_deleted = 0
-             LEFT JOIN role_permissions rp ON rp.role_id = ro.id
-                                           AND rp.resource_id = r.id
-                                           AND rp.action_id = a.id
-             LEFT JOIN user_permissions up ON up.user_id = ?1
-                                           AND up.resource_id = r.id
-                                           AND up.action_id = a.id
-             WHERE (rp.allowed IS NOT NULL OR up.allowed IS NOT NULL)
-             ORDER BY r.name, a.name",
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        let permissions = stmt
-            .query_map(params![user_id], |row| {
-                Ok(Permission {
-                    resource: row.get(0)?,
-                    action: row.get(1)?,
-                    allowed: row.get(2)?,
-                    is_system: None,
-                    source: None,
-                    role_name: None,
-                })
-            })
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        drop(stmt);
-        drop(conn);
-
-        Ok(permissions)
+        self.get_effective_permissions(user_id)
     }
 }

@@ -26,6 +26,7 @@ use std::{
 };
 
 use ave_actors::ActorRef;
+use ave_common::Error as CommonError;
 use ave_common::identity::KeyPair;
 
 use libp2p::{
@@ -103,6 +104,88 @@ impl PendingQueue {
     const fn bytes_len(&self) -> usize {
         self.pending_bytes
     }
+}
+
+/// Outcome of a bounded pending-queue insertion. The eviction policy is
+/// shared by the outbound and inbound queues; each direction logs and
+/// counts its own metrics from this report.
+struct PendingEnqueueReport {
+    /// The message was already queued (nothing changed).
+    duplicate: bool,
+    /// Messages evicted by the per-peer count limit.
+    dropped_count: u64,
+    /// Messages evicted by the per-peer bytes limit, plus one when the
+    /// incoming message itself did not fit and was rejected.
+    dropped_bytes_limit_peer: u64,
+    /// Messages rejected by the global bytes limit.
+    dropped_bytes_limit_global: u64,
+    /// Evicted messages (for age observation), in eviction order.
+    evicted: Vec<PendingMessage>,
+}
+
+/// Insert `message` into the peer's queue applying the shared bounded
+/// policy: dedup, per-peer count limit, per-peer bytes limit and global
+/// bytes limit (oldest evicted first). A `0` bytes limit disables it.
+fn enqueue_pending(
+    queues: &mut HashMap<PeerId, PendingQueue>,
+    per_peer_limit: usize,
+    global_limit: usize,
+    peer: PeerId,
+    message: Bytes,
+) -> PendingEnqueueReport {
+    let mut report = PendingEnqueueReport {
+        duplicate: false,
+        dropped_count: 0,
+        dropped_bytes_limit_peer: 0,
+        dropped_bytes_limit_global: 0,
+        evicted: Vec::new(),
+    };
+    let message_len = message.len();
+    let mut total_pending_bytes =
+        queues.values().map(PendingQueue::bytes_len).sum::<usize>();
+
+    let queue = queues.entry(peer).or_default();
+    if queue.contains(&message) {
+        report.duplicate = true;
+        return report;
+    }
+
+    while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
+        if let Some(evicted) = queue.pop_front() {
+            report.dropped_count += 1;
+            total_pending_bytes =
+                total_pending_bytes.saturating_sub(evicted.payload.len());
+            report.evicted.push(evicted);
+        } else {
+            break;
+        }
+    }
+
+    if per_peer_limit > 0 {
+        while queue.bytes_len() + message_len > per_peer_limit {
+            if let Some(evicted) = queue.pop_front() {
+                report.dropped_bytes_limit_peer += 1;
+                total_pending_bytes =
+                    total_pending_bytes.saturating_sub(evicted.payload.len());
+                report.evicted.push(evicted);
+            } else {
+                break;
+            }
+        }
+    }
+
+    if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit
+    {
+        report.dropped_bytes_limit_peer += 1;
+    } else if global_limit > 0
+        && total_pending_bytes.saturating_add(message_len) > global_limit
+    {
+        report.dropped_bytes_limit_global += 1;
+    } else {
+        queue.push_back(message);
+    }
+
+    report
 }
 
 /// Main network worker. Must be polled in order for the network to advance.
@@ -203,6 +286,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         safe_mode: bool,
         runtime: NetworkWorkerRuntime,
     ) -> Result<Self, Error> {
+        config.validate().map_err(|e| match e {
+            CommonError::InvalidConfiguration { component, reason } => {
+                Error::InvalidConfiguration { component, reason }
+            }
+            other => Error::InvalidConfiguration {
+                component: "network".to_string(),
+                reason: other.to_string(),
+            },
+        })?;
+
         // Create channels to communicate commands
         info!(target: TARGET, "network initialising");
         let (command_sender, command_receiver) = mpsc::channel(512);
@@ -659,94 +752,51 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     /// If count/bytes limits are reached, oldest messages are evicted first.
     fn add_pending_outbound_message(&mut self, peer: PeerId, message: Bytes) {
         let message_len = message.len();
-        let mut dropped_count = 0u64;
-        let mut dropped_bytes_limit_peer = 0u64;
-        let mut dropped_bytes_limit_global = 0u64;
-        let mut dropped_messages = Vec::new();
-        let mut duplicate = false;
-        let mut total_pending_bytes = self.pending_outbound_bytes_len();
         let per_peer_limit = self.max_pending_outbound_bytes_per_peer;
         let global_limit = self.max_pending_outbound_bytes_total;
+        let report = enqueue_pending(
+            &mut self.pending_outbound_messages,
+            per_peer_limit,
+            global_limit,
+            peer,
+            message,
+        );
 
-        {
-            let queue = self.pending_outbound_messages.entry(peer).or_default();
-            if queue.contains(&message) {
-                duplicate = true;
-            } else {
-                while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
-                    if let Some(evicted) = queue.pop_front() {
-                        dropped_count += 1;
-                        total_pending_bytes = total_pending_bytes
-                            .saturating_sub(evicted.payload.len());
-                        dropped_messages.push(evicted);
-                    } else {
-                        break;
-                    }
-                }
-
-                if per_peer_limit > 0 {
-                    while queue.bytes_len() + message_len > per_peer_limit {
-                        if let Some(evicted) = queue.pop_front() {
-                            dropped_bytes_limit_peer += 1;
-                            total_pending_bytes = total_pending_bytes
-                                .saturating_sub(evicted.payload.len());
-                            dropped_messages.push(evicted);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                if per_peer_limit > 0
-                    && queue.bytes_len() + message_len > per_peer_limit
-                {
-                    dropped_bytes_limit_peer += 1;
-                } else if global_limit > 0
-                    && total_pending_bytes.saturating_add(message_len)
-                        > global_limit
-                {
-                    dropped_bytes_limit_global += 1;
-                } else {
-                    queue.push_back(message);
-                }
-            }
-        }
-
-        if duplicate {
+        if report.duplicate {
             self.refresh_runtime_metrics();
             return;
         }
 
-        for evicted in dropped_messages {
+        for evicted in &report.evicted {
             self.observe_pending_message_age(evicted.enqueued_at);
         }
 
-        if dropped_count > 0 {
+        if report.dropped_count > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_count,
+                dropped = report.dropped_count,
                 max_messages = MAX_PENDING_MESSAGES_PER_PEER,
                 "outbound queue count limit reached; oldest messages evicted",
             );
         }
 
-        if dropped_bytes_limit_peer > 0 {
+        if report.dropped_bytes_limit_peer > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_bytes_limit_peer,
+                dropped = report.dropped_bytes_limit_peer,
                 message_bytes = message_len,
                 max_queue_bytes = per_peer_limit,
                 "outbound queue bytes limit reached; messages evicted/dropped",
             );
         }
 
-        if dropped_bytes_limit_global > 0 {
+        if report.dropped_bytes_limit_global > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_bytes_limit_global,
+                dropped = report.dropped_bytes_limit_global,
                 message_bytes = message_len,
                 max_queue_bytes_total = global_limit,
                 "outbound global queue bytes limit reached; messages dropped",
@@ -754,12 +804,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
 
         if let Some(metrics) = self.metric_handle() {
-            metrics.inc_outbound_queue_drop_by(dropped_count);
+            metrics.inc_outbound_queue_drop_by(report.dropped_count);
             metrics.inc_outbound_queue_bytes_drop_per_peer_by(
-                dropped_bytes_limit_peer,
+                report.dropped_bytes_limit_peer,
             );
             metrics.inc_outbound_queue_bytes_drop_global_by(
-                dropped_bytes_limit_global,
+                report.dropped_bytes_limit_global,
             );
         }
 
@@ -768,94 +818,51 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     fn add_pending_inbound_message(&mut self, peer: PeerId, message: Bytes) {
         let message_len = message.len();
-        let mut dropped_count = 0u64;
-        let mut dropped_bytes_limit_peer = 0u64;
-        let mut dropped_bytes_limit_global = 0u64;
-        let mut dropped_messages = Vec::new();
-        let mut duplicate = false;
-        let mut total_pending_bytes = self.pending_inbound_bytes_len();
         let per_peer_limit = self.max_pending_inbound_bytes_per_peer;
         let global_limit = self.max_pending_inbound_bytes_total;
+        let report = enqueue_pending(
+            &mut self.pending_inbound_messages,
+            per_peer_limit,
+            global_limit,
+            peer,
+            message,
+        );
 
-        {
-            let queue = self.pending_inbound_messages.entry(peer).or_default();
-            if queue.contains(&message) {
-                duplicate = true;
-            } else {
-                while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
-                    if let Some(evicted) = queue.pop_front() {
-                        dropped_count += 1;
-                        total_pending_bytes = total_pending_bytes
-                            .saturating_sub(evicted.payload.len());
-                        dropped_messages.push(evicted);
-                    } else {
-                        break;
-                    }
-                }
-
-                if per_peer_limit > 0 {
-                    while queue.bytes_len() + message_len > per_peer_limit {
-                        if let Some(evicted) = queue.pop_front() {
-                            dropped_bytes_limit_peer += 1;
-                            total_pending_bytes = total_pending_bytes
-                                .saturating_sub(evicted.payload.len());
-                            dropped_messages.push(evicted);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                if per_peer_limit > 0
-                    && queue.bytes_len() + message_len > per_peer_limit
-                {
-                    dropped_bytes_limit_peer += 1;
-                } else if global_limit > 0
-                    && total_pending_bytes.saturating_add(message_len)
-                        > global_limit
-                {
-                    dropped_bytes_limit_global += 1;
-                } else {
-                    queue.push_back(message);
-                }
-            }
-        }
-
-        if duplicate {
+        if report.duplicate {
             self.refresh_runtime_metrics();
             return;
         }
 
-        for evicted in dropped_messages {
+        for evicted in &report.evicted {
             self.observe_pending_message_age(evicted.enqueued_at);
         }
 
-        if dropped_count > 0 {
+        if report.dropped_count > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_count,
+                dropped = report.dropped_count,
                 max_messages = MAX_PENDING_MESSAGES_PER_PEER,
                 "inbound queue count limit reached; oldest messages evicted",
             );
         }
 
-        if dropped_bytes_limit_peer > 0 {
+        if report.dropped_bytes_limit_peer > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_bytes_limit_peer,
+                dropped = report.dropped_bytes_limit_peer,
                 message_bytes = message_len,
                 max_queue_bytes = per_peer_limit,
                 "inbound queue bytes limit reached; messages evicted/dropped",
             );
         }
 
-        if dropped_bytes_limit_global > 0 {
+        if report.dropped_bytes_limit_global > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_bytes_limit_global,
+                dropped = report.dropped_bytes_limit_global,
                 message_bytes = message_len,
                 max_queue_bytes_total = global_limit,
                 "inbound global queue bytes limit reached; messages dropped",
@@ -863,12 +870,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
 
         if let Some(metrics) = self.metric_handle() {
-            metrics.inc_inbound_queue_drop_by(dropped_count);
+            metrics.inc_inbound_queue_drop_by(report.dropped_count);
             metrics.inc_inbound_queue_bytes_drop_per_peer_by(
-                dropped_bytes_limit_peer,
+                report.dropped_bytes_limit_peer,
             );
             metrics.inc_inbound_queue_bytes_drop_global_by(
-                dropped_bytes_limit_global,
+                report.dropped_bytes_limit_global,
             );
         }
 
@@ -2076,6 +2083,7 @@ mod tests {
             vec!["/memory/3100".to_owned()],
         );
         config.max_pending_outbound_bytes_per_peer = 16;
+        config.max_app_message_bytes = 12;
 
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let mut registry = Registry::default();
@@ -2234,6 +2242,7 @@ mod tests {
         );
         config.max_pending_outbound_bytes_per_peer = 0;
         config.max_pending_outbound_bytes_total = 20;
+        config.max_app_message_bytes = 12;
 
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let mut registry = Registry::default();
@@ -2719,7 +2728,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::Denied {
                 cause: libp2p::swarm::ConnectionDenied::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, "test"),
+                    std::io::Error::other("test"),
                 ),
             },
             &peer,
@@ -2736,7 +2745,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::WrongPeerId {
                 obtained,
-                address: addr.clone(),
+                address: addr,
             },
             &peer,
             true,
@@ -2805,7 +2814,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::WrongPeerId {
                 obtained: PeerId::random(),
-                address: addr.clone(),
+                address: addr,
             },
             &peer,
             false,
@@ -2817,7 +2826,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::Denied {
                 cause: libp2p::swarm::ConnectionDenied::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, "test"),
+                    std::io::Error::other("test"),
                 ),
             },
             &peer,
@@ -2923,7 +2932,7 @@ mod tests {
         );
 
         // Duplicate should be ignored
-        worker.add_pending_inbound_message(peer, msg.clone());
+        worker.add_pending_inbound_message(peer, msg);
         assert_eq!(
             worker.pending_inbound_messages.get(&peer).unwrap().len(),
             1
@@ -3168,10 +3177,9 @@ mod tests {
             .handle_connection_events(SwarmEvent::Behaviour(
                 BehaviourEvent::IdentifyError {
                     peer_id: peer,
-                    error: swarm::StreamUpgradeError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "test",
-                    )),
+                    error: swarm::StreamUpgradeError::Io(
+                        std::io::Error::other("test"),
+                    ),
                 },
             ))
             .await;
@@ -3468,7 +3476,7 @@ mod tests {
         assert_eq!(worker.pending_outbound_messages_len(), 1);
         assert_eq!(worker.pending_outbound_bytes_len(), 3);
 
-        worker.add_pending_inbound_message(peer, msg.clone());
+        worker.add_pending_inbound_message(peer, msg);
         assert_eq!(worker.pending_inbound_messages_len(), 1);
         assert_eq!(worker.pending_inbound_bytes_len(), 3);
     }
@@ -3670,9 +3678,102 @@ mod tests {
         let peer = PeerId::random();
         let msg = Bytes::from(vec![1u8]);
 
-        let result = worker.send_message(peer, msg.clone());
+        let result = worker.send_message(peer, msg);
         assert!(result.is_ok());
         assert!(worker.pending_outbound_messages.contains_key(&peer));
         assert!(worker.retry_by_peer.contains_key(&peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn e2e_message_delivery_between_running_workers() {
+        // Bootstrap node with a helper channel to observe inbound messages.
+        let boot_addr = "/memory/3600";
+        let mut boot = build_worker(
+            vec![],
+            false,
+            NodeType::Bootstrap,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            boot_addr.to_owned(),
+        );
+        let boot_peer = boot.local_peer_id();
+        let (helper_sender, mut helper_rx) = mpsc::channel(8);
+        boot.add_helper_sender(helper_sender);
+
+        let boot_node = RoutingNode {
+            peer_id: boot_peer.to_string(),
+            address: vec![boot_addr.to_owned()],
+        };
+
+        tokio::spawn(async move {
+            boot.run_main().await;
+        });
+
+        // Ephemeral node: bootstraps against boot, then sends a message.
+        let mut node = build_worker(
+            vec![boot_node],
+            false,
+            NodeType::Ephemeral,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3601".to_owned(),
+        );
+        let node_peer = node.local_peer_id();
+
+        node.run_connection().await.unwrap();
+
+        let mut node_service = node.service();
+        tokio::spawn(async move {
+            node.run_main().await;
+        });
+
+        node_service
+            .send_command(Command::SendMessage {
+                peer: boot_peer,
+                message: Bytes::from_static(b"e2e-payload"),
+            })
+            .await
+            .unwrap();
+
+        let received =
+            tokio::time::timeout(Duration::from_secs(10), helper_rx.recv())
+                .await
+                .expect("timed out waiting for message delivery")
+                .expect("helper channel closed");
+        let CommandHelper::ReceivedMessage { sender, message } = received
+        else {
+            panic!("unexpected helper command")
+        };
+        assert_eq!(message, Bytes::from_static(b"e2e-payload"));
+        assert_eq!(
+            sender,
+            peer_id_to_ed25519_pubkey_bytes(&node_peer).unwrap()
+        );
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn run_main_stops_on_graceful_shutdown() {
+        let graceful = CancellationToken::new();
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Bootstrap,
+            graceful.clone(),
+            CancellationToken::new(),
+            "/memory/3602".to_owned(),
+        );
+
+        let handle = tokio::spawn(async move {
+            worker.run_main().await;
+        });
+
+        graceful.cancel();
+
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("run_main did not stop after graceful cancellation")
+            .expect("run_main panicked");
     }
 }

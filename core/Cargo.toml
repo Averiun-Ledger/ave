@@ -14,8 +14,9 @@ rust-version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 borsh = { workspace = true }
-ave-common = { workspace = true }
-json-patch = { version = "4.2.0" }
+ave-common = { workspace = true, features = ["sink-grpc"] }
+ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
+json-patch = "4.2.0"
 ave-actors = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
@@ -25,10 +26,11 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs", "p
 tracing = { workspace = true }
 ave-network = { workspace = true }
 rmp-serde = { workspace = true }
-wasmtime = {version = "46.0.1"}
 base64 = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
+rustls = "0.23"
+rustls-native-certs = "0.8"
 percent-encoding = "2"
 rand = { workspace = true }
 fastrand = { workspace = true }
@@ -36,19 +38,34 @@ bytes = { workspace = true }
 lru = { workspace = true }
 prometheus-client = { workspace = true }
 futures = { workspace = true }
+rdkafka = { workspace = true }
+httpdate = "1"
+flate2 = "1"
+zstd = "0.13"
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tonic-types = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-stream = "0.1"
 ave-network = { workspace = true, features = ["test"] }
 futures = { workspace = true }
 axum = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
+testcontainers = { workspace = true }
+axum-server = { workspace = true }
+rcgen = "0.14"
+tokio-rustls = "0.26"
+aws-lc-rs = { version = "1", features = ["ring-io"] }
 
 [features]
-default = ["sqlite", "ext-sqlite"]
+default = ["sqlite", "ext-sqlite", "prometheus"]
 rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["ave-actors/export-sqlite"]
+prometheus = ["ave-actors/prometheus"]
 test = []

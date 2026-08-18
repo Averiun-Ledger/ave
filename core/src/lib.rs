@@ -2,6 +2,7 @@
 pub mod config;
 pub mod error;
 
+pub(crate) mod api_input_validation;
 pub mod approval;
 pub mod auth;
 pub mod db;
@@ -23,13 +24,13 @@ pub mod update;
 pub mod validation;
 
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use auth::{
     AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse,
 };
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
+use ave_common::Error as CommonError;
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
     EventsQuery, SinkEventsQuery, SinkReplayItem, SinkReplayRequest,
@@ -45,7 +46,9 @@ use ave_common::response::{
 };
 use ave_common::{
     bridge::request::SinksQuery,
-    bridge::response::{SinkInfo, SinkManagerTarget, SinkStatusInfo},
+    bridge::response::{
+        SinkInfo, SinkManagerTarget, SinkServerView, SinkStatusInfo,
+    },
     sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
 use ave_network::{
@@ -70,6 +73,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use validation::{Validation, ValidationMessage};
 
+pub use crate::api_input_validation::{
+    parse_request_id, require_non_empty_str, require_positive_u64,
+    require_query_limit, validate_aborts_query, validate_event_request,
+    validate_events_query, validate_governance_id, validate_request_id,
+    validate_sink_events_query, validate_sink_replay_request,
+    validate_sinks_query, validate_subject_id,
+};
 use crate::approval::request::ApprovalReq;
 use crate::helpers::db::{
     DatabaseError as ExternalDatabaseError, ExternalDB, ReadStore,
@@ -312,12 +322,24 @@ impl Api {
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
         debug!("Creating Api");
 
+        config.validate().map_err(|e| match e {
+            CommonError::InvalidConfiguration { component, reason } => {
+                Error::InvalidConfiguration { component, reason }
+            }
+            other => Error::InvalidConfiguration {
+                component: "node".to_string(),
+                reason: other.to_string(),
+            },
+        })?;
+
         let (system, runner) = system(
             config.clone(),
             sinks,
             password,
             graceful_token.clone(),
             crash_token.clone(),
+            #[cfg(feature = "prometheus")]
+            Some(registry),
         )
         .await
         .map_err(|e| {
@@ -370,7 +392,7 @@ impl Api {
 
         worker.add_helper_sender(service.sender());
 
-        system.add_helper("network", service.clone()).await;
+        system.add_helper("network", service.clone());
 
         let public_key = Arc::new(keys.public_key());
         let node_actor = system
@@ -460,7 +482,7 @@ impl Api {
             )
         };
 
-        let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db").await
+        let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db")
         else {
             error!("External database helper not found");
             return Err(Error::MissingResource {
@@ -566,6 +588,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<RequestsInManagerSubject, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .request
             .ask(RequestHandlerMessage::RequestInManagerSubjectId {
@@ -597,6 +620,7 @@ impl Api {
         request: Signed<EventRequest>,
     ) -> Result<RequestData, Error> {
         self.ensure_mutations_allowed()?;
+        validate_event_request(request.content())?;
         let response = self
             .request
             .ask(RequestHandlerMessage::NewRequest { request })
@@ -624,6 +648,7 @@ impl Api {
         request: EventRequest,
     ) -> Result<RequestData, Error> {
         self.ensure_mutations_allowed()?;
+        validate_event_request(&request)?;
         let response = self
             .node
             .ask(NodeMessage::SignRequest(Box::new(
@@ -680,6 +705,7 @@ impl Api {
         subject_id: DigestIdentifier,
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .request
             .ask(RequestHandlerMessage::GetApproval { state, subject_id })
@@ -734,6 +760,7 @@ impl Api {
         state: ApprovalStateRes,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         if state == ApprovalStateRes::Obsolete {
             warn!("Cannot set approval state to Obsolete");
             return Err(Error::InvalidApprovalState("Obsolete".to_string()));
@@ -771,6 +798,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.request
             .tell(RequestHandlerMessage::AbortRequest { subject_id })
             .await
@@ -788,6 +816,7 @@ impl Api {
         &self,
         request_id: DigestIdentifier,
     ) -> Result<RequestInfo, Error> {
+        validate_request_id(&request_id)?;
         let Some(tracking) = &self.tracking else {
             return Err(Error::SafeMode(
                 "request tracking is unavailable while node is running in safe mode"
@@ -883,6 +912,7 @@ impl Api {
         witnesses: AuthWitness,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::AuthorizeGov {
                 subject_id,
@@ -904,6 +934,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::DisauthorizeGov { subject_id })
             .await
@@ -946,6 +977,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<bool, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::IsGovAuthorized { subject_id })
@@ -973,6 +1005,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::BanTracker { subject_id })
             .await
@@ -991,6 +1024,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         self.subject_access
             .tell(SubjectAccessMessage::UnbanTracker { subject_id })
             .await
@@ -1033,6 +1067,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<bool, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::IsTrackerBanned { subject_id })
@@ -1061,6 +1096,12 @@ impl Api {
         peers: Vec<PublicKey>,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
+        if peers.is_empty() {
+            return Err(Error::InvalidQueryParams(
+                "peers must not be empty".to_owned(),
+            ));
+        }
         self.subject_access
             .tell(SubjectAccessMessage::AddSyncPeers { subject_id, peers })
             .await
@@ -1080,6 +1121,12 @@ impl Api {
         peers: Vec<PublicKey>,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
+        if peers.is_empty() {
+            return Err(Error::InvalidQueryParams(
+                "peers must not be empty".to_owned(),
+            ));
+        }
         self.subject_access
             .tell(SubjectAccessMessage::RemoveSyncPeers { subject_id, peers })
             .await
@@ -1097,6 +1144,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<HashSet<PublicKey>, Error> {
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::GetSyncPeers { subject_id })
@@ -1157,6 +1205,7 @@ impl Api {
         strict: bool,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         let response = self
             .subject_access
             .ask(SubjectAccessMessage::Update {
@@ -1193,6 +1242,7 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
         let Some(manual_dis) = &self.manual_dis else {
             return Err(safe_mode_error());
         };
@@ -1213,6 +1263,7 @@ impl Api {
         &self,
         query: SinksQuery,
     ) -> Result<Vec<SinkInfo>, Error> {
+        validate_sinks_query(&query)?;
         let registrations = self.get_sink_registry().await?;
 
         // Group registered sinks by their manager target so we can query only
@@ -1276,7 +1327,6 @@ impl Api {
         let config_helper = self
             .system
             .get_helper::<system::ConfigHelper>("config")
-            .await
             .ok_or_else(|| {
                 Error::Internal("ConfigHelper not available".to_string())
             })?;
@@ -1303,7 +1353,11 @@ impl Api {
                 lagging_subjects: sink_status
                     .map(|st| st.lagging_subjects)
                     .unwrap_or_default(),
-                server,
+                last_error: sink_status.and_then(|st| st.last_error.clone()),
+                transport: server
+                    .as_ref()
+                    .map(|s| s.transport.kind().to_string()),
+                server: server.map(SinkServerView::from),
             });
         }
 
@@ -1327,6 +1381,8 @@ impl Api {
                         running: false,
                         blocked: sink_status.blocked.clone(),
                         lagging_subjects: sink_status.lagging_subjects,
+                        last_error: sink_status.last_error.clone(),
+                        transport: None,
                         server: None,
                     });
                 }
@@ -1343,12 +1399,23 @@ impl Api {
         Ok(infos)
     }
 
+    /// Returns the full view of a single sink, located by its unique name.
+    ///
+    /// Covers both registered sinks and residual ones reported by a manager
+    /// but missing from the registry, exactly like [`Self::get_sinks`].
+    pub async fn get_sink(&self, sink_name: String) -> Result<SinkInfo, Error> {
+        require_non_empty_str("sink_name", &sink_name)?;
+        self.get_sinks(SinksQuery::default())
+            .await?
+            .into_iter()
+            .find(|info| info.name == sink_name)
+            .ok_or(Error::SinkNotFound(sink_name))
+    }
+
     pub async fn get_sinks_status(&self) -> Result<Vec<SinkStatusInfo>, Error> {
-        let query = SinksQuery {
-            in_config: Some(true),
-            ..SinksQuery::default()
-        };
-        self.get_sinks(query).await.map(|infos| {
+        // No in_config filter: residual sinks (removed from the config but
+        // still tracked by the manager) must be visible in the status view.
+        self.get_sinks(SinksQuery::default()).await.map(|infos| {
             infos
                 .into_iter()
                 .map(|info| SinkStatusInfo {
@@ -1359,6 +1426,8 @@ impl Api {
                     running: info.running,
                     blocked: info.blocked,
                     lagging_subjects: info.lagging_subjects,
+                    last_error: info.last_error,
+                    transport: info.transport,
                 })
                 .collect()
         })
@@ -1455,6 +1524,7 @@ impl Api {
 
     pub async fn unblock_sink(&self, sink_name: String) -> Result<(), Error> {
         self.ensure_mutations_allowed()?;
+        require_non_empty_str("sink_name", &sink_name)?;
         let registration = self.get_sink_registration(&sink_name).await?;
         let target = manager_target_from_registration(&registration)?;
         let path = manager_path(&target);
@@ -1478,16 +1548,17 @@ impl Api {
         Ok(())
     }
 
-    /// Delete all persisted cursors and transient state for a sink.
+    /// Reset all persisted cursors and transient state for a sink.
     ///
     /// This operation is only available while the node is running in safe mode.
     /// The sink manager is located through the sink registry, so callers only
     /// need to provide the unique sink name.
-    pub async fn delete_sink_cursors(
+    pub async fn reset_sink_cursors(
         &self,
         sink_name: String,
     ) -> Result<(), Error> {
-        self.ensure_safe_mode_required("sink cursor deletion")?;
+        self.ensure_safe_mode_required("sink cursor reset")?;
+        require_non_empty_str("sink_name", &sink_name)?;
 
         let registration = self.get_sink_registration(&sink_name).await?;
         let target = manager_target_from_registration(&registration)?;
@@ -1502,12 +1573,12 @@ impl Api {
             })?;
 
         manager
-            .tell(SinkManagerMessage::DeleteSinkCursors {
+            .tell(SinkManagerMessage::ResetSinkCursors {
                 sink: sink_name.clone(),
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to delete sink cursors");
+                warn!(error = %e, sink = %sink_name, "Failed to reset sink cursors");
                 actor_communication_error("sink_manager", e)
             })?;
 
@@ -1530,6 +1601,7 @@ impl Api {
         request: SinkReplayRequest,
     ) -> Result<SinkReplayResponse, Error> {
         self.ensure_mutations_allowed()?;
+        validate_sink_replay_request(&request)?;
 
         // Resolve each distinct sink once in parallel instead of once per item.
         let unique_sinks: HashSet<String> = request
@@ -1703,11 +1775,73 @@ impl Api {
         Ok(SinkReplayResponse { processed, errors })
     }
 
+    /// Run a non-persistent end-to-end test of a sink.
+    ///
+    /// Performs a health check and sends a test payload using the sink's real
+    /// configuration (auth, signature, compression). No cursor is advanced and
+    /// no state is persisted.
+    pub async fn test_sink(&self, sink_name: String) -> Result<(), Error> {
+        self.ensure_mutations_allowed()?;
+        require_non_empty_str("sink_name", &sink_name)?;
+
+        let registration = self.get_sink_registration(&sink_name).await?;
+        let target = manager_target_from_registration(&registration)?;
+        let path = manager_path(&target);
+        let manager = self
+            .system
+            .get_actor::<crate::sink::manager::SinkManager>(&path)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                actor_communication_error("sink_manager", e)
+            })?;
+
+        match manager
+            .ask(crate::sink::manager::SinkManagerMessage::TestSink {
+                sink: sink_name.clone(),
+            })
+            .await
+        {
+            Ok(crate::sink::manager::SinkManagerResponse::TestResult(
+                result,
+            )) => result.map_err(|e| match e {
+                crate::sink::manager::SinkTestError::NotConfigured => {
+                    Error::SinkNotConfigured(sink_name.clone())
+                }
+                crate::sink::manager::SinkTestError::Internal(reason) => {
+                    Error::Internal(format!(
+                        "sink '{sink_name}' test: {reason}"
+                    ))
+                }
+                crate::sink::manager::SinkTestError::Delivery(reason) => {
+                    Error::SinkTestFailed(reason)
+                }
+            }),
+            Ok(other) => {
+                warn!(
+                    sink = %sink_name,
+                    response = ?other,
+                    "Unexpected response from sink manager for test"
+                );
+                Err(Error::UnexpectedResponse {
+                    actor: "sink_manager".to_string(),
+                    expected: "TestResult".to_string(),
+                    received: format!("{other:?}"),
+                })
+            }
+            Err(e) => {
+                warn!(error = %e, sink = %sink_name, "Failed to test sink");
+                Err(actor_communication_error("sink_manager", e))
+            }
+        }
+    }
+
     pub async fn delete_subject(
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_safe_mode_required("subject deletion")?;
+        validate_subject_id(&subject_id)?;
         self.begin_subject_deletion(&subject_id).await?;
 
         let result = async {
@@ -1849,6 +1983,10 @@ impl Api {
         active: Option<bool>,
         schema_id: Option<String>,
     ) -> Result<Vec<SubjsData>, Error> {
+        validate_governance_id(&governance_id)?;
+        if let Some(schema_id) = schema_id.as_ref() {
+            require_non_empty_str("schema_id", schema_id)?;
+        }
         let governance_id = governance_id.to_string();
         match self
             .db
@@ -1873,6 +2011,8 @@ impl Api {
         subject_id: DigestIdentifier,
         query: EventsQuery,
     ) -> Result<PaginatorEvents, Error> {
+        validate_subject_id(&subject_id)?;
+        validate_events_query(&query)?;
         let subject_id_str = subject_id.to_string();
 
         match self.db.get_events(&subject_id_str, query).await {
@@ -1892,20 +2032,8 @@ impl Api {
         subject_id: DigestIdentifier,
         query: SinkEventsQuery,
     ) -> Result<SinkEventsPage, Error> {
-        if let Some(limit) = query.limit {
-            if limit == 0 {
-                return Err(Error::InvalidQueryParams(
-                    "Replay limit must be greater than zero".to_owned(),
-                ));
-            }
-        }
-        if let (Some(from_sn), Some(to_sn)) = (query.from_sn, query.to_sn) {
-            if from_sn > to_sn {
-                return Err(Error::InvalidQueryParams(
-                    "Replay range requires from_sn <= to_sn".to_owned(),
-                ));
-            }
-        }
+        validate_subject_id(&subject_id)?;
+        validate_sink_events_query(&query)?;
 
         let subject_id_str = subject_id.to_string();
         let response = self
@@ -1942,13 +2070,12 @@ impl Api {
         subject_id: DigestIdentifier,
         query: AbortsQuery,
     ) -> Result<PaginatorAborts, Error> {
+        validate_subject_id(&subject_id)?;
+        validate_aborts_query(&query)?;
+
         let subject_id_str = subject_id.to_string();
         let request_id = if let Some(request_id) = query.request_id.as_ref() {
-            Some(
-                DigestIdentifier::from_str(request_id)
-                    .map_err(|e| Error::InvalidQueryParams(e.to_string()))?
-                    .to_string(),
-            )
+            Some(parse_request_id(request_id)?.to_string())
         } else {
             None
         };
@@ -1974,6 +2101,7 @@ impl Api {
         subject_id: DigestIdentifier,
         sn: u64,
     ) -> Result<LedgerDB, Error> {
+        validate_subject_id(&subject_id)?;
         let subject_id_str = subject_id.to_string();
 
         match self.db.get_event_sn(&subject_id_str, sn).await {
@@ -1998,6 +2126,10 @@ impl Api {
         reverse: Option<bool>,
         event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, Error> {
+        validate_subject_id(&subject_id)?;
+        if let Some(quantity) = quantity {
+            require_query_limit("quantity", quantity)?;
+        }
         let subject_id_str = subject_id.to_string();
 
         match self
@@ -2025,6 +2157,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<SubjectDB, Error> {
+        validate_subject_id(&subject_id)?;
         let subject_id_str = subject_id.to_string();
 
         match self.db.get_subject_state(&subject_id_str).await {
@@ -2113,11 +2246,6 @@ fn find_sink_config(
 }
 
 fn sink_info_matches_query(info: &SinkInfo, query: &SinksQuery) -> bool {
-    if let Some(name) = &query.name
-        && info.name != *name
-    {
-        return false;
-    }
     if let Some(target) = &query.target {
         let matches = match info.target.as_ref() {
             Some(SinkTarget::Schema { schema_id, .. }) => {
@@ -2174,6 +2302,7 @@ fn manager_sort_key(manager: &SinkManagerTarget) -> String {
 mod tests {
     use super::*;
     use ave_actors::{ActorError, ActorPath};
+    use ave_common::sink::{HttpSinkConfig, SinkTransportConfig};
 
     #[test]
     fn preserves_functional_actor_errors() {
@@ -2212,7 +2341,10 @@ mod tests {
     fn finds_sink_config_for_node_manager() {
         let server = SinkServer {
             server: "gov_sink".to_string(),
-            url: "http://example.com".to_string(),
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
+                url: "http://example.com".to_string(),
+                ..Default::default()
+            })),
             ..Default::default()
         };
         let entry = SinkConfigEntry {
@@ -2220,7 +2352,7 @@ mod tests {
                 schema_id: "governance".to_string(),
                 governance_id: None,
             },
-            servers: vec![server.clone()],
+            servers: vec![server],
         };
         let (target, found_server) =
             find_sink_config(&[entry], &SinkManagerTarget::Node, "gov_sink");
@@ -2234,7 +2366,10 @@ mod tests {
     fn finds_sink_config_for_governance_manager() {
         let server = SinkServer {
             server: "schema_sink".to_string(),
-            url: "http://example.com".to_string(),
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
+                url: "http://example.com".to_string(),
+                ..Default::default()
+            })),
             ..Default::default()
         };
         let entry = SinkConfigEntry {
@@ -2242,7 +2377,7 @@ mod tests {
                 schema_id: "schema1".to_string(),
                 governance_id: Some("gov1".to_string()),
             },
-            servers: vec![server.clone()],
+            servers: vec![server],
         };
         let manager = SinkManagerTarget::Governance {
             governance_id: "gov1".to_string(),
@@ -2251,37 +2386,6 @@ mod tests {
             find_sink_config(&[entry], &manager, "schema_sink");
         assert!(matches!(target, Some(SinkTarget::Schema { .. })));
         assert_eq!(found_server.unwrap().server, "schema_sink");
-    }
-
-    #[test]
-    fn sink_info_query_filters_by_name() {
-        let info = SinkInfo {
-            name: "foo".to_string(),
-            target: Some(SinkTarget::Schema {
-                schema_id: "governance".to_string(),
-                governance_id: None,
-            }),
-            manager: SinkManagerTarget::Node,
-            in_config: true,
-            running: true,
-            blocked: None,
-            lagging_subjects: 0,
-            server: None,
-        };
-        assert!(sink_info_matches_query(
-            &info,
-            &SinksQuery {
-                name: Some("foo".to_string()),
-                ..Default::default()
-            }
-        ));
-        assert!(!sink_info_matches_query(
-            &info,
-            &SinksQuery {
-                name: Some("bar".to_string()),
-                ..Default::default()
-            }
-        ));
     }
 
     #[test]
@@ -2297,6 +2401,8 @@ mod tests {
             running: false,
             blocked: Some("boom".to_string()),
             lagging_subjects: 0,
+            last_error: None,
+            transport: None,
             server: None,
         };
         assert!(sink_info_matches_query(
@@ -2330,6 +2436,8 @@ mod tests {
             running: true,
             blocked: None,
             lagging_subjects: 0,
+            last_error: None,
+            transport: None,
             server: None,
         };
         assert!(sink_info_matches_query(

@@ -166,7 +166,7 @@ mod tests {
     fn from_bytes_with_prefix_empty() {
         let err = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
             &[],
-            |id| Ok::<_, std::convert::Infallible>(id),
+            Ok::<_, std::convert::Infallible>,
             32,
             "test",
         )
@@ -204,7 +204,7 @@ mod tests {
     fn from_bytes_with_prefix_invalid_length() {
         let err = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
             &[0x01, 0x02],
-            |id| Ok::<_, std::convert::Infallible>(id),
+            Ok::<_, std::convert::Infallible>,
             10,
             "test",
         )
@@ -225,7 +225,7 @@ mod tests {
     fn from_bytes_with_prefix_ok() {
         let result = AlgorithmIdentifiedBytes::from_bytes_with_prefix(
             &[0x01, 0x02, 0x03],
-            |id| Ok::<_, std::convert::Infallible>(id),
+            Ok::<_, std::convert::Infallible>,
             2,
             "test",
         )

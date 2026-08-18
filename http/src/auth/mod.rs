@@ -37,6 +37,7 @@ use ave_bridge::{
 };
 // Re-exports for convenience
 pub use database::AuthDatabase;
+pub use database::UpdateUserParams;
 pub use database_apikeys::RotateApiKeyParams;
 use tokio::time::interval;
 use tracing::{error, info, warn};
@@ -67,6 +68,7 @@ pub(crate) struct ValidationLimits {
     pub audit_logs_max_limit: i64,
     pub system_config_default_limit: i64,
     pub system_config_max_limit: i64,
+    pub management_key_max_ttl_seconds: i64,
 }
 
 pub(crate) struct MaintenanceLimits {
@@ -84,6 +86,15 @@ pub(crate) const PASSWORD_POLICY: PasswordPolicy = PasswordPolicy {
     require_special: true,
 };
 
+/// Stricter policy for the bootstrap superadmin password: it arrives through
+/// an environment variable and protects the most privileged account, so the
+/// regular minimum is not enough. Only enforced on fresh databases (the
+/// bootstrap is skipped when users already exist).
+pub(crate) const SUPERADMIN_PASSWORD_POLICY: PasswordPolicy = PasswordPolicy {
+    min_length: 12,
+    ..PASSWORD_POLICY
+};
+
 pub(crate) const VALIDATION_LIMITS: ValidationLimits = ValidationLimits {
     role_name_max_length: 100,
     role_description_max_length: 500,
@@ -95,6 +106,9 @@ pub(crate) const VALIDATION_LIMITS: ValidationLimits = ValidationLimits {
     audit_logs_max_limit: 1000,
     system_config_default_limit: 50,
     system_config_max_limit: 200,
+    // Interactive (management) keys are login sessions, not long-lived
+    // credentials: they always expire, at most after 7 days.
+    management_key_max_ttl_seconds: 7 * 24 * 3600,
 };
 
 pub(crate) const MAINTENANCE_LIMITS: MaintenanceLimits = MaintenanceLimits {
@@ -102,6 +116,20 @@ pub(crate) const MAINTENANCE_LIMITS: MaintenanceLimits = MaintenanceLimits {
     rate_limit_cleanup_batch_size: 1_000,
     expired_api_key_cleanup_batch_size: 500,
 };
+
+/// Resources that only management keys and superadmin-driven flows may use.
+///
+/// Service keys get these filtered out at authentication time
+/// (`database_apikeys`), and admin-account guards use the same list to
+/// protect privileged accounts (`admin_handlers::is_admin_account`).
+pub(crate) const ADMIN_RESOURCES: [&str; 6] = [
+    "admin_users",
+    "admin_roles",
+    "admin_api_key",
+    "admin_system",
+    "user_api_key",
+    "node_maintenance",
+];
 
 pub async fn build_auth(
     auth_config: &AuthConfig,

@@ -932,11 +932,25 @@ impl CursorEventsQuery {
             quantity: query.quantity.unwrap_or(50).max(1),
             cursor: None,
             reverse: query.reverse.unwrap_or(false),
-            event_request_ts: query.event_request_ts,
-            event_ledger_ts: query.event_ledger_ts,
-            sink_ts: query.sink_ts,
+            event_request_ts: flat_range(
+                query.event_request_ts_from,
+                query.event_request_ts_to,
+            ),
+            event_ledger_ts: flat_range(
+                query.event_ledger_ts_from,
+                query.event_ledger_ts_to,
+            ),
+            sink_ts: flat_range(query.sink_ts_from, query.sink_ts_to),
             event_type: query.event_type,
         }
+    }
+}
+
+/// Builds a time range from the flat `*_from` / `*_to` query pair.
+fn flat_range(from: Option<String>, to: Option<String>) -> Option<TimeRange> {
+    match (from, to) {
+        (None, None) => None,
+        (from, to) => Some(TimeRange { from, to }),
     }
 }
 
@@ -2760,6 +2774,13 @@ fn fetch_aborts_with_offset(
     } else {
         "COALESCE(sn, -1) ASC, request_id ASC"
     };
+    // The outer query joins `aborts a` with `page_keys k`, and both expose
+    // `request_id`: every column there must be qualified with its alias.
+    let outer_order_clause = if query.reverse {
+        "COALESCE(a.sn, -1) DESC, a.request_id DESC"
+    } else {
+        "COALESCE(a.sn, -1) ASC, a.request_id ASC"
+    };
 
     let sql = format!(
         r#"
@@ -2779,7 +2800,7 @@ fn fetch_aborts_with_offset(
         order_clause,
         limit_idx,
         offset_idx,
-        order_clause
+        outer_order_clause
     );
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
@@ -2810,9 +2831,12 @@ fn count_events_from_conn(
     }
 
     let started = Instant::now();
-    if query.event_request_ts.is_none()
-        && query.event_ledger_ts.is_none()
-        && query.sink_ts.is_none()
+    if query.event_request_ts_from.is_none()
+        && query.event_request_ts_to.is_none()
+        && query.event_ledger_ts_from.is_none()
+        && query.event_ledger_ts_to.is_none()
+        && query.sink_ts_from.is_none()
+        && query.sink_ts_to.is_none()
         && query.event_type.is_none()
     {
         let mut stmt = conn
@@ -2839,9 +2863,15 @@ fn count_events_from_conn(
     add_event_time_filters(
         &mut where_clauses,
         &mut params_values,
-        query.event_request_ts.clone(),
-        query.event_ledger_ts.clone(),
-        query.sink_ts.clone(),
+        flat_range(
+            query.event_request_ts_from.clone(),
+            query.event_request_ts_to.clone(),
+        ),
+        flat_range(
+            query.event_ledger_ts_from.clone(),
+            query.event_ledger_ts_to.clone(),
+        ),
+        flat_range(query.sink_ts_from.clone(), query.sink_ts_to.clone()),
     )?;
 
     if let Some(event_type) = query.event_type.as_ref() {
@@ -3135,6 +3165,13 @@ fn fetch_events_with_offset(
     params_values.push(offset_i64.into());
     let offset_idx = params_values.len();
     let order_clause = if query.reverse { "sn DESC" } else { "sn ASC" };
+    // The outer query joins `events e` with `page_keys k`, and both expose
+    // `sn`: the column must be qualified with its alias there.
+    let outer_order_clause = if query.reverse {
+        "e.sn DESC"
+    } else {
+        "e.sn ASC"
+    };
 
     let sql = format!(
         r#"
@@ -3155,7 +3192,7 @@ fn fetch_events_with_offset(
         order_clause,
         limit_idx,
         offset_idx,
-        order_clause
+        outer_order_clause
     );
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
@@ -3210,9 +3247,18 @@ fn build_events_page_cache_key(
         "events|subject={subject_id}|quantity={}|reverse={}|event_request_ts={}|event_ledger_ts={}|sink_ts={}|event_type={}",
         query.quantity.unwrap_or(50).max(1),
         query.reverse.unwrap_or(false),
-        format_time_range(query.event_request_ts.as_ref()),
-        format_time_range(query.event_ledger_ts.as_ref()),
-        format_time_range(query.sink_ts.as_ref()),
+        format_time_range(
+            query.event_request_ts_from.as_ref(),
+            query.event_request_ts_to.as_ref(),
+        ),
+        format_time_range(
+            query.event_ledger_ts_from.as_ref(),
+            query.event_ledger_ts_to.as_ref(),
+        ),
+        format_time_range(
+            query.sink_ts_from.as_ref(),
+            query.sink_ts_to.as_ref(),
+        ),
         query
             .event_type
             .as_ref()
@@ -3228,9 +3274,18 @@ fn build_events_count_cache_key(
 ) -> Result<String, DatabaseError> {
     Ok(format!(
         "events-count|subject={subject_id}|event_request_ts={}|event_ledger_ts={}|sink_ts={}|event_type={}",
-        format_time_range(query.event_request_ts.as_ref()),
-        format_time_range(query.event_ledger_ts.as_ref()),
-        format_time_range(query.sink_ts.as_ref()),
+        format_time_range(
+            query.event_request_ts_from.as_ref(),
+            query.event_request_ts_to.as_ref(),
+        ),
+        format_time_range(
+            query.event_ledger_ts_from.as_ref(),
+            query.event_ledger_ts_to.as_ref(),
+        ),
+        format_time_range(
+            query.sink_ts_from.as_ref(),
+            query.sink_ts_to.as_ref(),
+        ),
         query
             .event_type
             .as_ref()
@@ -3264,14 +3319,15 @@ fn build_aborts_count_cache_key(
     )
 }
 
-fn format_time_range(range: Option<&TimeRange>) -> String {
-    range.map_or_else(String::new, |range| {
-        format!(
-            "{}..{}",
-            range.from.as_deref().unwrap_or_default(),
-            range.to.as_deref().unwrap_or_default()
-        )
-    })
+fn format_time_range(from: Option<&String>, to: Option<&String>) -> String {
+    if from.is_none() && to.is_none() {
+        return String::new();
+    }
+    format!(
+        "{}..{}",
+        from.map_or("", String::as_str),
+        to.map_or("", String::as_str)
+    )
 }
 
 fn map_abort_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AbortDB> {

@@ -9,7 +9,10 @@ use super::database_audit::AuditLogParams;
 use super::db_runtime::{AuthDbRuntime, PooledConnection, auth_tuning_for_ram};
 use super::models::*;
 use super::system_config::SystemConfigKey;
-use super::{MAINTENANCE_LIMITS, PASSWORD_POLICY, VALIDATION_LIMITS};
+use super::{
+    MAINTENANCE_LIMITS, PASSWORD_POLICY, SUPERADMIN_PASSWORD_POLICY,
+    VALIDATION_LIMITS,
+};
 use ave_actors::rusqlite::{
     Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
@@ -19,7 +22,6 @@ use ave_bridge::{
     auth::{AuthConfig, EndpointRateLimit},
     resolve_spec,
 };
-use rand::RngExt;
 use std::{
     fs,
     path::Path,
@@ -35,6 +37,38 @@ use tracing::{debug, info, warn};
 
 const TARGET: &str = "ave::http::auth";
 const BLOCKING_TASK_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Parameters for a validated admin user update
+/// (`AuthDatabase::update_user_validated_transactional`).
+pub struct UpdateUserParams<'a> {
+    pub user_id: i64,
+    pub password: Option<&'a str>,
+    pub is_active: Option<bool>,
+    pub role_ids: Option<&'a [i64]>,
+    pub actor_is_superadmin: bool,
+    pub assigned_by: Option<i64>,
+    pub audit: Option<AuditLogParams<'a>>,
+}
+
+/// Schema migrations as `(version, sql)` pairs, in application order.
+///
+/// `PRAGMA user_version` records the last applied version so only pending
+/// migrations run. Existing databases predate versioning (`user_version = 0`);
+/// every migration is idempotent, so re-applying them once on first boot is
+/// harmless and leaves the database stamped with the latest version.
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../../migrations/001_initial_schema.sql")),
+    (2, include_str!("../../migrations/002_role_permissions.sql")),
+    (3, include_str!("../../migrations/003_usage_plans.sql")),
+    (
+        4,
+        include_str!("../../migrations/004_sink_role_permissions.sql"),
+    ),
+    (
+        5,
+        include_str!("../../migrations/005_single_active_management_key.sql"),
+    ),
+];
 
 // =============================================================================
 // ERROR TYPE
@@ -1081,25 +1115,32 @@ impl AuthDatabase {
         info!(target: TARGET, "running database migrations");
 
         let conn = self.lock_conn()?;
+        let current_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| {
+                DatabaseError::Migration(format!(
+                    "failed to read schema version: {e}"
+                ))
+            })?;
 
-        // Read and execute migration files
-        let migration_001 =
-            include_str!("../../migrations/001_initial_schema.sql");
-        conn.execute_batch(migration_001).map_err(|e| {
-            DatabaseError::Migration(format!("migration 001 failed: {}", e))
-        })?;
-
-        let migration_002 =
-            include_str!("../../migrations/002_role_permissions.sql");
-        conn.execute_batch(migration_002).map_err(|e| {
-            DatabaseError::Migration(format!("migration 002 failed: {}", e))
-        })?;
-
-        let migration_003 =
-            include_str!("../../migrations/003_usage_plans.sql");
-        conn.execute_batch(migration_003).map_err(|e| {
-            DatabaseError::Migration(format!("migration 003 failed: {}", e))
-        })?;
+        for (version, sql) in MIGRATIONS {
+            if *version <= current_version {
+                continue;
+            }
+            conn.execute_batch(sql).map_err(|e| {
+                DatabaseError::Migration(format!(
+                    "migration {version:03} failed: {e}"
+                ))
+            })?;
+            conn.pragma_update(None, "user_version", *version).map_err(
+                |e| {
+                    DatabaseError::Migration(format!(
+                        "failed to stamp schema version {version}: {e}"
+                    ))
+                },
+            )?;
+            info!(target: TARGET, version = version, "migration applied");
+        }
         drop(conn);
 
         info!(target: TARGET, "database migrations completed");
@@ -1158,7 +1199,7 @@ impl AuthDatabase {
         &self,
         password: &str,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
 
         // Check if any users exist
         let user_count: i64 = conn
@@ -1183,6 +1224,16 @@ impl AuthDatabase {
 
         info!(target: TARGET, username = %superadmin, "bootstrapping superadmin account");
 
+        // The bootstrap password arrives through an env var and protects the
+        // most privileged account: enforce the stricter superadmin policy.
+        if let Err(reason) =
+            validate_password(password, &SUPERADMIN_PASSWORD_POLICY)
+        {
+            return Err(DatabaseError::Validation(format!(
+                "superadmin bootstrap password rejected: {reason}"
+            )));
+        }
+
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
             DatabaseError::Crypto(format!(
@@ -1191,8 +1242,15 @@ impl AuthDatabase {
             ))
         })?;
 
+        // Create the user and assign the role atomically: a partial
+        // bootstrap would leave a superadmin without its role and would
+        // never be retried (user_count > 0 on the next run)
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
         // Create superadmin user
-        conn.execute(
+        tx.execute(
             "INSERT INTO users (username, password_hash, is_active)
              VALUES (?1, ?2, 1)",
             params![superadmin, password_hash],
@@ -1201,10 +1259,10 @@ impl AuthDatabase {
             DatabaseError::Insert(format!("Failed to create superadmin: {}", e))
         })?;
 
-        let user_id = conn.last_insert_rowid();
+        let user_id = tx.last_insert_rowid();
 
         // Assign superadmin role
-        let superadmin_role_id: i64 = conn
+        let superadmin_role_id: i64 = tx
             .query_row(
                 "SELECT id FROM roles WHERE name = 'superadmin'",
                 [],
@@ -1217,7 +1275,7 @@ impl AuthDatabase {
                 ))
             })?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO user_roles (user_id, role_id) VALUES (?1, ?2)",
             params![user_id, superadmin_role_id],
         )
@@ -1227,6 +1285,9 @@ impl AuthDatabase {
                 e
             ))
         })?;
+
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         drop(conn);
 
         info!(target: TARGET, "superadmin account created");
@@ -1236,20 +1297,6 @@ impl AuthDatabase {
     /// Get the current Unix timestamp in seconds
     pub(crate) fn now() -> i64 {
         time::OffsetDateTime::now_utc().unix_timestamp()
-    }
-
-    /// Generate a UUID v4 string (for API key public IDs)
-    pub(crate) fn generate_uuid() -> String {
-        let mut rng = rand::rng();
-
-        format!(
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            rng.random::<u32>(),
-            rng.random::<u16>(),
-            0x4000 | (rng.random::<u16>() & 0x0FFF), // Version 4
-            0x8000 | (rng.random::<u16>() & 0x3FFF), // Variant 1
-            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
-        )
     }
 }
 
@@ -1444,20 +1491,24 @@ impl AuthDatabase {
 
     /// Count superadmin users (users with the superadmin role)
     pub fn count_superadmins(&self) -> Result<i64, DatabaseError> {
-        let count: i64 = self
-            .lock_conn()?
-            .query_row(
-                "SELECT COUNT(DISTINCT u.id)
+        let conn = self.lock_conn()?;
+        Self::count_superadmins_internal(&conn)
+    }
+
+    /// Internal: Count superadmin users on an existing connection
+    pub(crate) fn count_superadmins_internal(
+        conn: &Connection,
+    ) -> Result<i64, DatabaseError> {
+        conn.query_row(
+            "SELECT COUNT(DISTINCT u.id)
              FROM users u
              INNER JOIN user_roles ur ON u.id = ur.user_id
              INNER JOIN roles r ON ur.role_id = r.id
              WHERE r.name = 'superadmin' AND u.is_deleted = 0",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        Ok(count)
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
     /// List all users
@@ -1607,8 +1658,135 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        let user =
+            self.update_user_with_conn(&tx, user_id, password, is_active)?;
+
+        if let Some(role_ids) = role_ids {
+            Self::replace_user_roles_with_conn(
+                &tx,
+                user_id,
+                role_ids,
+                assigned_by,
+            )?;
+        }
+
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Ok(user)
+    }
+
+    /// Validated user update for the admin endpoint: every check and the
+    /// mutation run inside a single Immediate transaction, so no concurrent
+    /// write can interleave between validation and mutation (TOCTOU).
+    pub fn update_user_validated_transactional(
+        &self,
+        params: UpdateUserParams<'_>,
+    ) -> Result<User, DatabaseError> {
+        let UpdateUserParams {
+            user_id,
+            password,
+            is_active,
+            role_ids,
+            actor_is_superadmin,
+            assigned_by,
+            audit,
+        } = params;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        let target_roles = Self::get_user_roles_internal(&tx, user_id)?;
+        let is_target_superadmin =
+            target_roles.iter().any(|r| r == "superadmin");
+
+        if is_target_superadmin {
+            if is_active == Some(false) {
+                return Err(DatabaseError::PermissionDenied(
+                    "Cannot deactivate superadmin account".to_string(),
+                ));
+            }
+
+            if password.is_some() {
+                return Err(DatabaseError::PermissionDenied(
+                    "Cannot change superadmin password through API. Use direct database access".to_string(),
+                ));
+            }
+
+            if role_ids.is_some() {
+                return Err(DatabaseError::PermissionDenied(
+                    "Cannot modify superadmin roles. Superadmin has all permissions automatically".to_string(),
+                ));
+            }
+        }
+
+        if !actor_is_superadmin
+            && (password.is_some() || is_active.is_some() || role_ids.is_some())
+        {
+            // Admin account: superadmin role or any admin-resource permission
+            let is_admin = is_target_superadmin || {
+                let permissions =
+                    Self::get_effective_permissions_internal(&tx, user_id)?;
+                permissions.iter().any(|perm| {
+                    perm.allowed
+                        && super::ADMIN_RESOURCES
+                            .contains(&perm.resource.as_str())
+                })
+            };
+            if is_admin {
+                return Err(DatabaseError::PermissionDenied(
+                    "Only superadmin can modify admin accounts".to_string(),
+                ));
+            }
+        }
+
+        if let Some(role_ids) = role_ids {
+            let superadmin_role_id =
+                match Self::get_role_by_name_internal(&tx, "superadmin") {
+                    Ok(role) => Some(role.id),
+                    Err(DatabaseError::NotFound(_)) => None,
+                    Err(err) => return Err(err),
+                };
+
+            if let Some(sa_role_id) = superadmin_role_id {
+                if role_ids.contains(&sa_role_id) {
+                    // Superadmin role assignment
+                    if !actor_is_superadmin {
+                        return Err(DatabaseError::PermissionDenied(
+                            "Only superadmin can assign superadmin role"
+                                .to_string(),
+                        ));
+                    }
+                    if !is_target_superadmin
+                        && Self::count_superadmins_internal(&tx)? > 0
+                    {
+                        return Err(DatabaseError::Duplicate(
+                            "A superadmin already exists. Only one superadmin is allowed".to_string(),
+                        ));
+                    }
+                } else if is_target_superadmin {
+                    // Superadmin role removal
+                    if !actor_is_superadmin {
+                        return Err(DatabaseError::PermissionDenied(
+                            "Only superadmin can remove superadmin role"
+                                .to_string(),
+                        ));
+                    }
+                    if Self::count_superadmins_internal(&tx)? <= 1 {
+                        return Err(DatabaseError::PermissionDenied(
+                            "Cannot remove superadmin role from the only superadmin. System must have at least one superadmin".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
         let user =
             self.update_user_with_conn(&tx, user_id, password, is_active)?;
 
@@ -1653,7 +1831,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Self::delete_user_with_conn(&tx, user_id)?;
         if let Some(audit) = audit {
@@ -1729,7 +1907,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         Self::assign_role_to_user_with_conn(
             &tx,
@@ -1773,7 +1951,7 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Self::remove_role_from_user_with_conn(&tx, user_id, role_id)?;
         if let Some(audit) = audit {
@@ -1881,18 +2059,22 @@ impl AuthDatabase {
 
         // Password was already verified above for timing attack mitigation
         if !password_valid {
-            // Increment failed login attempts
-            let new_attempts = user.failed_login_attempts + 1;
-            let locked_until =
-                if new_attempts >= self.max_login_attempts() as i32 {
-                    Some(Self::now() + self.lockout_duration_seconds())
-                } else {
-                    None
-                };
-
+            // Atomic increment: computing the new value in SQL avoids lost
+            // updates when concurrent connections fail logins for the same
+            // user (the column references evaluate to the pre-update value)
             conn.execute(
-                "UPDATE users SET failed_login_attempts = ?1, locked_until = ?2 WHERE id = ?3",
-                params![new_attempts, locked_until, user.id],
+                "UPDATE users
+                 SET failed_login_attempts = failed_login_attempts + 1,
+                     locked_until = CASE
+                         WHEN failed_login_attempts + 1 >= ?1 THEN ?2
+                         ELSE locked_until
+                     END
+                 WHERE id = ?3",
+                params![
+                    self.max_login_attempts() as i32,
+                    Self::now() + self.lockout_duration_seconds(),
+                    user.id
+                ],
             )
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
@@ -1917,22 +2099,27 @@ impl AuthDatabase {
         Ok(user)
     }
 
-    pub fn verify_credentials_transactional(
+    /// Full login in a single Immediate transaction: credential
+    /// verification, the role/permission snapshot and the management key
+    /// issuance cannot interleave with a concurrent password reset, role
+    /// change or key revocation — otherwise the freshly issued key could
+    /// survive a "revoke all" that committed mid-flow.
+    pub fn login_transactional(
         &self,
         username: &str,
         password: &str,
         ip_address: Option<&str>,
         user_agent: Option<&str>,
-    ) -> Result<User, DatabaseError> {
-        if ip_address.is_none() && user_agent.is_none() {
-            return self.verify_credentials(username, password);
-        }
-
+        session_name: &str,
+    ) -> Result<
+        (User, Vec<String>, Vec<super::models::Permission>, String),
+        DatabaseError,
+    > {
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
         let result = (|| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             let user = match self
@@ -1940,39 +2127,74 @@ impl AuthDatabase {
             {
                 Ok(user) => user,
                 Err(err) => {
-                    let failed_details =
-                        format!("Failed login for username: {}", username);
-                    Self::create_audit_log_with_conn(
-                        &tx,
-                        self.audit_enabled(),
-                        crate::auth::database_audit::AuditLogParams {
-                            user_id: None,
-                            api_key_id: None,
-                            action_type: "login_failed",
-                            endpoint: Some("/login"),
-                            http_method: Some("POST"),
-                            ip_address,
-                            user_agent,
-                            request_id: None,
-                            details: Some(&failed_details),
-                            success: false,
-                            error_message: Some(&err.to_string()),
-                        },
-                    )?;
-
+                    // The failure (and the lockout counter increment) must
+                    // be committed; the audit row is written when there is
+                    // request metadata to log (same policy as
+                    // verify_credentials_transactional).
+                    if ip_address.is_some() || user_agent.is_some() {
+                        let failed_details =
+                            format!("Failed login for username: {}", username);
+                        Self::create_audit_log_with_conn(
+                            &tx,
+                            self.audit_enabled(),
+                            AuditLogParams {
+                                user_id: None,
+                                api_key_id: None,
+                                action_type: "login_failed",
+                                endpoint: Some("/login"),
+                                http_method: Some("POST"),
+                                ip_address,
+                                user_agent,
+                                request_id: None,
+                                details: Some(&failed_details),
+                                success: false,
+                                error_message: Some(&err.to_string()),
+                            },
+                        )?;
+                    }
                     tx.commit()
                         .map_err(|e| DatabaseError::Update(e.to_string()))?;
                     return Err(err);
                 }
             };
 
+            let roles = Self::get_user_roles_internal(&tx, user.id)?;
+            let permissions =
+                Self::get_effective_permissions_internal(&tx, user.id)?;
+            let (api_key, key_info) = self.issue_management_api_key_with_conn(
+                &tx,
+                user.id,
+                Some(session_name),
+                None,
+                None,
+            )?;
+
+            let audit_details =
+                format!("User {} logged in successfully", user.username);
+            Self::create_audit_log_with_conn(
+                &tx,
+                self.audit_enabled(),
+                AuditLogParams {
+                    user_id: Some(user.id),
+                    api_key_id: Some(&key_info.id),
+                    action_type: "login_success",
+                    endpoint: Some("/login"),
+                    http_method: Some("POST"),
+                    ip_address,
+                    user_agent,
+                    request_id: None,
+                    details: Some(&audit_details),
+                    success: true,
+                    error_message: None,
+                },
+            )?;
+
             tx.commit()
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
-
-            Ok(user)
+            Ok((user, roles, permissions, api_key))
         })();
         self.record_transaction_duration(
-            "verify_credentials_transactional",
+            "login_transactional",
             tx_started.elapsed(),
         );
         result
@@ -2001,7 +2223,116 @@ impl AuthDatabase {
         new_password: &str,
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
+        self.change_password_with_conn(
+            &conn,
+            username,
+            current_password,
+            new_password,
+        )
+    }
 
+    /// Audited variant of [`Self::change_password_with_credentials`]
+    ///
+    /// Writes `password_changed` / `password_change_failed` audit events
+    /// (with client IP and user agent) in the same transaction as the
+    /// password change itself.
+    pub fn change_password_with_credentials_transactional(
+        &self,
+        username: &str,
+        current_password: &str,
+        new_password: &str,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<User, DatabaseError> {
+        if ip_address.is_none() && user_agent.is_none() {
+            return self.change_password_with_credentials(
+                username,
+                current_password,
+                new_password,
+            );
+        }
+
+        let mut conn = self.lock_conn()?;
+        let tx_started = std::time::Instant::now();
+        let result = (|| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            let user = match self.change_password_with_conn(
+                &tx,
+                username,
+                current_password,
+                new_password,
+            ) {
+                Ok(user) => user,
+                Err(err) => {
+                    let failed_details = format!(
+                        "Failed password change for username: {}",
+                        username
+                    );
+                    Self::create_audit_log_with_conn(
+                        &tx,
+                        self.audit_enabled(),
+                        crate::auth::database_audit::AuditLogParams {
+                            user_id: None,
+                            api_key_id: None,
+                            action_type: "password_change_failed",
+                            endpoint: Some("/change-password"),
+                            http_method: Some("POST"),
+                            ip_address,
+                            user_agent,
+                            request_id: None,
+                            details: Some(&failed_details),
+                            success: false,
+                            error_message: Some(&err.to_string()),
+                        },
+                    )?;
+
+                    tx.commit()
+                        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+                    return Err(err);
+                }
+            };
+
+            let success_details =
+                format!("Password changed for username: {}", username);
+            Self::create_audit_log_with_conn(
+                &tx,
+                self.audit_enabled(),
+                crate::auth::database_audit::AuditLogParams {
+                    user_id: Some(user.id),
+                    api_key_id: None,
+                    action_type: "password_changed",
+                    endpoint: Some("/change-password"),
+                    http_method: Some("POST"),
+                    ip_address,
+                    user_agent,
+                    request_id: None,
+                    details: Some(&success_details),
+                    success: true,
+                    error_message: None,
+                },
+            )?;
+
+            tx.commit()
+                .map_err(|e| DatabaseError::Update(e.to_string()))?;
+            Ok(user)
+        })();
+        self.record_transaction_duration(
+            "change_password_with_credentials_transactional",
+            tx_started.elapsed(),
+        );
+        result
+    }
+
+    fn change_password_with_conn(
+        &self,
+        conn: &Connection,
+        username: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<User, DatabaseError> {
         let user_result = conn
             .query_row(
                 "SELECT id, username, password_hash, is_active, is_deleted,
@@ -2064,23 +2395,46 @@ impl AuthDatabase {
             )
         })?;
 
-        // Password was already verified above for timing attack mitigation
-        if !password_valid {
-            return Err(DatabaseError::PermissionDenied(
-                "Invalid username or password".to_string(),
-            ));
-        }
-
+        // Generic error messages prevent user/account-state enumeration
+        // (same policy as the login flow).
         if !user.is_active {
             return Err(DatabaseError::PermissionDenied(
-                "Account is disabled".to_string(),
+                "Invalid username or password".to_string(),
             ));
         }
         if let Some(locked_until) = user.locked_until
             && locked_until > Self::now()
         {
-            return Err(DatabaseError::AccountLocked(
-                "Account is temporarily locked".to_string(),
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            ));
+        }
+
+        // Password was already verified above for timing attack mitigation.
+        // Failed attempts feed the same lockout counter as the login flow:
+        // this endpoint is unauthenticated, so without accounting it would
+        // allow online brute-forcing of the current password.
+        if !password_valid {
+            // Atomic increment: computing the new value in SQL avoids lost
+            // updates when concurrent connections fail for the same user.
+            conn.execute(
+                "UPDATE users
+                 SET failed_login_attempts = failed_login_attempts + 1,
+                     locked_until = CASE
+                         WHEN failed_login_attempts + 1 >= ?1 THEN ?2
+                         ELSE locked_until
+                     END
+                 WHERE id = ?3",
+                params![
+                    self.max_login_attempts() as i32,
+                    Self::now() + self.lockout_duration_seconds(),
+                    user.id
+                ],
+            )
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
             ));
         }
 
@@ -2088,7 +2442,7 @@ impl AuthDatabase {
         // This prevents users from resetting their lockout counter by changing password
         if !user.must_change_password {
             return Err(DatabaseError::PermissionDenied(
-                "Password change not required. Use authenticated endpoints to change your password".to_string(),
+                "Invalid username or password".to_string(),
             ));
         }
 
@@ -2120,12 +2474,11 @@ impl AuthDatabase {
         // This prevents compromised accounts from maintaining persistent access
         // via existing API keys after the password has been changed
         Self::revoke_user_api_keys_internal(
-            &conn,
+            conn,
             user.id,
             Some(user.id), // User-initiated revocation
             "Password changed by user",
         )?;
-        drop(conn);
 
         // Refresh user
         user.must_change_password = false;
@@ -2180,7 +2533,7 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         let user =
             self.admin_reset_password_with_conn(&tx, user_id, new_password)?;
@@ -2286,5 +2639,55 @@ impl AuthDatabase {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_auth_db() -> (AuthDatabase, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = AuthConfig {
+            enable: true,
+            database_path: dir.path().to_path_buf(),
+            ..AuthConfig::default()
+        };
+        (
+            AuthDatabase::new(config, "AdminPass123!", None)
+                .expect("auth database"),
+            dir,
+        )
+    }
+
+    #[test]
+    fn bootstrap_superadmin_rolls_back_when_role_is_missing() {
+        let (db, _dir) = test_auth_db();
+
+        // Force a mid-bootstrap failure: wipe the bootstrapped state and
+        // hard-delete the superadmin role so the role lookup fails after
+        // the user insert
+        {
+            let conn = db.lock_conn().expect("connection");
+            conn.execute("DELETE FROM user_roles", []).expect("cleanup");
+            conn.execute("DELETE FROM users", []).expect("cleanup");
+            conn.execute("DELETE FROM roles WHERE name = 'superadmin'", [])
+                .expect("cleanup");
+        }
+
+        let result = db.bootstrap_superadmin("AdminPass123!");
+        assert!(
+            result.is_err(),
+            "bootstrap must fail without the superadmin role"
+        );
+
+        let conn = db.lock_conn().expect("connection");
+        let user_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .expect("count users");
+        assert_eq!(
+            user_count, 0,
+            "a failed bootstrap must not leave a partial superadmin user"
+        );
     }
 }

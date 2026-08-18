@@ -55,7 +55,7 @@ pub fn resolve_client_ip(
     }
 
     if proxy.trust_x_forwarded_for
-        && let Some(ip) = parse_x_forwarded_for(headers)
+        && let Some(ip) = parse_x_forwarded_for(headers, proxy)
     {
         return Some(ip);
     }
@@ -94,12 +94,22 @@ const fn max_prefix_for(ip: IpAddr) -> u8 {
     }
 }
 
-fn parse_x_forwarded_for(headers: &HeaderMap) -> Option<IpAddr> {
+/// Extract the client IP from X-Forwarded-For.
+///
+/// Each proxy appends the IP of its immediate peer, so the rightmost entry
+/// was added by the proxy closest to us and everything to the left of the
+/// last trusted proxy is client-controlled (spoofable). Walk from the right
+/// skipping trusted proxies: the first untrusted IP is the real client.
+fn parse_x_forwarded_for(
+    headers: &HeaderMap,
+    proxy: &ProxyConfig,
+) -> Option<IpAddr> {
     let value = headers.get("X-Forwarded-For")?.to_str().ok()?;
     value
         .split(',')
-        .map(str::trim)
-        .find_map(|candidate| IpAddr::from_str(candidate).ok())
+        .filter_map(|candidate| IpAddr::from_str(candidate.trim()).ok())
+        .rev()
+        .find(|ip| !is_trusted_proxy(*ip, proxy))
 }
 
 fn parse_single_ip_header(
@@ -131,6 +141,8 @@ mod tests {
 
     #[test]
     fn trusted_proxy_uses_x_forwarded_for() {
+        // The trusted proxy appends the real client IP at the right end;
+        // the leftmost entry is client-controlled and must be ignored
         let mut headers = HeaderMap::new();
         headers.insert(
             "X-Forwarded-For",
@@ -147,7 +159,31 @@ mod tests {
             &proxy,
         );
 
-        assert_eq!(ip, Some("203.0.113.10".parse().unwrap()));
+        assert_eq!(ip, Some("198.51.100.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_chain_skips_trusted_hops_from_the_right() {
+        // Two trusted proxies: the outer one appended the inner proxy IP,
+        // the inner one appended the real client IP. The leftmost entry is
+        // a client-supplied spoof attempt and must not win.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Forwarded-For",
+            "203.0.113.10, 198.51.100.2, 192.0.2.1".parse().unwrap(),
+        );
+        let proxy = ProxyConfig {
+            trusted_proxies: vec!["192.0.2.0/24".to_string()],
+            ..ProxyConfig::default()
+        };
+
+        let ip = resolve_client_ip(
+            &headers,
+            "192.0.2.2:1234".parse().unwrap(),
+            &proxy,
+        );
+
+        assert_eq!(ip, Some("198.51.100.2".parse().unwrap()));
     }
 
     #[test]

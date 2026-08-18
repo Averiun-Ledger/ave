@@ -1,4 +1,4 @@
-use crate::{Error, routing::RoutingNode};
+use crate::{Error as NetworkError, routing::RoutingNode};
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use libp2p::{
@@ -35,6 +35,10 @@ pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; 
 pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
 pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_TOTAL: usize = 0; // disabled
 pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL: usize = 0; // disabled
+/// Maximum accepted body size of a control-list service response.
+/// 1 MiB holds ~18k peer ids — ample for any realistic deployment, and it
+/// implicitly bounds the parsed entry count.
+const MAX_CONTROL_LIST_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {
@@ -239,6 +243,35 @@ pub enum MessagesHelper {
 }
 
 /// Method that update allow and block lists
+/// Why a control-list response body could not be accepted.
+#[derive(Debug)]
+enum ListBodyError {
+    /// The body exceeded the byte cap. The response is rejected whole: a
+    /// truncated list must never be applied.
+    TooLarge,
+    /// Transport error while reading the body.
+    Read(reqwest::Error),
+}
+
+/// Read a control-list response body up to `max_bytes`. Unlike the sink
+/// error bodies (which truncate), a control list is rejected whole when the
+/// cap is exceeded: applying a partial list could isolate the node.
+async fn read_bounded_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ListBodyError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(ListBodyError::Read)?;
+        if body.len() + chunk.len() > max_bytes {
+            return Err(ListBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn request_peer_list(
     client: reqwest::Client,
     service: String,
@@ -266,13 +299,37 @@ async fn request_peer_list(
                 return None;
             }
 
-            let peers = tokio::select! {
+            let body = tokio::select! {
                 _ = graceful_token.clone().cancelled_owned() => return None,
                 _ = crash_token.clone().cancelled_owned() => return None,
-                peers = res.json::<Vec<String>>() => peers,
+                body = read_bounded_body(res, MAX_CONTROL_LIST_BODY_BYTES) => body,
             };
 
-            match peers {
+            let bytes = match body {
+                Ok(bytes) => bytes,
+                Err(ListBodyError::TooLarge) => {
+                    warn!(
+                        target: TARGET,
+                        list_kind = list_kind,
+                        url = service,
+                        max_bytes = MAX_CONTROL_LIST_BODY_BYTES,
+                        "control-list service response too large; rejected whole"
+                    );
+                    return None;
+                }
+                Err(ListBodyError::Read(e)) => {
+                    warn!(
+                        target: TARGET,
+                        list_kind = list_kind,
+                        url = service,
+                        error = %e,
+                        "control-list service body read failed"
+                    );
+                    return None;
+                }
+            };
+
+            match serde_json::from_slice::<Vec<String>>(&bytes) {
                 Ok(peers) => Some(peers),
                 Err(e) => {
                     warn!(
@@ -431,13 +488,13 @@ pub fn convert_boot_nodes(
 /// Gets the list of external (public) addresses for the node from string array.
 pub fn convert_addresses(
     addresses: &[String],
-) -> Result<HashSet<Multiaddr>, Error> {
+) -> Result<HashSet<Multiaddr>, NetworkError> {
     let mut addrs = HashSet::new();
     for address in addresses {
         if let Some(value) = multiaddr(address) {
             addrs.insert(value);
         } else {
-            return Err(Error::InvalidAddress(address.clone()));
+            return Err(NetworkError::InvalidAddress(address.clone()));
         }
     }
     Ok(addrs)
@@ -650,7 +707,7 @@ mod tests {
     #[test]
     fn convert_addresses_invalid() {
         let result = convert_addresses(&["not-a-valid-address".to_string()]);
-        assert!(matches!(result, Err(Error::InvalidAddress(_))));
+        assert!(matches!(result, Err(NetworkError::InvalidAddress(_))));
     }
 
     #[test]
@@ -674,5 +731,78 @@ mod tests {
             .with_max_concurrent_streams(50);
         assert_eq!(cfg.get_message_timeout(), Duration::from_secs(3));
         assert_eq!(cfg.get_max_concurrent_streams(), 50);
+    }
+
+    /// Serve one HTTP response with the given body on an ephemeral port and
+    /// return its URL.
+    async fn start_list_server(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            // Drain enough of the request to avoid RST on some platforms.
+            let mut tmp = [0u8; 1024];
+            let _ = stream.read(&mut tmp).await;
+            let _ = stream.write_all(headers.as_bytes()).await;
+            // Chunked writes; the client may close early when the body
+            // exceeds the cap (broken pipe is expected then).
+            for chunk in body.chunks(64 * 1024) {
+                if stream.write_all(chunk).await.is_err() {
+                    break;
+                }
+            }
+            let _ = stream.shutdown().await;
+        });
+        format!("http://{addr}/list")
+    }
+
+    #[tokio::test]
+    async fn request_peer_list_accepts_bounded_body() {
+        let url = start_list_server(br#"["peer1","peer2"]"#.to_vec()).await;
+
+        let peers = request_peer_list(
+            reqwest::Client::new(),
+            url,
+            Duration::from_secs(5),
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "allow",
+        )
+        .await
+        .expect("a small valid list must be accepted");
+
+        assert_eq!(peers, vec!["peer1".to_owned(), "peer2".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn request_peer_list_rejects_oversized_body() {
+        let url =
+            start_list_server(vec![b'x'; MAX_CONTROL_LIST_BODY_BYTES + 1])
+                .await;
+
+        let peers = request_peer_list(
+            reqwest::Client::new(),
+            url,
+            Duration::from_secs(5),
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "allow",
+        )
+        .await;
+
+        assert!(
+            peers.is_none(),
+            "an oversized body must be rejected whole, never truncated"
+        );
     }
 }

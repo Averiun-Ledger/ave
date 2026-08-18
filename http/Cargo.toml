@@ -13,29 +13,28 @@ rust-version.workspace = true
 
 [dependencies]
 ave-bridge = { workspace = true, features = ["openapi"] }
+ave-core = { workspace = true, default-features = false }
 prometheus-client = { workspace = true, optional = true }
 
-tokio = {  workspace = true }
+tokio = { workspace = true }
 
 serde_json = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-file-rotate = {  workspace = true }
+file-rotate = { workspace = true }
 
 futures = { workspace = true }
 
-reqwest = {  workspace = true }
-rustls = { version = "0.23.41", features = ["ring"] }
-axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+reqwest = { workspace = true }
+axum-server = { workspace = true }
 axum = { workspace = true }
 ip_network = { workspace = true }
-serde_qs = { version = "1.1", features = ["axum"] }
 tower = "0.5.3"
-tower-http = {version = "0.7.0", features = ["trace", "metrics", "cors", "set-header"]}
+tower-http = { version = "0.7.0", features = ["trace", "cors", "set-header"] }
 utoipa = { workspace = true, features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"]}
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tokio-util = { workspace = true }
 
 # Auth system dependencies
@@ -43,24 +42,24 @@ ave-actors = { workspace = true, default-features = false, features = ["export-s
 argon2 = { version = "0.5.3", features = ["std"] }
 sha2 = { workspace = true }
 hex = "0.4.3"
-rand = { workspace = true } 
+rand = { workspace = true }
 time = { workspace = true }
-thiserror = { workspace = true } 
+thiserror = { workspace = true }
 
 # Self-signed certificate generation
 rcgen = "0.14"
 x509-parser = "0.18"
 
 [dev-dependencies]
-test-log = { workspace = true } 
+test-log = { workspace = true }
 tempfile = { workspace = true }
 chrono = "0.4.45"
-ave-bridge = { workspace = true , features = ["openapi", "test"] }
+ave-bridge = { workspace = true, features = ["openapi", "test"] }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]
 rocksdb = ["ave-bridge/rocksdb"]
 sqlite = ["ave-bridge/sqlite"]
 ext-sqlite = ["ave-bridge/ext-sqlite"]
-prometheus = ["ave-bridge/prometheus", "dep:prometheus-client"]
+prometheus = ["ave-bridge/prometheus", "ave-core/prometheus", "dep:prometheus-client"]
 test = ["ave-bridge/test"]

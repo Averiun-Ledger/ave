@@ -4,9 +4,6 @@ use std::{
 
 mod common;
 
-#[allow(unused)]
-use ave_common::identity::{HashAlgorithm, hash_borsh};
-
 use ave_common::{
     ValueWrapper,
     identity::{KeyPair, PublicKey, keys::Ed25519Signer},
@@ -242,7 +239,7 @@ async fn manual_distribution() {
     emit_transfer(
         &creator_1,
         subject_id.clone(),
-        PublicKey::from_str(&creator_2.public_key()).unwrap(),
+        PublicKey::from_str(creator_2.public_key()).unwrap(),
         true,
     )
     .await
@@ -298,7 +295,7 @@ async fn manual_distribution() {
         .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         )
         .await
@@ -620,7 +617,7 @@ async fn test_issuer_any() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -642,7 +639,7 @@ async fn test_issuer_any() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -865,7 +862,7 @@ async fn test_limits_in_subjects() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -886,7 +883,7 @@ async fn test_limits_in_subjects() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -907,7 +904,7 @@ async fn test_limits_in_subjects() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -927,7 +924,7 @@ async fn test_limits_in_subjects() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1138,7 +1135,7 @@ async fn test_namespace_in_role_1() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1158,7 +1155,7 @@ async fn test_namespace_in_role_1() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1178,7 +1175,7 @@ async fn test_namespace_in_role_1() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1398,7 +1395,7 @@ async fn test_namespace_in_role_2() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1418,7 +1415,7 @@ async fn test_namespace_in_role_2() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1438,7 +1435,7 @@ async fn test_namespace_in_role_2() {
     assert_eq!(state.owner, emit_events.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, emit_events.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -1591,7 +1588,7 @@ async fn test_subject_transfer_event_1() {
         .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         )
         .await
@@ -1601,7 +1598,7 @@ async fn test_subject_transfer_event_1() {
     emit_transfer(
         owner_governance,
         subject_id.clone(),
-        PublicKey::from_str(&future_owner.public_key()).unwrap(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
         true,
     )
     .await
@@ -1674,7 +1671,7 @@ async fn test_subject_transfer_event_1() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
@@ -1694,7 +1691,7 @@ async fn test_subject_transfer_event_1() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
@@ -1843,7 +1840,7 @@ async fn test_subject_transfer_event_2() {
         .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         )
         .await
@@ -1853,7 +1850,7 @@ async fn test_subject_transfer_event_2() {
     emit_transfer(
         old_owner,
         subject_id.clone(),
-        PublicKey::from_str(&future_owner.public_key()).unwrap(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
         true,
     )
     .await
@@ -1913,7 +1910,7 @@ async fn test_subject_transfer_event_2() {
         .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         )
         .await
@@ -1971,7 +1968,7 @@ async fn test_subject_transfer_event_2() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
@@ -1991,7 +1988,7 @@ async fn test_subject_transfer_event_2() {
     assert_eq!(state.owner, future_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
@@ -2011,7 +2008,7 @@ async fn test_subject_transfer_event_2() {
     assert_eq!(state.owner, old_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2031,7 +2028,7 @@ async fn test_subject_transfer_event_2() {
     assert_eq!(state.owner, old_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2191,7 +2188,7 @@ async fn test_subject_transfer_event_3() {
         .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         )
         .await
@@ -2201,7 +2198,7 @@ async fn test_subject_transfer_event_3() {
     emit_transfer(
         old_owner,
         subject_id_1.clone(),
-        PublicKey::from_str(&future_owner.public_key()).unwrap(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
         true,
     )
     .await
@@ -2320,7 +2317,7 @@ async fn test_subject_transfer_event_3() {
         .authorize_governance(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
             ),
         )
         .await
@@ -2370,7 +2367,7 @@ async fn test_subject_transfer_event_3() {
     assert_eq!(state.owner, old_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
@@ -2391,7 +2388,7 @@ async fn test_subject_transfer_event_3() {
     assert_eq!(state.owner, old_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
@@ -2411,7 +2408,7 @@ async fn test_subject_transfer_event_3() {
     assert_eq!(state.owner, old_owner.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, old_owner.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 3);
     assert_eq!(
         state.properties,
@@ -2607,7 +2604,7 @@ async fn test_dynamic_witnesses_1() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
@@ -2626,7 +2623,7 @@ async fn test_dynamic_witnesses_1() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
@@ -2646,7 +2643,7 @@ async fn test_dynamic_witnesses_1() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
@@ -2824,7 +2821,7 @@ async fn test_dynamic_witnesses_2() {
         .authorize_governance(
             governance_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&witness.public_key()).unwrap(),
+                PublicKey::from_str(witness.public_key()).unwrap(),
             ),
         )
         .await
@@ -2834,7 +2831,7 @@ async fn test_dynamic_witnesses_2() {
         .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&witness.public_key()).unwrap(),
+                PublicKey::from_str(witness.public_key()).unwrap(),
             ),
         )
         .await
@@ -2865,7 +2862,7 @@ async fn test_dynamic_witnesses_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2885,7 +2882,7 @@ async fn test_dynamic_witnesses_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2905,7 +2902,7 @@ async fn test_dynamic_witnesses_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -2925,7 +2922,7 @@ async fn test_dynamic_witnesses_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3115,7 +3112,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         .authorize_governance(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&creator.public_key()).unwrap(),
+                PublicKey::from_str(creator.public_key()).unwrap(),
             ),
         )
         .await
@@ -3137,7 +3134,7 @@ async fn test_dynamic_witnesses_explicit_1() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3156,7 +3153,7 @@ async fn test_dynamic_witnesses_explicit_1() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3333,7 +3330,7 @@ async fn test_dynamic_witnesses_explicit_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3352,7 +3349,7 @@ async fn test_dynamic_witnesses_explicit_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3377,7 +3374,7 @@ async fn test_dynamic_witnesses_explicit_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3396,7 +3393,7 @@ async fn test_dynamic_witnesses_explicit_2() {
     assert_eq!(state.owner, creator.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -3658,7 +3655,7 @@ async fn test_no_subject_evaluator() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 0);
     assert_eq!(
         state.properties,
@@ -3762,7 +3759,7 @@ async fn test_no_subject_issuer() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 0);
     assert_eq!(
         state.properties,
@@ -3889,7 +3886,7 @@ async fn test_300_events() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 300);
     assert_eq!(
         state.properties,
@@ -4052,7 +4049,7 @@ async fn test_subj_no_all_validators() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -4380,7 +4377,7 @@ async fn test_subj_no_all_evaluators() {
     assert_eq!(state.owner, owner_governance.public_key());
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
-    assert_eq!(state.active, true);
+    assert!(state.active);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
@@ -5240,7 +5237,7 @@ async fn test_emisor_actual_sn_bigger_than_witness_tracker() {
 
     let owner = nodes[0].api.clone();
     let witness = nodes[1].api.clone();
-    let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
+    let owner_pk = PublicKey::from_str(owner.public_key()).unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&witness]).await;
@@ -5473,7 +5470,7 @@ async fn test_emisor_actual_sn_bigger_than_witness_gov() {
 
     let owner = nodes[0].api.clone();
     let witness = nodes[1].api.clone();
-    let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
+    let owner_pk = PublicKey::from_str(owner.public_key()).unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&witness]).await;
@@ -5702,7 +5699,7 @@ async fn test_emisor_sender_no_access() {
     );
 
     // W se autentica con owner para el subject
-    let owner_pk = PublicKey::from_str(&owner.public_key()).unwrap();
+    let owner_pk = PublicKey::from_str(owner.public_key()).unwrap();
     witness_spain
         .authorize_governance(subject_id.clone(), AuthWitness::One(owner_pk))
         .await
