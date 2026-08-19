@@ -234,6 +234,7 @@ impl Handler<Self> for ValidationSchema {
                             hash: self.hash,
                             network: self.network.clone(),
                             stop: true,
+                            pending: None,
                         },
                     )
                     .await;

@@ -216,6 +216,7 @@ impl Handler<Self> for EvaluationSchema {
                             hash: self.hash,
                             network: self.network.clone(),
                             stop: true,
+                            pending: None,
                         },
                     )
                     .await;

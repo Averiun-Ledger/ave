@@ -32,6 +32,17 @@ pub enum ValidationRes {
     Abort(String),
     TimeOut,
     Reboot,
+    /// The validator can not validate right now for reasons unrelated to
+    /// the request (it is going down mid-validation): not a verdict. The
+    /// requester drops the validator from the current set, pulls fresh
+    /// ones from the pending pool and only reboots the request when no
+    /// validator can answer at all.
+    ///
+    /// Added at the end of the enum on purpose: borsh encodes the variant
+    /// ordinal, so existing variants keep their wire value. Nodes running
+    /// older code can not deserialize it and treat the message as lost —
+    /// the same outcome as the validator not answering.
+    Unavailable,
 }
 
 #[derive(Debug, Error, Clone)]

@@ -11,8 +11,9 @@ use crate::{
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::{
         common::{
-            check_quorum_signers, crash_system, get_actual_roles_register,
-            get_validation_roles_register,
+            GovVersionSync, check_quorum_signers, crash_system,
+            get_actual_roles_register, get_validation_roles_register,
+            gov_version_sync,
             node::{SignTypesNode, get_sign},
         },
         event::{
@@ -88,9 +89,87 @@ pub struct ValiWorker {
     pub network: Arc<NetworkSender>,
     pub current_roles: CurrentWorkerRoles,
     pub stop: bool,
+    /// In-flight network validation request, if any (see `pre_stop`).
+    pub pending: Option<PendingValidation>,
+}
+
+/// A network validation request being processed. `pre_stop` uses it to
+/// notify the requester that this validator is going down mid-validation
+/// (`ValidationRes::Unavailable`) instead of letting it burn the
+/// coordinator retries on a dead node.
+#[derive(Clone, Debug)]
+pub struct PendingValidation {
+    /// Requester node key (response receiver).
+    pub sender: PublicKey,
+    /// Request identifier of the in-flight validation.
+    pub request_id: String,
+    /// Validation request version.
+    pub version: u64,
+    /// Subject the validation belongs to (response actor path).
+    pub subject_id: DigestIdentifier,
 }
 
 impl ValiWorker {
+    /// Best-effort `Unavailable` notification for the in-flight network
+    /// validation request: the node is going down before answering, so
+    /// the requester can replace this validator immediately instead of
+    /// waiting for the coordinator retries and timeout. The response is
+    /// signed like any other validation response. Errors are logged and
+    /// swallowed — the coordinator timeout is the fallback.
+    async fn notify_unavailable(&self, ctx: &mut ActorContext<Self>) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+
+        let signature = match get_sign(
+            ctx,
+            SignTypesNode::ValidationRes(ValidationRes::Unavailable),
+        )
+        .await
+        {
+            Ok(signature) => signature,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    request_id = %pending.request_id,
+                    "Could not sign unavailability notification"
+                );
+                return;
+            }
+        };
+
+        let info = ComunicateInfo {
+            receiver: pending.sender.clone(),
+            request_id: pending.request_id.clone(),
+            version: pending.version,
+            receiver_actor: format!(
+                "/user/request/{}/validation/{}",
+                pending.subject_id, self.our_key
+            ),
+        };
+
+        let signed_response: Signed<ValidationRes> =
+            Signed::from_parts(ValidationRes::Unavailable, signature);
+        if let Err(error) = self
+            .network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                message: NetworkMessage {
+                    info,
+                    message: ActorMessage::ValidationRes {
+                        res: signed_response,
+                    },
+                },
+            })
+            .await
+        {
+            debug!(
+                error = %error,
+                request_id = %pending.request_id,
+                "Could not notify validator unavailability while stopping"
+            );
+        }
+    }
+
     fn event_request_hash(
         &self,
         event_request: &Signed<EventRequest>,
@@ -124,33 +203,6 @@ impl ValiWorker {
 
     fn current_approval_roles(&self) -> RoleDataRegister {
         self.current_roles.approval.clone()
-    }
-
-    async fn check_governance(
-        &self,
-        gov_version: u64,
-    ) -> Result<bool, ActorError> {
-        match self.gov_version.cmp(&gov_version) {
-            std::cmp::Ordering::Less => {
-                warn!(
-                    local_gov_version = self.gov_version,
-                    request_gov_version = gov_version,
-                    governance_id = %self.governance_id,
-                    sender = %self.node_key,
-                    "Received request with a higher governance version; ignoring request"
-                );
-                Err(ActorError::Functional {
-                    description:
-                        "Abort validation, request governance version is higher than local"
-                            .to_owned(),
-                })
-            }
-            std::cmp::Ordering::Equal => {
-                // If it is the same it means that we have the latest version of governance, we are up to date.
-                Ok(false)
-            }
-            std::cmp::Ordering::Greater => Ok(true),
-        }
     }
 
     fn check_data(
@@ -870,164 +922,100 @@ impl ValiWorker {
     async fn create_res(
         &self,
         ctx: &mut ActorContext<Self>,
-        reboot: bool,
         validation_req: &Signed<ValidationReq>,
     ) -> Result<ValidationRes, ValidatorError> {
-        if reboot {
-            Ok(ValidationRes::Reboot)
-        } else {
-            match validation_req.content() {
-                ValidationReq::Create {
-                    event_request,
-                    gov_version,
-                    subject_id,
-                } => {
-                    if let EventRequest::Create(create) =
-                        event_request.content()
+        match validation_req.content() {
+            ValidationReq::Create {
+                event_request,
+                gov_version,
+                subject_id,
+            } => {
+                if let EventRequest::Create(create) = event_request.content() {
+                    if let Some(name) = &create.name
+                        && (name.is_empty() || name.len() > 100)
                     {
-                        if let Some(name) = &create.name
-                            && (name.is_empty() || name.len() > 100)
-                        {
-                            return Err(ValidatorError::InvalidData {
-                                value: "create event name",
-                            });
-                        }
+                        return Err(ValidatorError::InvalidData {
+                            value: "create event name",
+                        });
+                    }
 
-                        if let Some(description) = &create.description
-                            && (description.is_empty()
-                                || description.len() > 200)
-                        {
-                            return Err(ValidatorError::InvalidData {
-                                value: "create event description",
-                            });
-                        }
+                    if let Some(description) = &create.description
+                        && (description.is_empty() || description.len() > 200)
+                    {
+                        return Err(ValidatorError::InvalidData {
+                            value: "create event description",
+                        });
+                    }
 
-                        if !create.schema_id.is_valid_in_request() {
-                            return Err(ValidatorError::InvalidData {
-                                value: "create event schema_id",
-                            });
-                        }
+                    if !create.schema_id.is_valid_in_request() {
+                        return Err(ValidatorError::InvalidData {
+                            value: "create event schema_id",
+                        });
+                    }
 
-                        if create.schema_id.is_gov() {
-                            if !create.governance_id.is_empty() {
-                                return Err(ValidatorError::InvalidData {
-                                    value: "create event governance_id",
-                                });
-                            }
-
-                            if !create.namespace.is_empty() {
-                                return Err(ValidatorError::InvalidData {
-                                    value: "create event namespace",
-                                });
-                            }
-                        } else if create.governance_id.is_empty() {
+                    if create.schema_id.is_gov() {
+                        if !create.governance_id.is_empty() {
                             return Err(ValidatorError::InvalidData {
                                 value: "create event governance_id",
                             });
                         }
 
-                        let subject_id_worker =
-                            hash_borsh(&*self.hash.hasher(), &event_request)
-                                .map_err(|e| ValidatorError::InternalError {
-                                    problem: e.to_string(),
-                                })?;
-
-                        if subject_id != &subject_id_worker {
+                        if !create.namespace.is_empty() {
                             return Err(ValidatorError::InvalidData {
-                                value: "subject_id",
+                                value: "create event namespace",
                             });
                         }
+                    } else if create.governance_id.is_empty() {
+                        return Err(ValidatorError::InvalidData {
+                            value: "create event governance_id",
+                        });
+                    }
 
-                        let init_state = self.init_state.as_ref().map_or_else(
-                            || {
-                                let governance_data = GovernanceData::new(
-                                    validation_req.signature().signer.clone(),
-                                );
-
-                                governance_data.to_value_wrapper()
-                            },
-                            |init_state| init_state.clone(),
-                        );
-
-                        let governance_id = if create.schema_id.is_gov() {
-                            subject_id.clone()
-                        } else {
-                            create.governance_id.clone()
-                        };
-
-                        let subject_metadata = Metadata {
-                            name: create.name.clone(),
-                            description: create.description.clone(),
-                            subject_id: subject_id_worker,
-                            governance_id,
-                            genesis_gov_version: *gov_version,
-                            prev_ledger_event_hash: DigestIdentifier::default(),
-                            schema_id: create.schema_id.clone(),
-                            namespace: create.namespace.clone(),
-                            sn: 0,
-                            creator: validation_req.signature().signer.clone(),
-                            owner: validation_req.signature().signer.clone(),
-                            new_owner: None,
-                            active: true,
-                            properties: init_state,
-                        };
-
-                        let vali_req_hash =
-                            hash_borsh(&*self.hash.hasher(), &validation_req)
-                                .map_err(|e| ValidatorError::InternalError {
+                    let subject_id_worker =
+                        hash_borsh(&*self.hash.hasher(), &event_request)
+                            .map_err(|e| ValidatorError::InternalError {
                                 problem: e.to_string(),
                             })?;
 
-                        Ok(ValidationRes::Create {
-                            vali_req_hash,
-                            subject_metadata: Box::new(subject_metadata),
-                        })
-                    } else {
-                        Err(ValidatorError::InvalidData {
-                            value: "event type",
-                        })
+                    if subject_id != &subject_id_worker {
+                        return Err(ValidatorError::InvalidData {
+                            value: "subject_id",
+                        });
                     }
-                }
-                ValidationReq::Event {
-                    actual_protocols,
-                    event_request,
-                    metadata,
-                    last_data,
-                    gov_version,
-                    sn,
-                    ledger_hash,
-                } => {
-                    let signer = validation_req.signature().signer.clone();
-                    Self::check_basic_data(
-                        event_request,
-                        metadata,
-                        &signer,
-                        *gov_version,
-                        *sn,
-                    )?;
 
-                    let properties = self
-                        .check_actual_protocols(
-                            ctx,
-                            metadata,
-                            actual_protocols,
-                            &EventRequestType::from(event_request.content()),
-                            *gov_version,
-                            signer,
-                        )
-                        .await?;
+                    let init_state = self.init_state.as_ref().map_or_else(
+                        || {
+                            let governance_data = GovernanceData::new(
+                                validation_req.signature().signer.clone(),
+                            );
 
-                    self.check_last_vali_data(ctx, metadata, last_data).await?;
+                            governance_data.to_value_wrapper()
+                        },
+                        |init_state| init_state.clone(),
+                    );
 
-                    let is_success = actual_protocols.is_success();
+                    let governance_id = if create.schema_id.is_gov() {
+                        subject_id.clone()
+                    } else {
+                        create.governance_id.clone()
+                    };
 
-                    let modified_metadata = Self::create_modified_metadata(
-                        is_success,
-                        event_request.content(),
-                        properties,
-                        ledger_hash.clone(),
-                        *metadata.clone(),
-                    )?;
+                    let subject_metadata = Metadata {
+                        name: create.name.clone(),
+                        description: create.description.clone(),
+                        subject_id: subject_id_worker,
+                        governance_id,
+                        genesis_gov_version: *gov_version,
+                        prev_ledger_event_hash: DigestIdentifier::default(),
+                        schema_id: create.schema_id.clone(),
+                        namespace: create.namespace.clone(),
+                        sn: 0,
+                        creator: validation_req.signature().signer.clone(),
+                        owner: validation_req.signature().signer.clone(),
+                        new_owner: None,
+                        active: true,
+                        properties: init_state,
+                    };
 
                     let vali_req_hash =
                         hash_borsh(&*self.hash.hasher(), &validation_req)
@@ -1035,39 +1023,96 @@ impl ValiWorker {
                                 problem: e.to_string(),
                             })?;
 
-                    let meta_wo_props = MetadataWithoutProperties::from(
-                        modified_metadata.clone(),
-                    );
-                    let meta_wo_props_hash =
-                        hash_borsh(&*self.hash.hasher(), &meta_wo_props)
-                            .map_err(|e| ValidatorError::InternalError {
-                                problem: e.to_string(),
-                            })?;
-
-                    let propierties_hash = hash_borsh(
-                        &*self.hash.hasher(),
-                        &modified_metadata.properties,
-                    )
-                    .map_err(|e| {
-                        ValidatorError::InternalError {
-                            problem: e.to_string(),
-                        }
-                    })?;
-
-                    let event_request_hash =
-                        self.event_request_hash(event_request)?;
-                    let viewpoints_hash =
-                        self.viewpoints_hash(event_request.content())?;
-
-                    Ok(ValidationRes::Response {
+                    Ok(ValidationRes::Create {
                         vali_req_hash,
-                        modified_metadata_without_propierties_hash:
-                            meta_wo_props_hash,
-                        propierties_hash,
-                        event_request_hash,
-                        viewpoints_hash,
+                        subject_metadata: Box::new(subject_metadata),
+                    })
+                } else {
+                    Err(ValidatorError::InvalidData {
+                        value: "event type",
                     })
                 }
+            }
+            ValidationReq::Event {
+                actual_protocols,
+                event_request,
+                metadata,
+                last_data,
+                gov_version,
+                sn,
+                ledger_hash,
+            } => {
+                let signer = validation_req.signature().signer.clone();
+                Self::check_basic_data(
+                    event_request,
+                    metadata,
+                    &signer,
+                    *gov_version,
+                    *sn,
+                )?;
+
+                let properties = self
+                    .check_actual_protocols(
+                        ctx,
+                        metadata,
+                        actual_protocols,
+                        &EventRequestType::from(event_request.content()),
+                        *gov_version,
+                        signer,
+                    )
+                    .await?;
+
+                self.check_last_vali_data(ctx, metadata, last_data).await?;
+
+                let is_success = actual_protocols.is_success();
+
+                let modified_metadata = Self::create_modified_metadata(
+                    is_success,
+                    event_request.content(),
+                    properties,
+                    ledger_hash.clone(),
+                    *metadata.clone(),
+                )?;
+
+                let vali_req_hash =
+                    hash_borsh(&*self.hash.hasher(), &validation_req).map_err(
+                        |e| ValidatorError::InternalError {
+                            problem: e.to_string(),
+                        },
+                    )?;
+
+                let meta_wo_props =
+                    MetadataWithoutProperties::from(modified_metadata.clone());
+                let meta_wo_props_hash =
+                    hash_borsh(&*self.hash.hasher(), &meta_wo_props).map_err(
+                        |e| ValidatorError::InternalError {
+                            problem: e.to_string(),
+                        },
+                    )?;
+
+                let propierties_hash = hash_borsh(
+                    &*self.hash.hasher(),
+                    &modified_metadata.properties,
+                )
+                .map_err(|e| {
+                    ValidatorError::InternalError {
+                        problem: e.to_string(),
+                    }
+                })?;
+
+                let event_request_hash =
+                    self.event_request_hash(event_request)?;
+                let viewpoints_hash =
+                    self.viewpoints_hash(event_request.content())?;
+
+                Ok(ValidationRes::Response {
+                    vali_req_hash,
+                    modified_metadata_without_propierties_hash:
+                        meta_wo_props_hash,
+                    propierties_hash,
+                    event_request_hash,
+                    viewpoints_hash,
+                })
             }
         }
     }
@@ -1106,6 +1151,18 @@ impl Actor for ValiWorker {
             |parent_span| info_span!(parent: parent_span, "ValiWorker", id),
         )
     }
+
+    /// On any stop (graceful shutdown, controlled crash or fault) with a
+    /// network validation still in flight, tell the requester this
+    /// validator is unavailable so it can replace it without waiting for
+    /// the coordinator retries.
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        self.notify_unavailable(ctx).await;
+        Ok(())
+    }
 }
 
 impl NotPersistentActor for ValiWorker {}
@@ -1128,7 +1185,7 @@ impl Handler<Self> for ValiWorker {
             }
             ValiWorkerMessage::LocalValidation { validation_req } => {
                 let validation =
-                    match self.create_res(ctx, false, &validation_req).await {
+                    match self.create_res(ctx, &validation_req).await {
                         Ok(vali) => vali,
                         Err(e) => {
                             if matches!(e, ValidatorError::OutOfVersion) {
@@ -1210,58 +1267,72 @@ impl Handler<Self> for ValiWorker {
                     return Ok(());
                 }
 
-                let reboot = match self
-                    .check_governance(
-                        validation_req.content().get_gov_version(),
-                    )
-                    .await
-                {
-                    Ok(reboot) => reboot,
-                    Err(e) => {
-                        warn!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to check governance"
-                        );
-                        if let ActorError::Functional { .. } = e {
-                            if self.stop {
-                                ctx.stop(None).await;
-                            }
-
-                            return Err(e);
-                        } else {
-                            return Err(crash_system(ctx, e).await);
-                        }
-                    }
-                };
+                self.pending = Some(PendingValidation {
+                    sender: sender.clone(),
+                    request_id: info.request_id.clone(),
+                    version: info.version,
+                    subject_id: validation_req.content().get_subject_id(),
+                });
 
                 let validation = if let Err(error) =
                     self.check_data(&validation_req)
                 {
                     ValidationRes::Abort(error.to_string())
                 } else {
-                    match self.create_res(ctx, reboot, &validation_req).await {
-                        Ok(vali) => vali,
-                        Err(e) => {
-                            if let ValidatorError::InternalError { .. } = e {
-                                error!(
-                                    msg_type = "NetworkRequest",
-                                    error = %e,
-                                    "Internal error during validation"
-                                );
+                    match gov_version_sync(
+                        self.gov_version,
+                        validation_req.content().get_gov_version(),
+                    ) {
+                        // This node is behind the request's governance
+                        // version and can not validate it: say so instead
+                        // of staying silent — the requester replaces this
+                        // validator from its pending pool.
+                        GovVersionSync::NodeBehind => {
+                            warn!(
+                                msg_type = "NetworkRequest",
+                                local_gov_version = self.gov_version,
+                                request_gov_version = validation_req.content().get_gov_version(),
+                                governance_id = %self.governance_id,
+                                sender = %self.node_key,
+                                "Request governance version is higher than local; answering unavailable"
+                            );
+                            ValidationRes::Unavailable
+                        }
+                        // The requester is behind: it must sync its
+                        // governance and retry the request.
+                        GovVersionSync::RequesterBehind => {
+                            ValidationRes::Reboot
+                        }
+                        GovVersionSync::Current => {
+                            match self.create_res(ctx, &validation_req).await {
+                                Ok(vali) => vali,
+                                Err(e) => {
+                                    if let ValidatorError::InternalError {
+                                        ..
+                                    } = e
+                                    {
+                                        error!(
+                                            msg_type = "NetworkRequest",
+                                            error = %e,
+                                            "Internal error during validation"
+                                        );
 
-                                return Err(crash_system(
-                                    ctx,
-                                    ActorError::FunctionalCritical {
-                                        description: e.to_string(),
-                                    },
-                                )
-                                .await);
-                            } else if matches!(e, ValidatorError::OutOfVersion)
-                            {
-                                ValidationRes::Reboot
-                            } else {
-                                ValidationRes::Abort(e.to_string())
+                                        return Err(crash_system(
+                                            ctx,
+                                            ActorError::FunctionalCritical {
+                                                description: e.to_string(),
+                                            },
+                                        )
+                                        .await);
+                                    } else if matches!(
+                                        e,
+                                        ValidatorError::OutOfVersion
+                                    ) {
+                                        ValidationRes::Reboot
+                                    } else {
+                                        ValidationRes::Abort(e.to_string())
+                                    }
+                                }
                             }
                         }
                     }
@@ -1323,6 +1394,8 @@ impl Handler<Self> for ValiWorker {
                         "Validation response sent to network"
                     );
                 }
+
+                self.pending = None;
 
                 if self.stop {
                     ctx.stop(None).await;

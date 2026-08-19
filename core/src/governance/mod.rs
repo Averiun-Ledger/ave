@@ -1414,6 +1414,7 @@ impl Governance {
                         },
                 },
                 stop: false,
+                pending: None,
             };
             ctx.create_child("validator", validator).await?;
         }
@@ -1438,6 +1439,7 @@ impl Governance {
                 hash: *hash,
                 network: network.clone(),
                 stop: false,
+                pending: None,
             };
             ctx.create_child("evaluator", evaluator).await?;
         }
@@ -1532,6 +1534,7 @@ impl Governance {
                         },
                     },
                     stop: false,
+                    pending: None,
                 };
                 ctx.create_child("validator", validator).await?;
             }
@@ -1571,6 +1574,7 @@ impl Governance {
                     hash: *hash,
                     network: network.clone(),
                     stop: false,
+                    pending: None,
                 };
                 ctx.create_child("evaluator", evaluator).await?;
             }

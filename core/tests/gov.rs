@@ -22,6 +22,7 @@ use ave_common::{
     sink::{DataToSink, DataToSinkEvent},
 };
 use ave_core::auth::AuthWitness;
+use ave_core::config::CompilerNodeConfig;
 use ave_core::governance::data::GovernanceData;
 use ave_core::governance::model::{
     CreatorWitness, PolicyGov, PolicySchema, Quorum, RoleCreator,
@@ -4436,4 +4437,249 @@ async fn test_update_offer_gov() {
     get_subject(witness, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
+}
+
+#[test(tokio::test)]
+// Un evaluador con el compilador caído responde `Unavailable` y no arrastra
+// la request: el quorum de evaluación se cierra con el resto de evaluadores
+// y el fact de gobernanza con contrato se confirma.
+async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+    let node2 = &nodes[1].api;
+
+    // Tercer nodo cuyo compilador apunta a un endpoint muerto: toda
+    // compilación falla con `CompilersUnavailable`.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node3, mut node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{}", port),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node3_dirs);
+    node_running(&node3.api).await.unwrap();
+    let node3 = &node3.api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2, node3]).await;
+
+    // SN 1: los tres nodos pasan a ser evaluadores y witnesses de la
+    // gobernanza. Este fact no añade contratos, así que no necesita
+    // compilación y lo evalúa el Owner (quorum Majority de 1 evaluador).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2", "AveNode3"],
+                    "evaluator": ["AveNode2", "AveNode3"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Esperar a que el fact commitee en node1 antes de sincronizar:
+    // wait_request puede terminar en Approval, antes del commit real.
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Los evaluadores deben tener la gobernanza en SN 1 antes del siguiente
+    // fact, o responderían por desincronización de versión.
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    node3.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    get_subject(node3, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 2: fact que añade un schema con contrato. La evaluación exige
+    // compilarlo de forma temporal; node3 no puede y responde `Unavailable`,
+    // pero el quorum Majority (2 de 3) se cierra con node1 y node2.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    assert_eq!(state.subject_id, governance_id.to_string());
+    assert_eq!(state.sn, 2);
+    assert!(state.active);
+
+    let gov = governance_properties(state.properties);
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+    assert_eq!(gov.members.len(), 3);
+}
+
+#[test(tokio::test)]
+// Si el quorum de evaluación es inalcanzable porque los compiladores no
+// están disponibles, la request no se pierde ni se marca inválida: entra en
+// RebootTimeOut y el nodo emisor sigue operativo.
+async fn test_gov_evaluator_compiler_unavailable_quorum_fails_reboot() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // Segundo nodo con el compilador apuntando a un endpoint muerto.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node2, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{}", port),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    node_running(&node2.api).await.unwrap();
+    let node2 = &node2.api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    // SN 1: node2 pasa a ser evaluador y witness. Con 2 evaluadores y
+    // quorum Majority la evaluación exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "evaluator": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Esperar a que el fact commitee en node1 antes de sincronizar:
+    // wait_request puede terminar en Approval, antes del commit real.
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Fact con contrato: node1 evalúa correctamente pero node2 responde
+    // `Unavailable`; sin quorum la request entra en RebootTimeOut.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id,
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // La gobernanza no avanza y el nodo emisor sigue respondiendo.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    assert_eq!(state.sn, 1);
+    assert!(state.active);
 }

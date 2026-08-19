@@ -114,6 +114,9 @@ pub struct CreateNodeConfig {
     pub ledger_batch_size: Option<usize>,
     pub safe_mode: bool,
     pub sinks: Vec<SinkConfigEntry>,
+    /// Explicit compiler configuration; `None` uses the default (in tests,
+    /// the auto-injected embedded compiler).
+    pub compiler: Option<CompilerNodeConfig>,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
@@ -130,6 +133,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         ledger_batch_size,
         safe_mode,
         sinks,
+        compiler,
     } = config;
 
     let keys =
@@ -210,7 +214,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
             update: UpdateSyncConfig::default(),
             reboot: RebootSyncConfig::default(),
         },
-        compiler: CompilerNodeConfig::default(),
+        compiler: compiler.unwrap_or_default(),
         spec: None,
     };
 

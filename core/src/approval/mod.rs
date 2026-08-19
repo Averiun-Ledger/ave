@@ -50,6 +50,10 @@ pub struct Approval {
     approvers_disagrees: Vec<Signature>,
     approval_req_hash: DigestIdentifier,
     approvers_quantity: u32,
+    /// The round is closed (approval, rejection or abort already sent):
+    /// late responses are ignored. Responses only matter until the
+    /// quorum closes or the approver list runs out.
+    closed: bool,
 }
 
 impl Approval {
@@ -81,6 +85,7 @@ impl Approval {
             approvers_agrees: vec![],
             approvers_disagrees: vec![],
             approval_req_hash: DigestIdentifier::default(),
+            closed: false,
         }
     }
 
@@ -260,7 +265,7 @@ impl Handler<Self> for Approval {
                 sender,
                 signature,
             } => {
-                if self.check_approval(sender.clone()) {
+                if !self.closed && self.check_approval(sender.clone()) {
                     match approval_res.clone() {
                         ApprovalRes::Response {
                             approval_req_hash,
@@ -326,6 +331,8 @@ impl Handler<Self> for Approval {
                                 "Approval aborted"
                             );
 
+                            self.closed = true;
+
                             return Ok(());
                         }
                         ApprovalRes::TimeOut(approval_time_out) => {
@@ -352,6 +359,8 @@ impl Handler<Self> for Approval {
                             return Err(crash_system(ctx, e).await);
                         };
 
+                        self.closed = true;
+
                         debug!(
                             msg_type = "Response",
                             agrees = self.approvers_agrees.len(),
@@ -371,6 +380,7 @@ impl Handler<Self> for Approval {
                         return Err(crash_system(ctx, e).await);
                     } else if self.approvers.is_empty() {
                         Self::observe_event("rejected");
+                        self.closed = true;
                         debug!(
                             msg_type = "Response",
                             agrees = self.approvers_agrees.len(),

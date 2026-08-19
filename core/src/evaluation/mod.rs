@@ -71,7 +71,10 @@ pub struct Evaluation {
 
     evaluation_request_hash: DigestIdentifier,
 
-    reboot: bool,
+    /// The round is closed (result, reboot or abort already sent): late
+    /// responses are ignored. Responses only matter until the quorum
+    /// closes or the evaluator list runs out.
+    closed: bool,
 
     current_evaluators: HashSet<PublicKey>,
 
@@ -113,7 +116,7 @@ impl Evaluation {
             evaluators_response: vec![],
             evaluators_signatures: vec![],
             pending_evaluators: HashSet::new(),
-            reboot: false,
+            closed: false,
             request_id: DigestIdentifier::default(),
             version: 0,
         }
@@ -185,6 +188,7 @@ impl Evaluation {
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,
+                        pending: None,
                     },
                 )
                 .await?;
@@ -421,7 +425,7 @@ impl Handler<Self> for Evaluation {
                 evaluation_res,
                 sender,
             } => {
-                if !self.reboot {
+                if !self.closed {
                     // If node is in evaluator list
                     if self.check_evaluator(sender.clone()) {
                         // Check type of validation
@@ -439,6 +443,13 @@ impl Handler<Self> for Evaluation {
                             }
                             EvaluationRes::TimeOut => {
                                 Self::observe_event("timeout");
+                            }
+                            // Same handling as a timeout — the evaluator is
+                            // dropped from the current set and replaced
+                            // from the pending pool — but explicit and
+                            // immediate: no coordinator timeout wait.
+                            EvaluationRes::Unavailable => {
+                                Self::observe_event("unavailable");
                             }
                             EvaluationRes::Abort(error) => {
                                 Self::observe_event("abort");
@@ -470,6 +481,8 @@ impl Handler<Self> for Evaluation {
                                     "Evaluation aborted"
                                 );
 
+                                self.closed = true;
+
                                 return Ok(());
                             }
                             EvaluationRes::Reboot => {
@@ -493,7 +506,7 @@ impl Handler<Self> for Evaluation {
                                     return Err(crash_system(ctx, e).await);
                                 }
 
-                                self.reboot = true;
+                                self.closed = true;
 
                                 return Ok(());
                             }
@@ -526,6 +539,7 @@ impl Handler<Self> for Evaluation {
                             }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                self.closed = true;
                                 return Ok(());
                             }
 
@@ -554,6 +568,8 @@ impl Handler<Self> for Evaluation {
                                 );
                                 return Err(crash_system(ctx, e).await);
                             };
+
+                            self.closed = true;
 
                             if !matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event(if summary.is_ok() {
@@ -622,6 +638,7 @@ impl Handler<Self> for Evaluation {
                             return Err(crash_system(ctx, e).await);
                         } else if self.current_evaluators.is_empty() {
                             Self::observe_event("reboot");
+                            self.closed = true;
                         }
                     } else {
                         warn!(

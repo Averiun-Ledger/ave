@@ -70,7 +70,10 @@ pub struct Validation {
 
     validation_request_hash: DigestIdentifier,
 
-    reboot: bool,
+    /// The round is closed (result, reboot or abort already sent): late
+    /// responses are ignored. Responses only matter until the quorum
+    /// closes or the validator list runs out.
+    closed: bool,
 
     current_validators: HashSet<PublicKey>,
 
@@ -110,7 +113,7 @@ impl Validation {
             request_id: DigestIdentifier::default(),
             version: 0,
             validation_request_hash: DigestIdentifier::default(),
-            reboot: false,
+            closed: false,
             current_validators: HashSet::new(),
             pending_validators: HashSet::new(),
             current_request_roles,
@@ -168,7 +171,8 @@ impl Validation {
                                 .clone(),
                             approval: self.current_request_roles.approval.clone(),
                         },
-                        stop:true
+                        stop:true,
+                        pending: None,
                     },
                 )
                 .await?;
@@ -337,7 +341,7 @@ impl Handler<Self> for Validation {
                 sender,
                 signature,
             } => {
-                if !self.reboot {
+                if !self.closed {
                     if self.check_validator(sender.clone()) {
                         match *validation_res {
                             ValidationRes::Create {
@@ -419,6 +423,13 @@ impl Handler<Self> for Validation {
                             ValidationRes::TimeOut => {
                                 Self::observe_event("timeout");
                             }
+                            // Same handling as a timeout — the validator
+                            // is dropped from the current set and replaced
+                            // from the pending pool — but explicit and
+                            // immediate: no coordinator timeout wait.
+                            ValidationRes::Unavailable => {
+                                Self::observe_event("unavailable");
+                            }
                             ValidationRes::Abort(error) => {
                                 Self::observe_event("abort");
                                 if let Err(e) = abort_req(
@@ -438,6 +449,10 @@ impl Handler<Self> for Validation {
                                     );
                                     return Err(crash_system(ctx, e).await);
                                 }
+
+                                self.closed = true;
+
+                                return Ok(());
                             }
                             ValidationRes::Reboot => {
                                 Self::observe_event("reboot");
@@ -458,7 +473,7 @@ impl Handler<Self> for Validation {
                                     return Err(crash_system(ctx, e).await);
                                 }
 
-                                self.reboot = true;
+                                self.closed = true;
 
                                 return Ok(());
                             }
@@ -488,6 +503,7 @@ impl Handler<Self> for Validation {
                                 }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                self.closed = true;
                                 return Ok(());
                             }
 
@@ -504,6 +520,8 @@ impl Handler<Self> for Validation {
                                 );
                                 return Err(crash_system(ctx, e).await);
                             };
+
+                            self.closed = true;
 
                             if !matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("success");
@@ -568,6 +586,7 @@ impl Handler<Self> for Validation {
                                     return Err(crash_system(ctx, e).await);
                                 } else if self.current_validators.is_empty() {
                                     Self::observe_event("reboot");
+                                    self.closed = true;
                                 }
                     } else {
                         warn!(

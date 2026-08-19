@@ -27,6 +27,17 @@ pub enum EvaluationRes {
     Abort(String),
     TimeOut,
     Reboot,
+    /// The evaluator can not evaluate right now for reasons unrelated to
+    /// the request (its compiler pool is down, its local artifacts are
+    /// missing...): not a verdict. The requester drops the evaluator from
+    /// the current set, pulls fresh ones from the pending pool and only
+    /// reboots the request when no evaluator can answer at all.
+    ///
+    /// Added at the end of the enum on purpose: borsh encodes the variant
+    /// ordinal, so existing variants keep their wire value. Nodes running
+    /// older code can not deserialize it and treat the message as lost —
+    /// the same outcome as the evaluator not answering.
+    Unavailable,
 }
 
 #[derive(
@@ -69,7 +80,8 @@ pub enum EvaluatorError {
     Runner(EvalRunnerError),
     InternalError(String),
     /// The compiler infrastructure is unavailable or untrustworthy: not a
-    /// contract failure, the evaluation must be retried later (Reboot).
+    /// contract failure and not a request failure — the evaluator answers
+    /// `EvaluationRes::Unavailable` and casts no verdict.
     CompilersUnavailable(String),
 }
 

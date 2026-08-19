@@ -16,7 +16,7 @@ use crate::{
     governance::{data::GovernanceData, model::Schema},
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
-        crash_system,
+        GovVersionSync, crash_system, gov_version_sync,
         node::{SignTypesNode, get_sign},
     },
     subject::RequestSubjectData,
@@ -64,9 +64,67 @@ pub struct EvalWorker {
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
     pub stop: bool,
+    /// In-flight network evaluation request, if any (see `pre_stop`).
+    pub pending: Option<PendingEvaluation>,
+}
+
+/// A network evaluation request being processed. `pre_stop` uses it to
+/// notify the requester that this evaluator is going down mid-evaluation
+/// (`EvaluationRes::Unavailable`) instead of letting it burn the
+/// coordinator retries on a dead node.
+#[derive(Clone, Debug)]
+pub struct PendingEvaluation {
+    /// Requester node key (response receiver).
+    pub sender: PublicKey,
+    /// Request identifier of the in-flight evaluation.
+    pub request_id: String,
+    /// Evaluation request version.
+    pub version: u64,
+    /// Subject the evaluation belongs to (response actor path).
+    pub subject_id: DigestIdentifier,
 }
 
 impl EvalWorker {
+    /// Best-effort `Unavailable` notification for the in-flight network
+    /// evaluation request: the node is going down before answering, so
+    /// the requester can replace this evaluator immediately instead of
+    /// waiting for the coordinator retries and timeout. Errors are
+    /// logged and swallowed — the coordinator timeout is the fallback.
+    async fn notify_unavailable(&self) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+
+        let info = ComunicateInfo {
+            receiver: pending.sender.clone(),
+            request_id: pending.request_id.clone(),
+            version: pending.version,
+            receiver_actor: format!(
+                "/user/request/{}/evaluation/{}",
+                pending.subject_id, self.our_key
+            ),
+        };
+
+        if let Err(error) = self
+            .network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                message: NetworkMessage {
+                    info,
+                    message: ActorMessage::EvaluationRes {
+                        res: EvaluationRes::Unavailable,
+                    },
+                },
+            })
+            .await
+        {
+            debug!(
+                error = %error,
+                request_id = %pending.request_id,
+                "Could not notify evaluator unavailability while stopping"
+            );
+        }
+    }
+
     async fn execute_contract(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -118,33 +176,6 @@ impl EvalWorker {
 
         compiler.ask_stop().await?;
         Ok(None)
-    }
-
-    async fn check_governance(
-        &self,
-        gov_version: u64,
-    ) -> Result<bool, ActorError> {
-        match self.gov_version.cmp(&gov_version) {
-            std::cmp::Ordering::Less => {
-                warn!(
-                    local_gov_version = self.gov_version,
-                    request_gov_version = gov_version,
-                    governance_id = %self.governance_id,
-                    sender = %self.node_key,
-                    "Received request with a higher governance version; ignoring request"
-                );
-                Err(ActorError::Functional {
-                    description:
-                        "Abort evaluation, request governance version is higher than local"
-                            .to_owned(),
-                })
-            }
-            std::cmp::Ordering::Equal => {
-                // If it is the same it means that we have the latest version of governance, we are up to date.
-                Ok(false)
-            }
-            std::cmp::Ordering::Greater => Ok(true),
-        }
     }
 
     async fn evaluate(
@@ -362,9 +393,13 @@ impl EvalWorker {
             | EvaluatorError::InvalidEventRequest(..) => {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
+            // The evaluator can not evaluate (its compiler pool is
+            // unreachable or its local artifacts are missing): not the
+            // request's fault, cast no verdict. The requester replaces
+            // this evaluator from its pending pool.
             EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..))
             | EvaluatorError::CompilersUnavailable(..) => {
-                return Ok(EvaluationRes::Reboot);
+                return Ok(EvaluationRes::Unavailable);
             }
             _ => {}
         };
@@ -384,12 +419,9 @@ impl EvalWorker {
     async fn create_res(
         &self,
         ctx: &mut ActorContext<Self>,
-        reboot: bool,
         evaluation_req: &Signed<EvaluationReq>,
     ) -> Result<EvaluationRes, EvaluatorError> {
-        let evaluation = if reboot {
-            EvaluationRes::Reboot
-        } else {
+        let evaluation =
             match self.evaluate(ctx, evaluation_req.content()).await {
                 Ok(evaluation) => {
                     self.build_response(ctx, evaluation, evaluation_req.clone())
@@ -407,8 +439,7 @@ impl EvalWorker {
                         .await?
                     }
                 }
-            }
-        };
+            };
 
         Ok(evaluation)
     }
@@ -519,6 +550,18 @@ impl Actor for EvalWorker {
             |parent_span| info_span!(parent: parent_span, "EvalWorker", id),
         )
     }
+
+    /// On any stop (graceful shutdown, controlled crash or fault) with a
+    /// network evaluation still in flight, tell the requester this
+    /// evaluator is unavailable so it can replace it without waiting for
+    /// the coordinator retries.
+    async fn pre_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        self.notify_unavailable().await;
+        Ok(())
+    }
 }
 
 impl NotPersistentActor for EvalWorker {}
@@ -545,7 +588,7 @@ impl Handler<Self> for EvalWorker {
             }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {
                 let evaluation =
-                    match self.create_res(ctx, false, &evaluation_req).await {
+                    match self.create_res(ctx, &evaluation_req).await {
                         Ok(eval) => eval,
                         Err(e) => {
                             error!(
@@ -619,27 +662,16 @@ impl Handler<Self> for EvalWorker {
                     return Ok(());
                 }
 
-                let reboot = match self
-                    .check_governance(evaluation_req.content().gov_version)
-                    .await
-                {
-                    Ok(reboot) => reboot,
-                    Err(e) => {
-                        warn!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to check governance"
-                        );
-                        if let ActorError::Functional { .. } = e {
-                            if self.stop {
-                                ctx.stop(None).await;
-                            }
-                            return Err(e);
-                        } else {
-                            return Err(crash_system(ctx, e).await);
-                        }
-                    }
-                };
+                self.pending = Some(PendingEvaluation {
+                    sender: sender.clone(),
+                    request_id: info.request_id.clone(),
+                    version: info.version,
+                    subject_id: evaluation_req
+                        .content()
+                        .event_request
+                        .content()
+                        .get_subject_id(),
+                });
 
                 let evaluation = if let Err(error) =
                     self.check_data(&evaluation_req)
@@ -669,21 +701,48 @@ impl Handler<Self> for EvalWorker {
                         }
                     }
                 } else {
-                    match self.create_res(ctx, reboot, &evaluation_req).await {
-                        Ok(eval) => eval,
-                        Err(e) => {
-                            error!(
+                    match gov_version_sync(
+                        self.gov_version,
+                        evaluation_req.content().gov_version,
+                    ) {
+                        // This node is behind the request's governance
+                        // version and can not evaluate it: say so instead
+                        // of staying silent — the requester replaces this
+                        // evaluator from its pending pool.
+                        GovVersionSync::NodeBehind => {
+                            warn!(
                                 msg_type = "NetworkRequest",
-                                error = %e,
-                                "Internal error during evaluation"
+                                local_gov_version = self.gov_version,
+                                request_gov_version = evaluation_req.content().gov_version,
+                                governance_id = %self.governance_id,
+                                sender = %self.node_key,
+                                "Request governance version is higher than local; answering unavailable"
                             );
-                            return Err(crash_system(
-                                ctx,
-                                ActorError::FunctionalCritical {
-                                    description: e.to_string(),
-                                },
-                            )
-                            .await);
+                            EvaluationRes::Unavailable
+                        }
+                        // The requester is behind: it must sync its
+                        // governance and retry the request.
+                        GovVersionSync::RequesterBehind => {
+                            EvaluationRes::Reboot
+                        }
+                        GovVersionSync::Current => {
+                            match self.create_res(ctx, &evaluation_req).await {
+                                Ok(eval) => eval,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "NetworkRequest",
+                                        error = %e,
+                                        "Internal error during evaluation"
+                                    );
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: e.to_string(),
+                                        },
+                                    )
+                                    .await);
+                                }
+                            }
                         }
                     }
                 };
@@ -722,6 +781,8 @@ impl Handler<Self> for EvalWorker {
                     );
                     return Err(crash_system(ctx, e).await);
                 };
+
+                self.pending = None;
 
                 debug!(
                     msg_type = "NetworkRequest",

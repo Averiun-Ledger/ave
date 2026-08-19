@@ -928,6 +928,29 @@ where
     error
 }
 
+/// Governance version sync between this node and an incoming request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GovVersionSync {
+    /// Same version: the request can be served.
+    Current,
+    /// This node is behind the request's governance version: it can not
+    /// serve the request — the worker answers `Unavailable` so the
+    /// requester replaces it from its pending pool.
+    NodeBehind,
+    /// The requester is behind this node's governance version: the
+    /// worker answers `Reboot` so the requester syncs and retries.
+    RequesterBehind,
+}
+
+/// Compares the local governance version with the request's one.
+pub fn gov_version_sync(local: u64, request: u64) -> GovVersionSync {
+    match local.cmp(&request) {
+        std::cmp::Ordering::Less => GovVersionSync::NodeBehind,
+        std::cmp::Ordering::Equal => GovVersionSync::Current,
+        std::cmp::Ordering::Greater => GovVersionSync::RequesterBehind,
+    }
+}
+
 pub fn take_random_signers(
     signers: HashSet<PublicKey>,
     quantity: usize,
