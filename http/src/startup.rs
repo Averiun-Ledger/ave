@@ -951,8 +951,13 @@ mod tests {
             .flat_map(|(_, lines)| lines.iter())
             .collect();
         for leaf in &expected {
+            // A sensitive leaf is redacted only when it carries a value;
+            // empty strings and nulls mean "not configured" and stay
+            // visible, matching redact_sensitive_values.
             let sensitive = REDACTED_CONFIG_KEYS.iter().any(|key| {
-                leaf.contains(&format!(".{key}: ")) && !leaf.ends_with(": \"\"")
+                leaf.contains(&format!(".{key}: "))
+                    && !leaf.ends_with(": \"\"")
+                    && !leaf.ends_with(": null")
             });
             let expected_line = if sensitive {
                 let (path, _) = leaf.rsplit_once(": ").unwrap();

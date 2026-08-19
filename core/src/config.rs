@@ -69,6 +69,8 @@ pub struct Config {
     pub only_clear_events: bool,
     /// Sync protocol configuration.
     pub sync: SyncConfig,
+    /// Compiler service pool the node delegates contract builds to.
+    pub compiler: CompilerNodeConfig,
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
     pub spec: Option<MachineSpec>,
@@ -89,7 +91,47 @@ impl Default for Config {
             is_service: false,
             only_clear_events: false,
             sync: Default::default(),
+            compiler: Default::default(),
             spec: None,
+        }
+    }
+}
+
+/// Compiler service pool configuration of the node.
+///
+/// The node never compiles contracts locally: builds are delegated to the
+/// configured compiler pool. An empty `endpoints` list is valid (the node
+/// starts without compilers; compilations fail with an explicit
+/// "compilers unavailable" error until configured).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct CompilerNodeConfig {
+    /// Compiler endpoints (`http://` or `https://`), tried in order.
+    pub endpoints: Vec<String>,
+    /// API key sent as `x-api-key` metadata on every request.
+    pub api_key: Option<String>,
+    /// Expected toolchain fingerprint (DigestIdentifier Display form);
+    /// responses with another fingerprint are discarded.
+    pub expected_toolchain: Option<String>,
+    /// Pinned compiler public key (Display form) used to verify
+    /// attestation signatures.
+    pub compiler_public_key: Option<String>,
+    /// Pinned TLS certificate (PEM) for `https://` endpoints.
+    pub pinned_cert_pem: Option<String>,
+    /// Per-attempt request timeout in seconds.
+    pub request_timeout_secs: u64,
+}
+
+impl Default for CompilerNodeConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            api_key: None,
+            expected_toolchain: None,
+            compiler_public_key: None,
+            pinned_cert_pem: None,
+            request_timeout_secs: 120,
         }
     }
 }

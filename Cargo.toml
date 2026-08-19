@@ -18,7 +18,8 @@ members = [
     "bridge",
     "network",
     "http",
-    "common"
+    "common",
+    "compiler"
 ]
 default-members = [
     ".",
@@ -27,7 +28,8 @@ default-members = [
     "bridge",
     "network",
     "http",
-    "common"
+    "common",
+    "compiler"
 ]
 
 resolver = "2"
@@ -47,6 +49,7 @@ rust-version = "1.95.0"
 [workspace.dependencies]
 ave-core = { path = "core", version = "0.12.0", default-features = false }
 ave-bridge = { path = "bridge", version = "0.12.0", default-features = false }
+ave-compiler = { path = "compiler", version = "0.1.0", default-features = false }
 ave-network = { path = "network", version = "0.10.0" }
 ave-identity = { path = "identity", version = "0.3.0" }
 ave-common = { path = "common", version = "0.10.0" }

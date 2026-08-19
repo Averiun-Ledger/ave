@@ -55,6 +55,9 @@ pub mod sink;
 #[cfg(feature = "value-wrapper")]
 pub mod wrapper;
 
+#[cfg(feature = "compiler-grpc")]
+pub mod compiler;
+
 // Re-exports
 #[cfg(feature = "common")]
 pub use ave_identity as identity;

@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+// Public contract of the ave compiler service. Versioned as ave.compiler.v1;
+// only additive changes are allowed within v1 (new fields with new numbers,
+// new RPCs). Breaking changes require a v2 package.
+package ave.compiler.v1;
+
+// Compilation endpoint implemented by compiler nodes.
+service CompilerService {
+  // Compiles a base64-encoded contract source to wasm. The response carries
+  // the artifact, its content hashes and an Ed25519 attestation signature
+  // over the hashes. Status codes: UNAUTHENTICATED (missing/invalid API
+  // key), INVALID_ARGUMENT (source too large, invalid base64 or the
+  // contract does not compile), RESOURCE_EXHAUSTED (build queue full),
+  // INTERNAL (server-side failure).
+  rpc Compile(CompileRequest) returns (CompileResponse);
+}
+
+message CompileRequest {
+  // Contract source code, base64-encoded (standard alphabet, as produced by
+  // the node's governance payloads).
+  string source_b64 = 1;
+}
+
+message CompileResponse {
+  // Compiled wasm artifact.
+  bytes wasm = 1;
+  // Digest of the base64 source string, in DigestIdentifier Display form.
+  string source_hash = 2;
+  // Digest of the contract manifest template (covers the SDK/template
+  // version), in DigestIdentifier Display form.
+  string manifest_hash = 3;
+  // Digest of the compiler toolchain (`rustc --version --verbose`), in
+  // DigestIdentifier Display form.
+  string toolchain_fingerprint = 4;
+  // Digest of the wasm bytes, in DigestIdentifier Display form.
+  string wasm_hash = 5;
+  // Ed25519 signature over borsh(source_hash, manifest_hash,
+  // toolchain_fingerprint, wasm_hash) as a tuple of strings.
+  bytes signature = 6;
+}

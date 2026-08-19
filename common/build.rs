@@ -37,5 +37,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         std::fs::write(&generated, code)?;
     }
+    // The gRPC compiler service protobuf types are only needed by the
+    // compiler crate and the node (feature `compiler-grpc`); same
+    // compilation-out rationale as `sink-grpc` above.
+    #[cfg(feature = "compiler-grpc")]
+    {
+        let protoc = protoc_bin_vendored::protoc_bin_path()?;
+        // SAFETY: single-threaded build script; the variable is set before
+        // any protoc invocation and read only by prost-build.
+        unsafe { std::env::set_var("PROTOC", protoc) };
+        tonic_prost_build::configure().compile_protos(
+            &["proto/ave/compiler/v1/compiler.proto"],
+            &["proto"],
+        )?;
+
+        // Same `clippy::missing_const_for_fn` workaround as for
+        // `ave.sink.v1.rs` above: tonic-build does not emit the server's
+        // message-size builder methods as `const fn`. If a future
+        // tonic-build changes the emitted code the replacement becomes a
+        // no-op and the warning reappears — visible, never silent breakage.
+        let generated = std::path::Path::new(&std::env::var("OUT_DIR")?)
+            .join("ave.compiler.v1.rs");
+        let code = std::fs::read_to_string(&generated)?;
+        let code = code
+            .replace(
+                "pub fn max_decoding_message_size(mut self, limit: usize) -> Self {\n            self.max_decoding_message_size = Some(limit);",
+                "pub const fn max_decoding_message_size(mut self, limit: usize) -> Self {\n            self.max_decoding_message_size = Some(limit);",
+            )
+            .replace(
+                "pub fn max_encoding_message_size(mut self, limit: usize) -> Self {\n            self.max_encoding_message_size = Some(limit);",
+                "pub const fn max_encoding_message_size(mut self, limit: usize) -> Self {\n            self.max_encoding_message_size = Some(limit);",
+            );
+        std::fs::write(&generated, code)?;
+    }
     Ok(())
 }

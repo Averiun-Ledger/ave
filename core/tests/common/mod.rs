@@ -20,9 +20,9 @@ use ave_core::{
     Api,
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, Config, GovernanceSyncConfig,
-        RebootSyncConfig, SinkConfigEntry, SyncConfig, TrackerSyncConfig,
-        UpdateSyncConfig,
+        AveInternalDBFeatureConfig, CompilerNodeConfig, Config,
+        GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry, SyncConfig,
+        TrackerSyncConfig, UpdateSyncConfig,
     },
 };
 use ave_network::{Config as NetworkConfig, RoutingNode};
@@ -210,6 +210,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
             update: UpdateSyncConfig::default(),
             reboot: RebootSyncConfig::default(),
         },
+        compiler: CompilerNodeConfig::default(),
         spec: None,
     };
 

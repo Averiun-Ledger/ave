@@ -1,0 +1,55 @@
+[package]
+name = "ave-compiler"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description = "Averiun Ledger contract compilation pipeline"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ave-common = { workspace = true }
+ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
+tokio = { workspace = true, features = ["fs", "process", "sync", "time"] }
+base64 = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tonic = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
+config = { workspace = true, optional = true }
+rustls = { version = "0.23", optional = true }
+tokio-stream = { version = "0.1", features = ["net"], optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+serial_test = { workspace = true }
+
+[features]
+test = []
+client = ["tonic", "rustls", "ave-common/compiler-grpc"]
+server = [
+    "tonic",
+    "rustls",
+    "ave-common/compiler-grpc",
+    "subtle",
+    "config",
+    "tokio-stream",
+    "tracing-subscriber",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
+    "tokio/signal",
+]
+
+[[bin]]
+name = "ave-compiler"
+path = "src/main.rs"
+required-features = ["server"]

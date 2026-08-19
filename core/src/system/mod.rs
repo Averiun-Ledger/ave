@@ -1,4 +1,5 @@
 pub use error::SystemError;
+use std::time::Duration;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
@@ -71,6 +72,21 @@ pub async fn system(
     crash_token: CancellationToken,
     #[cfg(feature = "prometheus")] mut registry: Option<&mut Registry>,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
+    // Test builds get the embedded test compiler automatically when no
+    // compiler pool is configured, so any crate driving core with the
+    // `test` feature compiles contracts without extra wiring. An
+    // explicitly configured pool always wins: failure-path tests point
+    // at dead endpoints on purpose.
+    #[cfg(any(test, feature = "test"))]
+    let config = if config.compiler.endpoints.is_empty() {
+        Config {
+            compiler: crate::test_compiler::test_compiler_config().await,
+            ..config
+        }
+    } else {
+        config
+    };
+
     // Create de actor system.
     let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
@@ -107,6 +123,46 @@ pub async fn system(
 
     let contracts: HashMap<String, Arc<CompiledModule>> = HashMap::new();
     system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
+
+    // The node never compiles contracts locally: when a compiler pool is
+    // configured, register the client as a helper. Without endpoints the
+    // helper is absent and compilations fail with an explicit
+    // "compilers unavailable" error.
+    if !config.compiler.endpoints.is_empty() {
+        let expected_toolchain = config
+            .compiler
+            .expected_toolchain
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| {
+                SystemError::CompilerConfig(format!(
+                    "invalid expected_toolchain: {e}"
+                ))
+            })?;
+        let compiler_public_key = config
+            .compiler
+            .compiler_public_key
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| {
+                SystemError::CompilerConfig(format!(
+                    "invalid compiler_public_key: {e}"
+                ))
+            })?;
+        let compiler_client = ave_compiler::CompilerClient::new(
+            config.compiler.endpoints.clone(),
+            config.compiler.api_key.clone().unwrap_or_default(),
+            expected_toolchain,
+            compiler_public_key,
+            Some(Duration::from_secs(
+                config.compiler.request_timeout_secs,
+            )),
+            config.compiler.pinned_cert_pem.clone(),
+        );
+        system.add_helper("compiler_client", Arc::new(compiler_client));
+    }
 
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
@@ -287,6 +343,7 @@ pub mod tests {
                 ledger_batch_size: 100,
             },
             spec: None,
+            compiler: Default::default(),
         };
 
         #[cfg(feature = "prometheus")]

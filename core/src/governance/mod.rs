@@ -11,6 +11,7 @@ use crate::{
     evaluation::{
         compiler::{
             CompilerResponse, ContractCompiler, ContractCompilerMessage,
+            error::CompilerError, is_compiler_infra_error,
         },
         request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
@@ -58,7 +59,10 @@ use crate::{
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
-    sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
+    sink::{
+        SinkManager, SinkManagerInitParams, SinkManagerMessage,
+        retry_delay_ms,
+    },
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata, error::SubjectError,
@@ -1705,6 +1709,58 @@ impl Governance {
         Ok(())
     }
 
+    /// Maximum retries of a final contract compilation on compiler
+    /// infrastructure errors (the contract itself failing never retries).
+    const COMPILE_INFRA_MAX_RETRIES: usize = 5;
+    /// Base delay of the compilation retry backoff.
+    const COMPILE_INFRA_RETRY_BASE_MS: u64 = 1_000;
+    /// Cap of the compilation retry backoff.
+    const COMPILE_INFRA_RETRY_MAX_MS: u64 = 30_000;
+
+    /// Asks a ContractCompiler actor, retrying with exponential backoff
+    /// (same policy as sink deliveries: [`retry_delay_ms`]) when the
+    /// failure is a compiler infrastructure error — a liveness problem,
+    /// not a contract problem. Returns the terminal error, if any, so the
+    /// caller formats its own message.
+    async fn ask_compile_with_retries<F, Fut>(
+        schema_id: &SchemaType,
+        mut attempt: F,
+    ) -> Result<Option<CompilerError>, ActorError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<
+            Output = Result<CompilerResponse, ActorError>,
+        >,
+    {
+        let mut retry = 0;
+        loop {
+            match attempt().await? {
+                CompilerResponse::Ok => return Ok(None),
+                CompilerResponse::Error(error)
+                    if is_compiler_infra_error(&error)
+                        && retry < Self::COMPILE_INFRA_MAX_RETRIES =>
+                {
+                    retry += 1;
+                    let delay = retry_delay_ms(
+                        Self::COMPILE_INFRA_RETRY_BASE_MS,
+                        Self::COMPILE_INFRA_RETRY_MAX_MS,
+                        retry,
+                        None,
+                    );
+                    warn!(
+                        schema_id = %schema_id,
+                        retry,
+                        delay_ms = delay,
+                        error = %error,
+                        "Compiler infrastructure error during final compilation, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                CompilerResponse::Error(error) => return Ok(Some(error)),
+            }
+        }
+    }
+
     async fn up_compilers_schemas(
         ctx: &mut ActorContext<Self>,
         schemas: &BTreeMap<SchemaType, Schema>,
@@ -1735,18 +1791,21 @@ impl Governance {
                 ..
             } = schema;
 
-            let response = compiler
-                .ask(ContractCompilerMessage::Compile {
-                    contract_name: format!("{}_{}", subject_id, id),
-                    contract: contract.clone(),
-                    initial_value: initial_value.0.clone(),
-                    contract_path: contracts_path
-                        .join("contracts")
-                        .join(format!("{}_{}", subject_id, id)),
-                })
-                .await?;
+            let terminal_error = Self::ask_compile_with_retries(id, || async {
+                compiler
+                    .ask(ContractCompilerMessage::Compile {
+                        contract_name: format!("{}_{}", subject_id, id),
+                        contract: contract.clone(),
+                        initial_value: initial_value.0.clone(),
+                        contract_path: contracts_path
+                            .join("contracts")
+                            .join(format!("{}_{}", subject_id, id)),
+                    })
+                    .await
+            })
+            .await?;
 
-            if let CompilerResponse::Error(error) = response {
+            if let Some(error) = terminal_error {
                 return Err(ActorError::Functional {
                     description: format!(
                         "Can not compile schema contract {}: {}",
@@ -1838,18 +1897,21 @@ impl Governance {
                 ))
                 .await?;
 
-            let response = actor
-                .ask(ContractCompilerMessage::Compile {
-                    contract_name: format!("{}_{}", subject_id, id),
-                    contract: schema.contract.clone(),
-                    initial_value: schema.initial_value.0.clone(),
-                    contract_path: contracts_path
-                        .join("contracts")
-                        .join(format!("{}_{}", subject_id, id)),
-                })
-                .await?;
+            let terminal_error = Self::ask_compile_with_retries(&id, || async {
+                actor
+                    .ask(ContractCompilerMessage::Compile {
+                        contract_name: format!("{}_{}", subject_id, id),
+                        contract: schema.contract.clone(),
+                        initial_value: schema.initial_value.0.clone(),
+                        contract_path: contracts_path
+                            .join("contracts")
+                            .join(format!("{}_{}", subject_id, id)),
+                    })
+                    .await
+            })
+            .await?;
 
-            if let CompilerResponse::Error(error) = response {
+            if let Some(error) = terminal_error {
                 return Err(ActorError::Functional {
                     description: format!(
                         "Can not refresh schema contract {}: {}",

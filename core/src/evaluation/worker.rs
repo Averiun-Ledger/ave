@@ -20,7 +20,6 @@ use crate::{
         node::{SignTypesNode, get_sign},
     },
     subject::RequestSubjectData,
-    system::ConfigHelper,
 };
 
 use crate::helpers::network::ActorMessage;
@@ -94,19 +93,8 @@ impl EvalWorker {
         ids: &[SchemaType],
         schemas: BTreeMap<SchemaType, Schema>,
     ) -> Result<Option<CompilerError>, ActorError> {
-        let contracts_path = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
-        {
-            config.contracts_path
-        } else {
-            return Err(ActorError::Helper {
-                name: "config".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
         let compiler = ctx
-            .create_child("temp_compiler", TempCompiler::new(self.hash))
+            .create_child("temp_compiler", TempCompiler)
             .await?;
 
         for id in ids {
@@ -119,9 +107,6 @@ impl EvalWorker {
                     contract_name: format!("{}_{}", self.governance_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.0.clone(),
-                    contract_path: contracts_path
-                        .join("contracts")
-                        .join(format!("{}_temp_{}", self.governance_id, id)),
                 })
                 .await?;
 
@@ -377,7 +362,8 @@ impl EvalWorker {
             | EvaluatorError::InvalidEventRequest(..) => {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
-            EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..)) => {
+            EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..))
+            | EvaluatorError::CompilersUnavailable(..) => {
                 return Ok(EvaluationRes::Reboot);
             }
             _ => {}

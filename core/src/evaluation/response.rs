@@ -68,6 +68,9 @@ pub enum EvaluatorError {
     InvalidEventRequest(String),
     Runner(EvalRunnerError),
     InternalError(String),
+    /// The compiler infrastructure is unavailable or untrustworthy: not a
+    /// contract failure, the evaluation must be retried later (Reboot).
+    CompilersUnavailable(String),
 }
 
 #[derive(
@@ -108,6 +111,9 @@ impl std::fmt::Display for EvaluatorError {
             }
             Self::Runner(e) => write!(f, "runner error: {}", e),
             Self::InternalError(msg) => write!(f, "internal error: {}", msg),
+            Self::CompilersUnavailable(msg) => {
+                write!(f, "compilers unavailable: {}", msg)
+            }
         }
     }
 }
@@ -127,8 +133,17 @@ impl From<CompilerError> for EvaluatorError {
             | CompilerError::InvalidContractOutput { .. } => {
                 Self::Runner(EvalRunnerError::ContractFailed(value.to_string()))
             }
+            // Infraestructura del compiler: problema de liveness, no de
+            // validez del contrato; la evaluación se reintenta (Reboot)
+            CompilerError::CompilersUnavailable { .. }
+            | CompilerError::ToolchainMismatch { .. }
+            | CompilerError::InvalidAttestationSignature
+            | CompilerError::AttestationMismatch { .. } => {
+                Self::CompilersUnavailable(value.to_string())
+            }
             // Fallos del sistema: no deberían ocurrir en un entorno sano
             CompilerError::CargoBuildFailed { .. }
+            | CompilerError::BuildTimeout { .. }
             | CompilerError::InvalidContractPath { .. }
             | CompilerError::DirectoryCreationFailed { .. }
             | CompilerError::FileWriteFailed { .. }

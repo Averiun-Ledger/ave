@@ -33,4 +33,8 @@ pub enum SystemError {
     /// Failed to build external database.
     #[error("failed to build external database: {0}")]
     ExternalDbBuild(String),
+
+    /// Invalid compiler service configuration.
+    #[error("invalid compiler configuration: {0}")]
+    CompilerConfig(String),
 }

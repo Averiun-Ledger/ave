@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 borsh = { workspace = true }
 ave-common = { workspace = true, features = ["sink-grpc"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
+ave-compiler = { workspace = true, features = ["client"] }
 json-patch = "4.2.0"
 ave-actors = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
@@ -53,6 +54,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-stream = "0.1"
 ave-network = { workspace = true, features = ["test"] }
+ave-compiler = { workspace = true, features = ["server"] }
 futures = { workspace = true }
 axum = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
@@ -68,4 +70,4 @@ rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["ave-actors/export-sqlite"]
 prometheus = ["ave-actors/prometheus"]
-test = []
+test = ["ave-compiler/test", "ave-compiler/server"]

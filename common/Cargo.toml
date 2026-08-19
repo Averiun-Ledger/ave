@@ -37,5 +37,8 @@ value-wrapper = []
 # gRPC sink protobuf types. Optional: tonic does not compile for the
 # wasm32 target used by the contract SDK, which depends on this crate.
 sink-grpc = ["tonic", "tonic-prost", "prost", "tonic-prost-build", "protoc-bin-vendored"]
+# gRPC compiler service protobuf types. Optional for the same reason as
+# `sink-grpc`.
+compiler-grpc = ["tonic", "tonic-prost", "prost", "tonic-prost-build", "protoc-bin-vendored"]
 openapi = ["utoipa"]
 typescript = ["ts-rs"]

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -8,24 +7,15 @@ use ave_actors::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::fs;
 use tracing::{Span, error, info_span};
 
-use ave_common::identity::HashAlgorithm;
+use ave_common::ValueWrapper;
 
 use super::{CompilerResponse, CompilerSupport};
 use crate::metrics::try_core_metrics;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TempCompiler {
-    hash: HashAlgorithm,
-}
-
-impl TempCompiler {
-    pub const fn new(hash: HashAlgorithm) -> Self {
-        Self { hash }
-    }
-}
+pub struct TempCompiler;
 
 #[derive(Debug, Clone)]
 pub enum TempCompilerMessage {
@@ -33,7 +23,6 @@ pub enum TempCompilerMessage {
         contract: String,
         contract_name: String,
         initial_value: Value,
-        contract_path: PathBuf,
     },
 }
 
@@ -71,19 +60,34 @@ impl Handler<Self> for TempCompiler {
                 contract,
                 contract_name,
                 initial_value,
-                contract_path,
             } => {
                 let started_at = Instant::now();
-                let _ = fs::remove_dir_all(&contract_path).await;
-                if let Err(e) = CompilerSupport::compile_fresh(
-                    self.hash,
-                    ctx,
-                    &contract,
-                    &contract_path,
-                    initial_value,
-                )
-                .await
-                {
+
+                // The node never compiles locally: the wasm comes from the
+                // compiler service and is precompiled and validated
+                // (init_check) in memory. Nothing touches the disk and
+                // nothing is persisted: the artifact is discarded after
+                // validation.
+                let result = async {
+                    ave_compiler::validate_source_base64(&contract)?;
+                    let contract_runtime =
+                        CompilerSupport::contract_runtime(ctx).await?;
+                    let client = CompilerSupport::compiler_client(ctx).await?;
+                    let outcome = client.compile(&contract).await?;
+                    let (_, module) = ave_compiler::precompile_module(
+                        &contract_runtime,
+                        &outcome.wasm,
+                    )?;
+                    ave_compiler::validate_module(
+                        &contract_runtime,
+                        &module,
+                        ValueWrapper(initial_value),
+                    )?;
+                    Ok::<(), super::error::CompilerError>(())
+                }
+                .await;
+
+                if let Err(e) = result {
                     if let Some(metrics) = try_core_metrics() {
                         metrics.observe_contract_prepare(
                             "temporary",
@@ -95,10 +99,8 @@ impl Handler<Self> for TempCompiler {
                         msg_type = "Compile",
                         error = %e,
                         contract_name = %contract_name,
-                        path = %contract_path.display(),
                         "Temporary contract compilation or validation failed"
                     );
-                    let _ = fs::remove_dir_all(&contract_path).await;
                     return Ok(CompilerResponse::Error(e));
                 }
 
@@ -107,15 +109,6 @@ impl Handler<Self> for TempCompiler {
                         "temporary",
                         "recompiled",
                         started_at.elapsed(),
-                    );
-                }
-
-                if let Err(e) = fs::remove_dir_all(&contract_path).await {
-                    error!(
-                        msg_type = "Compile",
-                        error = %e,
-                        path = %contract_path.display(),
-                        "Failed to remove temporal contract directory"
                     );
                 }
 
