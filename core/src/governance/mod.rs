@@ -1810,12 +1810,18 @@ impl Governance {
             .await?;
 
             if let Some(error) = terminal_error {
-                return Err(ActorError::Functional {
-                    description: format!(
-                        "Can not compile schema contract {}: {}",
-                        id, error
-                    ),
-                });
+                // Degraded mode: this schema has no usable local artifact
+                // and the compiler pool could not provide one. That is not
+                // a fatal node problem — keep the governance running and
+                // leave the contract out of the local cache, so
+                // evaluations of this schema answer `Unavailable` until
+                // the artifacts are restored (next governance event or
+                // restart; a dedicated recovery policy is level-3 work).
+                error!(
+                    schema_id = %id,
+                    error = %error,
+                    "Contract artifacts unavailable; evaluations of this schema will be unavailable"
+                );
             }
         }
 
@@ -1893,6 +1899,15 @@ impl Governance {
             });
         };
 
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
+        >>("contracts") else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_owned(),
+                reason: "Not Found".to_owned(),
+            });
+        };
+
         for (id, schema) in schemas {
             let actor = ctx
                 .get_child::<ContractCompiler>(&format!(
@@ -1901,27 +1916,35 @@ impl Governance {
                 ))
                 .await?;
 
-            let terminal_error = Self::ask_compile_with_retries(&id, || async {
-                actor
-                    .ask(ContractCompilerMessage::Compile {
-                        contract_name: format!("{}_{}", subject_id, id),
-                        contract: schema.contract.clone(),
-                        initial_value: schema.initial_value.0.clone(),
-                        contract_path: contracts_path
-                            .join("contracts")
-                            .join(format!("{}_{}", subject_id, id)),
-                    })
-                    .await
-            })
-            .await?;
+            let contract_name = format!("{}_{}", subject_id, id);
+            let terminal_error =
+                Self::ask_compile_with_retries(&id, || async {
+                    actor
+                        .ask(ContractCompilerMessage::Compile {
+                            contract_name: contract_name.clone(),
+                            contract: schema.contract.clone(),
+                            initial_value: schema.initial_value.0.clone(),
+                            contract_path: contracts_path
+                                .join("contracts")
+                                .join(format!("{}_{}", subject_id, id)),
+                        })
+                        .await
+                })
+                .await?;
 
             if let Some(error) = terminal_error {
-                return Err(ActorError::Functional {
-                    description: format!(
-                        "Can not refresh schema contract {}: {}",
-                        id, error
-                    ),
-                });
+                // Degraded mode (same policy as `up_compilers_schemas`):
+                // the refreshed artifact could not be obtained, so evict
+                // the previous module from the local cache — evaluating
+                // with a stale contract would diverge from the rest of
+                // the network. Evaluations of this schema answer
+                // `Unavailable` until the artifacts are restored.
+                error!(
+                    schema_id = %id,
+                    error = %error,
+                    "Contract refresh failed, stale artifact evicted; evaluations of this schema will be unavailable"
+                );
+                contracts.write().await.remove(&contract_name);
             }
         }
 
