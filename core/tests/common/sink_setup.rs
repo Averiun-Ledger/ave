@@ -101,7 +101,7 @@ pub fn make_sink_entry_with_concurrency(
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -133,7 +133,7 @@ pub fn make_sink_entry_with_auth(
                 url,
                 auth: Some(auth),
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -181,7 +181,7 @@ pub fn make_sink_entry_with_signature_and_retries(
                 signature: true,
                 max_retries,
                 retry_base_delay_ms: 100,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -214,7 +214,7 @@ pub fn make_sink_entry_with_tls(
                 url,
                 tls: Some(tls),
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -249,7 +249,7 @@ pub fn make_sink_entry_batch(
                 batch_max_delay_ms: 100,
                 compression,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -282,7 +282,7 @@ pub fn make_sink_entry_with_proxy(
                 url,
                 proxy: Some(proxy),
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -315,7 +315,7 @@ pub fn make_sink_entry_with_headers(
                 url,
                 headers,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -351,7 +351,7 @@ pub fn make_sink_entry_with_retry_policy(
                 max_retries,
                 retry_base_delay_ms,
                 retry_max_delay_ms,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -373,6 +373,37 @@ pub fn example_sink_config(
         governance_id,
         BTreeSet::from([SinkTypes::All]),
     )]
+}
+
+/// Returns a sink configuration with a short request timeout (2s) so tests
+/// that simulate a hung or unreachable sink (`ResponseMode::Drop`) see the
+/// client timeout fire quickly instead of waiting the default 10s.
+#[allow(dead_code)]
+pub fn short_timeout_sink_config(
+    url: String,
+    governance_id: Option<String>,
+) -> Vec<SinkConfigEntry> {
+    vec![SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: "example-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::All]),
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
+                url,
+                max_retries: 0,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            })),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            max_catch_up_concurrency: 2,
+            ..Default::default()
+        }],
+    }]
 }
 
 /// Returns a sink configuration designed to trigger flapping detection after
@@ -812,7 +843,7 @@ pub fn make_governance_sink_entry(
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),

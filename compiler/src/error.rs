@@ -86,4 +86,7 @@ pub enum CompilerError {
 
     #[error("contract check failed: {error}")]
     ContractCheckFailed { error: String },
+
+    #[error("engine creation failed: {details}")]
+    EngineCreation { details: String },
 }

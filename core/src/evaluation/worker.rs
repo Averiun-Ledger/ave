@@ -394,11 +394,13 @@ impl EvalWorker {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
             // The evaluator can not evaluate (its compiler pool is
-            // unreachable or its local artifacts are missing): not the
-            // request's fault, cast no verdict. The requester replaces
-            // this evaluator from its pending pool.
+            // unreachable, its local artifacts are missing or its own
+            // resources are not enough): not the request's fault, cast no
+            // verdict. The requester replaces this evaluator from its
+            // pending pool.
             EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..))
-            | EvaluatorError::CompilersUnavailable(..) => {
+            | EvaluatorError::CompilersUnavailable(..)
+            | EvaluatorError::ResourceUnavailable(..) => {
                 return Ok(EvaluationRes::Unavailable);
             }
             _ => {}

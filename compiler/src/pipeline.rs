@@ -728,8 +728,12 @@ pub fn map_runtime_error_to_compiler_error(
     error: RuntimeError,
 ) -> CompilerError {
     match error {
-        RuntimeError::EngineCreation(details)
-        | RuntimeError::PrecompileFailed(details) => {
+        // The wasmtime engine cannot be built: the host is broken, not the
+        // contract — must never be reported as a contract failure.
+        RuntimeError::EngineCreation(details) => {
+            CompilerError::EngineCreation { details }
+        }
+        RuntimeError::PrecompileFailed(details) => {
             CompilerError::WasmPrecompileFailed { details }
         }
         RuntimeError::DeserializationFailed(details) => {
@@ -752,6 +756,21 @@ pub fn map_runtime_error_to_compiler_error(
         }
         RuntimeError::MemoryAllocationFailed(details) => {
             CompilerError::MemoryAllocationFailed { details }
+        }
+        // These contexts deserialize bytes produced by the contract (its
+        // result buffers and final state): garbage there is a deterministic
+        // contract failure, not a host serialization problem.
+        RuntimeError::SerializationError { context, details }
+            if matches!(
+                context,
+                "execution result" | "final state json" | "init check result"
+            ) =>
+        {
+            CompilerError::ContractExecutionFailed {
+                details: format!(
+                    "invalid contract output [{context}]: {details}"
+                ),
+            }
         }
         RuntimeError::SerializationError { context, details } => {
             CompilerError::SerializationError { context, details }

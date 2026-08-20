@@ -1472,47 +1472,79 @@ impl Runner {
 
 fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
     match error {
-        RuntimeError::EngineCreation(details)
-        | RuntimeError::PrecompileFailed(details)
-        | RuntimeError::DeserializationFailed(details) => {
-            RunnerError::WasmError {
-                operation: "compile module",
+        // The wasmtime engine itself cannot be built: the node is broken,
+        // not the contract — stays an internal error.
+        RuntimeError::EngineCreation(details) => RunnerError::WasmError {
+            operation: "create engine",
+            details,
+        },
+        // Resource limits whose ceiling derives from this machine's spec
+        // (memory, instantiation): another evaluator with more capacity may
+        // succeed, so the node casts no verdict instead of calling the
+        // request invalid.
+        RuntimeError::InstantiationFailed(details) => {
+            RunnerError::ResourceLimit {
+                operation: "instantiate",
                 details,
             }
         }
-        RuntimeError::InvalidModule(kind) => RunnerError::WasmError {
-            operation: "validate module",
-            details: kind.to_string(),
-        },
-        RuntimeError::EntryPointNotFound { function } => {
-            RunnerError::WasmError {
-                operation: "resolve entrypoint",
-                details: format!("entry point not found: {}", function),
-            }
-        }
-        RuntimeError::ContractExecutionFailed(details) => {
-            RunnerError::WasmError {
-                operation: "call entrypoint",
-                details,
-            }
-        }
-        RuntimeError::FuelLimitError(details) => RunnerError::WasmError {
-            operation: "set fuel",
-            details,
-        },
-        RuntimeError::InstantiationFailed(details) => RunnerError::WasmError {
-            operation: "instantiate",
-            details,
-        },
         RuntimeError::MemoryAllocationFailed(details) => {
-            RunnerError::MemoryError {
+            RunnerError::ResourceLimit {
                 operation: "contract memory operation",
                 details,
             }
         }
+        // These contexts deserialize bytes produced by the contract (its
+        // result buffers and final state): garbage there is a deterministic
+        // contract failure, not a node serialization problem.
+        RuntimeError::SerializationError { context, details }
+            if matches!(
+                context,
+                "execution result" | "final state json" | "init check result"
+            ) =>
+        {
+            RunnerError::ContractFailed {
+                details: format!(
+                    "invalid contract output [{context}]: {details}"
+                ),
+            }
+        }
+        // Local (de)serialization of node data: internal error.
         RuntimeError::SerializationError { context, details } => {
             RunnerError::SerializationError { context, details }
         }
+        // Everything else is deterministic given the same artifact and the
+        // pinned engine: fuel is a fixed network-wide limit and module
+        // loading behaves identically on every evaluator, so all of them
+        // fail the same way. It is a contract failure (failed evaluation
+        // vote), never a node crash — a pathological contract must not take
+        // evaluators down.
+        RuntimeError::PrecompileFailed(details) => {
+            RunnerError::ContractFailed {
+                details: format!("compile module: {}", details),
+            }
+        }
+        RuntimeError::DeserializationFailed(details) => {
+            RunnerError::ContractFailed {
+                details: format!("load module: {}", details),
+            }
+        }
+        RuntimeError::InvalidModule(kind) => RunnerError::ContractFailed {
+            details: format!("validate module: {}", kind),
+        },
+        RuntimeError::EntryPointNotFound { function } => {
+            RunnerError::ContractFailed {
+                details: format!("entry point not found: {}", function),
+            }
+        }
+        RuntimeError::ContractExecutionFailed(details) => {
+            RunnerError::ContractFailed {
+                details: format!("execute contract: {}", details),
+            }
+        }
+        RuntimeError::FuelLimitError(details) => RunnerError::ContractFailed {
+            details: format!("set fuel: {}", details),
+        },
     }
 }
 

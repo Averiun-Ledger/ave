@@ -58,9 +58,10 @@ use crate::common::{
         make_sink_entry_with_retry_policy, make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
         restart_config, restart_config_safe_mode, restart_config_with_peers,
-        sample_sinks, short_idle_sink_config, transient_error_sink_config,
-        wait_for_sink_blocked, wait_for_sink_caught_up,
-        wait_for_sink_lagging_subjects, wait_for_sink_unblocked,
+        sample_sinks, short_idle_sink_config, short_timeout_sink_config,
+        transient_error_sink_config, wait_for_sink_blocked,
+        wait_for_sink_caught_up, wait_for_sink_lagging_subjects,
+        wait_for_sink_unblocked,
     },
     test_sink::{AuthResponseMode, ResponseMode, TestProxy, TestSink},
 };
@@ -614,7 +615,7 @@ async fn replay_single_subject_after_sink_loss() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink.url(), Some(governance_id.to_string())),
+        short_timeout_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -2540,7 +2541,7 @@ async fn sink_permanent_failure_and_manual_recovery() {
         initial_local_db,
         initial_ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink_url, Some(governance_id.to_string())),
+        short_timeout_sink_config(sink_url, Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -3010,7 +3011,10 @@ async fn sink_recovery_across_node_restart() {
         keys: Some(initial_keys),
         local_db: Some(initial_local_db),
         ext_db: Some(initial_ext_db),
-        sinks: example_sink_config(sink_url, Some(governance_id.to_string())),
+        sinks: short_timeout_sink_config(
+            sink_url,
+            Some(governance_id.to_string()),
+        ),
         ..Default::default()
     })
     .await;
@@ -3073,7 +3077,7 @@ async fn sink_recovery_across_node_restart() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink.url(), Some(governance_id.to_string())),
+        short_timeout_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -3113,7 +3117,7 @@ async fn sink_recovery_across_node_restart() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink.url(), Some(governance_id.to_string())),
+        short_timeout_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -3154,7 +3158,7 @@ async fn sink_recovery_across_node_restart() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink.url(), Some(governance_id.to_string())),
+        short_timeout_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -7201,7 +7205,7 @@ async fn sink_signature_v2_zstd_verify() {
                         signature_version: 2,
                         compression: SinkCompression::Zstd,
                         max_retries: 0,
-                        request_timeout_ms: 2000,
+                        request_timeout_ms: 10_000,
                         connect_timeout_ms: 1000,
                         ..Default::default()
                     }),
@@ -11202,7 +11206,7 @@ async fn pending_replay_survives_node_restart() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink.url(), Some(governance_id.to_string())),
+        short_timeout_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -11246,7 +11250,7 @@ async fn pending_replay_survives_node_restart() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(sink.url(), Some(governance_id.to_string())),
+        short_timeout_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);

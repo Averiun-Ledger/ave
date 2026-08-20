@@ -29,8 +29,8 @@ pub enum RunnerError {
         details: String,
     },
 
-    #[error("memory error [{operation}]: {details}")]
-    MemoryError {
+    #[error("resource limit [{operation}]: {details}")]
+    ResourceLimit {
         operation: &'static str,
         details: String,
     },

@@ -83,6 +83,12 @@ pub enum EvaluatorError {
     /// contract failure and not a request failure — the evaluator answers
     /// `EvaluationRes::Unavailable` and casts no verdict.
     CompilersUnavailable(String),
+    /// The node cannot do the work with its own resources (memory or
+    /// instantiation limits, which derive from this machine's spec):
+    /// another evaluator with more capacity may succeed, so the evaluator
+    /// answers `EvaluationRes::Unavailable` instead of calling the request
+    /// invalid.
+    ResourceUnavailable(String),
 }
 
 #[derive(
@@ -126,6 +132,9 @@ impl std::fmt::Display for EvaluatorError {
             Self::CompilersUnavailable(msg) => {
                 write!(f, "compilers unavailable: {}", msg)
             }
+            Self::ResourceUnavailable(msg) => {
+                write!(f, "resource unavailable: {}", msg)
+            }
         }
     }
 }
@@ -133,41 +142,58 @@ impl std::fmt::Display for EvaluatorError {
 impl From<CompilerError> for EvaluatorError {
     fn from(value: CompilerError) -> Self {
         match value {
-            // Errores del usuario: el contrato enviado es inválido
+            // User errors: the submitted contract is invalid
             CompilerError::Base64DecodeFailed { .. } => {
                 Self::InvalidEventRequest(value.to_string())
             }
+            // Deterministic contract failures: every healthy evaluator hits
+            // them identically (same artifact, pinned engine, fixed
+            // network-wide fuel limit), so they are a failed evaluation
+            // vote, never a node crash. A pathological contract must not
+            // take evaluators down.
             CompilerError::CompilationFailed
             | CompilerError::InvalidModule { .. }
             | CompilerError::EntryPointNotFound { .. }
             | CompilerError::ContractCheckFailed { .. }
             | CompilerError::ContractExecutionFailed { .. }
-            | CompilerError::InvalidContractOutput { .. } => {
+            | CompilerError::InvalidContractOutput { .. }
+            | CompilerError::FuelLimitError { .. }
+            | CompilerError::WasmPrecompileFailed { .. }
+            | CompilerError::WasmDeserializationFailed { .. } => {
                 Self::Runner(EvalRunnerError::ContractFailed(value.to_string()))
             }
-            // Infraestructura del compiler: problema de liveness, no de
-            // validez del contrato; la evaluación se reintenta (Reboot)
+            // Resource limits whose ceiling derives from this machine's
+            // spec: another evaluator with more capacity may succeed, so
+            // the node casts no verdict instead of calling the request
+            // invalid.
+            CompilerError::InstantiationFailed { .. }
+            | CompilerError::MemoryAllocationFailed { .. } => {
+                Self::ResourceUnavailable(value.to_string())
+            }
+            // Compiler infrastructure: a liveness problem, not a contract
+            // validity problem. The worker maps these to
+            // `EvaluationRes::Unavailable` (the evaluator casts no verdict;
+            // the request only escalates to reboot if nobody can evaluate).
+            // The node no longer compiles: `CargoBuildFailed`/`BuildTimeout`
+            // are only produced by the compiler service, so if they ever
+            // reach the node they come from there.
             CompilerError::CompilersUnavailable { .. }
             | CompilerError::ToolchainMismatch { .. }
             | CompilerError::InvalidAttestationSignature
-            | CompilerError::AttestationMismatch { .. } => {
+            | CompilerError::AttestationMismatch { .. }
+            | CompilerError::CargoBuildFailed { .. }
+            | CompilerError::BuildTimeout { .. } => {
                 Self::CompilersUnavailable(value.to_string())
             }
-            // Fallos del sistema: no deberían ocurrir en un entorno sano
-            CompilerError::CargoBuildFailed { .. }
-            | CompilerError::BuildTimeout { .. }
-            | CompilerError::InvalidContractPath { .. }
+            // System failures: should not happen in a healthy environment
+            CompilerError::InvalidContractPath { .. }
             | CompilerError::DirectoryCreationFailed { .. }
             | CompilerError::FileWriteFailed { .. }
             | CompilerError::FileReadFailed { .. }
             | CompilerError::MissingHelper { .. }
             | CompilerError::ContractRegisterFailed { .. }
             | CompilerError::ToolchainFingerprintFailed { .. }
-            | CompilerError::FuelLimitError { .. }
-            | CompilerError::WasmPrecompileFailed { .. }
-            | CompilerError::WasmDeserializationFailed { .. }
-            | CompilerError::InstantiationFailed { .. }
-            | CompilerError::MemoryAllocationFailed { .. }
+            | CompilerError::EngineCreation { .. }
             | CompilerError::SerializationError { .. } => {
                 Self::InternalError(value.to_string())
             }
@@ -187,6 +213,11 @@ impl From<RunnerError> for EvaluatorError {
             RunnerError::ContractNotFound { .. } => Self::Runner(
                 EvalRunnerError::ContractNotFound(value.to_string()),
             ),
+            // Resource limits whose ceiling derives from this machine's
+            // spec: cast no verdict instead of calling the request invalid.
+            RunnerError::ResourceLimit { .. } => {
+                Self::ResourceUnavailable(value.to_string())
+            }
             RunnerError::MissingHelper { .. } => {
                 Self::InternalError(value.to_string())
             }
@@ -194,9 +225,6 @@ impl From<RunnerError> for EvaluatorError {
                 Self::InternalError(value.to_string())
             }
             RunnerError::SerializationError { .. } => {
-                Self::InternalError(value.to_string())
-            }
-            RunnerError::MemoryError { .. } => {
                 Self::InternalError(value.to_string())
             }
         }
