@@ -5583,6 +5583,124 @@ async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
 }
 
 #[test(tokio::test)]
+// Un fallo local fatal durante el refresh de un contrato en runtime (el
+// compilador entrega el artefacto pero el disco no puede persistirlo) no
+// se degrada: el evento commitea, el actor de gobernanza muere y, con el
+// disco aún roto, el reinicio se niega a arrancar en modo degradado.
+async fn test_gov_contract_refresh_disk_failure_restart_is_fatal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, dirs) = create_node(CreateNodeConfig {
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    // SN 1: schema "Example" con la v1 del contrato.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&node.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&node.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert!(contracts_dir.path().join("contracts").exists());
+
+    // Disco roto en caliente: los artefactos desaparecen y el directorio
+    // queda sin permisos de escritura.
+    fs::remove_dir_all(contracts_dir.path().join("contracts")).unwrap();
+    fs::set_permissions(
+        contracts_dir.path(),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+
+    // SN 2: cambio de contrato a la v2. El evento se persiste antes del
+    // refresh; este consigue el artefacto del compilador pero no puede
+    // escribirlo: error local fatal. Se emite async porque el actor de
+    // gobernanza muere justo después de commitear.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_contract": EXAMPLE_CONTRACT_V2
+                }
+            ]
+        }
+    });
+    emit_fact(&node.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+    get_subject(&node.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // El proceso del nodo sigue vivo: el fallo fatal tumba la gobernanza,
+    // no el sistema.
+    node_running(&node.api).await.unwrap();
+
+    // Apagado ordenado conservando claves y bases de datos.
+    let keys = node.keys.clone();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Con el disco aún roto el nodo no debe arrancar degradado: el fallo
+    // local fatal vuelve a aparecer al recompilar la v2 en el arranque.
+    let result = try_create_node(CreateNodeConfig {
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+
+    // Restaurar permisos para que el TempDir pueda limpiarse al salir.
+    fs::set_permissions(
+        contracts_dir.path(),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    match result {
+        Err(ave_core::error::Error::ActorCreation { actor, .. }) => {
+            assert_eq!(actor, "node");
+        }
+        Err(error) => panic!("unexpected boot error: {error}"),
+        Ok(_) => {
+            panic!("node booted degraded with a read-only contracts directory")
+        }
+    }
+}
+
+#[test(tokio::test)]
 // Un evaluador degradado se recupera al reiniciar con un pool sano: los
 // artefactos se obtienen en el arranque y el nodo vuelve a votar. El
 // quorum Majority exige a los dos evaluadores, así que el commit del
