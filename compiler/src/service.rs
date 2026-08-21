@@ -760,16 +760,22 @@ impl CompilerService for CompilerServer {
 /// failures), everything else is INTERNAL. `CargoBuildFailed` means the
 /// cargo process could not even run — a service misconfiguration, not a
 /// contract problem — so it is INTERNAL like any other infra failure.
+/// A `BuildTimeout` is also INTERNAL (decided 2026-08-20): a slow or
+/// loaded machine is not proof that the contract is bad, and calling it
+/// INVALID_ARGUMENT would be a deterministic-but-false negative vote.
+/// The node fails over to the next endpoint and, if none can build it,
+/// casts no verdict instead of rejecting the request. Abusing this for
+/// resource exhaustion requires emitting governance facts, which only
+/// the governance owner can do — the actor most interested in the
+/// network's safety.
 fn status_for_build_error(error: &CompilerError) -> Status {
     match error {
         CompilerError::Base64DecodeFailed { .. } => {
             Status::invalid_argument(error.to_string())
         }
-        CompilerError::CompilationFailed | CompilerError::BuildTimeout { .. } => {
-            Status::invalid_argument(
-                format!("contract does not compile: {error}"),
-            )
-        }
+        CompilerError::CompilationFailed => Status::invalid_argument(format!(
+            "contract does not compile: {error}"
+        )),
         _ => Status::internal(error.to_string()),
     }
 }

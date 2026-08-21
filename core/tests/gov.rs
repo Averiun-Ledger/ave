@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
+    fs,
     str::FromStr,
     sync::atomic::Ordering,
     time::Duration,
@@ -42,13 +43,16 @@ use test_log::test;
 
 use crate::common::{
     PORT_COUNTER, create_node, get_abort_request, node_running,
-    wait_request_state,
+    try_create_node, wait_request_state,
 };
 
 const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 const INVALID_EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXp";
 const FUEL_EXHAUSTING_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIGxldCBtdXQgYnVybjogdTY0ID0gZGF0YSBhcyB1NjQ7CiAgICAgICAgbG9vcCB7CiAgICAgICAgICBidXJuID0gYnVybi53cmFwcGluZ19tdWwoMzEpLndyYXBwaW5nX2FkZCg3KTsKICAgICAgICAgIHN0YXRlLm9uZSA9IChidXJuICUgMTAwMCkgYXMgdTMyOwogICAgICAgIH0KICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVHdvIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS50d28gPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RUaHJlZSB7IGRhdGEgfSA9PiB7CiAgICAgICAgaWYgZGF0YSA9PSA1MCB7CiAgICAgICAgICBjb250cmFjdF9yZXN1bHQuZXJyb3IgPSAiQ2FuIG5vdCBjaGFuZ2UgdGhyZWUgdmFsdWUsIDUwIGlzIGEgaW52YWxpZCB2YWx1ZSIudG9fb3duZWQoKTsKICAgICAgICAgIHJldHVybgogICAgICAgIH0KICAgICAgICAKICAgICAgICBzdGF0ZS50aHJlZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZEFsbCB7IG9uZSwgdHdvLCB0aHJlZSB9ID0+IHsKICAgICAgICBzdGF0ZS5vbmUgPSBvbmU7CiAgICAgICAgc3RhdGUudHdvID0gdHdvOwogICAgICAgIHN0YXRlLnRocmVlID0gdGhyZWU7CiAgICAgIH0KICB9CiAgY29udHJhY3RfcmVzdWx0LnN1Y2Nlc3MgPSB0cnVlOwp9";
 const CHANGED_SCHEMA_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgZGF0YTogU3RyaW5nCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0KZW51bSBTdGF0ZUV2ZW50IHsKICBDaGFuZ2VEYXRhIHsgZGF0YTogU3RyaW5nIH0sCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gbWFpbl9mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMiwgaW5pdF9zdGF0ZV9wdHI6IGkzMiwgZXZlbnRfcHRyOiBpMzIsIGlzX293bmVyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpleGVjdXRlX2NvbnRyYWN0KHN0YXRlX3B0ciwgaW5pdF9zdGF0ZV9wdHIsIGV2ZW50X3B0ciwgaXNfb3duZXIsIGNvbnRyYWN0X2xvZ2ljKQp9CgojW3Vuc2FmZShub19tYW5nbGUpXQpwdWIgdW5zYWZlIGZuIGluaXRfY2hlY2tfZnVuY3Rpb24oc3RhdGVfcHRyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpjaGVja19pbml0X2RhdGEoc3RhdGVfcHRyLCBpbml0X2xvZ2ljKQp9CgpmbiBpbml0X2xvZ2ljKAogIF9zdGF0ZTogJlN0YXRlLAogIGNvbnRyYWN0X3Jlc3VsdDogJm11dCBzZGs6OkNvbnRyYWN0SW5pdENoZWNrLAopIHsKICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0KCmZuIGNvbnRyYWN0X2xvZ2ljKAogIGNvbnRleHQ6ICZzZGs6OkNvbnRleHQ8U3RhdGVFdmVudD4sCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RSZXN1bHQ8U3RhdGU+LAopIHsKICBsZXQgc3RhdGUgPSAmbXV0IGNvbnRyYWN0X3Jlc3VsdC5zdGF0ZTsKICBtYXRjaCBjb250ZXh0LmV2ZW50LmNsb25lKCkgewogICAgICBTdGF0ZUV2ZW50OjpDaGFuZ2VEYXRhIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS5kYXRhID0gZGF0YS5jbG9uZSgpOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
+// Misma lógica que EXAMPLE_CONTRACT pero sin el rechazo de ModThree=50:
+// sirve para discriminar qué versión del contrato evaluó un nodo.
+const EXAMPLE_CONTRACT_V2: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLnRocmVlID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kQWxsIHsgb25lLCB0d28sIHRocmVlIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IG9uZTsKICAgICAgICBzdGF0ZS50d28gPSB0d287CiAgICAgICAgc3RhdGUudGhyZWUgPSB0aHJlZTsKICAgICAgfQogIH0KICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0=";
 
 #[track_caller]
 fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
@@ -4872,4 +4876,1251 @@ async fn test_contract_fuel_exhaustion_fails_event_nodes_survive() {
     get_subject(node1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
+}
+
+#[test(tokio::test)]
+// Un fallo de disco al persistir los artefactos de un contrato es un
+// fallo local fatal, no un problema del pool de compiladores: el nodo no
+// puede evaluar ese schema de forma fiable y el arranque debe fallar de
+// forma controlada en lugar de continuar en modo degradado.
+async fn test_gov_contract_artifacts_disk_failure_node_fails_boot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, dirs) = create_node(CreateNodeConfig {
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    // SN 1: schema con contrato. La compilación final persiste los
+    // artefactos bajo el directorio de contratos del nodo.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&node.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&node.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert!(contracts_dir.path().join("contracts").exists());
+
+    // Apagado ordenado conservando claves y bases de datos.
+    let keys = node.keys.clone();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Simular corrupción de disco: los artefactos desaparecen y el
+    // directorio queda sin permisos de escritura, así la recompilación
+    // del arranque no puede persistir el artefacto.
+    fs::remove_dir_all(contracts_dir.path().join("contracts")).unwrap();
+    fs::set_permissions(
+        contracts_dir.path(),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+
+    let result = try_create_node(CreateNodeConfig {
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+
+    // Restaurar permisos para que el TempDir pueda limpiarse al salir.
+    fs::set_permissions(
+        contracts_dir.path(),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    match result {
+        Err(ave_core::error::Error::ActorCreation { actor, .. }) => {
+            assert_eq!(actor, "node");
+        }
+        Err(error) => panic!("unexpected boot error: {error}"),
+        Ok(_) => {
+            panic!("node booted with a read-only contracts directory")
+        }
+    }
+}
+
+#[test(tokio::test)]
+// Un compilador cuya clave pública no coincide con el pin configurado es
+// indistinguible de uno comprometido: el cliente descarta sus respuestas
+// (firma de atestación inválida), el evaluador responde `Unavailable` sin
+// emitir veredicto y, al no cerrarse el quorum, la request entra en
+// RebootTimeOut en lugar de perderse. Ambos nodos siguen operativos.
+async fn test_gov_evaluator_wrong_compiler_pin_unavailable_reboot() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // Segundo nodo apuntando al compilador embebido real pero con un pin
+    // de clave pública incorrecto: toda respuesta se descarta.
+    let mut compiler_config =
+        ave_core::test_compiler::test_compiler_config().await;
+    compiler_config.compiler_public_key = Some(
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string(),
+    );
+
+    let (node2, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        compiler: Some(compiler_config),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    node_running(&node2.api).await.unwrap();
+    let node2 = &node2.api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    // SN 1: node2 pasa a ser evaluador y testigo. Con 2 evaluadores y
+    // quorum Majority la evaluación exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "evaluator": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Esperar a que el fact commitee en node1 antes de sincronizar:
+    // wait_request puede terminar en Approval, antes del commit real.
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Fact con contrato: node1 evalúa correctamente pero las respuestas
+    // del compilador de node2 se descartan por el pin; sin quorum la
+    // request entra en RebootTimeOut.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id,
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // La gobernanza no avanza y ambos nodos siguen respondiendo.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    assert_eq!(state.sn, 1);
+    assert!(state.active);
+    node_running(node2).await.unwrap();
+}
+
+#[test(tokio::test)]
+// La compilación final con el pool caído degrada pero no tumba el nodo:
+// el schema queda sin artefacto local y sus evaluaciones responden
+// `Unavailable`, el quorum se cierra con el resto de evaluadores y el
+// nodo degradado sigue aplicando el ledger como testigo.
+async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+    let node2 = &nodes[1].api;
+
+    // Tercer nodo cuyo compilador apunta a un endpoint muerto.
+    let (node3, mut node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node3_dirs);
+    node_running(&node3.api).await.unwrap();
+    let node3 = &node3.api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2, node3]).await;
+
+    // SN 1: los tres nodos pasan a ser evaluadores y testigos de la
+    // gobernanza. Sin contratos de por medio, la evalúa el Owner.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2", "AveNode3"],
+                    "evaluator": ["AveNode2", "AveNode3"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    node3.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    get_subject(node3, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 2: schema con contrato y roles de schema. La evaluación temporal
+    // de node3 responde `Unavailable` pero el quorum Majority (2 de 3) se
+    // cierra con node1 y node2. Al commitear, node3 intenta la
+    // compilación final, agota los reintentos (~30s de backoff; el poll
+    // de get_subject absorbe la espera) y degrada: el schema queda sin
+    // artefacto local.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode3",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode3",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    node3.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    get_subject(node3, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Creación del subject: node3 responde `Unavailable` (contrato no
+    // encontrado) y el quorum se cierra con node1 y node2.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    get_subject(node2, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    get_subject(node3, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    // El fact se evalúa sin node3 y commitea con el quorum restante.
+    emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 7}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(node1, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(state.properties, json!({"one": 7, "two": 0, "three": 0}));
+
+    // El nodo degradado sigue vivo y aplica el ledger como testigo.
+    let state = get_subject(node3, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(state.properties, json!({"one": 7, "two": 0, "three": 0}));
+}
+
+#[test(tokio::test)]
+// Si el refresh de un contrato modificado falla por infraestructura del
+// pool, el módulo anterior se expulsa del caché local: evaluar con el
+// contrato stale divergiría del resto de la red. El evaluador responde
+// `Unavailable` (RebootTimeOut) en lugar de votar con la versión vieja,
+// lo que produciría un RebootDiff.
+async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // node2 con un directorio de contratos explícito: el artefacto v1
+    // debe sobrevivir al reinicio para que el arranque lo cargue de
+    // disco (si no se preserva, el restart genera un directorio vacío y
+    // el nodo arrancaría ya degradado, sin módulo stale que expulsar).
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let (mut node2_data, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2_data.api).await.unwrap();
+
+    let node2 = &node2_data.api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    // SN 1: miembro + schema "Example" (v1). node2 es testigo de la
+    // gobernanza (no evaluador: los facts de gobernanza commitean solo
+    // con el Owner) y evaluador del schema; el quorum Majority de
+    // evaluación del schema exige a los dos evaluadores.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Subject y fact con la v1: ambos evaluadores operativos.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    get_subject(node2, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(node1, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Esperar a que node2 aplique el evento antes de apagarlo: reiniciar
+    // un nodo desincronizado degrada todo lo posterior bajo estrés.
+    get_subject(node2, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Reinicio de node2 con el compilador muerto conservando el
+    // directorio de contratos: el artefacto v1 está en disco, así que el
+    // arranque no necesita al pool.
+    let keys = node2_data.keys.clone();
+    let local_db = node2_dirs[0].path().to_path_buf();
+    let ext_db = node2_dirs[1].path().to_path_buf();
+
+    node2_data.token.cancel();
+    join_all(node2_data.handler.iter_mut()).await;
+
+    let (node2, mut node2_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    dirs.append(&mut node2_dirs_new);
+    node_running(&node2.api).await.unwrap();
+    let node2 = &node2.api;
+
+    // SN 2: cambio de contrato a la v2 (ModThree=50 pasa a ser válido).
+    // Lo evalúa el Owner únicamente. Al commitear, node2 intenta el
+    // refresh contra su pool muerto, agota los reintentos (~30s de
+    // backoff) y expulsa el módulo v1 del caché.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_contract": EXAMPLE_CONTRACT_V2
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Sincronizar node2: su gobernanza queda ocupada con los reintentos
+    // del refresh, así que este poll espera a que la expulsión ya haya
+    // ocurrido antes de emitir el siguiente fact.
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // ModThree=50: node1 (v2) vota OK; node2, sin módulo, responde
+    // `Unavailable`. Sin quorum la request entra en RebootTimeOut. Si la
+    // expulsión no existiera, node2 votaría Error con la v1 y el
+    // resultado sería RebootDiff.
+    let request_id = emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({"ModThree": {"data": 50}}),
+        false,
+    )
+    .await
+    .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id,
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // El nodo degradado sigue operativo.
+    node_running(node2).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Un evaluador degradado se recupera al reiniciar con un pool sano: los
+// artefactos se obtienen en el arranque y el nodo vuelve a votar. El
+// quorum Majority exige a los dos evaluadores, así que el commit del
+// fact prueba que el nodo recuperado participa de nuevo.
+async fn test_gov_evaluator_recovers_after_compiler_restart() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // Segundo nodo con el compilador apuntando a un endpoint muerto.
+    let (mut node2, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: node2 pasa a ser evaluador y testigo. Con 2 evaluadores y
+    // quorum Majority la evaluación exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "evaluator": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Intento de fact con contrato: node2 no puede evaluar y la request
+    // entra en RebootTimeOut.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id,
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Reinicio con el pool sano (el embebido autoinyectado): los
+    // artefactos se obtienen al arrancar y node2 vuelve a evaluar.
+    let keys = node2.keys.clone();
+    let local_db = node2_dirs[0].path().to_path_buf();
+    let ext_db = node2_dirs[1].path().to_path_buf();
+
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let (node2, mut node2_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    dirs.append(&mut node2_dirs_new);
+    node_running(&node2.api).await.unwrap();
+
+    // Con el pool recuperado, la propia request sale del reboot y
+    // commitea: como el quorum exige el voto de node2, el commit prueba
+    // la recuperación. No hace falta reemitir nada — los reboots por
+    // TimeOut son ilimitados (el schedule repite su último valor).
+    let state = get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    node_running(&node2.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Un artefacto corrupto en disco no es un fallo fatal: el check de
+// integridad (hash del wasm y del precompilado) lo detecta en el
+// arranque, lo descarta y recompila desde el pool. El nodo arranca y
+// evalúa con normalidad.
+async fn test_contract_artifact_corruption_self_heals_on_boot() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let (mut node, dirs) = create_node(CreateNodeConfig {
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    // SN 1: schema con contrato y roles del Owner; la compilación final
+    // persiste los artefactos en el directorio de contratos.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&node.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert!(contracts_dir.path().join("contracts").exists());
+
+    // Apagado ordenado conservando claves y bases de datos.
+    let keys = node.keys.clone();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Corromper todos los artefactos persistidos: los hashes no
+    // coincidirán con los registrados y el loader los descartará.
+    let contracts_root = contracts_dir.path().join("contracts");
+    for entry in fs::read_dir(&contracts_root).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            for artifact in fs::read_dir(entry.path()).unwrap() {
+                let artifact = artifact.unwrap();
+                if artifact.file_type().unwrap().is_file() {
+                    fs::write(artifact.path(), b"corrupted artifact").unwrap();
+                }
+            }
+        }
+    }
+
+    // Reinicio: el loader detecta el hash mismatch, recompila desde el
+    // pool y el nodo arranca con normalidad.
+    let (node, _new_dirs) = create_node(CreateNodeConfig {
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    // El nodo evalúa con el artefacto recompilado: subject + fact.
+    let (subject_id, ..) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 7}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(state.properties, json!({"one": 7, "two": 0, "three": 0}));
+}
+
+#[test(tokio::test)]
+// La degradación es por schema, no por nodo: un evaluador que reinicia
+// con el pool caído pero con el artefacto en disco sigue evaluando ese
+// schema con total normalidad (solo queda mudo para schemas que no puede
+// obtener). El quorum Majority exige a los dos evaluadores, así que el
+// commit prueba que node2 votó con el artefacto cacheado.
+async fn test_contract_cached_artifact_evaluates_with_dead_compiler_pool() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // node2 con un directorio de contratos explícito: el artefacto debe
+    // sobrevivir al reinicio para que el arranque lo cargue de disco (si
+    // no se preserva, el restart genera un directorio vacío y el nodo
+    // degradaría, que no es lo que se quiere probar).
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let (mut node2_data, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2_data.api).await.unwrap();
+
+    let node2 = &node2_data.api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    // SN 1: miembro + schema "Example". node2 es testigo de la
+    // gobernanza y evaluador del schema; el quorum Majority exige a los
+    // dos evaluadores.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Subject y fact con ambos nodos sanos: el artefacto queda
+    // persistido en disco en node2.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    get_subject(node2, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(node1, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Esperar a que node2 aplique el evento antes de apagarlo: reiniciar
+    // un nodo desincronizado degrada todo lo posterior bajo estrés.
+    get_subject(node2, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Reinicio de node2 con el compilador muerto conservando el
+    // directorio de contratos: el arranque carga el artefacto desde
+    // disco y no necesita al pool.
+    let keys = node2_data.keys.clone();
+    let local_db = node2_dirs[0].path().to_path_buf();
+    let ext_db = node2_dirs[1].path().to_path_buf();
+
+    node2_data.token.cancel();
+    join_all(node2_data.handler.iter_mut()).await;
+
+    let (node2, mut node2_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    dirs.append(&mut node2_dirs_new);
+    node_running(&node2.api).await.unwrap();
+    let node2 = &node2.api;
+
+    // Fact posterior: node2 evalúa con el artefacto cacheado y el fact
+    // commitea. Sin su voto no habría quorum, así que el commit prueba
+    // que el nodo sigue operativo para este schema pese al pool caído.
+    // Se emite async y se espera el commit con get_subject (acotado):
+    // wait_request no tiene límite y bajo estrés la request puede pasar
+    // por varias rondas de reboot antes de commitear.
+    emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({"ModTwo": {"data": 9}}),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(node1, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_eq!(state.properties, json!({"one": 1, "two": 9, "three": 0}));
+
+    let state = get_subject(node2, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_eq!(state.properties, json!({"one": 1, "two": 9, "three": 0}));
 }

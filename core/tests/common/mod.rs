@@ -117,9 +117,22 @@ pub struct CreateNodeConfig {
     /// Explicit compiler configuration; `None` uses the default (in tests,
     /// the auto-injected embedded compiler).
     pub compiler: Option<CompilerNodeConfig>,
+    /// Explicit contracts directory; `None` generates a fresh one. Needed
+    /// by tests that manipulate the on-disk artifacts (permissions,
+    /// deletions) to exercise boot-time failures.
+    pub contracts_path: Option<PathBuf>,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
+    try_create_node(config).await.unwrap()
+}
+
+/// Fallible variant of [`create_node`] for tests that expect the node boot
+/// to fail (fatal contract artifact errors surface as `Api::build` errors).
+#[allow(dead_code)]
+pub async fn try_create_node(
+    config: CreateNodeConfig,
+) -> Result<(NodeData, Vec<TempDir>), ave_core::error::Error> {
     let CreateNodeConfig {
         node_type,
         listen_address,
@@ -134,35 +147,30 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         safe_mode,
         sinks,
         compiler,
+        contracts_path,
     } = config;
 
     let keys =
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let local_db = local_db.map_or_else(
-        || {
-            let dir =
-                tempfile::tempdir().expect("Can not create temporal directory");
-            let local_db = dir.path().to_path_buf();
-            vec_dirs.push(dir);
+    let local_db = local_db.unwrap_or_else(|| {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let local_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
 
-            local_db
-        },
-        |local_db| local_db,
-    );
+        local_db
+    });
 
-    let ext_db = ext_db.map_or_else(
-        || {
-            let dir =
-                tempfile::tempdir().expect("Can not create temporal directory");
-            let ext_db = dir.path().to_path_buf();
-            vec_dirs.push(dir);
+    let ext_db = ext_db.unwrap_or_else(|| {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let ext_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
 
-            ext_db
-        },
-        |ext_db| ext_db,
-    );
+        ext_db
+    });
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -171,11 +179,13 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         peers,
     );
 
-    let contracts_path = env::temp_dir().join(format!(
-        "ave-test-contracts-{}-{}",
-        process::id(),
-        CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
+    let contracts_path = contracts_path.unwrap_or_else(|| {
+        env::temp_dir().join(format!(
+            "ave-test-contracts-{}-{}",
+            process::id(),
+            CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ))
+    });
     fs::create_dir_all(&contracts_path)
         .expect("Can not create contracts directory");
 
@@ -231,10 +241,9 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         graceful_token.clone(),
         crash_token,
     )
-    .await
-    .unwrap();
+    .await?;
 
-    (
+    Ok((
         NodeData {
             api,
             handler: runners,
@@ -243,7 +252,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
             listen_address,
         },
         vec_dirs,
-    )
+    ))
 }
 
 #[allow(dead_code)]

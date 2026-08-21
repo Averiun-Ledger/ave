@@ -934,6 +934,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         safe_mode,
         sinks,
         compiler: None,
+        contracts_path: None,
     }
 }
 

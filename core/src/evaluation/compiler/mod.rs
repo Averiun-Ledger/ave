@@ -48,6 +48,26 @@ pub(crate) fn is_compiler_infra_error(error: &CompilerError) -> bool {
     )
 }
 
+/// Whether a compiler error is a fatal LOCAL problem (disk, artifact
+/// register, missing helpers, engine, local serialization): the node is
+/// broken and these must stay fatal — they never degrade. This is the
+/// same family that maps to `EvaluatorError::InternalError` in
+/// `evaluation/response.rs`; keep both in sync.
+pub(crate) fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
+    matches!(
+        error,
+        CompilerError::InvalidContractPath { .. }
+            | CompilerError::DirectoryCreationFailed { .. }
+            | CompilerError::FileWriteFailed { .. }
+            | CompilerError::FileReadFailed { .. }
+            | CompilerError::MissingHelper { .. }
+            | CompilerError::ContractRegisterFailed { .. }
+            | CompilerError::ToolchainFingerprintFailed { .. }
+            | CompilerError::EngineCreation { .. }
+            | CompilerError::SerializationError { .. }
+    )
+}
+
 struct CompilerSupport;
 
 impl CompilerSupport {

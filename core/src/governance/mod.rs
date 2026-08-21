@@ -12,6 +12,7 @@ use crate::{
         compiler::{
             CompilerResponse, ContractCompiler, ContractCompilerMessage,
             error::CompilerError, is_compiler_infra_error,
+            is_local_fatal_compiler_error,
         },
         request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
@@ -1810,6 +1811,17 @@ impl Governance {
             .await?;
 
             if let Some(error) = terminal_error {
+                // Fatal local problems (disk, register, helpers, engine)
+                // are never degraded: the node is broken and must fail
+                // like before the degraded mode existed.
+                if is_local_fatal_compiler_error(&error) {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Can not compile schema contract {}: {}",
+                            id, error
+                        ),
+                    });
+                }
                 // Degraded mode: this schema has no usable local artifact
                 // and the compiler pool could not provide one. That is not
                 // a fatal node problem — keep the governance running and
@@ -1933,6 +1945,17 @@ impl Governance {
                 .await?;
 
             if let Some(error) = terminal_error {
+                // Fatal local problems (disk, register, helpers, engine)
+                // are never degraded: the node is broken and must fail
+                // like before the degraded mode existed.
+                if is_local_fatal_compiler_error(&error) {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Can not refresh schema contract {}: {}",
+                            id, error
+                        ),
+                    });
+                }
                 // Degraded mode (same policy as `up_compilers_schemas`):
                 // the refreshed artifact could not be obtained, so evict
                 // the previous module from the local cache — evaluating
