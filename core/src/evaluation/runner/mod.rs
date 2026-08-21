@@ -601,6 +601,27 @@ impl Runner {
                 new_policies.validate = validate;
             }
 
+            if let Some(compile) = gov.change.compile {
+                compile.check_values().map_err(|e| {
+                    RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::InvalidQuorum {
+                            context: "governance compile policy".to_owned(),
+                            details: e,
+                        },
+                    }
+                })?;
+                if compile == new_policies.compile {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::SameValue {
+                            what: "governance compile policy".to_owned(),
+                        },
+                    });
+                }
+                new_policies.compile = compile;
+            }
+
             governance.policies_gov = new_policies;
         }
 

@@ -51,6 +51,7 @@ impl GovernanceData {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         };
 
         let owner_signers_gov: BTreeSet<MemberName> =
@@ -63,8 +64,9 @@ impl GovernanceData {
             witness: owner_signers_gov.clone(),
             issuer: RoleGovIssuer {
                 any: false,
-                signers: owner_signers_gov,
+                signers: owner_signers_gov.clone(),
             },
+            compiler: owner_signers_gov,
         };
 
         let not_gov_role = RolesTrackerSchemas {

@@ -72,6 +72,7 @@ pub struct RolesGov {
     pub validator: BTreeSet<MemberName>,
     pub witness: BTreeSet<MemberName>,
     pub issuer: RoleGovIssuer,
+    pub compiler: BTreeSet<MemberName>,
 }
 
 impl RolesGov {
@@ -84,6 +85,7 @@ impl RolesGov {
                 .issuer
                 .signers
                 .contains(&ReservedWords::Owner.to_string())
+            && self.compiler.contains(&ReservedWords::Owner.to_string())
     }
 
     pub fn remove_member_role(&mut self, remove_members: &Vec<String>) {
@@ -93,6 +95,7 @@ impl RolesGov {
             self.validator.remove(remove);
             self.witness.remove(remove);
             self.issuer.signers.remove(remove);
+            self.compiler.remove(remove);
         }
     }
 
@@ -116,6 +119,9 @@ impl RolesGov {
             if self.issuer.signers.remove(old_name) {
                 self.issuer.signers.insert(new_name.clone());
             };
+            if self.compiler.remove(old_name) {
+                self.compiler.insert(new_name.clone());
+            };
         }
     }
 
@@ -129,6 +135,7 @@ impl RolesGov {
             }
             RoleTypes::Creator => false,
             RoleTypes::Witness => self.witness.contains(name),
+            RoleTypes::Compiler => self.compiler.contains(name),
         }
     }
 
@@ -154,6 +161,10 @@ impl RolesGov {
                 (self.witness.iter().cloned().collect::<Vec<String>>(), false)
             }
             RoleTypes::Creator => (vec![], false),
+            RoleTypes::Compiler => (
+                self.compiler.iter().cloned().collect::<Vec<String>>(),
+                false,
+            ),
         }
     }
 }
@@ -386,7 +397,9 @@ impl RolesTrackerSchemas {
                         && x.name == name
                 }) || self.issuer.any
             }
-            RoleTypes::Approver | RoleTypes::Creator => false,
+            RoleTypes::Approver | RoleTypes::Creator | RoleTypes::Compiler => {
+                false
+            }
         }
     }
 
@@ -441,7 +454,9 @@ impl RolesTrackerSchemas {
                     .collect::<Vec<String>>(),
                 self.issuer.any,
             ),
-            RoleTypes::Approver | RoleTypes::Creator => (vec![], false),
+            RoleTypes::Approver | RoleTypes::Creator | RoleTypes::Compiler => {
+                (vec![], false)
+            }
         }
     }
 }
@@ -724,7 +739,7 @@ impl RolesSchema {
                         && x.name == name
                 }) || self.issuer.any
             }
-            RoleTypes::Approver => false,
+            RoleTypes::Approver | RoleTypes::Compiler => false,
         }
     }
 
@@ -849,7 +864,7 @@ impl RolesSchema {
                     .collect::<Vec<String>>(),
                 self.issuer.any,
             ),
-            RoleTypes::Approver => (vec![], false),
+            RoleTypes::Approver | RoleTypes::Compiler => (vec![], false),
         }
     }
 }
@@ -862,6 +877,7 @@ pub enum RoleTypes {
     Witness,
     Creator,
     Issuer,
+    Compiler,
 }
 
 impl From<ProtocolTypes> for RoleTypes {
@@ -870,6 +886,7 @@ impl From<ProtocolTypes> for RoleTypes {
             ProtocolTypes::Approval => Self::Approver,
             ProtocolTypes::Evaluation => Self::Evaluator,
             ProtocolTypes::Validation => Self::Validator,
+            ProtocolTypes::Compilation => Self::Compiler,
         }
     }
 }
@@ -983,6 +1000,8 @@ pub struct PolicyGov {
     pub evaluate: Quorum,
     /// Validate quorum
     pub validate: Quorum,
+    /// Compile quorum
+    pub compile: Quorum,
 }
 
 impl PolicyGov {
@@ -991,6 +1010,7 @@ impl PolicyGov {
             ProtocolTypes::Approval => Some(self.approve.clone()),
             ProtocolTypes::Evaluation => Some(self.evaluate.clone()),
             ProtocolTypes::Validation => Some(self.validate.clone()),
+            ProtocolTypes::Compilation => Some(self.compile.clone()),
         }
     }
 }
@@ -1020,6 +1040,7 @@ impl PolicySchema {
             ProtocolTypes::Approval => None,
             ProtocolTypes::Evaluation => Some(self.evaluate.clone()),
             ProtocolTypes::Validation => Some(self.validate.clone()),
+            ProtocolTypes::Compilation => None,
         }
     }
 }

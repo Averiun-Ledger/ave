@@ -1137,6 +1137,11 @@ pub fn gov_role_event_check_data(
                 check_and_register("issuer", issuer)?;
             }
         }
+        if let Some(ref compilers) = add.compiler {
+            for compiler in compilers {
+                check_and_register("compiler", compiler)?;
+            }
+        }
     }
 
     // Validar remove operations
@@ -1164,6 +1169,11 @@ pub fn gov_role_event_check_data(
         if let Some(ref issuers) = remove.issuer {
             for issuer in issuers {
                 check_and_register("issuer", issuer)?;
+            }
+        }
+        if let Some(ref compilers) = remove.compiler {
+            for compiler in compilers {
+                check_and_register("compiler", compiler)?;
             }
         }
     }
@@ -1521,6 +1531,72 @@ pub fn gov_role_event_check_data(
                 }
             }
         }
+
+        // Compilers
+        if let Some(compilers) = add.compiler {
+            if compilers.is_empty() {
+                return Err(RunnerError::InvalidEvent {
+                    location: "GovRoleEvent::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "compilers vec in governance roles add"
+                            .to_owned(),
+                    },
+                });
+            }
+
+            for compiler in compilers {
+                if compiler != compiler.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "compiler name".to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
+                        },
+                    });
+                }
+
+                if compiler.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "compiler name".to_owned(),
+                        },
+                    });
+                }
+
+                if compiler.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: "compiler name".to_owned(),
+                            actual: compiler.len(),
+                            max: 100,
+                        },
+                    });
+                }
+
+                if !members.contains(&compiler) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::NotMember {
+                            who: compiler,
+                        },
+                    });
+                }
+
+                if !new_roles.compiler.insert(compiler.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::AlreadyExists {
+                            what: "governance compiler".to_owned(),
+                            id: compiler,
+                        },
+                    });
+                };
+            }
+        }
     }
 
     if let Some(remove) = event.remove.clone() {
@@ -1719,6 +1795,41 @@ pub fn gov_role_event_check_data(
                         });
                     }
                     new_roles.issuer.any = false;
+                }
+            }
+        }
+
+        // Compilers
+        if let Some(compilers) = remove.compiler {
+            if compilers.is_empty() {
+                return Err(RunnerError::InvalidEvent {
+                    location: "GovRoleEvent::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "compilers vec in governance roles remove"
+                            .to_owned(),
+                    },
+                });
+            }
+            for compiler in compilers {
+                if compiler != compiler.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "compiler name to remove".to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
+                        },
+                    });
+                }
+                if !new_roles.compiler.remove(&compiler) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::CannotRemove {
+                            what: format!("compiler {}", compiler),
+                            reason: "does not have this role".to_owned(),
+                        },
+                    });
                 }
             }
         }
@@ -3339,6 +3450,7 @@ pub const fn gov_roles_event_is_empty(event: &GovRolesEvent) -> bool {
         && event.validator.is_none()
         && event.witness.is_none()
         && event.issuer.is_none()
+        && event.compiler.is_none()
 }
 
 pub const fn tracker_schemas_roles_add_event_is_empty(
@@ -3429,6 +3541,7 @@ pub const fn gov_policie_change_is_empty(event: &GovPolicieChange) -> bool {
     event.approve.is_none()
         && event.evaluate.is_none()
         && event.validate.is_none()
+        && event.compile.is_none()
 }
 
 pub const fn schema_policie_change_is_empty(

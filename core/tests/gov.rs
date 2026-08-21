@@ -597,11 +597,13 @@ async fn test_invalid_init_state() {
                     signers: BTreeSet::from(["Owner".to_owned()]),
                     any: false,
                 },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
             },
             policies_gov: PolicyGov {
                 approve: Quorum::Majority,
                 evaluate: Quorum::Majority,
                 validate: Quorum::Majority,
+                compile: Quorum::Majority,
             },
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
@@ -678,11 +680,13 @@ async fn test_invalid_contract() {
                     signers: BTreeSet::from(["Owner".to_owned()]),
                     any: false,
                 },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
             },
             policies_gov: PolicyGov {
                 approve: Quorum::Majority,
                 evaluate: Quorum::Majority,
                 validate: Quorum::Majority,
+                compile: Quorum::Majority,
             },
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
@@ -980,11 +984,13 @@ async fn test_basic_use_case_1b_1e_1a() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -1111,11 +1117,13 @@ async fn test_many_schema_in_one_governance() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::from([
             (
@@ -1222,6 +1230,7 @@ async fn test_transfer_event_governance_1() {
                 "governance": {
                     "add": {
                         "witness": ["AveNode1"],
+                        "compiler": ["AveNode1"],
                     }
                 }
             }
@@ -1296,11 +1305,13 @@ async fn test_transfer_event_governance_1() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -1347,11 +1358,16 @@ async fn test_transfer_event_governance_1() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -1398,6 +1414,7 @@ async fn test_transfer_event_governance_2() {
                 "governance": {
                     "add": {
                         "witness": ["AveNode1"],
+                        "compiler": ["AveNode1"],
                     }
                 }
             }
@@ -1514,11 +1531,13 @@ async fn test_transfer_event_governance_2() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -1623,11 +1642,13 @@ async fn test_governance_fail_approve() {
                     signers: BTreeSet::from(["Owner".to_owned()]),
                     any: false,
                 },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
             },
             policies_gov: PolicyGov {
                 approve: Quorum::Majority,
                 evaluate: Quorum::Majority,
                 validate: Quorum::Majority,
+                compile: Quorum::Majority,
             },
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
@@ -1788,11 +1809,13 @@ async fn test_governance_manual_many_approvers() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Fixed(100),
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -1966,11 +1989,13 @@ async fn test_governance_auto_many_approvers() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Fixed(100),
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -2169,11 +2194,13 @@ async fn test_governance_not_quorum_many_approvers() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Fixed(100),
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -2249,7 +2276,8 @@ async fn test_change_roles_gov() {
             "add": {
                 "witness": ["AveNode1"],
                 "evaluator": ["AveNode1"],
-                "validator": ["AveNode1"]
+                "validator": ["AveNode1"],
+                "compiler": ["AveNode1"]
             }
         }
     },
@@ -2278,6 +2306,13 @@ async fn test_change_roles_gov() {
                 "key": fake_node_1
             }
         ]
+    },
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["AveNode2"]
+            }
+        }
     }});
 
     emit_fact(owner_governance, governance_id.clone(), json, true)
@@ -2318,11 +2353,17 @@ async fn test_change_roles_gov() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "AveNode2".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -2365,7 +2406,8 @@ async fn test_change_roles_gov() {
         "governance": {
             "remove": {
                 "evaluator": ["AveNode1"],
-                "validator": ["AveNode1"]
+                "validator": ["AveNode1"],
+                "compiler": ["AveNode1"]
             }
         }
     }});
@@ -2402,11 +2444,16 @@ async fn test_change_roles_gov() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode2".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -2494,11 +2541,16 @@ async fn test_change_roles_gov() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode2".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -2535,6 +2587,101 @@ async fn test_change_roles_gov() {
     assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected);
+
+    // SN 5 (fallido): quitar el rol compiler al Owner está protegido por
+    // check_basic_gov, como el resto de roles básicos.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "remove": {
+                "compiler": ["Owner"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // SN 6 (fallido): dar el rol compiler a un miembro que no existe.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["NotAMember"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // SN 7 (fallido): dar el rol compiler a AveNode2, que ya lo tiene.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["AveNode2"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // SN 8 (fallido): quitar el rol compiler a AveNode1, que ya no lo
+    // tiene (se le quitó en el SN 3).
+    let json = json!({
+    "roles": {
+        "governance": {
+            "remove": {
+                "compiler": ["AveNode1"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Los cuatro eventos commitean como fallidos: el sn avanza pero las
+    // propiedades no cambian (compiler sigue siendo {AveNode2, Owner}).
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(8), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 4);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["AveNode2".to_owned(), "Owner".to_owned()])
+    );
+
+    // SN 9: se elimina al MIEMBRO AveNode2 (sin evento de roles). La
+    // cascada de borrado (remove_member_role) debe quitarlo también del
+    // rol compiler.
+    let json = json!({
+    "members": {
+        "remove": ["AveNode2"]
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(9), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 5);
+    assert!(!properties.members.contains_key("AveNode2"));
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["Owner".to_owned()])
+    );
 }
 
 #[test(tokio::test)]
@@ -2899,6 +3046,9 @@ async fn test_gov_no_all_validators() {
                     },
                     "validate": {
                         "fixed": 1
+                    },
+                    "compile": {
+                        "fixed": 1
                     }
                }
             }
@@ -2954,11 +3104,13 @@ async fn test_gov_no_all_validators() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Fixed(1),
             validate: Quorum::Fixed(1),
+            compile: Quorum::Fixed(1),
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -3089,11 +3241,13 @@ async fn test_gov_no_all_evaluators() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Fixed(1),
             validate: Quorum::Fixed(1),
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
@@ -3236,11 +3390,13 @@ async fn test_gov_fail_no_all_evaluators() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Fixed(1),
             validate: Quorum::Fixed(1),
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),

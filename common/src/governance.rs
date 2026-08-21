@@ -100,6 +100,7 @@ pub struct GovRolesEvent {
     pub validator: Option<BTreeSet<MemberName>>,
     pub witness: Option<BTreeSet<MemberName>>,
     pub issuer: Option<BTreeSet<MemberName>>,
+    pub compiler: Option<BTreeSet<MemberName>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -256,6 +257,7 @@ pub struct GovPolicieChange {
     pub approve: Option<Quorum>,
     pub evaluate: Option<Quorum>,
     pub validate: Option<Quorum>,
+    pub compile: Option<Quorum>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -838,6 +840,7 @@ pub enum ProtocolTypes {
     Approval,
     Evaluation,
     Validation,
+    Compilation,
 }
 
 impl fmt::Display for ProtocolTypes {
@@ -846,6 +849,7 @@ impl fmt::Display for ProtocolTypes {
             Self::Approval => write!(f, "Approval"),
             Self::Evaluation => write!(f, "Evaluation"),
             Self::Validation => write!(f, "Validation"),
+            Self::Compilation => write!(f, "Compilation"),
         }
     }
 }
