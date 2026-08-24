@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
+    compilation::{request::CompilationReq, response::CompilationRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     governance::witnesses_register::CurrentWitnessSubject,
     model::event::Ledger,
@@ -80,6 +81,12 @@ pub enum ActorMessage {
         governance_version: u64,
         items: Vec<CurrentWitnessSubject>,
         next_cursor: Option<DigestIdentifier>,
+    },
+    CompilationReq {
+        req: Box<Signed<CompilationReq>>,
+    },
+    CompilationRes {
+        res: CompilationRes,
     },
 }
 

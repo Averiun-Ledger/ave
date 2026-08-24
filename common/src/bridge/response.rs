@@ -677,6 +677,7 @@ pub enum RequestState {
         seconds: u64,
         count: u64,
     },
+    Compilation,
     Evaluation,
     Approval,
     Validation,
@@ -731,6 +732,7 @@ impl Display for RequestState {
                 "Reboot timeout, try: {}, seconds: {}",
                 count, seconds
             ),
+            Self::Compilation => write!(f, "Compilation"),
             Self::Evaluation => write!(f, "Evaluation"),
             Self::Approval => write!(f, "Approval"),
             Self::Validation => write!(f, "Validation"),

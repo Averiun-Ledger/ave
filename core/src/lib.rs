@@ -5,6 +5,7 @@ pub mod error;
 pub(crate) mod api_input_validation;
 pub mod approval;
 pub mod auth;
+pub mod compilation;
 pub mod db;
 pub mod distribution;
 pub mod evaluation;

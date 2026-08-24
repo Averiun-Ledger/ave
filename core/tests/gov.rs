@@ -2682,6 +2682,639 @@ async fn test_change_roles_gov() {
         properties.roles_gov.compiler,
         BTreeSet::from(["Owner".to_owned()])
     );
+
+    // SN 10: se devuelve el rol compiler a AveNode1 (nodo real). A partir
+    // de aquí el quórum de compile Majority exige el 2/2: Owner compila
+    // en local y AveNode1 por red.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["AveNode1"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(10), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 6);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["AveNode1".to_owned(), "Owner".to_owned()])
+    );
+
+    // Se sincroniza a AveNode1 antes de emitir: los siguientes facts
+    // exigen su compile remoto contra la gov_version actual, y la
+    // distribución a testigos no forma parte del ciclo de la request.
+    get_subject(eval_node, governance_id.clone(), Some(10), true)
+        .await
+        .unwrap();
+
+    // SN 11: se añade un schema con contrato. La fase compile exige el
+    // 2/2, así que AveNode1 compila por red; el commit también en
+    // AveNode1 (testigo de la gov) prueba que aplica el evento con la
+    // evidencia de compilación remota.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(11), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 7);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(11), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 7);
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+
+    // SN 12: cambio solo de initial_value. Los compilers resuelven el
+    // contrato actual contra su estado local (misma gov_version que la
+    // request), sin que el contrato viaje por red.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_initial_value": {
+                    "one": 10,
+                    "two": 20,
+                    "three": 30
+                }
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(12), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 8);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 10, "two": 20, "three": 30})
+    );
+
+    // AveNode1 tiene que estar al día antes del siguiente compile remoto.
+    get_subject(eval_node, governance_id.clone(), Some(12), true)
+        .await
+        .unwrap();
+
+    // SN 13 (fallido): cambiar el initial_value de un schema que no
+    // existe. Los compilers votan InvalidEvent y el evento commitea
+    // fallido sin pasar por evaluación: el sn avanza pero la versión y
+    // los schemas no cambian, también en el testigo.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "NotASchema",
+                "new_initial_value": {
+                    "one": 1,
+                    "two": 2,
+                    "three": 3
+                }
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(13), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 8);
+    assert_eq!(properties.schemas.len(), 1);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["AveNode1".to_owned(), "Owner".to_owned()])
+    );
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(13), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 8);
+    assert_eq!(properties.schemas.len(), 1);
+
+    // SN 14: cambio solo de contrato. El source viaja en el propio
+    // evento (la rama que faltaba de resolve_compile_targets) y el
+    // initial_value commiteado se mantiene intacto, como exige la
+    // aplicación del evento. Cambiar al mismo valor sería un evento
+    // inválido, así que se usa la otra versión del contrato de ejemplo
+    // (misma forma de estado, distinto hash).
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(14), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 9);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT_V2);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 10, "two": 20, "three": 30})
+    );
+
+    // AveNode1 tiene que estar al día antes del siguiente compile remoto.
+    get_subject(eval_node, governance_id.clone(), Some(14), true)
+        .await
+        .unwrap();
+
+    // SN 15: un solo evento añade dos schemas. La evidencia de compile
+    // cubre varios contratos a la vez (mapa ordenado: si no fuese
+    // determinista, los compilers firmarían resultados distintos y el
+    // quórum no cerraría).
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example2",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "Example3",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(15), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 10);
+    assert_eq!(properties.schemas.len(), 3);
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example2".to_owned()))
+    );
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example3".to_owned()))
+    );
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(15), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 10);
+    assert_eq!(properties.schemas.len(), 3);
+
+    // SN 16: un mismo evento cambia un contrato y quita el rol compiler
+    // a AveNode1. La fase compile se evalúa contra los roles ANTERIORES
+    // al evento (quórum 2/2 con AveNode1 por red); tras el commit el set
+    // de compilers queda reducido a {Owner}. El contrato vuelve a la
+    // versión original (rollback).
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT
+            }]
+        },
+        "roles": {
+            "governance": {
+                "remove": {
+                    "compiler": ["AveNode1"]
+                }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(16), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 11);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["Owner".to_owned()])
+    );
+
+    // SN 17: con el set reducido a {Owner} la fase compile sigue
+    // funcionando 1/1 (cambio solo de initial_value), también aplicado
+    // en AveNode1 como testigo.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_initial_value": {
+                    "one": 100,
+                    "two": 200,
+                    "three": 300
+                }
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(17), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 12);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 100, "two": 200, "three": 300})
+    );
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(17), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 12);
+}
+
+#[test(tokio::test)]
+// Sin quórum de compile la request entra en RebootTimeOut y sale sola
+// cuando el compiler vuelve: con compilers {Owner, AveNode2} y Majority
+// se exige el 2/2, así que el commit final prueba que AveNode2 compiló
+// por red tras recuperarse. No hace falta reemitir nada — los reboots
+// por TimeOut son ilimitados (el schedule repite su último valor).
+async fn test_gov_compile_quorum_unmet_reboots_and_recovers() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // Segundo nodo: compiler y testigo de la gobernanza.
+    let (mut node2, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser compiler y testigo. Con 2 compilers y
+    // quórum Majority la fase compile exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído no hay quórum de compile: el fact con contrato
+    // no puede commitear y la request entra en RebootTimeOut.
+    let keys = node2.keys.clone();
+    let local_db = node2_dirs[0].path().to_path_buf();
+    let ext_db = node2_dirs[1].path().to_path_buf();
+
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id,
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // AveNode2 vuelve con las mismas claves y bases de datos: la propia
+    // request sale del reboot y commitea (quórum 2/2 con compile remoto
+    // de AveNode2).
+    let (node2, mut node2_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    dirs.append(&mut node2_dirs_new);
+    node_running(&node2.api).await.unwrap();
+
+    let state = get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    node_running(&node2.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Una request atascada en la fase compile (compiler caído, sin quórum)
+// se puede abortar manualmente con limpieza: el manager para los hijos
+// de la fase, registra el abort y la gobernanza no avanza.
+async fn test_gov_compile_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser compiler y testigo. Con 2 compilers y
+    // quórum Majority la fase compile exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la request no puede cerrar el quórum de
+    // compile: se queda peleando con la fase.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    // Abort manual con la fase compile en vuelo.
+    node1
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, governance_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // La gobernanza no ha avanzado: sigue en el SN 1.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
 }
 
 #[test(tokio::test)]

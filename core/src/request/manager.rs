@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
+use crate::compilation::schemas_to_compile;
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
 };
@@ -41,7 +42,8 @@ use crate::model::common::subject::{
 };
 use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::event::{
-    ApprovalData, EvaluationData, Ledger, LedgerSeal, Protocols, ValidationData,
+    ApprovalData, CompilationData, EvaluationData, Ledger, LedgerSeal,
+    Protocols, ValidationData,
 };
 use crate::node::SubjectData;
 use crate::request::error::RequestManagerError;
@@ -56,6 +58,7 @@ use crate::{
     ActorMessage, NetworkMessage, Validation, ValidationMessage,
     approval::{Approval, ApprovalMessage},
     auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
+    compilation::{Compilation, CompilationMessage, request::CompilationReq},
     db::Storable,
     evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
     model::common::crash_system,
@@ -65,8 +68,8 @@ use crate::{
 use super::{
     reboot::{Reboot, RebootMessage},
     types::{
-        DistributionPlanEntry, DistributionPlanMode, ReqManInitMessage,
-        RequestManagerState,
+        CompileEvidence, DistributionPlanEntry, DistributionPlanMode,
+        ReqManInitMessage, RequestManagerState,
     },
 };
 
@@ -214,8 +217,8 @@ impl RequestManager {
         }
     }
 
-    //////// EVAL
-    async fn build_evaluation(
+    //////// COMPILE
+    async fn build_compilation(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
@@ -225,7 +228,145 @@ impl RequestManager {
 
         self.on_event(
             RequestManagerEvent::UpdateState {
-                state: Box::new(RequestManagerState::Evaluation),
+                state: Box::new(RequestManagerState::Compilation),
+            },
+            ctx,
+        )
+        .await;
+
+        let metadata = self.check_data_eval(ctx, &request).await?;
+
+        let (signed_compilation_req, quorum, signers, state) =
+            self.build_request_compile(ctx, &metadata, &request).await?;
+
+        if signers.is_empty() {
+            warn!(
+                request_id = %self.id,
+                schema_id = %metadata.schema_id,
+                "No compilers available for schema"
+            );
+
+            return Err(RequestManagerError::NoCompilersAvailable {
+                schema_id: metadata.schema_id.to_string(),
+                governance_id: signed_compilation_req
+                    .content()
+                    .governance_id
+                    .clone(),
+            });
+        }
+
+        self.run_compilation(
+            ctx,
+            signed_compilation_req,
+            quorum,
+            signers,
+            state,
+        )
+        .await
+    }
+
+    async fn build_request_compile(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        metadata: &Metadata,
+        request: &Signed<EventRequest>,
+    ) -> Result<
+        (
+            Signed<CompilationReq>,
+            Quorum,
+            HashSet<PublicKey>,
+            GovernanceData,
+        ),
+        RequestManagerError,
+    > {
+        let state = GovernanceData::try_from(metadata.properties.clone())?;
+
+        let (signers, quorum) = state.get_quorum_and_signers(
+            ProtocolTypes::Compilation,
+            &metadata.schema_id,
+            metadata.namespace.clone(),
+        )?;
+
+        let compile_req = CompilationReq {
+            event_request: request.clone(),
+            governance_id: metadata.governance_id.clone(),
+            sn: metadata.sn + 1,
+            gov_version: state.version,
+        };
+
+        let signature = get_sign(
+            ctx,
+            SignTypesNode::CompilationReq(Box::new(compile_req.clone())),
+        )
+        .await?;
+
+        let signed_compilation_req: Signed<CompilationReq> =
+            Signed::from_parts(compile_req, signature);
+
+        Ok((signed_compilation_req, quorum, signers, state))
+    }
+
+    async fn run_compilation(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        request: Signed<CompilationReq>,
+        quorum: Quorum,
+        signers: HashSet<PublicKey>,
+        state: GovernanceData,
+    ) -> Result<(), RequestManagerError> {
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(RequestManagerError::HelpersNotInitialized);
+        };
+
+        self.start_phase_metrics("compilation");
+        info!("Init compilation {}", self.id);
+        let child = ctx
+            .create_child(
+                "compilation",
+                Compilation::new(
+                    self.our_key.clone(),
+                    request,
+                    quorum,
+                    state,
+                    hash,
+                    network,
+                ),
+            )
+            .await?;
+
+        child
+            .tell(CompilationMessage::Create {
+                request_id: self.id.clone(),
+                version: self.version,
+                signers,
+            })
+            .await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Compilation,
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    //////// EVAL
+    async fn build_evaluation(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        compile: Option<Box<CompileEvidence>>,
+    ) -> Result<(), RequestManagerError> {
+        let Some(request) = self.request.clone() else {
+            return Err(RequestManagerError::RequestNotSet);
+        };
+
+        self.on_event(
+            RequestManagerEvent::UpdateState {
+                state: Box::new(RequestManagerState::Evaluation { compile }),
             },
             ctx,
         )
@@ -749,6 +890,7 @@ impl RequestManager {
     async fn build_validation_req(
         &mut self,
         ctx: &mut ActorContext<Self>,
+        compile: Option<CompileEvidence>,
         eval: Option<(EvaluationReq, EvaluationData)>,
         appro_data: Option<ApprovalData>,
     ) -> Result<
@@ -769,7 +911,9 @@ impl RequestManager {
             current_request_roles,
             schema_id,
             governance_data,
-        ) = self.build_validation_data(ctx, eval, appro_data).await?;
+        ) = self
+            .build_validation_data(ctx, compile, eval, appro_data)
+            .await?;
 
         if signers.is_empty() {
             let governance_id = vali_req.get_governance_id().map_err(|error| {
@@ -841,6 +985,7 @@ impl RequestManager {
     async fn build_validation_data(
         &self,
         ctx: &mut ActorContext<Self>,
+        compile: Option<CompileEvidence>,
         eval: Option<(EvaluationReq, EvaluationData)>,
         appro_data: Option<ApprovalData>,
     ) -> Result<
@@ -881,6 +1026,10 @@ impl RequestManager {
                     None,
                     CurrentRequestRoles {
                         evaluation: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                        compilation: RoleDataRegister {
                             workers: HashSet::new(),
                             quorum: Quorum::default(),
                         },
@@ -926,6 +1075,10 @@ impl RequestManager {
                             workers: HashSet::new(),
                             quorum: Quorum::default(),
                         },
+                        compilation: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
                         approval: RoleDataRegister {
                             workers: HashSet::new(),
                             quorum: Quorum::default(),
@@ -942,27 +1095,66 @@ impl RequestManager {
 
             let governance_data = self.get_governance_data(ctx).await?;
 
-            let (actual_protocols, gov_version, sn) =
-                if let Some((eval_req, eval_data)) = eval {
-                    if let Some(approval_data) = appro_data.clone() {
-                        (
-                            ActualProtocols::EvalApprove {
-                                eval_data,
-                                approval_data,
-                            },
-                            eval_req.gov_version,
-                            Some(eval_req.sn),
-                        )
-                    } else {
-                        (
-                            ActualProtocols::Eval { eval_data },
-                            eval_req.gov_version,
-                            Some(eval_req.sn),
-                        )
-                    }
-                } else {
+            let has_compilation = compile.is_some();
+
+            let (actual_protocols, gov_version, sn) = match (
+                compile,
+                eval,
+                appro_data.clone(),
+            ) {
+                (
+                    Some((_, compile_data)),
+                    Some((eval_req, eval_data)),
+                    Some(approval_data),
+                ) => (
+                    ActualProtocols::CompileEvalApprove {
+                        compile_data,
+                        eval_data,
+                        approval_data,
+                    },
+                    eval_req.gov_version,
+                    Some(eval_req.sn),
+                ),
+                (
+                    Some((_, compile_data)),
+                    Some((eval_req, eval_data)),
+                    None,
+                ) => (
+                    ActualProtocols::CompileEval {
+                        compile_data,
+                        eval_data,
+                    },
+                    eval_req.gov_version,
+                    Some(eval_req.sn),
+                ),
+                (Some((compile_req, compile_data)), None, None) => (
+                    ActualProtocols::Compile { compile_data },
+                    compile_req.gov_version,
+                    Some(compile_req.sn),
+                ),
+                (None, Some((eval_req, eval_data)), Some(approval_data)) => (
+                    ActualProtocols::EvalApprove {
+                        eval_data,
+                        approval_data,
+                    },
+                    eval_req.gov_version,
+                    Some(eval_req.sn),
+                ),
+                (None, Some((eval_req, eval_data)), None) => (
+                    ActualProtocols::Eval { eval_data },
+                    eval_req.gov_version,
+                    Some(eval_req.sn),
+                ),
+                (None, None, _) => {
                     (ActualProtocols::None, governance_data.version, None)
-                };
+                }
+                (Some(_), None, Some(_)) => {
+                    return Err(RequestManagerError::InvalidRequestState {
+                        expected: "compilation with evaluation before approval",
+                        got: "compilation with approval but without evaluation",
+                    });
+                }
+            };
 
             let lease = acquire_subject(
                 ctx,
@@ -1024,6 +1216,17 @@ impl RequestManager {
                             metadata.namespace.clone(),
                         )?;
 
+                    let (compilation_workers, compilation_quorum) =
+                        if has_compilation {
+                            governance_data.get_quorum_and_signers(
+                                ProtocolTypes::Compilation,
+                                &SchemaType::Governance,
+                                Namespace::new(),
+                            )?
+                        } else {
+                            (HashSet::new(), Quorum::default())
+                        };
+
                     let (approval_workers, approval_quorum) =
                         if appro_data.is_some() {
                             governance_data.get_quorum_and_signers(
@@ -1040,6 +1243,10 @@ impl RequestManager {
                             workers: evaluation_workers,
                             quorum: evaluation_quorum,
                         },
+                        compilation: RoleDataRegister {
+                            workers: compilation_workers,
+                            quorum: compilation_quorum,
+                        },
                         approval: RoleDataRegister {
                             workers: approval_workers,
                             quorum: approval_quorum,
@@ -1048,6 +1255,10 @@ impl RequestManager {
                 } else {
                     CurrentRequestRoles {
                         evaluation: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                        compilation: RoleDataRegister {
                             workers: HashSet::new(),
                             quorum: Quorum::default(),
                         },
@@ -1572,6 +1783,9 @@ impl RequestManager {
             | RequestManagerError::NoApproversAvailable {
                 governance_id, ..
             }
+            | RequestManagerError::NoCompilersAvailable {
+                governance_id, ..
+            }
             | RequestManagerError::NoValidatorsAvailable {
                 governance_id,
                 ..
@@ -1755,12 +1969,37 @@ impl RequestManager {
         Ok(())
     }
 
+    /// The compilation phase only runs for governance facts that add a
+    /// schema or change a contract (or its initial value).
+    fn gov_fact_needs_compilation(&self) -> bool {
+        if self.governance_id.is_some() {
+            return false;
+        }
+
+        let Some(request) = &self.request else {
+            return false;
+        };
+
+        let EventRequest::Fact(fact_request) = request.content() else {
+            return false;
+        };
+
+        schemas_to_compile(&fact_request.payload)
+            .is_some_and(|schemas| !schemas.is_empty())
+    }
+
     async fn match_command(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         match self.command {
-            ReqManInitMessage::Evaluate => self.build_evaluation(ctx).await,
+            ReqManInitMessage::Evaluate => {
+                if self.gov_fact_needs_compilation() {
+                    self.build_compilation(ctx).await
+                } else {
+                    self.build_evaluation(ctx, None).await
+                }
+            }
             ReqManInitMessage::Validate => {
                 let (
                     request,
@@ -1768,7 +2007,7 @@ impl RequestManager {
                     signers,
                     init_state,
                     current_request_roles,
-                ) = self.build_validation_req(ctx, None, None).await?;
+                ) = self.build_validation_req(ctx, None, None, None).await?;
 
                 self.run_validation(
                     ctx,
@@ -1893,7 +2132,14 @@ impl RequestManager {
                     actor.ask_stop().await?;
                 };
             }
-            RequestManagerState::Evaluation => {
+            RequestManagerState::Compilation => {
+                if let Ok(actor) =
+                    ctx.get_child::<Compilation>("compilation").await
+                {
+                    actor.ask_stop().await?;
+                };
+            }
+            RequestManagerState::Evaluation { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Evaluation>("evaluation").await
                 {
@@ -2011,6 +2257,11 @@ pub enum RequestManagerMessage {
         request_id: DigestIdentifier,
         eval_req: Box<EvaluationReq>,
         eval_res: EvaluationData,
+    },
+    CompilationRes {
+        request_id: DigestIdentifier,
+        compile_req: Box<CompilationReq>,
+        compile_res: CompilationData,
     },
     ApprovalRes {
         request_id: DigestIdentifier,
@@ -2300,7 +2551,8 @@ impl Handler<Self> for RequestManager {
                 match &self.state {
                     RequestManagerState::Reboot
                     | RequestManagerState::Starting
-                    | RequestManagerState::Evaluation
+                    | RequestManagerState::Compilation
+                    | RequestManagerState::Evaluation { .. }
                     | RequestManagerState::Approval { .. }
                     | RequestManagerState::Validation { .. } => {
                         if let Err(e) = self
@@ -2399,8 +2651,23 @@ impl Handler<Self> for RequestManager {
                             return Ok(());
                         };
                     }
-                    RequestManagerState::Evaluation => {
-                        if let Err(e) = self.build_evaluation(ctx).await {
+                    RequestManagerState::Compilation => {
+                        if let Err(e) = self.build_compilation(ctx).await {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Compilation",
+                                error = %e,
+                                "Failed to build compilation"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        }
+                    }
+                    RequestManagerState::Evaluation { compile } => {
+                        if let Err(e) =
+                            self.build_evaluation(ctx, compile).await
+                        {
                             error!(
                                 msg_type = "Run",
                                 request_id = %self.id,
@@ -2413,7 +2680,11 @@ impl Handler<Self> for RequestManager {
                         }
                     }
 
-                    RequestManagerState::Approval { eval_req, eval_res } => {
+                    RequestManagerState::Approval {
+                        eval_req,
+                        eval_res,
+                        ..
+                    } => {
                         let Some(evaluator_res) =
                             eval_res.evaluator_response_ok()
                         else {
@@ -2589,6 +2860,125 @@ impl Handler<Self> for RequestManager {
                     }
                 };
             }
+            RequestManagerMessage::CompilationRes {
+                compile_req,
+                compile_res,
+                request_id,
+            } => {
+                if request_id == self.id {
+                    debug!(
+                        msg_type = "CompilationRes",
+                        request_id = %self.id,
+                        version = self.version,
+                        "Compilation result received"
+                    );
+
+                    if !matches!(self.state, RequestManagerState::Compilation) {
+                        // Benign race: the request already left the
+                        // compilation phase (reboot, abort...) while this
+                        // response was in flight. Ignore it, do not
+                        // crash the node over a late message.
+                        warn!(
+                            msg_type = "CompilationRes",
+                            request_id = %self.id,
+                            state = ?self.state,
+                            "Late compilation response ignored: the request is no longer in the compilation phase"
+                        );
+                        return Ok(());
+                    }
+
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "CompilationRes",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
+
+                    if compile_res.is_ok() {
+                        debug!(
+                            msg_type = "CompilationRes",
+                            request_id = %self.id,
+                            "Compilation succeeded, proceeding to evaluation phase"
+                        );
+
+                        if let Err(e) = self
+                            .build_evaluation(
+                                ctx,
+                                Some(Box::new((*compile_req, compile_res))),
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "CompilationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to build evaluation"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        }
+                    } else {
+                        debug!(
+                            msg_type = "CompilationRes",
+                            request_id = %self.id,
+                            "Compilation rejected the contracts, proceeding to validation phase"
+                        );
+
+                        let (
+                            request,
+                            quorum,
+                            signers,
+                            init_state,
+                            current_request_roles,
+                        ) = match self
+                            .build_validation_req(
+                                ctx,
+                                Some((*compile_req, compile_res)),
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(data) => data,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "CompilationRes",
+                                    request_id = %self.id,
+                                    error = %e,
+                                    "Failed to build validation request"
+                                );
+                                self.match_error(ctx, e).await;
+                                return Ok(());
+                            }
+                        };
+
+                        if let Err(e) = self
+                            .run_validation(
+                                ctx,
+                                request,
+                                quorum,
+                                signers,
+                                init_state,
+                                current_request_roles,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "CompilationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to run validation"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        };
+                    }
+                }
+            }
             RequestManagerMessage::EvaluationRes {
                 eval_req,
                 eval_res,
@@ -2601,6 +2991,23 @@ impl Handler<Self> for RequestManager {
                         version = self.version,
                         "Evaluation result received"
                     );
+
+                    let RequestManagerState::Evaluation { compile } =
+                        self.state.clone()
+                    else {
+                        // Benign race: the request already left the
+                        // evaluation phase (reboot, abort...) while this
+                        // response was in flight. Ignore it, do not
+                        // crash the node over a late message.
+                        warn!(
+                            msg_type = "EvaluationRes",
+                            request_id = %self.id,
+                            state = ?self.state,
+                            "Late evaluation response ignored: the request is no longer in the evaluation phase"
+                        );
+                        return Ok(());
+                    };
+
                     if let Err(e) = self.stops_childs(ctx).await {
                         error!(
                             msg_type = "EvaluationRes",
@@ -2627,6 +3034,7 @@ impl Handler<Self> for RequestManager {
                                     RequestManagerState::Approval {
                                         eval_req: *eval_req.clone(),
                                         eval_res: eval_res.clone(),
+                                        compile,
                                     },
                                 ),
                             },
@@ -2662,6 +3070,7 @@ impl Handler<Self> for RequestManager {
                         ) = match self
                             .build_validation_req(
                                 ctx,
+                                compile.map(|compile| *compile),
                                 Some((*eval_req, eval_res)),
                                 None,
                             )
@@ -2726,8 +3135,11 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    let RequestManagerState::Approval { eval_req, eval_res } =
-                        self.state.clone()
+                    let RequestManagerState::Approval {
+                        eval_req,
+                        eval_res,
+                        compile,
+                    } = self.state.clone()
                     else {
                         error!(
                             msg_type = "ApprovalRes",
@@ -2749,6 +3161,7 @@ impl Handler<Self> for RequestManager {
                     ) = match self
                         .build_validation_req(
                             ctx,
+                            compile.map(|compile| *compile),
                             Some((eval_req, eval_res)),
                             Some(appro_res),
                         )

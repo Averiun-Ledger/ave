@@ -558,8 +558,7 @@ impl EventLedgerDataForSink {
             Protocols::Create { .. } => Self::Create {
                 state: state.clone(),
             },
-            Protocols::TrackerFactFull { evaluation, .. }
-            | Protocols::GovFact { evaluation, .. } => {
+            Protocols::TrackerFactFull { evaluation, .. } => {
                 let success = protocols.is_success();
                 let (patch, error) = match &evaluation.response {
                     crate::model::event::EvaluationResponse::Ok {
@@ -573,6 +572,55 @@ impl EventLedgerDataForSink {
                         result,
                         ..
                     } => (None, Some(result.to_string())),
+                };
+
+                Self::FactFull {
+                    patch,
+                    success,
+                    error,
+                }
+            }
+            Protocols::GovFact {
+                evaluation,
+                compilation,
+                ..
+            } => {
+                let success = protocols.is_success();
+                let (patch, error) = match evaluation {
+                    Some(evaluation) => match &evaluation.response {
+                        crate::model::event::EvaluationResponse::Ok {
+                            result,
+                            ..
+                        } if success => (Some(result.patch.0.clone()), None),
+                        crate::model::event::EvaluationResponse::Ok {
+                            ..
+                        } => (None, None),
+                        crate::model::event::EvaluationResponse::Error {
+                            result,
+                            ..
+                        } => (None, Some(result.to_string())),
+                    },
+                    // No evaluation means the compilation phase rejected
+                    // the contracts.
+                    None => {
+                        let error = match compilation {
+                            Some(compilation) => match &compilation.response {
+                                crate::model::event::CompilationResponse::Error {
+                                    result,
+                                    ..
+                                } => Some(format!(
+                                    "compilation: {}",
+                                    result
+                                )),
+                                crate::model::event::CompilationResponse::Ok {
+                                    ..
+                                } => None,
+                            },
+                            None => None,
+                        };
+
+                        (None, error)
+                    }
                 };
 
                 Self::FactFull {
@@ -1089,6 +1137,7 @@ where
             (
                 Protocols::GovFact {
                     event_request,
+                    compilation,
                     evaluation,
                     approval,
                     validation,
@@ -1111,34 +1160,76 @@ where
                     return Err(SubjectError::UnexpectedFactEvent);
                 }
 
-                let actual_protocols =
-                    if let Some(eval) = evaluation.evaluator_response_ok() {
-                        if let Some(appr) = approval {
-                            if appr.approved {
-                                Self::apply_patch_verify(
-                                    &mut modified_subject_metadata.properties,
-                                    eval.patch,
-                                )?;
-                            }
+                let actual_protocols = match (compilation, evaluation) {
+                    (Some(compilation), None) => ActualProtocols::Compile {
+                        compile_data: compilation.as_ref().clone(),
+                    },
+                    (Some(compilation), Some(evaluation)) => {
+                        if let Some(eval) = evaluation.evaluator_response_ok() {
+                            if let Some(appr) = approval {
+                                if appr.approved {
+                                    Self::apply_patch_verify(
+                                        &mut modified_subject_metadata
+                                            .properties,
+                                        eval.patch,
+                                    )?;
+                                }
 
-                            ActualProtocols::EvalApprove {
-                                eval_data: evaluation.clone(),
-                                approval_data: appr.clone(),
+                                ActualProtocols::CompileEvalApprove {
+                                    compile_data: compilation.as_ref().clone(),
+                                    eval_data: evaluation.clone(),
+                                    approval_data: appr.clone(),
+                                }
+                            } else {
+                                return Err(
+                                    SubjectError::MissingApprovalAfterEvaluation,
+                                );
                             }
-                        } else {
+                        } else if approval.is_some() {
                             return Err(
-                                SubjectError::MissingApprovalAfterEvaluation,
+                                SubjectError::UnexpectedApprovalAfterFailedEvaluation,
                             );
+                        } else {
+                            ActualProtocols::CompileEval {
+                                compile_data: compilation.as_ref().clone(),
+                                eval_data: evaluation.clone(),
+                            }
                         }
-                    } else if approval.is_some() {
-                        return Err(
-                        SubjectError::UnexpectedApprovalAfterFailedEvaluation,
-                    );
-                    } else {
-                        ActualProtocols::Eval {
-                            eval_data: evaluation.clone(),
+                    }
+                    (None, Some(evaluation)) => {
+                        if let Some(eval) = evaluation.evaluator_response_ok() {
+                            if let Some(appr) = approval {
+                                if appr.approved {
+                                    Self::apply_patch_verify(
+                                        &mut modified_subject_metadata
+                                            .properties,
+                                        eval.patch,
+                                    )?;
+                                }
+
+                                ActualProtocols::EvalApprove {
+                                    eval_data: evaluation.clone(),
+                                    approval_data: appr.clone(),
+                                }
+                            } else {
+                                return Err(
+                                    SubjectError::MissingApprovalAfterEvaluation,
+                                );
+                            }
+                        } else if approval.is_some() {
+                            return Err(
+                                SubjectError::UnexpectedApprovalAfterFailedEvaluation,
+                            );
+                        } else {
+                            ActualProtocols::Eval {
+                                eval_data: evaluation.clone(),
+                            }
                         }
-                    };
+                    }
+                    (None, None) => {
+                        return Err(SubjectError::EventProtocolMismatch);
+                    }
+                };
 
                 (
                     validation,

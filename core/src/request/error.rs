@@ -187,6 +187,12 @@ pub enum RequestManagerError {
         governance_id: DigestIdentifier,
     },
 
+    #[error("no compilers available for schema '{schema_id}'")]
+    NoCompilersAvailable {
+        schema_id: String,
+        governance_id: DigestIdentifier,
+    },
+
     #[error("no validators available for schema '{schema_id}'")]
     NoValidatorsAvailable {
         schema_id: String,

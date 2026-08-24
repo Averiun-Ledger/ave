@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     approval::response::ApprovalRes,
+    compilation::{response::CompilationResult, schemas_to_compile},
     evaluation::response::EvaluationResult,
     governance::{
         data::GovernanceData,
@@ -17,8 +18,8 @@ use crate::{
             node::{SignTypesNode, get_sign},
         },
         event::{
-            ApprovalData, EvaluationData, EvaluationResponse,
-            ValidationMetadata,
+            ApprovalData, CompilationData, CompilationResponse, EvaluationData,
+            EvaluationResponse, ValidationMetadata,
         },
     },
     subject::{Metadata, MetadataWithoutProperties, RequestSubjectData},
@@ -68,12 +69,14 @@ use super::{
 )]
 pub struct CurrentRequestRoles {
     pub evaluation: RoleDataRegister,
+    pub compilation: RoleDataRegister,
     pub approval: RoleDataRegister,
 }
 
 #[derive(Clone, Debug)]
 pub struct CurrentWorkerRoles {
     pub evaluation: RoleDataRegister,
+    pub compilation: RoleDataRegister,
     pub approval: RoleDataRegister,
 }
 
@@ -199,6 +202,10 @@ impl ValiWorker {
 
     fn current_evaluation_roles(&self) -> RoleDataRegister {
         self.current_roles.evaluation.clone()
+    }
+
+    fn current_compilation_roles(&self) -> RoleDataRegister {
+        self.current_roles.compilation.clone()
     }
 
     fn current_approval_roles(&self) -> RoleDataRegister {
@@ -648,35 +655,153 @@ impl ValiWorker {
         Ok((appr_required, properties))
     }
 
+    fn check_compilation(
+        &self,
+        compilation: CompilationData,
+        comp_data: RoleDataRegister,
+        req_subject_data_hash: DigestIdentifier,
+        signer: PublicKey,
+    ) -> Result<(), ValidatorError> {
+        if signer != compilation.compile_req_signature.signer {
+            return Err(ValidatorError::InvalidSigner {
+                signer: signer.to_string(),
+            });
+        }
+
+        if !check_quorum_signers(
+            &compilation
+                .compilers_signatures
+                .iter()
+                .map(|x| x.signer.clone())
+                .collect::<HashSet<PublicKey>>(),
+            &comp_data.quorum,
+            &comp_data.workers,
+        ) {
+            return Err(ValidatorError::InvalidOperation {
+                action: "verify compilation quorum",
+            });
+        }
+
+        let (compile_result, result_hash) = match compilation.response.clone() {
+            CompilationResponse::Ok {
+                result,
+                result_hash,
+            } => (
+                CompilationResult::Ok {
+                    response: result,
+                    compile_req_hash: compilation.compile_req_hash.clone(),
+                    req_subject_data_hash,
+                },
+                result_hash,
+            ),
+            CompilationResponse::Error {
+                result,
+                result_hash,
+            } => (
+                CompilationResult::Error {
+                    error: result,
+                    compile_req_hash: compilation.compile_req_hash.clone(),
+                    req_subject_data_hash,
+                },
+                result_hash,
+            ),
+        };
+
+        let compile_result_hash =
+            hash_borsh(&*self.hash.hasher(), &compile_result).map_err(|e| {
+                ValidatorError::InternalError {
+                    problem: e.to_string(),
+                }
+            })?;
+
+        if compile_result_hash != result_hash {
+            return Err(ValidatorError::InvalidData {
+                value: "compile result hash",
+            });
+        }
+
+        for signature in compilation.compilers_signatures.iter() {
+            if signature.verify(&compile_result_hash).is_err() {
+                return Err(ValidatorError::InvalidSignature {
+                    data: "compilation",
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     async fn check_actual_protocols(
         &self,
         ctx: &mut ActorContext<Self>,
         metadata: &Metadata,
         actual_protocols: &ActualProtocols,
-        event_type: &EventRequestType,
+        event_request: &Signed<EventRequest>,
         gov_version: u64,
         signer: PublicKey,
     ) -> Result<Option<ValueWrapper>, ValidatorError> {
+        let event_type = EventRequestType::from(event_request.content());
+
         if !actual_protocols
-            .check_protocols(metadata.schema_id.is_gov(), event_type)
+            .check_protocols(metadata.schema_id.is_gov(), &event_type)
         {
             return Err(ValidatorError::InvalidData {
                 value: "actual protocols",
             });
         }
 
-        let (evaluation, approval) = match &actual_protocols {
-            ActualProtocols::None => (None, None),
+        let (compilation, evaluation, approval) = match &actual_protocols {
+            ActualProtocols::None => (None, None, None),
             ActualProtocols::Eval { eval_data } => {
-                (Some(eval_data.clone()), None)
+                (None, Some(eval_data.clone()), None)
             }
             ActualProtocols::EvalApprove {
                 eval_data,
                 approval_data,
-            } => (Some(eval_data.clone()), Some(approval_data.clone())),
+            } => (None, Some(eval_data.clone()), Some(approval_data.clone())),
+            ActualProtocols::Compile { compile_data } => {
+                (Some(compile_data.clone()), None, None)
+            }
+            ActualProtocols::CompileEval {
+                compile_data,
+                eval_data,
+            } => (Some(compile_data.clone()), Some(eval_data.clone()), None),
+            ActualProtocols::CompileEvalApprove {
+                compile_data,
+                eval_data,
+                approval_data,
+            } => (
+                Some(compile_data.clone()),
+                Some(eval_data.clone()),
+                Some(approval_data.clone()),
+            ),
         };
 
-        let properties = if let Some(evaluation) = evaluation {
+        // In governance facts the compilation evidence must be present
+        // exactly when the fact adds a schema or changes a contract (or
+        // its initial value): the owner can not skip the phase nor add
+        // it where it does not belong.
+        if metadata.schema_id.is_gov()
+            && matches!(event_type, EventRequestType::Fact)
+        {
+            let EventRequest::Fact(fact_request) = event_request.content()
+            else {
+                return Err(ValidatorError::InvalidData {
+                    value: "event request",
+                });
+            };
+
+            let needs_compilation = schemas_to_compile(&fact_request.payload)
+                .is_some_and(|schemas| !schemas.is_empty());
+
+            if needs_compilation != compilation.is_some() {
+                return Err(ValidatorError::InvalidData {
+                    value: "compilation evidence",
+                });
+            }
+        }
+
+        let properties = if compilation.is_some() || evaluation.is_some() {
             let req_subject_data_hash = hash_borsh(
                 &*self.hash.hasher(),
                 &RequestSubjectData {
@@ -693,64 +818,92 @@ impl ValiWorker {
                 problem: e.to_string(),
             })?;
 
-            let (eval_data, appro_data) = if gov_version == self.gov_version {
+            let (eval_data, comp_data, appro_data) = if gov_version
+                == self.gov_version
+            {
                 (
                     self.current_evaluation_roles(),
+                    compilation
+                        .as_ref()
+                        .map(|_| self.current_compilation_roles()),
                     approval.as_ref().map(|_| self.current_approval_roles()),
                 )
             } else {
-                get_actual_roles_register(
-                    ctx,
-                    &metadata.governance_id,
-                    SearchRole {
-                        schema_id: metadata.schema_id.clone(),
-                        namespace: metadata.namespace.clone(),
-                    },
-                    approval.is_some(),
-                    gov_version,
-                )
-                .await
-                .map_err(|e| {
-                    if let ActorError::UnexpectedResponse { .. } = e {
-                        ValidatorError::OutOfVersion
-                    } else {
-                        ValidatorError::InternalError {
-                            problem: e.to_string(),
+                let (eval_roles, appro_roles, comp_roles) =
+                    get_actual_roles_register(
+                        ctx,
+                        &metadata.governance_id,
+                        SearchRole {
+                            schema_id: metadata.schema_id.clone(),
+                            namespace: metadata.namespace.clone(),
+                        },
+                        approval.is_some(),
+                        compilation.is_some(),
+                        gov_version,
+                    )
+                    .await
+                    .map_err(|e| {
+                        if let ActorError::UnexpectedResponse { .. } = e {
+                            ValidatorError::OutOfVersion
+                        } else {
+                            ValidatorError::InternalError {
+                                problem: e.to_string(),
+                            }
                         }
-                    }
-                })?
+                    })?;
+
+                (eval_roles, comp_roles, appro_roles)
             };
 
-            let (appr_required, properties) = self.check_evaluation(
-                evaluation,
-                eval_data,
-                metadata.properties.clone(),
-                req_subject_data_hash.clone(),
-                signer.clone(),
-            )?;
+            if let Some(compilation) = compilation {
+                let Some(comp_data) = comp_data else {
+                    return Err(ValidatorError::InvalidData {
+                        value: "compilation roles",
+                    });
+                };
 
-            if let Some(approval) = approval
-                && let Some(appr_data) = appro_data
-            {
-                if !appr_required {
+                self.check_compilation(
+                    compilation,
+                    comp_data,
+                    req_subject_data_hash.clone(),
+                    signer.clone(),
+                )?;
+            }
+
+            if let Some(evaluation) = evaluation {
+                let (appr_required, properties) = self.check_evaluation(
+                    evaluation,
+                    eval_data,
+                    metadata.properties.clone(),
+                    req_subject_data_hash.clone(),
+                    signer.clone(),
+                )?;
+
+                if let Some(approval) = approval
+                    && let Some(appr_data) = appro_data
+                {
+                    if !appr_required {
+                        return Err(ValidatorError::InvalidData {
+                            value: "evaluation appr_required",
+                        });
+                    }
+
+                    Self::check_approval(
+                        approval,
+                        appr_data,
+                        req_subject_data_hash,
+                        signer,
+                    )?;
+                } else if appr_required {
                     return Err(ValidatorError::InvalidData {
                         value: "evaluation appr_required",
                     });
                 }
 
-                Self::check_approval(
-                    approval,
-                    appr_data,
-                    req_subject_data_hash,
-                    signer,
-                )?;
-            } else if appr_required {
-                return Err(ValidatorError::InvalidData {
-                    value: "evaluation appr_required",
-                });
+                Some(properties)
+            } else {
+                None
             }
-
-            Some(properties)
         } else {
             None
         };
@@ -1056,7 +1209,7 @@ impl ValiWorker {
                         ctx,
                         metadata,
                         actual_protocols,
-                        &EventRequestType::from(event_request.content()),
+                        event_request,
                         *gov_version,
                         signer,
                     )

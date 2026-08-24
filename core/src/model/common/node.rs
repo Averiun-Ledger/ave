@@ -17,6 +17,7 @@ use ave_common::request::EventRequest;
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
+    compilation::request::CompilationReq,
     evaluation::request::EvaluationReq,
     validation::{request::ValidationReq, response::ValidationRes},
 };
@@ -27,6 +28,9 @@ use serde::{Deserialize, Serialize};
 pub enum SignTypesNode {
     ApprovalReq(ApprovalReq),
     ApprovalRes(Box<ApprovalRes>),
+
+    CompilationReq(Box<CompilationReq>),
+    CompilationSignature(DigestIdentifier),
 
     EvaluationReq(Box<EvaluationReq>),
     EvaluationSignature(DigestIdentifier),

@@ -1,5 +1,7 @@
 use crate::{
-    model::event::{ApprovalData, EvaluationData, ValidationData},
+    model::event::{
+        ApprovalData, CompilationData, EvaluationData, ValidationData,
+    },
     subject::Metadata,
 };
 
@@ -142,6 +144,22 @@ pub enum ActualProtocols {
         eval_data: EvaluationData,
         approval_data: ApprovalData,
     },
+    /// The governance fact touched contracts and the compilation phase
+    /// rejected them: the event commits as failed without evaluation.
+    Compile {
+        compile_data: CompilationData,
+    },
+    /// Compilation succeeded but the evaluation failed.
+    CompileEval {
+        compile_data: CompilationData,
+        eval_data: EvaluationData,
+    },
+    /// Compilation and evaluation succeeded and the event was approved.
+    CompileEvalApprove {
+        compile_data: CompilationData,
+        eval_data: EvaluationData,
+        approval_data: ApprovalData,
+    },
 }
 
 impl ActualProtocols {
@@ -150,6 +168,10 @@ impl ActualProtocols {
             Self::None => true,
             Self::Eval { eval_data } => eval_data.is_ok(),
             Self::EvalApprove { approval_data, .. } => approval_data.approved,
+            Self::Compile { .. } | Self::CompileEval { .. } => false,
+            Self::CompileEvalApprove { approval_data, .. } => {
+                approval_data.approved
+            }
         }
     }
 
@@ -178,6 +200,26 @@ impl ActualProtocols {
                 true,
                 EventRequestType::Fact,
             ) => eval_data.is_ok(),
+            (Self::Compile { compile_data }, true, EventRequestType::Fact) => {
+                !compile_data.is_ok()
+            }
+            (
+                Self::CompileEval {
+                    compile_data,
+                    eval_data,
+                },
+                true,
+                EventRequestType::Fact,
+            ) => compile_data.is_ok() && !eval_data.is_ok(),
+            (
+                Self::CompileEvalApprove {
+                    compile_data,
+                    eval_data,
+                    ..
+                },
+                true,
+                EventRequestType::Fact,
+            ) => compile_data.is_ok() && eval_data.is_ok(),
             _ => false,
         }
     }

@@ -1,9 +1,10 @@
 use std::{collections::HashSet, fmt::Display};
 
 use crate::{
+    compilation::request::CompilationReq,
     evaluation::request::EvaluationReq,
     governance::model::Quorum,
-    model::event::{EvaluationData, Ledger},
+    model::event::{CompilationData, EvaluationData, Ledger},
     validation::{request::ValidationReq, worker::CurrentRequestRoles},
 };
 
@@ -30,16 +31,25 @@ pub struct DistributionPlanEntry {
     pub mode: DistributionPlanMode,
 }
 
+/// The compilation phase outcome carried across the following phases so
+/// it can be embedded in the validation request (and survive a restart,
+/// like the evaluation data in `Approval`).
+pub type CompileEvidence = (CompilationReq, CompilationData);
+
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum RequestManagerState {
     Reboot,
     Starting,
-    Evaluation,
+    Compilation,
+    Evaluation {
+        compile: Option<Box<CompileEvidence>>,
+    },
     Approval {
         eval_req: EvaluationReq,
         eval_res: EvaluationData,
+        compile: Option<Box<CompileEvidence>>,
     },
     Validation {
         request: Box<Signed<ValidationReq>>,
@@ -65,7 +75,8 @@ impl Display for RequestManagerState {
         match self {
             Self::Reboot => write!(f, "Reboot"),
             Self::Starting => write!(f, "Starting"),
-            Self::Evaluation => write!(f, "Evaluation"),
+            Self::Compilation => write!(f, "Compilation"),
+            Self::Evaluation { .. } => write!(f, "Evaluation"),
             Self::Approval { .. } => {
                 write!(f, "Approval")
             }

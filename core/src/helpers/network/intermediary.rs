@@ -3,6 +3,10 @@ use crate::{
         light::{ApprLight, ApprLightMessage},
         persist::{ApprPersist, ApprPersistMessage},
     },
+    compilation::{
+        coordinator::{CompileCoordinator, CompileCoordinatorMessage},
+        worker::{CompileWorker, CompileWorkerMessage},
+    },
     distribution::{
         coordinator::{DistriCoordinator, DistriCoordinatorMessage},
         worker::{DistriWorker, DistriWorkerMessage},
@@ -623,6 +627,49 @@ impl Intermediary {
                         actor
                             .tell(ApprLightMessage::NetworkResponse {
                                 approval_res: *res,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::CompilationReq { req } => {
+                        let actor = system
+                            .get_actor::<CompileWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(CompileWorkerMessage::NetworkRequest {
+                                compilation_req: *req,
+                                info: message.info,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::CompilationRes { res } => {
+                        let actor = system
+                            .get_actor::<CompileCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(CompileCoordinatorMessage::NetworkResponse {
+                                compilation_res: Box::new(res),
                                 request_id: message.info.request_id,
                                 version: message.info.version,
                                 sender: sender.clone(),

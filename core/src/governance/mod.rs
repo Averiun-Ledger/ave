@@ -6,6 +6,7 @@ use crate::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
     },
+    compilation::worker::{CompileWorker, CompileWorkerMessage},
     config::SinkTarget,
     db::Storable,
     evaluation::{
@@ -133,6 +134,10 @@ pub struct RolesUpdate {
     pub new_approvers: Vec<PublicKey>,
     pub remove_approvers: Vec<PublicKey>,
 
+    pub comp_quorum: Option<Quorum>,
+    pub new_compilers: Vec<PublicKey>,
+    pub remove_compilers: Vec<PublicKey>,
+
     pub eval_quorum: HashMap<SchemaType, Quorum>,
     pub new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     pub remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -155,6 +160,9 @@ pub struct RolesUpdateConfirm {
     pub new_approver: Option<PublicKey>,
     pub remove_approver: PublicKey,
 
+    pub new_compiler: Option<PublicKey>,
+    pub remove_compiler: PublicKey,
+
     pub new_evaluator: Option<PublicKey>,
     pub remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 
@@ -169,6 +177,7 @@ pub struct RolesUpdateRemove {
     pub witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     pub creator: HashSet<(SchemaType, String, PublicKey)>,
     pub approvers: Vec<PublicKey>,
+    pub compilers: Vec<PublicKey>,
     pub evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     pub validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 }
@@ -1068,8 +1077,20 @@ impl Governance {
             evaluator
                 .tell(EvalWorkerMessage::Update {
                     gov_version: self.properties.version,
+                    issuers: issuers.clone(),
+                    issuer_any,
+                })
+                .await?;
+        }
+
+        if let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
+            compiler
+                .tell(CompileWorkerMessage::Update {
+                    gov_version: self.properties.version,
                     issuers,
                     issuer_any,
+                    schemas: self.properties.schemas.clone(),
                 })
                 .await?;
         }
@@ -1083,6 +1104,7 @@ impl Governance {
                     gov_version: self.properties.version,
                     current_roles: crate::validation::worker::CurrentWorkerRoles {
                         approval: current_roles.approval,
+                        compilation: current_roles.compilation,
                         evaluation: crate::governance::role_register::RoleDataRegister {
                             workers: current_roles
                                 .schema
@@ -1403,6 +1425,7 @@ impl Governance {
                 network: network.clone(),
                 current_roles: crate::validation::worker::CurrentWorkerRoles {
                     approval: current_roles.approval,
+                    compilation: current_roles.compilation,
                     evaluation:
                         crate::governance::role_register::RoleDataRegister {
                             workers: current_roles
@@ -1443,6 +1466,28 @@ impl Governance {
                 pending: None,
             };
             ctx.create_child("evaluator", evaluator).await?;
+        }
+
+        if self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        }) {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
+            // If we are a compiler
+            let compiler = CompileWorker {
+                node_key: node_key.clone(),
+                our_key: self.our_key.clone(),
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                issuers,
+                issuer_any,
+                schemas: self.properties.schemas.clone(),
+                hash: *hash,
+                network: network.clone(),
+                stop: false,
+                pending: None,
+            };
+            ctx.create_child("compiler", compiler).await?;
         }
 
         if self.properties.has_this_role(HashThisRole::Gov {
@@ -1524,6 +1569,7 @@ impl Governance {
                     network: network.clone(),
                     current_roles: crate::validation::worker::CurrentWorkerRoles {
                         approval: current_roles.approval,
+                        compilation: current_roles.compilation,
                         evaluation: crate::governance::role_register::RoleDataRegister {
                             workers: current_roles
                                 .schema
@@ -1582,11 +1628,47 @@ impl Governance {
             _ => {}
         };
 
+        let old_comp = old_gov.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        });
+
+        let new_comp = self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        });
+
+        match (old_comp, new_comp) {
+            (true, false) => {
+                let actor = ctx.get_child::<CompileWorker>("compiler").await?;
+
+                actor.ask_stop().await?;
+            }
+            (false, true) => {
+                let (issuers, issuer_any) =
+                    self.properties.governance_issuers();
+                let compiler = CompileWorker {
+                    node_key: node_key.clone(),
+                    our_key: self.our_key.clone(),
+                    governance_id: self.subject_metadata.subject_id.clone(),
+                    gov_version: self.properties.version,
+                    issuers,
+                    issuer_any,
+                    schemas: self.properties.schemas.clone(),
+                    hash: *hash,
+                    network: network.clone(),
+                    stop: false,
+                    pending: None,
+                };
+                ctx.create_child("compiler", compiler).await?;
+            }
+            _ => {}
+        };
+
         let old_appr = old_gov.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         });
-
         let new_appr = self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
@@ -1655,6 +1737,15 @@ impl Governance {
             role: RoleTypes::Evaluator,
         }) {
             let actor = ctx.get_child::<EvalWorker>("evaluator").await?;
+
+            actor.ask_stop().await?;
+        }
+
+        if gov.has_this_role(HashThisRole::Gov {
+            who: (*our_key).clone(),
+            role: RoleTypes::Compiler,
+        }) {
+            let actor = ctx.get_child::<CompileWorker>("compiler").await?;
 
             actor.ask_stop().await?;
         }
@@ -2210,11 +2301,13 @@ impl Governance {
             .tell(RoleRegisterMessage::UpdateFact {
                 version: 0,
                 appr_quorum: Some(Quorum::Majority),
+                comp_quorum: Some(Quorum::Majority),
                 eval_quorum: HashMap::from([(
                     SchemaType::Governance,
                     Quorum::Majority,
                 )]),
                 new_approvers: vec![self.subject_metadata.owner.clone()],
+                new_compilers: vec![self.subject_metadata.owner.clone()],
                 new_evaluators: HashMap::from([(
                     (
                         SchemaType::Governance,
@@ -2230,6 +2323,7 @@ impl Governance {
                     vec![Namespace::new()],
                 )]),
                 remove_approvers: vec![],
+                remove_compilers: vec![],
                 remove_evaluators: HashMap::new(),
                 remove_validators: HashMap::new(),
                 vali_quorum: HashMap::from([(
@@ -2263,6 +2357,9 @@ impl Governance {
             appr_quorum,
             new_approvers,
             remove_approvers,
+            comp_quorum,
+            new_compilers,
+            remove_compilers,
             eval_quorum,
             new_evaluators,
             remove_evaluators,
@@ -2280,8 +2377,11 @@ impl Governance {
             .tell(RoleRegisterMessage::UpdateFact {
                 version: self.properties.version,
                 appr_quorum,
+                comp_quorum,
                 eval_quorum,
                 new_approvers,
+                new_compilers,
+                remove_compilers,
                 new_evaluators,
                 new_validators,
                 remove_approvers,
@@ -2319,6 +2419,8 @@ impl Governance {
         let RolesUpdateConfirm {
             new_approver,
             remove_approver,
+            new_compiler,
+            remove_compiler,
             new_evaluator,
             remove_evaluators,
             new_validator,
@@ -2333,6 +2435,8 @@ impl Governance {
                 version: self.properties.version,
                 new_approver,
                 remove_approver,
+                new_compiler,
+                remove_compiler,
                 new_evaluator,
                 remove_evaluators,
                 new_validator,
@@ -3899,7 +4003,10 @@ impl PersistentActor for Governance {
                     });
                 };
 
-                if let Some(eval_res) = evaluation.evaluator_response_ok() {
+                if let Some(eval_res) = evaluation
+                    .as_ref()
+                    .and_then(|evaluation| evaluation.evaluator_response_ok())
+                {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
                             inner.apply_patch_inner(eval_res.patch)?;
@@ -3925,6 +4032,15 @@ impl PersistentActor for Governance {
                         );
                         return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval".to_owned() });
                     }
+                } else {
+                    // No successful evaluation: the compilation phase
+                    // rejected the contracts or the evaluation failed —
+                    // the event commits as failed, nothing to apply.
+                    debug!(
+                        event_type = "Fact",
+                        subject_id = %inner.subject_metadata.subject_id,
+                        "Governance fact without successful evaluation, nothing to apply"
+                    );
                 }
             }
 

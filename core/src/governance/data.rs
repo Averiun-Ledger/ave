@@ -103,6 +103,7 @@ impl GovernanceData {
             HashSet::new();
 
         let mut new_approver = None;
+        let mut new_compiler = None;
         let mut new_evaluator = None;
         let mut new_validator = None;
 
@@ -112,6 +113,7 @@ impl GovernanceData {
         > = HashMap::new();
 
         let remove_approver: PublicKey = old_owner_key.clone();
+        let remove_compiler: PublicKey = old_owner_key.clone();
         let mut remove_evaluators: HashMap<
             (SchemaType, PublicKey),
             Vec<Namespace>,
@@ -132,6 +134,10 @@ impl GovernanceData {
         if let Some(old_name) = old_name {
             if !self.roles_gov.approver.contains(&old_name) {
                 new_approver = Some(new_owner_key.clone());
+            }
+
+            if !self.roles_gov.compiler.contains(&old_name) {
+                new_compiler = Some(new_owner_key.clone());
             }
 
             if !self.roles_gov.evaluator.contains(&old_name) {
@@ -271,9 +277,11 @@ impl GovernanceData {
 
         RolesUpdateConfirm {
             new_approver,
+            new_compiler,
             new_evaluator,
             new_validator,
             remove_approver,
+            remove_compiler,
             remove_creator,
             remove_evaluators,
             remove_validators,
@@ -295,6 +303,7 @@ impl GovernanceData {
         > = HashMap::new();
 
         let mut remove_approvers: Vec<PublicKey> = vec![];
+        let mut remove_compilers: Vec<PublicKey> = vec![];
         let mut remove_evaluators: HashMap<
             (SchemaType, PublicKey),
             Vec<Namespace>,
@@ -352,6 +361,9 @@ impl GovernanceData {
                 if let Some(user_key) = self.members.get(user) {
                     if self.roles_gov.approver.contains(user) {
                         remove_approvers.push(user_key.clone());
+                    }
+                    if self.roles_gov.compiler.contains(user) {
+                        remove_compilers.push(user_key.clone());
                     }
                     if self.roles_gov.evaluator.contains(user) {
                         remove_evaluators
@@ -456,6 +468,7 @@ impl GovernanceData {
             witnesses: remove_witnesses,
             creator: remove_creator,
             approvers: remove_approvers,
+            compilers: remove_compilers,
             evaluators: remove_evaluators,
             validators: remove_validators,
         }

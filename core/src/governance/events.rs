@@ -538,11 +538,15 @@ pub fn governance_event_roles_update_fact(
     rm_roles: Option<RolesUpdateRemove>,
 ) -> RolesUpdate {
     let mut appr_quorum: Option<EventQuorum> = None;
+    let mut comp_quorum: Option<EventQuorum> = None;
     let mut eval_quorum: HashMap<SchemaType, EventQuorum> = HashMap::new();
     let mut vali_quorum: HashMap<SchemaType, EventQuorum> = HashMap::new();
 
     let mut new_approvers: Vec<PublicKey> = vec![];
     let mut remove_approvers: Vec<PublicKey> = vec![];
+
+    let mut new_compilers: Vec<PublicKey> = vec![];
+    let mut remove_compilers: Vec<PublicKey> = vec![];
 
     let mut new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>> =
         HashMap::new();
@@ -595,6 +599,14 @@ pub fn governance_event_roles_update_fact(
                     });
                 }
 
+                if let Some(compilers) = &add.compiler {
+                    compilers.iter().for_each(|x| {
+                        if let Some(user) = members.get(x) {
+                            new_compilers.push(user.clone());
+                        }
+                    });
+                }
+
                 if let Some(evaluators) = &add.evaluator {
                     evaluators.iter().for_each(|x| {
                         if let Some(user) = members.get(x) {
@@ -622,6 +634,14 @@ pub fn governance_event_roles_update_fact(
                     approvers.iter().for_each(|x| {
                         if let Some(user) = members.get(x) {
                             remove_approvers.push(user.clone());
+                        }
+                    });
+                }
+
+                if let Some(compilers) = &remove.compiler {
+                    compilers.iter().for_each(|x| {
+                        if let Some(user) = members.get(x) {
+                            remove_compilers.push(user.clone());
                         }
                     });
                 }
@@ -1010,6 +1030,7 @@ pub fn governance_event_roles_update_fact(
         // gov
         if let Some(governance) = &policies.governance {
             appr_quorum = governance.change.approve.clone();
+            comp_quorum = governance.change.compile.clone();
 
             if let Some(quorum) = &governance.change.evaluate {
                 eval_quorum.insert(SchemaType::Governance, quorum.clone());
@@ -1038,6 +1059,7 @@ pub fn governance_event_roles_update_fact(
         remove_witnesses.extend(rm.witnesses);
         remove_creator.extend(rm.creator);
         remove_approvers.extend(rm.approvers);
+        remove_compilers.extend(rm.compilers);
         remove_evaluators.extend(rm.evaluators);
         remove_validators.extend(rm.validators);
     }
@@ -1049,6 +1071,9 @@ pub fn governance_event_roles_update_fact(
         eval_quorum,
         new_approvers,
         remove_approvers,
+        comp_quorum,
+        new_compilers,
+        remove_compilers,
         vali_quorum,
         remove_evaluators,
         remove_validators,

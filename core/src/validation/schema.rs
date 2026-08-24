@@ -230,6 +230,10 @@ impl Handler<Self> for ValidationSchema {
                                     workers: std::collections::HashSet::new(),
                                     quorum: crate::governance::model::Quorum::default(),
                                 },
+                                compilation: crate::governance::role_register::RoleDataRegister {
+                                    workers: std::collections::HashSet::new(),
+                                    quorum: crate::governance::model::Quorum::default(),
+                                },
                             },
                             hash: self.hash,
                             network: self.network.clone(),

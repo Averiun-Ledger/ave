@@ -1323,6 +1323,8 @@ impl Handler<Self> for Node {
                     SignTypesNode::EventRequest(_) => "EventRequest",
                     SignTypesNode::ValidationReq(_) => "ValidationReq",
                     SignTypesNode::ValidationRes(_) => "ValidationRes",
+                    SignTypesNode::CompilationReq(_) => "CompilationReq",
+                    SignTypesNode::CompilationSignature(_) => "CompilationRes",
                     SignTypesNode::EvaluationReq(_) => "EvaluationReq",
                     SignTypesNode::EvaluationSignature(_) => "EvaluationRes",
                     SignTypesNode::ApprovalReq(_) => "ApprovalReq",
@@ -1340,6 +1342,12 @@ impl Handler<Self> for Node {
                     }
                     SignTypesNode::ValidationRes(validation_res) => {
                         self.sign(&validation_res)
+                    }
+                    SignTypesNode::CompilationReq(compilation_req) => {
+                        self.sign(&*compilation_req)
+                    }
+                    SignTypesNode::CompilationSignature(compilation_res) => {
+                        self.sign(&compilation_res)
                     }
                     SignTypesNode::EvaluationReq(evaluation_req) => {
                         self.sign(&*evaluation_req)

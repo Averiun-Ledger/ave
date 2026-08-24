@@ -59,6 +59,9 @@ pub struct RoleRegister {
     appr_quorum: Quorum,
     approvers: HashSet<PublicKey>,
 
+    comp_quorum: Quorum,
+    compilers: HashSet<PublicKey>,
+
     eval_quorum: HashMap<SchemaType, Quorum>,
     evaluators: HashMap<SchemaType, HashSet<(PublicKey, Namespace)>>,
 
@@ -88,6 +91,7 @@ pub struct CurrentSchemaRoles {
 #[derive(Debug, Clone)]
 pub struct CurrentValidationRoles {
     pub approval: RoleDataRegister,
+    pub compilation: RoleDataRegister,
     pub schema: CurrentSchemaRoles,
 }
 
@@ -101,6 +105,7 @@ pub enum RoleRegisterMessage {
         version: u64,
         evaluation: SearchRole,
         approval: bool,
+        compilation: bool,
     },
     SearchValidators {
         search: SearchRole,
@@ -113,11 +118,15 @@ pub enum RoleRegisterMessage {
         version: u64,
 
         appr_quorum: Option<Quorum>,
+        comp_quorum: Option<Quorum>,
         eval_quorum: HashMap<SchemaType, Quorum>,
         vali_quorum: HashMap<SchemaType, Quorum>,
 
         new_approvers: Vec<PublicKey>,
         remove_approvers: Vec<PublicKey>,
+
+        new_compilers: Vec<PublicKey>,
+        remove_compilers: Vec<PublicKey>,
 
         new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -130,6 +139,9 @@ pub enum RoleRegisterMessage {
 
         new_approver: Option<PublicKey>,
         remove_approver: PublicKey,
+
+        new_compiler: Option<PublicKey>,
+        remove_compiler: PublicKey,
 
         new_evaluator: Option<PublicKey>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -156,6 +168,7 @@ pub enum RoleRegisterResponse {
     ActualRoles {
         evaluation: RoleDataRegister,
         approval: Option<RoleDataRegister>,
+        compilation: Option<RoleDataRegister>,
     },
     Validation(RoleDataRegister),
     MissingData,
@@ -176,11 +189,15 @@ pub enum RoleRegisterEvent {
         version: u64,
 
         appr_quorum: Option<Quorum>,
+        comp_quorum: Option<Quorum>,
         eval_quorum: HashMap<SchemaType, Quorum>,
         vali_quorum: HashMap<SchemaType, Quorum>,
 
         new_approvers: Vec<PublicKey>,
         remove_approvers: Vec<PublicKey>,
+
+        new_compilers: Vec<PublicKey>,
+        remove_compilers: Vec<PublicKey>,
 
         new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -193,6 +210,9 @@ pub enum RoleRegisterEvent {
 
         new_approver: Option<PublicKey>,
         remove_approver: PublicKey,
+
+        new_compiler: Option<PublicKey>,
+        remove_compiler: PublicKey,
 
         new_evaluator: Option<PublicKey>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -268,6 +288,11 @@ impl Handler<Self> for RoleRegister {
                     quorum: self.appr_quorum.clone(),
                 };
 
+                let compilation = RoleDataRegister {
+                    workers: self.compilers.clone(),
+                    quorum: self.comp_quorum.clone(),
+                };
+
                 let Some(evaluation_quorum) =
                     self.eval_quorum.get(&schema_id).cloned()
                 else {
@@ -337,6 +362,7 @@ impl Handler<Self> for RoleRegister {
                 Ok(RoleRegisterResponse::CurrentValidationRoles(
                     CurrentValidationRoles {
                         approval,
+                        compilation,
                         schema: CurrentSchemaRoles {
                             evaluation,
                             evaluation_quorum,
@@ -350,6 +376,7 @@ impl Handler<Self> for RoleRegister {
                 version,
                 evaluation,
                 approval,
+                compilation,
             } => {
                 if version != self.version {
                     debug!(
@@ -371,6 +398,19 @@ impl Handler<Self> for RoleRegister {
                             Some(RoleDataRegister {
                                 workers: self.approvers.clone(),
                                 quorum: self.appr_quorum.clone(),
+                            })
+                        }
+                    } else {
+                        None
+                    };
+
+                    let compilers = if compilation {
+                        if self.compilers.is_empty() {
+                            break 'data;
+                        } else {
+                            Some(RoleDataRegister {
+                                workers: self.compilers.clone(),
+                                quorum: self.comp_quorum.clone(),
                             })
                         }
                     } else {
@@ -444,6 +484,7 @@ impl Handler<Self> for RoleRegister {
                             quorum,
                         },
                         approval: approvers,
+                        compilation: compilers,
                     });
                 }
 
@@ -592,6 +633,8 @@ impl Handler<Self> for RoleRegister {
                 version,
                 new_approver,
                 remove_approver,
+                new_compiler,
+                remove_compiler,
                 new_evaluator,
                 remove_evaluators,
                 new_validator,
@@ -603,6 +646,8 @@ impl Handler<Self> for RoleRegister {
                             version,
                             new_approver,
                             remove_approver,
+                            new_compiler,
+                            remove_compiler,
                             new_evaluator,
                             remove_evaluators,
                             new_validator,
@@ -631,10 +676,13 @@ impl Handler<Self> for RoleRegister {
             RoleRegisterMessage::UpdateFact {
                 version,
                 appr_quorum,
+                comp_quorum,
                 eval_quorum,
                 vali_quorum,
                 new_approvers,
                 remove_approvers,
+                new_compilers,
+                remove_compilers,
                 new_evaluators,
                 remove_evaluators,
                 new_validators,
@@ -645,10 +693,13 @@ impl Handler<Self> for RoleRegister {
                         RoleRegisterEvent::UpdateFact {
                             version,
                             appr_quorum,
+                            comp_quorum,
                             eval_quorum,
                             vali_quorum,
                             new_approvers,
                             remove_approvers,
+                            new_compilers,
+                            remove_compilers,
                             new_evaluators,
                             remove_evaluators,
                             new_validators,
@@ -722,6 +773,8 @@ impl PersistentActor for RoleRegister {
                 version,
                 new_approver,
                 remove_approver,
+                new_compiler,
+                remove_compiler,
                 new_evaluator,
                 remove_evaluators,
                 new_validator,
@@ -730,6 +783,10 @@ impl PersistentActor for RoleRegister {
                 inner.version = *version;
                 if let Some(approver) = new_approver {
                     inner.approvers.insert(approver.clone());
+                }
+
+                if let Some(compiler) = new_compiler {
+                    inner.compilers.insert(compiler.clone());
                 }
 
                 if let Some(evaluator) = new_evaluator {
@@ -751,6 +808,8 @@ impl PersistentActor for RoleRegister {
                 }
 
                 inner.approvers.remove(remove_approver);
+
+                inner.compilers.remove(remove_compiler);
 
                 for ((schema_id, evaluator), namespaces) in
                     remove_evaluators.iter()
@@ -798,10 +857,13 @@ impl PersistentActor for RoleRegister {
             RoleRegisterEvent::UpdateFact {
                 version,
                 appr_quorum,
+                comp_quorum,
                 eval_quorum,
                 vali_quorum,
                 new_approvers,
                 remove_approvers,
+                new_compilers,
+                remove_compilers,
                 new_evaluators,
                 remove_evaluators,
                 new_validators,
@@ -811,6 +873,10 @@ impl PersistentActor for RoleRegister {
 
                 if let Some(appr_quorum) = appr_quorum {
                     inner.appr_quorum = appr_quorum.clone();
+                }
+
+                if let Some(comp_quorum) = comp_quorum {
+                    inner.comp_quorum = comp_quorum.clone();
                 }
 
                 for (schema_id, quorum) in vali_quorum.iter() {
@@ -831,6 +897,14 @@ impl PersistentActor for RoleRegister {
 
                 for approver in remove_approvers.iter() {
                     inner.approvers.remove(approver);
+                }
+
+                for compiler in new_compilers.iter() {
+                    inner.compilers.insert(compiler.clone());
+                }
+
+                for compiler in remove_compilers.iter() {
+                    inner.compilers.remove(compiler);
                 }
 
                 for ((schema_id, evaluator), namespaces) in

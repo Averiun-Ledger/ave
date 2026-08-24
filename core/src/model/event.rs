@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use super::network::TimeOut;
 
 use crate::{
+    compilation::response::{CompilationError, CompilerResponse},
     evaluation::response::{EvaluatorError, EvaluatorResponse},
     subject::Metadata,
     validation::request::ActualProtocols,
@@ -59,6 +60,46 @@ impl EvaluationResponse {
 pub enum EvaluationResponseOpaque {
     Ok { result_hash: DigestIdentifier },
     Error { result_hash: DigestIdentifier },
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub enum CompilationResponse {
+    Ok {
+        result: CompilerResponse,
+        result_hash: DigestIdentifier,
+    },
+    Error {
+        result: CompilationError,
+        result_hash: DigestIdentifier,
+    },
+}
+
+impl CompilationResponse {
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self, CompilationResponse::Ok { .. })
+    }
+}
+
+/// Evidence of the compilation phase of a governance fact: the owner's
+/// signature over the compilation request, its hash, and one signature
+/// per compiler over the agreed result. Follows the same shape as
+/// `EvaluationData` / `ApprovalData` / `ValidationData`.
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct CompilationData {
+    pub compile_req_signature: Signature,
+    pub compile_req_hash: DigestIdentifier,
+    pub compilers_signatures: Vec<Signature>,
+    pub response: CompilationResponse,
+}
+
+impl CompilationData {
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self.response, CompilationResponse::Ok { .. })
+    }
 }
 
 #[derive(
@@ -174,7 +215,13 @@ pub enum Protocols {
     },
     GovFact {
         event_request: Signed<EventRequest>,
-        evaluation: EvaluationData,
+        /// Compilation evidence, present when the fact adds a schema or
+        /// changes a contract (or its initial value). Boxed to keep the
+        /// enum size close to the other variants.
+        compilation: Option<Box<CompilationData>>,
+        /// `None` when the compilation phase rejected the contracts:
+        /// there is nothing to evaluate and the event commits as failed.
+        evaluation: Option<EvaluationData>,
         approval: Option<ApprovalData>,
         validation: ValidationData,
     },
@@ -200,6 +247,33 @@ pub enum Protocols {
         event_request: Signed<EventRequest>,
         validation: ValidationData,
     },
+}
+
+/// Checks the evaluation/approval combination of a governance fact:
+/// without approval the evaluation must have failed; with approval the
+/// evaluation must be correct and require it.
+fn check_eval_approval(
+    eval_data: EvaluationData,
+    approval_data: Option<ApprovalData>,
+) -> Result<(Option<EvaluationData>, Option<ApprovalData>), ProtocolsError> {
+    match approval_data {
+        None => {
+            if eval_data.is_ok() {
+                return Err(ProtocolsError::InvalidEvaluation);
+            }
+            Ok((Some(eval_data), None))
+        }
+        Some(approval_data) => {
+            if let EvaluationResponse::Ok { result, .. } = &eval_data.response {
+                if !result.appr_required {
+                    return Err(ProtocolsError::ApprovalRequired);
+                }
+            } else {
+                return Err(ProtocolsError::InvalidEvaluation);
+            }
+            Ok((Some(eval_data), Some(approval_data)))
+        }
+    }
 }
 
 impl Protocols {
@@ -352,27 +426,54 @@ impl Protocols {
             Self::GovFact {
                 evaluation,
                 approval,
+                compilation,
                 event_request,
                 ..
             } => {
-                let (evaluation_response, approval_success) = match evaluation
-                    .response
-                    .clone()
-                {
-                    EvaluationResponse::Ok { result, .. } => {
-                        if let Some(appr) = approval {
-                            (
-                                EvalResDB::Patch(result.patch.0),
-                                Some(appr.approved),
-                            )
-                        } else {
-                            unreachable!(
-                                "In a fact governance event, if the assessment is correct, there should be approval"
-                            )
+                let (evaluation_response, approval_success) = match evaluation {
+                    Some(evaluation) => match evaluation.response.clone() {
+                        EvaluationResponse::Ok { result, .. } => {
+                            if let Some(appr) = approval {
+                                (
+                                    EvalResDB::Patch(result.patch.0),
+                                    Some(appr.approved),
+                                )
+                            } else {
+                                unreachable!(
+                                    "In a fact governance event, if the assessment is correct, there should be approval"
+                                )
+                            }
                         }
-                    }
-                    EvaluationResponse::Error { result, .. } => {
-                        (EvalResDB::Error(result.to_string()), None)
+                        EvaluationResponse::Error { result, .. } => {
+                            (EvalResDB::Error(result.to_string()), None)
+                        }
+                    },
+                    None => {
+                        // No evaluation means the compilation phase
+                        // rejected the contracts.
+                        let compilation_error = match compilation {
+                            Some(compilation) => match &compilation.response {
+                                CompilationResponse::Error {
+                                    result, ..
+                                } => result.to_string(),
+                                CompilationResponse::Ok { .. } => {
+                                    unreachable!(
+                                        "In a fact governance event without evaluation, the compilation must have failed"
+                                    )
+                                }
+                            },
+                            None => unreachable!(
+                                "In a fact governance event, if there is no evaluation, there must be compilation"
+                            ),
+                        };
+
+                        (
+                            EvalResDB::Error(format!(
+                                "compilation: {}",
+                                compilation_error
+                            )),
+                            None,
+                        )
                     }
                 };
 
@@ -517,29 +618,68 @@ impl Protocols {
                 })
             }
             (EventRequestType::Fact, true) => {
-                let (evaluation, approval) = match actual_protocols {
+                let (compilation, evaluation, approval) = match actual_protocols
+                {
                     ActualProtocols::Eval { eval_data } => {
-                        if eval_data.is_ok() {
-                            return Err(ProtocolsError::InvalidEvaluation);
-                        } else {
-                            (eval_data, None)
-                        }
+                        let (evaluation, approval) =
+                            check_eval_approval(eval_data, None)?;
+                        (None, evaluation, approval)
                     }
                     ActualProtocols::EvalApprove {
                         eval_data,
                         approval_data,
                     } => {
-                        if let EvaluationResponse::Ok { result, .. } =
-                            &eval_data.response
-                        {
-                            if !result.appr_required {
-                                return Err(ProtocolsError::ApprovalRequired);
-                            }
-                        } else {
-                            return Err(ProtocolsError::InvalidEvaluation);
+                        let (evaluation, approval) = check_eval_approval(
+                            eval_data,
+                            Some(approval_data),
+                        )?;
+                        (None, evaluation, approval)
+                    }
+                    ActualProtocols::Compile { compile_data } => {
+                        if compile_data.is_ok() {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "failed Compile",
+                                    got: "successful Compile",
+                                },
+                            );
                         }
-
-                        (eval_data, Some(approval_data))
+                        (Some(Box::new(compile_data)), None, None)
+                    }
+                    ActualProtocols::CompileEval {
+                        compile_data,
+                        eval_data,
+                    } => {
+                        if !compile_data.is_ok() {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "successful Compile",
+                                    got: "failed Compile",
+                                },
+                            );
+                        }
+                        let (evaluation, approval) =
+                            check_eval_approval(eval_data, None)?;
+                        (Some(Box::new(compile_data)), evaluation, approval)
+                    }
+                    ActualProtocols::CompileEvalApprove {
+                        compile_data,
+                        eval_data,
+                        approval_data,
+                    } => {
+                        if !compile_data.is_ok() {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "successful Compile",
+                                    got: "failed Compile",
+                                },
+                            );
+                        }
+                        let (evaluation, approval) = check_eval_approval(
+                            eval_data,
+                            Some(approval_data),
+                        )?;
+                        (Some(Box::new(compile_data)), evaluation, approval)
                     }
                     ActualProtocols::None => {
                         return Err(ProtocolsError::InvalidActualProtocols {
@@ -551,6 +691,7 @@ impl Protocols {
 
                 Ok(Self::GovFact {
                     event_request,
+                    compilation,
                     evaluation,
                     approval,
                     validation,
@@ -569,6 +710,14 @@ impl Protocols {
                         return Err(ProtocolsError::InvalidActualProtocols {
                             expected: "Eval",
                             got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "Compile",
                         });
                     }
                 };
@@ -595,6 +744,14 @@ impl Protocols {
                             got: "EvalApprove",
                         });
                     }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "Compile",
+                        });
+                    }
                 };
 
                 Ok(Self::Transfer {
@@ -618,6 +775,14 @@ impl Protocols {
                             got: "EvalApprove",
                         });
                     }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "Compile",
+                        });
+                    }
                 };
                 Ok(Self::GovConfirm {
                     event_request,
@@ -637,6 +802,14 @@ impl Protocols {
                         return Err(ProtocolsError::InvalidActualProtocols {
                             expected: "None",
                             got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Compile",
                         });
                     }
                     ActualProtocols::None => {}
@@ -661,6 +834,14 @@ impl Protocols {
                             got: "EvalApprove",
                         });
                     }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Compile",
+                        });
+                    }
                     ActualProtocols::None => {}
                 }
                 Ok(Self::Reject {
@@ -680,6 +861,14 @@ impl Protocols {
                         return Err(ProtocolsError::InvalidActualProtocols {
                             expected: "None",
                             got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Compile",
                         });
                     }
                     ActualProtocols::None => {}

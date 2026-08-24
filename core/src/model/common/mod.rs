@@ -77,8 +77,16 @@ pub async fn get_actual_roles_register<A>(
     governance_id: &DigestIdentifier,
     evaluation: SearchRole,
     approval: bool,
+    compilation: bool,
     version: u64,
-) -> Result<(RoleDataRegister, Option<RoleDataRegister>), ActorError>
+) -> Result<
+    (
+        RoleDataRegister,
+        Option<RoleDataRegister>,
+        Option<RoleDataRegister>,
+    ),
+    ActorError,
+>
 where
     A: Actor + Handler<A>,
 {
@@ -93,6 +101,7 @@ where
             version,
             evaluation,
             approval,
+            compilation,
         })
         .await?;
 
@@ -100,7 +109,8 @@ where
         RoleRegisterResponse::ActualRoles {
             evaluation,
             approval,
-        } => Ok((evaluation, approval)),
+            compilation,
+        } => Ok((evaluation, approval, compilation)),
         _ => Err(ActorError::UnexpectedResponse {
             path,
             expected: "RolesRegisterResponse::ActualRoles".to_string(),

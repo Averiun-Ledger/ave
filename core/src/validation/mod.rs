@@ -169,6 +169,10 @@ impl Validation {
                                 .current_request_roles
                                 .evaluation
                                 .clone(),
+                            compilation: self
+                                .current_request_roles
+                                .compilation
+                                .clone(),
                             approval: self.current_request_roles.approval.clone(),
                         },
                         stop:true,
