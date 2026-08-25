@@ -96,6 +96,10 @@ impl Handler<Self> for ContractCompiler {
                     };
 
                 if contract_hash != self.contract {
+                    let register_path = ActorPath::from(format!(
+                        "{}/contract_register",
+                        ctx.path().parent()
+                    ));
                     let (module, metadata) =
                         match CompilerSupport::compile_or_load_registered(
                             self.hash,
@@ -104,6 +108,7 @@ impl Handler<Self> for ContractCompiler {
                             &contract,
                             &contract_path,
                             initial_value,
+                            &register_path,
                         )
                         .await
                         {

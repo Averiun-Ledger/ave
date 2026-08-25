@@ -4,7 +4,13 @@ use std::{
 };
 
 use crate::{
-    compilation::{request::CompilationReq, resolve_compile_targets},
+    compilation::{
+        CompileTarget, request::CompilationReq, resolve_compile_targets,
+    },
+    evaluation::compiler::{
+        CompilerSupport, error::CompilerError, is_compiler_infra_error,
+        is_local_fatal_compiler_error,
+    },
     governance::model::Schema,
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
@@ -12,6 +18,7 @@ use crate::{
         node::{SignTypesNode, get_sign},
     },
     subject::RequestSubjectData,
+    system::ConfigHelper,
 };
 
 use crate::helpers::network::ActorMessage;
@@ -76,6 +83,22 @@ pub struct PendingCompilation {
     pub version: u64,
     /// Subject the compilation belongs to (response actor path).
     pub subject_id: DigestIdentifier,
+}
+
+/// Outcome of compiling the target contracts of a request.
+enum ContractCompilation {
+    /// Every contract compiled and passed its init check: artifact hash
+    /// per schema.
+    Compiled(BTreeMap<SchemaType, DigestIdentifier>),
+    /// Deterministic failure (contract rejected or init check failed):
+    /// every honest compiler votes the same.
+    Failed(CompilationError),
+    /// A contract payload does not even decode: the request is
+    /// malformed, there is nothing to vote. Aborted, same as the
+    /// evaluation's `InvalidEventRequest`.
+    Abort(String),
+    /// This node can not compile right now for infrastructure reasons.
+    Unavailable,
 }
 
 impl CompileWorker {
@@ -195,25 +218,34 @@ impl CompileWorker {
                             req_subject_data_hash,
                         }
                     } else {
-                        let mut contracts = BTreeMap::new();
-                        for (schema_id, contract) in targets {
-                            // Placeholder: the source hash stands in for the
-                            // artifact hash until the real compilation lands.
-                            let wasm_hash =
-                                hash_borsh(&*self.hash.hasher(), &contract)
-                                    .map_err(|e| ActorError::Functional {
-                                        description: format!(
-                                            "Can not hash contract source: {}",
-                                            e
-                                        ),
-                                    })?;
-                            contracts.insert(schema_id, wasm_hash);
-                        }
-
-                        CompilationResult::Ok {
-                            response: CompilerResponse { contracts },
-                            compile_req_hash,
-                            req_subject_data_hash,
+                        match self
+                            .compile_targets(ctx, compilation_req, targets)
+                            .await
+                        {
+                            Ok(ContractCompilation::Compiled(contracts)) => {
+                                CompilationResult::Ok {
+                                    response: CompilerResponse { contracts },
+                                    compile_req_hash,
+                                    req_subject_data_hash,
+                                }
+                            }
+                            Ok(ContractCompilation::Failed(error)) => {
+                                CompilationResult::Error {
+                                    error,
+                                    compile_req_hash,
+                                    req_subject_data_hash,
+                                }
+                            }
+                            Ok(ContractCompilation::Abort(reason)) => {
+                                return Ok(CompilationRes::Abort(reason));
+                            }
+                            Ok(ContractCompilation::Unavailable) => {
+                                // This node can not compile right now for
+                                // infrastructure reasons: not a verdict,
+                                // the requester replaces this compiler.
+                                return Ok(CompilationRes::Unavailable);
+                            }
+                            Err(error) => return Err(error),
                         }
                     }
                 }
@@ -245,6 +277,140 @@ impl CompileWorker {
             result_hash,
             result_hash_signature,
         })
+    }
+
+    /// Compiles every target contract with its init check and returns
+    /// the artifact hash of each one. Changed contracts are staged under
+    /// a temporary name — promoted to the official artifact if the event
+    /// commits, swept otherwise — while unchanged ones reuse the
+    /// official artifact and only run the init check with the new
+    /// initial value.
+    async fn compile_targets(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        compilation_req: &Signed<CompilationReq>,
+        targets: BTreeMap<SchemaType, CompileTarget>,
+    ) -> Result<ContractCompilation, ActorError> {
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let subject_id = compilation_req
+            .content()
+            .event_request
+            .content()
+            .get_subject_id();
+        let register_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/contract_register",
+            self.governance_id
+        ));
+
+        let mut contracts = BTreeMap::new();
+        for (schema_id, target) in targets {
+            let (contract_name, contract_path) = if target.contract_changed {
+                let contract_hash = hash_borsh(
+                    &*self.hash.hasher(),
+                    &target.source,
+                )
+                .map_err(|e| ActorError::Functional {
+                    description: format!("Can not hash contract source: {}", e),
+                })?;
+                let staging_name =
+                    format!("{}_temp_staging_{}", subject_id, contract_hash);
+                let staging_path = config.contracts_path.join(&staging_name);
+                (staging_name, staging_path)
+            } else {
+                let official_name = format!("{}_{}", subject_id, schema_id);
+                let official_path = config
+                    .contracts_path
+                    .join("contracts")
+                    .join(&official_name);
+                (official_name, official_path)
+            };
+
+            match CompilerSupport::compile_or_load_registered(
+                self.hash,
+                ctx,
+                &contract_name,
+                &target.source,
+                &contract_path,
+                target.initial_value,
+                &register_path,
+            )
+            .await
+            {
+                Ok((_module, record)) => {
+                    contracts.insert(schema_id, record.wasm_hash);
+                }
+                Err(error) => {
+                    if matches!(error, CompilerError::Base64DecodeFailed { .. })
+                    {
+                        // A contract payload that does not even decode
+                        // is a malformed request: nothing to vote, it
+                        // is aborted (same as the evaluation's
+                        // `InvalidEventRequest`).
+                        if target.contract_changed {
+                            return Ok(ContractCompilation::Abort(
+                                error.to_string(),
+                            ));
+                        }
+                        // The undecodable contract comes from the
+                        // committed local state: it is corrupt, fail
+                        // loud.
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Committed contract {} does not decode: {}",
+                                    schema_id, error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                    // Infrastructure problems of this node are not a
+                    // verdict: answer Unavailable so the requester
+                    // replaces this compiler.
+                    if is_compiler_infra_error(&error) {
+                        warn!(
+                            governance_id = %self.governance_id,
+                            schema_id = %schema_id,
+                            error = %error,
+                            "Compiler infrastructure unavailable"
+                        );
+                        return Ok(ContractCompilation::Unavailable);
+                    }
+                    // Fatal local problems (disk, register, helpers,
+                    // engine): the node is broken, fail loud.
+                    if is_local_fatal_compiler_error(&error) {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not compile contract {}: {}",
+                                    schema_id, error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                    // Anything else is a contract problem: every honest
+                    // compiler reaches the same verdict, so it is voted.
+                    return Ok(ContractCompilation::Failed(
+                        CompilationError::CompilationFailed(format!(
+                            "{}: {}",
+                            schema_id, error
+                        )),
+                    ));
+                }
+            }
+        }
+
+        Ok(ContractCompilation::Compiled(contracts))
     }
 
     /// Request-level checks. Every failure is an abort: the requester is
@@ -400,26 +566,29 @@ impl Handler<Self> for CompileWorker {
                             })
                             .await
                         {
-                            error!(
+                            // The phase was torn down (abort, reboot or
+                            // quorum already closed) while this response
+                            // was in flight: it is moot, drop it.
+                            debug!(
                                 msg_type = "LocalCompilation",
                                 error = %e,
-                                "Failed to send response to compilation actor"
+                                "Compilation actor gone, dropping response"
                             );
-                            return Err(crash_system(ctx, e).await);
+                        } else {
+                            debug!(
+                                msg_type = "LocalCompilation",
+                                "Local compilation completed successfully"
+                            );
                         }
-
-                        debug!(
-                            msg_type = "LocalCompilation",
-                            "Local compilation completed successfully"
-                        );
                     }
                     Err(e) => {
-                        error!(
+                        // Same teardown race: the phase actor is gone.
+                        debug!(
                             msg_type = "LocalCompilation",
                             path = %ctx.path().parent(),
-                            "Compilation actor not found"
+                            error = %e,
+                            "Compilation actor not found, dropping response"
                         );
-                        return Err(e);
                     }
                 }
 

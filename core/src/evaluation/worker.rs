@@ -617,26 +617,29 @@ impl Handler<Self> for EvalWorker {
                             })
                             .await
                         {
-                            error!(
+                            // The phase was torn down (abort, reboot or
+                            // quorum already closed) while this response
+                            // was in flight: it is moot, drop it.
+                            debug!(
                                 msg_type = "LocalEvaluation",
                                 error = %e,
-                                "Failed to send response to evaluation actor"
+                                "Evaluation actor gone, dropping response"
                             );
-                            return Err(crash_system(ctx, e).await);
+                        } else {
+                            debug!(
+                                msg_type = "LocalEvaluation",
+                                "Local evaluation completed successfully"
+                            );
                         }
-
-                        debug!(
-                            msg_type = "LocalEvaluation",
-                            "Local evaluation completed successfully"
-                        );
                     }
                     Err(e) => {
-                        error!(
+                        // Same teardown race: the phase actor is gone.
+                        debug!(
                             msg_type = "LocalEvaluation",
                             path = %ctx.path().parent(),
-                            "Evaluation actor not found"
+                            error = %e,
+                            "Evaluation actor not found, dropping response"
                         );
-                        return Err(e);
                     }
                 }
 

@@ -3318,6 +3318,2240 @@ async fn test_gov_compile_request_aborted_manually() {
 }
 
 #[test(tokio::test)]
+// Una request atascada en la fase de aprobación (aprobador caído, sin
+// quórum) se puede abortar manualmente con limpieza: el manager para
+// los hijos de la fase con reintentos de red en vuelo, registra el
+// abort y la gobernanza no avanza.
+async fn test_gov_approval_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser aprobador y todo cambio de gobernanza
+    // exige la aprobación de todos los aprobadores (fixed 100).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": {
+                        "fixed": 100
+                    }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "approver": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la aprobación no puede cerrar el quórum: la
+    // fase se queda reintentando el envío de red.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode3",
+                    "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                        .public_key()
+                        .to_string()
+                }
+            ]
+        }
+    });
+
+    // El helper espera al estado Approval: la fase está en vuelo.
+    let request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // El owner aprueba; solo falta AveNode2, que está caído.
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Abort manual con la fase de aprobación en vuelo.
+    node1
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, governance_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // La gobernanza no ha avanzado: sigue en el SN 1.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+}
+
+#[test(tokio::test)]
+// Una request abortada a mitad de la fase compile nunca commitea: el
+// abort barre su staging y reemitir el mismo cambio recompila y
+// commitea con normalidad, sin colisiones con restos anteriores.
+async fn test_gov_compile_abort_sweeps_staging_and_reemit_commits() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_local = tempfile::tempdir().unwrap();
+    let node2_ext = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(node1_contracts.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: AveNode2 pasa a ser compiler y testigo. Con 2 compilers y
+    // quórum Majority la fase compile exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la request no puede cerrar el quórum de
+    // compile: node1 compila a staging y se queda peleando con la fase.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id =
+        emit_fact(&node1.api, governance_id.clone(), json.clone(), false)
+            .await
+            .unwrap();
+
+    // Se espera a que el staging exista en disco (sondeo, como los
+    // helpers).
+    for _ in 0..100 {
+        if !staging_dirs().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(staging_dirs().len(), 1);
+
+    // Abort manual con la fase compile en vuelo: barre el staging.
+    node1
+        .api
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        &node1.api,
+        request_id,
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // El abort barrió el staging: la request nunca va a commitear.
+    assert!(staging_dirs().is_empty());
+
+    // AveNode2 vuelve y la reemisión del mismo cambio commitea.
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+
+    // El staging se promovió: no queda nada temporal y el artefacto
+    // oficial existe.
+    assert!(staging_dirs().is_empty());
+    assert!(
+        node1_contracts
+            .path()
+            .join("contracts")
+            .join(format!("{}_Example", governance_id))
+            .exists()
+    );
+}
+
+#[test(tokio::test)]
+// Un nodo que cae a mitad de la fase compile deja staging huérfano en
+// disco: al reiniciar la request se reanuda sola, reutiliza o
+// recompila ese staging y commitea cuando el quórum vuelve.
+async fn test_gov_compile_orphan_staging_survives_restart() {
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_local = tempfile::tempdir().unwrap();
+    let node2_ext = tempfile::tempdir().unwrap();
+
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(node1_contracts.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: AveNode2 pasa a ser compiler y testigo. Con 2 compilers y
+    // quórum Majority la fase compile exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la request no puede cerrar el quórum de
+    // compile: node1 compila a staging y se queda peleando con la fase.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    // Se espera a que el staging exista en disco (sondeo, como los
+    // helpers).
+    for _ in 0..100 {
+        if !staging_dirs().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(staging_dirs().len(), 1);
+
+    // node1 cae a mitad de la fase compile: staging huérfano en disco.
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    // node1 reinicia con los mismos datos: la request se reanuda sola.
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        keys: Some(node1.keys.clone()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // El staging huérfano sobrevive al reinicio: la request reanudada
+    // lo reutiliza o lo recompila.
+    assert_eq!(staging_dirs().len(), 1);
+
+    // AveNode2 vuelve: el quórum de compile se cierra y commitea.
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+
+    // El staging se promovió: no queda nada temporal y el artefacto
+    // oficial existe.
+    assert!(staging_dirs().is_empty());
+    assert!(
+        node1_contracts
+            .path()
+            .join("contracts")
+            .join(format!("{}_Example", governance_id))
+            .exists()
+    );
+}
+
+#[test(tokio::test)]
+// El staging de una fase compile ya completada también se barre si el
+// owner aborta la request más tarde, en la fase de aprobación: la
+// request nunca commitea y sus artefactos temporales no pueden quedar
+// en disco.
+async fn test_gov_compile_staging_swept_on_approval_abort() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(node1_contracts.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: AveNode2 pasa a ser aprobador y todo cambio de gobernanza
+    // exige la aprobación de todos los aprobadores (fixed 100).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": {
+                        "fixed": 100
+                    }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "approver": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        &node1.api,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la aprobación no puede cerrar el quórum.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    // La compile y la evaluación sí completan: el staging queda
+    // escrito y la fase de aprobación se queda en vuelo.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    assert_eq!(staging_dirs().len(), 1);
+
+    // Abort manual con la fase de aprobación en vuelo y el staging ya
+    // escrito: el barrido también aplica.
+    node1
+        .api
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        &node1.api,
+        request_id,
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(staging_dirs().is_empty());
+
+    // La gobernanza no ha avanzado: sigue en el SN 1.
+    let state = get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+}
+
+#[test(tokio::test)]
+// Un cambio de contrato que compila y evalúa bien pero se rechaza en
+// aprobación commitea sin aplicar: su staging se barre y el contrato
+// oficial sigue siendo el anterior, así que el sujeto sigue evaluando
+// con el contrato numérico original.
+async fn test_gov_compile_staging_swept_on_approval_reject() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = |dir: &tempfile::TempDir| -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: esquema con el contrato numérico, sus roles, y AveNode2 de
+    // compiler y testigo. Con 2 compilers y quórum Majority la fase
+    // compile exige el visto bueno de ambos: los dos stagean.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        &node1.api,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Sujeto del esquema: un evento numérico funciona.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+
+    // SN 2: cambio a un contrato de strings. Compila y evalúa bien en
+    // ambos compilers (los dos tienen staging), pero la aprobación lo
+    // rechaza.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_contract": CHANGED_SCHEMA_CONTRACT,
+                    "new_initial_value": {
+                        "data": "hola"
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    assert_eq!(staging_dirs(&node1_contracts).len(), 1);
+    assert_eq!(staging_dirs(&node2_contracts).len(), 1);
+
+    emit_approve(
+        &node1.api,
+        governance_id.clone(),
+        ApprovalStateRes::Rejected,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // El evento commitea rechazado: el staging se barre y el contrato
+    // no cambia.
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert!(staging_dirs(&node1_contracts).is_empty());
+
+    // El barrido es de todos los nodos que aplican el evento, no solo
+    // del requester: AveNode2 aplica el evento al sincronizarse y su
+    // staging también desaparece.
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(staging_dirs(&node2_contracts).is_empty());
+
+    // El contrato oficial sigue siendo el numérico: el evento de
+    // números sigue funcionando.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 200 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+}
+
+#[test(tokio::test)]
+// Un cambio que solo toca el initial_value reutiliza el artefacto oficial
+// (no hay contrato nuevo que compilar): si el nuevo valor no pasa el init
+// check del contrato, el veredicto es un fallo determinista — recompilar
+// el mismo source fallaría igual — y el evento commitea fallido sin tocar
+// el esquema ni el artefacto.
+async fn test_gov_compile_invalid_init_only_change_fails_event() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: esquema con el contrato numérico y sus roles.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Sujeto del esquema: un evento numérico funciona.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+
+    // SN 2 (fallido): cambio solo de initial_value, con un tipo que el
+    // contrato no acepta (`one` es u32). La fase compile valida el nuevo
+    // valor contra el artefacto oficial y vota el fallo.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_initial_value": {
+                        "one": "abc",
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // El evento commitea fallido: el sn avanza pero la versión y el
+    // esquema no cambian.
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 1);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 0, "two": 0, "three": 0})
+    );
+
+    // Sin contrato nuevo no hay staging: nada que barrer y el artefacto
+    // oficial sigue intacto.
+    let staging: Vec<_> = fs::read_dir(node1_contracts.path())
+        .unwrap()
+        .filter_map(|entry| {
+            let name =
+                entry.unwrap().file_name().to_string_lossy().into_owned();
+            name.contains("_temp_staging_").then_some(name)
+        })
+        .collect();
+    assert!(staging.is_empty());
+    assert!(
+        node1_contracts
+            .path()
+            .join("contracts")
+            .join(format!("{}_Example", governance_id))
+            .join("contract.cwasm")
+            .exists()
+    );
+
+    // El artefacto oficial sigue sirviendo: el evento de números funciona.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 200 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+}
+
+#[test(tokio::test)]
+// Si el artefacto precompilado (contract.cwasm) está corrupto pero el
+// wasm persiste íntegro, la primera evaluación tras rearrancar el nodo
+// (sin el módulo cacheado en memoria) se autocura: precompila desde el
+// wasm, vuelve a persistir el precompilado y el evento se evalúa con
+// normalidad, sin pedir nada a la red.
+async fn test_contract_cwasm_corruption_falls_back_to_wasm() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
+
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: esquema con el contrato numérico y sus roles.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Sujeto del esquema: un evento numérico funciona.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+
+    // El módulo compilado queda cacheado en memoria tras el primer uso:
+    // el fallback de disco solo se ejerce cuando el nodo arranca sin esa
+    // caché. Se para el nodo, se corrompe el precompilado (el wasm, que
+    // es la fuente de verdad del artefacto, no se toca) y se rearranca
+    // con las mismas claves y bases de datos.
+    let artifact_dir = node1_contracts
+        .path()
+        .join("contracts")
+        .join(format!("{}_Example", governance_id));
+    let cwasm_path = artifact_dir.join("contract.cwasm");
+    assert!(cwasm_path.exists());
+
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    fs::write(&cwasm_path, b"corrupted").unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        keys: Some(node1.keys.clone()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // La evaluación carga el contrato desde disco: el precompilado no
+    // deserializa, se cae al wasm, se regenera el precompilado y el
+    // evento se aplica con normalidad, sin pedir nada a la red.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 200 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+
+    // Autocuración: el fallback vuelve a persistir el precompilado, así
+    // que el fichero corrupto ha sido reemplazado.
+    let healed = fs::read(&cwasm_path).unwrap();
+    assert_ne!(healed, b"corrupted");
+}
+
+#[test(tokio::test)]
+// Un alta de schema cuyo contrato compila pero cuyo initial_value no
+// pasa el init check falla en la fase compile después de stagear: el
+// evento commitea fallido y no queda residuo en disco — ni staging ni
+// artefacto oficial.
+async fn test_gov_compile_failed_add_leaves_no_artifacts() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1 (fallido): el contrato compila pero `one` es u32 y llega un
+    // string: el init check falla contra el artefacto stageado.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": "abc",
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // El evento commitea fallido: el sn avanza pero la versión no y no
+    // hay schemas.
+    let state = get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 0);
+    assert!(properties.schemas.is_empty());
+
+    // Sin residuo en disco: el staging se barre al commitear fallido y
+    // no se crea artefacto oficial.
+    let staging: Vec<_> = fs::read_dir(node1_contracts.path())
+        .unwrap()
+        .filter_map(|entry| {
+            let name =
+                entry.unwrap().file_name().to_string_lossy().into_owned();
+            name.contains("_temp_staging_").then_some(name)
+        })
+        .collect();
+    assert!(staging.is_empty());
+    assert!(
+        !node1_contracts
+            .path()
+            .join("contracts")
+            .join(format!("{}_Example", governance_id))
+            .exists()
+    );
+}
+
+#[test(tokio::test)]
+// Si los dos ficheros del artefacto (wasm y precompilado) están corruptos
+// no hay fallback local posible: la primera evaluación tras rearrancar el
+// nodo detecta el hash mismatch y recompila desde el source del schema,
+// regenerando los artefactos, y el evento se aplica con normalidad.
+async fn test_contract_full_artifact_corruption_recompiles_on_boot() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
+
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: esquema con el contrato numérico y sus roles.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Sujeto del esquema: un evento numérico funciona.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+
+    // Corrupción total con el nodo parado (sin la caché en memoria): ni
+    // el precompilado ni el wasm sobreviven íntegros.
+    let artifact_dir = node1_contracts
+        .path()
+        .join("contracts")
+        .join(format!("{}_Example", governance_id));
+    let wasm_path = artifact_dir.join("contract.wasm");
+    let cwasm_path = artifact_dir.join("contract.cwasm");
+    assert!(wasm_path.exists());
+    assert!(cwasm_path.exists());
+
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    fs::write(&wasm_path, b"corrupted").unwrap();
+    fs::write(&cwasm_path, b"corrupted").unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        keys: Some(node1.keys.clone()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // La evaluación carga el contrato desde disco: ambos artefactos
+    // fallan su hash, se recompila desde el source y el evento se aplica
+    // con normalidad.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 200 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+
+    // La recompilación vuelve a persistir los artefactos: los ficheros
+    // corruptos han sido reemplazados.
+    let healed_wasm = fs::read(&wasm_path).unwrap();
+    assert_ne!(healed_wasm, b"corrupted");
+    let healed_cwasm = fs::read(&cwasm_path).unwrap();
+    assert_ne!(healed_cwasm, b"corrupted");
+}
+
+#[test(tokio::test)]
+// Un fallo de disco al promover el staging a oficial durante el commit
+// es un fallo local fatal: el nodo cae controlado en vez de quedarse
+// reintentando para siempre.
+async fn test_gov_compile_promotion_disk_failure_is_fatal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_local = tempfile::tempdir().unwrap();
+    let node2_ext = tempfile::tempdir().unwrap();
+
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(node1_contracts.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: esquema con contrato y AveNode2 de compiler y testigo.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la request se queda peleando con la fase
+    // compile tras escribir el staging.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_contract": EXAMPLE_CONTRACT_V2
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    // Se espera a que el staging exista en disco (sondeo, como los
+    // helpers).
+    for _ in 0..100 {
+        if !staging_dirs().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(staging_dirs().len(), 1);
+
+    // Disco roto en caliente: el directorio de contratos queda sin
+    // permisos de escritura, así que el rename de la promoción fallará.
+    fs::set_permissions(
+        node1_contracts.path(),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+
+    // AveNode2 vuelve: el quórum se cierra y el commit intenta la
+    // promoción con el disco roto.
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    // Un nodo que no puede hacer su trabajo es un nodo muerto: el fallo
+    // de disco en la promoción tumba el nodo entero de forma controlada.
+    join_all(node1.handler.iter_mut()).await;
+
+    // Restaurar permisos para que el TempDir pueda limpiarse al salir.
+    fs::set_permissions(
+        node1_contracts.path(),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+}
+
+#[test(tokio::test)]
+// Un staging corrompido en disco entre la compile y el commit (bitrot,
+// escritura parcial) no rompe al nodo: el evento commitea y en la
+// siguiente evaluación la lectura detecta el mismatch de hash y
+// recompila, autorrecuperándose.
+async fn test_gov_compile_staging_corruption_self_heals() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_local = tempfile::tempdir().unwrap();
+    let node2_ext = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(node1_contracts.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: AveNode2 pasa a ser compiler y testigo. Con 2 compilers y
+    // quórum Majority la fase compile exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la request se queda peleando con la fase
+    // compile tras escribir el staging.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    // Se espera a que el staging exista en disco (sondeo, como los
+    // helpers).
+    for _ in 0..100 {
+        if !staging_dirs().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let staging = staging_dirs();
+    assert_eq!(staging.len(), 1);
+
+    // El wasm staged se corrompe antes de que el evento commitee.
+    fs::write(
+        node1_contracts
+            .path()
+            .join(&staging[0])
+            .join("contract.wasm"),
+        b"corrupted",
+    )
+    .unwrap();
+
+    // AveNode2 vuelve: el quórum se cierra y el evento commitea con el
+    // artefacto corrompido promovido.
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert!(staging_dirs().is_empty());
+
+    // La primera evaluación lee el artefacto oficial corrompido,
+    // detecta el mismatch de hash y recompila: el nodo se
+    // autorrecupera y el sujeto funciona.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+}
+
+#[test(tokio::test)]
+// Un evento que añade dos schemas con contratos distintos genera dos
+// stagings: si la request se aborta, el barrido los elimina todos.
+async fn test_gov_compile_abort_sweeps_every_staging() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    let staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(node1_contracts.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1: AveNode2 pasa a ser compiler y testigo. Con 2 compilers y
+    // quórum Majority la fase compile exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la request se queda peleando con la fase
+    // compile tras escribir los stagings.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "ExampleV2",
+                    "contract": EXAMPLE_CONTRACT_V2,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    // Se espera a que ambos stagings existan en disco (sondeo, como
+    // los helpers).
+    for _ in 0..100 {
+        if staging_dirs().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(staging_dirs().len(), 2);
+
+    // Abort manual con la fase compile en vuelo: barre los dos
+    // stagings.
+    node1
+        .api
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        &node1.api,
+        request_id,
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(staging_dirs().is_empty());
+
+    // La gobernanza no ha avanzado: sigue en el SN 1.
+    let state = get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+}
+
+#[test(tokio::test)]
+// El artefacto compilado en la fase compile queda en staging hasta que
+// el evento commitea: si el commit es exitoso se promueve al slot
+// oficial y el staging desaparece (sin recompilar); si el evento
+// commitea fallido, el staging se borra y el artefacto nunca se vuelve
+// oficial.
+async fn test_gov_compile_staging_promoted_and_swept() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    let temp_staging_dirs = || -> Vec<String> {
+        let prefix = format!("{}_temp_staging_", governance_id);
+        fs::read_dir(contracts_dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix).then_some(name)
+            })
+            .collect()
+    };
+
+    // SN 1 (exitoso): se añade un schema con contrato. La fase compile
+    // deja el artefacto en staging y, al commitear, se promueve al slot
+    // oficial: el staging desaparece.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&node.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    assert!(
+        contracts_dir
+            .path()
+            .join("contracts")
+            .join(format!("{}_Example", governance_id))
+            .exists(),
+        "el artefacto promovido debe existir en el slot oficial"
+    );
+    assert!(
+        temp_staging_dirs().is_empty(),
+        "tras el commit exitoso no debe quedar staging: {:?}",
+        temp_staging_dirs()
+    );
+
+    // SN 2 (fallido): se añade otro schema con contrato (se compila y
+    // queda en staging) pero el evento también da el rol compiler a un
+    // miembro que no existe, así que la evaluación lo rechaza. El
+    // evento commitea fallido: el staging se borra y el artefacto de
+    // Example2 nunca llega al slot oficial.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example2",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "compiler": ["NotAMember"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let state = get_subject(&node.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 1);
+    assert_eq!(properties.schemas.len(), 1);
+
+    assert!(
+        temp_staging_dirs().is_empty(),
+        "tras el commit fallido no debe quedar staging: {:?}",
+        temp_staging_dirs()
+    );
+    assert!(
+        !contracts_dir
+            .path()
+            .join("contracts")
+            .join(format!("{}_Example2", governance_id))
+            .exists(),
+        "el artefacto de un evento fallido no debe ser oficial"
+    );
+}
+
+#[test(tokio::test)]
 async fn test_delete_schema() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -6372,10 +8606,10 @@ async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
 }
 
 #[test(tokio::test)]
-// Un fallo local fatal durante el refresh de un contrato en runtime (el
-// compilador entrega el artefacto pero el disco no puede persistirlo) no
-// se degrada: el evento commitea, el actor de gobernanza muere y, con el
-// disco aún roto, el reinicio se niega a arrancar en modo degradado.
+// Un fallo local fatal durante la compilación pre-commit de un contrato
+// (el disco no puede persistir el staging) no se degrada: el nodo se
+// baja controladamente, el evento no commitea y, con el disco aún roto,
+// el reinicio se niega a arrancar en modo degradado.
 async fn test_gov_contract_refresh_disk_failure_restart_is_fatal() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -6425,10 +8659,9 @@ async fn test_gov_contract_refresh_disk_failure_restart_is_fatal() {
     )
     .unwrap();
 
-    // SN 2: cambio de contrato a la v2. El evento se persiste antes del
-    // refresh; este consigue el artefacto del compilador pero no puede
-    // escribirlo: error local fatal. Se emite async porque el actor de
-    // gobernanza muere justo después de commitear.
+    // SN 2: cambio de contrato a la v2. La compilación es pre-commit: el
+    // worker intenta crear el staging con el disco roto, un fallo local
+    // fatal. Se emite async porque el nodo entero se baja justo después.
     let json = json!({
         "schemas": {
             "change": [
@@ -6442,28 +8675,22 @@ async fn test_gov_contract_refresh_disk_failure_restart_is_fatal() {
     emit_fact(&node.api, governance_id.clone(), json, false)
         .await
         .unwrap();
-    get_subject(&node.api, governance_id.clone(), Some(2), true)
-        .await
-        .unwrap();
 
-    // El proceso del nodo sigue vivo: el fallo fatal tumba la gobernanza,
-    // no el sistema.
-    node_running(&node.api).await.unwrap();
-
-    // Apagado ordenado conservando claves y bases de datos.
-    let keys = node.keys.clone();
-    node.token.cancel();
+    // Un nodo que no puede hacer su trabajo es un nodo muerto: el fallo
+    // de disco tumba el nodo entero (no solo la gobernanza) y el evento
+    // no llega a commitear.
     join_all(node.handler.iter_mut()).await;
 
     // Con el disco aún roto el nodo no debe arrancar degradado: el fallo
-    // local fatal vuelve a aparecer al recompilar la v2 en el arranque.
+    // local fatal vuelve a aparecer al recuperar los artefactos en el
+    // arranque.
     let result = try_create_node(CreateNodeConfig {
         listen_address: format!(
             "/memory/{}",
             PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
         ),
         always_accept: true,
-        keys: Some(keys),
+        keys: Some(node.keys.clone()),
         local_db: Some(dirs[0].path().to_path_buf()),
         ext_db: Some(dirs[1].path().to_path_buf()),
         contracts_path: Some(contracts_dir.path().to_path_buf()),

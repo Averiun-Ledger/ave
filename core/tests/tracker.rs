@@ -5724,3 +5724,367 @@ async fn test_emisor_sender_no_access() {
     let result = owner.manual_distribution(subject_id.clone()).await;
     assert!(result.is_err());
 }
+
+#[test(tokio::test)]
+// Una request atascada en la fase de validación (un validador caído y
+// quórum Majority que lo exige) se puede abortar manualmente con
+// limpieza: el manager para la fase con reintentos de red en vuelo,
+// registra el abort y el sujeto no avanza.
+async fn test_subject_validation_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser validador del esquema. Con 2
+    // validadores y quórum Majority se exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // El sujeto se crea con AveNode2 vivo: la validación cierra.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Con AveNode2 caído la validación no puede cerrar el quórum: la
+    // fase se queda reintentando el envío de red.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let request_id = emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Se espera a que la fase de validación esté en vuelo.
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Validation),
+    )
+    .await
+    .unwrap();
+
+    // Abort manual con la fase de validación en vuelo.
+    node1
+        .manual_request_abort(subject_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, subject_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // El sujeto no ha avanzado: sigue en el SN 0.
+    let state = get_subject(node1, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 0);
+}
+
+#[test(tokio::test)]
+// Una request atascada en la fase de evaluación (un evaluador caído y
+// quórum Majority que lo exige) se puede abortar manualmente con
+// limpieza: el manager para la fase con reintentos de red en vuelo,
+// registra el abort y el sujeto no avanza.
+async fn test_subject_evaluation_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser evaluador del esquema. Con 2
+    // evaluadores y quórum Majority se exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // El sujeto se crea con validación solo del owner: AveNode2 no
+    // participa y no necesita estar sincronizado.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Con AveNode2 caído la evaluación no puede cerrar el quórum: la
+    // fase se queda reintentando el envío de red.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let request_id = emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Se espera a que la fase de evaluación esté en vuelo.
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Evaluation),
+    )
+    .await
+    .unwrap();
+
+    // Abort manual con la fase de evaluación en vuelo.
+    node1
+        .manual_request_abort(subject_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, subject_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // El sujeto no ha avanzado: sigue en el SN 0.
+    let state = get_subject(node1, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 0);
+}

@@ -6,7 +6,10 @@ use crate::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
     },
-    compilation::worker::{CompileWorker, CompileWorkerMessage},
+    compilation::{
+        payload_contract_sources,
+        worker::{CompileWorker, CompileWorkerMessage},
+    },
     config::SinkTarget,
     db::Storable,
     evaluation::{
@@ -58,7 +61,7 @@ use crate::{
         common::{
             crash_system, get_last_event, purge_storage, subject::make_obsolete,
         },
-        event::{Ledger, Protocols, ValidationMetadata},
+        event::{CompilationResponse, Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     sink::{
@@ -83,7 +86,7 @@ use ave_actors::{
 };
 use ave_common::{
     DataToSink, Namespace, SchemaType, ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey},
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
     request::EventRequest,
     response::SubjectDB,
     schematype::ReservedWords,
@@ -352,6 +355,14 @@ impl Subject for Governance {
 
         let current_properties = self.properties.clone();
 
+        // Compilation evidence of the governance fact events being
+        // applied: artifact hashes of the successful ones (to promote
+        // their staged artifacts to official) and payload contract
+        // sources of the failed ones (their staged artifacts are
+        // dropped).
+        let (evidence_contracts, failed_compile_sources) =
+            Self::compile_evidence_of(&events);
+
         if let Err(e) = self.verify_new_ledger_events(ctx, events, &hash).await
         {
             if let ActorError::Functional { description } = e.clone() {
@@ -465,7 +476,19 @@ impl Subject for Governance {
                         .await?;
                 }
 
-                self.manager_schemas_compilers(ctx, &old_gov).await?;
+                self.manager_schemas_compilers(
+                    ctx,
+                    &old_gov,
+                    &evidence_contracts,
+                )
+                .await?;
+                Self::drop_failed_staged_contracts(
+                    ctx,
+                    &failed_compile_sources,
+                    &self.subject_metadata.subject_id,
+                    &hash,
+                )
+                .await?;
                 self.update_childs(ctx).await?;
             }
 
@@ -889,10 +912,344 @@ impl Governance {
         Ok(())
     }
 
+    /// Splits the compilation evidence of the governance fact events
+    /// being applied: artifact hashes per schema of the successful ones
+    /// (their staged artifacts are promoted to official) and the payload
+    /// contract sources of the failed ones (their staged artifacts are
+    /// dropped).
+    fn compile_evidence_of(
+        events: &[Ledger],
+    ) -> (BTreeMap<SchemaType, DigestIdentifier>, Vec<String>) {
+        let mut evidence_contracts = BTreeMap::new();
+        let mut failed_sources = Vec::new();
+
+        for ledger in events {
+            let Protocols::GovFact {
+                compilation,
+                evaluation,
+                approval,
+                event_request,
+                ..
+            } = &ledger.protocols
+            else {
+                continue;
+            };
+
+            let EventRequest::Fact(fact_request) = event_request.content()
+            else {
+                continue;
+            };
+
+            // Same criterion as the event apply: the patch is only
+            // applied when the evaluation succeeded AND the approval
+            // accepted. A rejected fact commits without applying, so
+            // its staged contracts are swept, not promoted.
+            let success = evaluation
+                .as_ref()
+                .and_then(|evaluation| evaluation.evaluator_response_ok())
+                .is_some()
+                && approval.as_ref().is_some_and(|approval| approval.approved);
+
+            if success {
+                if let Some(compilation) = compilation
+                    && let CompilationResponse::Ok { result, .. } =
+                        &compilation.response
+                {
+                    evidence_contracts.extend(result.contracts.clone());
+                }
+            } else {
+                // Only contracts coming in the payload were staged;
+                // unchanged ones reuse the official artifact.
+                failed_sources
+                    .extend(payload_contract_sources(&fact_request.payload));
+            }
+        }
+
+        (evidence_contracts, failed_sources)
+    }
+
+    /// Promotes the staged artifact of every committed contract to its
+    /// official slot, replacing the previous one. Staged artifacts whose
+    /// hash is not the quorum-anchored one are discarded — the
+    /// registered pipeline obtains the right artifact as usual.
+    async fn promote_staged_contracts(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
+        hash: &HashAlgorithm,
+    ) -> Result<(), ActorError> {
+        if evidence_contracts.is_empty() {
+            return Ok(());
+        }
+
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        let subject_id = &self.subject_metadata.subject_id;
+        for (schema_id, evidence_wasm_hash) in evidence_contracts {
+            let Some(schema) = self.properties.schemas.get(schema_id) else {
+                continue;
+            };
+            let contract_hash = hash_borsh(&*hash.hasher(), &schema.contract);
+            let contract_hash = match contract_hash {
+                Ok(contract_hash) => contract_hash,
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not hash contract of schema {}: {}",
+                                schema_id, e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            };
+            let staging_name =
+                format!("{}_temp_staging_{}", subject_id, contract_hash);
+
+            let staged = match contract_register
+                .ask(ContractRegisterMessage::GetMetadata {
+                    contract_name: staging_name.clone(),
+                })
+                .await
+            {
+                Ok(ContractRegisterResponse::Metadata(metadata)) => metadata,
+                Ok(_) => None,
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not read staged contract metadata: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            };
+
+            // This node did not compile the contract: the registered
+            // pipeline obtains the artifact as usual.
+            let Some(record) = staged else {
+                continue;
+            };
+
+            if &record.wasm_hash != evidence_wasm_hash {
+                // The staged artifact is not the one the quorum
+                // anchored: discard it.
+                warn!(
+                    schema_id = %schema_id,
+                    staged_hash = %record.wasm_hash,
+                    evidence_hash = %evidence_wasm_hash,
+                    "Staged contract artifact does not match the committed evidence, discarding"
+                );
+                if let Err(e) = contract_register
+                    .tell(ContractRegisterMessage::DeleteMetadata {
+                        contract_name: staging_name.clone(),
+                    })
+                    .await
+                {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not drop staged contract metadata: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+                let _ = fs::remove_dir_all(
+                    config.contracts_path.join(&staging_name),
+                )
+                .await;
+                continue;
+            }
+
+            let official_name = format!("{}_{}", subject_id, schema_id);
+            let official_path =
+                config.contracts_path.join("contracts").join(&official_name);
+            if official_path.exists() {
+                if let Err(e) = fs::remove_dir_all(&official_path).await {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not remove previous contract artifact {}: {}",
+                                official_path.display(),
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            }
+            if let Err(e) = fs::rename(
+                config.contracts_path.join(&staging_name),
+                &official_path,
+            )
+            .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not promote staged contract artifact to {}: {}",
+                            official_path.display(),
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::SetMetadata {
+                    contract_name: official_name.clone(),
+                    metadata: record,
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not register promoted contract {}: {}",
+                            official_name, e
+                        ),
+                    },
+                )
+                .await);
+            }
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::DeleteMetadata {
+                    contract_name: staging_name,
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not drop promoted staging metadata: {}",
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+
+            debug!(
+                schema_id = %schema_id,
+                contract_name = %official_name,
+                "Promoted staged contract artifact to official"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Drops the staged artifacts of governance fact events that
+    /// committed as failed: their contracts never become official.
+    async fn drop_failed_staged_contracts(
+        ctx: &mut ActorContext<Self>,
+        sources: &[String],
+        subject_id: &DigestIdentifier,
+        hash: &HashAlgorithm,
+    ) -> Result<(), ActorError> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        for source in sources {
+            let contract_hash = hash_borsh(&*hash.hasher(), source);
+            let contract_hash = match contract_hash {
+                Ok(contract_hash) => contract_hash,
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not hash staged contract source: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            };
+            let staging_name =
+                format!("{}_temp_staging_{}", subject_id, contract_hash);
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::DeleteMetadata {
+                    contract_name: staging_name.clone(),
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not drop failed staged contract metadata: {}",
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+            // Best-effort: a leftover directory is swept on the next
+            // boot by `sweep_contract_artifacts`.
+            if let Err(e) =
+                fs::remove_dir_all(config.contracts_path.join(&staging_name))
+                    .await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(
+                    contract_name = %staging_name,
+                    error = %e,
+                    "Can not remove failed staged contract artifact"
+                );
+            }
+        }
+
+        debug!(
+            count = sources.len(),
+            "Dropped staged artifacts of failed governance events"
+        );
+
+        Ok(())
+    }
+
     async fn manager_schemas_compilers(
         &self,
         ctx: &mut ActorContext<Self>,
         old_gov: &GovernanceData,
+        evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
     ) -> Result<(), ActorError> {
         let Some(network) =
             ctx.system().get_helper::<Arc<NetworkSender>>("network")
@@ -908,6 +1265,12 @@ impl Governance {
                 description: "Hash algorithm is None".to_string(),
             });
         };
+
+        // Staged artifacts of the contracts that just committed become
+        // the official ones: the registered pipeline below then finds
+        // them already in place and does not recompile.
+        self.promote_staged_contracts(ctx, evidence_contracts, &hash)
+            .await?;
 
         let (old_schemas_eval, new_schemas_eval) = {
             let old_schemas_eval =

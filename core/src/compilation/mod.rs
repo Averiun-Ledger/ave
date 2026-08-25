@@ -41,6 +41,7 @@ use ave_common::{
         Signed, hash_borsh,
     },
 };
+use serde_json::Value;
 
 use request::CompilationReq;
 use response::{CompilationError, CompilationRes, CompilerResponse};
@@ -83,14 +84,53 @@ pub fn schemas_to_compile(
     Some(schemas)
 }
 
-/// Effective contract source of every schema to compile, resolving
-/// changes against the committed governance schemas: the source of an
-/// added or changed contract comes from the event itself, the source of
-/// a schema whose initial value changes is the committed one.
+/// Contract sources coming in a governance fact payload: every added
+/// schema plus every change with a new contract. These are the only
+/// contracts the compilation phase stages — unchanged contracts reuse
+/// the official artifact. Returns an empty vec when the payload is not
+/// a valid governance event.
+pub fn payload_contract_sources(payload: &ValueWrapper) -> Vec<String> {
+    let mut sources = Vec::new();
+    let Ok(event) =
+        serde_json::from_value::<GovernanceEvent>(payload.0.clone())
+    else {
+        return sources;
+    };
+
+    if let Some(schemas_event) = event.schemas {
+        if let Some(add) = schemas_event.add {
+            sources.extend(add.into_iter().map(|schema| schema.contract));
+        }
+        if let Some(change) = schemas_event.change {
+            sources.extend(
+                change.into_iter().filter_map(|schema| schema.new_contract),
+            );
+        }
+    }
+
+    sources
+}
+
+/// Everything the compilation phase needs for one schema: the effective
+/// contract source and initial value, and whether the contract itself
+/// changes. Added or changed contracts come from the event; the source
+/// (and initial value) of an unchanged one comes from the committed
+/// governance schemas.
+#[derive(Debug, Clone)]
+pub struct CompileTarget {
+    pub source: String,
+    pub initial_value: Value,
+    pub contract_changed: bool,
+}
+
+/// Effective compile target of every schema to compile, resolving
+/// changes against the committed governance schemas: what the event does
+/// not provide comes from the committed state, which is identical at the
+/// same governance version.
 pub fn resolve_compile_targets(
     payload: &ValueWrapper,
     schemas: &BTreeMap<SchemaType, Schema>,
-) -> Result<BTreeMap<SchemaType, String>, CompilationError> {
+) -> Result<BTreeMap<SchemaType, CompileTarget>, CompilationError> {
     let event: GovernanceEvent = serde_json::from_value(payload.0.clone())
         .map_err(|e| CompilationError::InvalidEvent(e.to_string()))?;
 
@@ -98,7 +138,14 @@ pub fn resolve_compile_targets(
     if let Some(schemas_event) = &event.schemas {
         if let Some(add) = &schemas_event.add {
             for schema in add {
-                targets.insert(schema.id.clone(), schema.contract.clone());
+                targets.insert(
+                    schema.id.clone(),
+                    CompileTarget {
+                        source: schema.contract.clone(),
+                        initial_value: schema.initial_value.clone(),
+                        contract_changed: true,
+                    },
+                );
             }
         }
         if let Some(change) = &schemas_event.change {
@@ -109,20 +156,30 @@ pub fn resolve_compile_targets(
                     continue;
                 }
 
-                let contract = if let Some(new_contract) = &schema.new_contract
-                {
-                    new_contract.clone()
-                } else {
-                    let Some(current) = schemas.get(&schema.actual_id) else {
-                        return Err(CompilationError::InvalidEvent(format!(
-                            "Schema {} does not exist",
-                            schema.actual_id
-                        )));
-                    };
-                    current.contract.clone()
+                // A change references an existing schema: its committed
+                // data completes whatever the event does not change.
+                let Some(current) = schemas.get(&schema.actual_id) else {
+                    return Err(CompilationError::InvalidEvent(format!(
+                        "Schema {} does not exist",
+                        schema.actual_id
+                    )));
                 };
 
-                targets.insert(schema.actual_id.clone(), contract);
+                let contract_changed = schema.new_contract.is_some();
+                targets.insert(
+                    schema.actual_id.clone(),
+                    CompileTarget {
+                        source: schema
+                            .new_contract
+                            .clone()
+                            .unwrap_or_else(|| current.contract.clone()),
+                        initial_value: schema
+                            .new_initial_value
+                            .clone()
+                            .unwrap_or_else(|| current.initial_value.0.clone()),
+                        contract_changed,
+                    },
+                );
             }
         }
     }

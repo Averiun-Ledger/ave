@@ -123,27 +123,28 @@ impl Handler<Self> for ApprLight {
                             })
                             .await
                         {
-                            error!(
+                            // The phase was torn down while this timeout
+                            // was in flight: it is moot, drop it.
+                            debug!(
                                 error = %e,
-                                "Failed to send timeout response to approval actor"
+                                "Approval actor gone, dropping timeout response"
                             );
-                            crash_system(ctx, e).await;
+                        } else {
+                            debug!(
+                                request_id = %self.request_id,
+                                version = self.version,
+                                node_key = %self.node_key,
+                                "Timeout response sent to approval actor"
+                            );
                         }
-
-                        debug!(
-                            request_id = %self.request_id,
-                            version = self.version,
-                            node_key = %self.node_key,
-                            "Timeout response sent to approval actor"
-                        );
                     }
                     Err(e) => {
-                        error!(
+                        // Same teardown race: the phase actor is gone.
+                        debug!(
                             error = %e,
                             path = %ctx.path().parent(),
-                            "Approval actor not found"
+                            "Approval actor not found, dropping timeout response"
                         );
-                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -264,21 +265,24 @@ impl Handler<Self> for ApprLight {
                                 })
                                 .await
                             {
-                                error!(
+                                // The phase was torn down while this
+                                // response was in flight: it is moot,
+                                // drop it.
+                                debug!(
                                     msg_type = "NetworkResponse",
                                     error = %e,
-                                    "Failed to send response to approval actor"
+                                    "Approval actor gone, dropping response"
                                 );
-                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
-                            error!(
+                            // Same teardown race: the phase actor is gone.
+                            debug!(
                                 msg_type = "NetworkResponse",
+                                error = %e,
                                 path = %ctx.path().parent(),
-                                "Approval actor not found"
+                                "Approval actor not found, dropping response"
                             );
-                            return Err(crash_system(ctx, e).await);
                         }
                     };
 

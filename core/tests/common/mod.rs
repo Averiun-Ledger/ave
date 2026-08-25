@@ -673,6 +673,7 @@ pub async fn wait_request_state(
                         RequestState::RebootTimeOut { .. },
                         RequestState::RebootTimeOut { .. },
                     )
+                    | (RequestState::Evaluation, RequestState::Evaluation)
                     | (RequestState::Validation, RequestState::Validation)
                     | (
                         RequestState::Distribution,

@@ -5,7 +5,7 @@ use ave_actors::{
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::bridge::request::EventRequestType;
 use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed,
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
 use ave_common::request::EventRequest;
 use ave_common::response::RequestState;
@@ -16,15 +16,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::fs;
 use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
-use crate::compilation::schemas_to_compile;
+use crate::compilation::{payload_contract_sources, schemas_to_compile};
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
 };
 use crate::evaluation::request::{EvalWorkerContext, EvaluateData};
 use crate::evaluation::response::EvaluatorResponse;
+use crate::governance::contract_register::{
+    ContractRegister, ContractRegisterMessage,
+};
 use crate::governance::data::GovernanceData;
 use crate::governance::model::{
     HashThisRole, ProtocolTypes, Quorum, RoleTypes, WitnessesData,
@@ -1988,6 +1992,103 @@ impl RequestManager {
             .is_some_and(|schemas| !schemas.is_empty())
     }
 
+    /// Sweeps the staged contract artifacts of an aborted governance
+    /// fact: the request will never commit, so its pre-commit
+    /// compilation output would linger on disk otherwise. Best-effort:
+    /// failures are logged, never propagated — the abort must complete,
+    /// and a leftover stage is consumed or discarded by the next commit
+    /// touching the same contract.
+    async fn sweep_staged_contracts(&self, ctx: &mut ActorContext<Self>) {
+        if !self.gov_fact_needs_compilation() {
+            return;
+        }
+
+        let Some(request) = &self.request else {
+            return;
+        };
+        let EventRequest::Fact(fact_request) = request.content() else {
+            return;
+        };
+        let sources = payload_contract_sources(&fact_request.payload);
+        if sources.is_empty() {
+            return;
+        }
+
+        let Some((hash, ..)) = self.helpers.clone() else {
+            return;
+        };
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return;
+        };
+
+        let register_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/contract_register",
+            self.subject_id
+        ));
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+            .ok();
+
+        for source in sources {
+            let contract_hash = match hash_borsh(&*hash.hasher(), &source) {
+                Ok(contract_hash) => contract_hash,
+                Err(error) => {
+                    warn!(
+                        request_id = %self.id,
+                        error = %error,
+                        "Can not hash staged contract source during \
+                         abort sweep"
+                    );
+                    continue;
+                }
+            };
+            let staging_name =
+                format!("{}_temp_staging_{}", self.subject_id, contract_hash);
+
+            if let Some(register) = &register
+                && let Err(error) = register
+                    .tell(ContractRegisterMessage::DeleteMetadata {
+                        contract_name: staging_name.clone(),
+                    })
+                    .await
+            {
+                warn!(
+                    request_id = %self.id,
+                    contract_name = %staging_name,
+                    error = %error,
+                    "Can not drop staged contract metadata during \
+                     abort sweep"
+                );
+            }
+
+            match fs::remove_dir_all(config.contracts_path.join(&staging_name))
+                .await
+            {
+                Ok(()) => {
+                    debug!(
+                        request_id = %self.id,
+                        contract_name = %staging_name,
+                        "Swept staged contract artifact of aborted request"
+                    );
+                }
+                // Never staged locally: nothing to sweep.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    warn!(
+                        request_id = %self.id,
+                        contract_name = %staging_name,
+                        error = %error,
+                        "Can not remove staged contract artifact during \
+                         abort sweep"
+                    );
+                }
+            }
+        }
+    }
+
     async fn match_command(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -2180,6 +2281,10 @@ impl RequestManager {
         who: PublicKey,
     ) -> Result<(), RequestManagerError> {
         self.stops_childs(ctx).await?;
+
+        // The request will never commit: sweep the staged contract
+        // artifacts of its compilation phase, if any.
+        self.sweep_staged_contracts(ctx).await;
 
         self.finish_request_metrics("aborted");
         info!("Aborting {}", self.id);

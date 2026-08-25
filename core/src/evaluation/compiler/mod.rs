@@ -68,7 +68,7 @@ pub(crate) fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
     )
 }
 
-struct CompilerSupport;
+pub(crate) struct CompilerSupport;
 
 impl CompilerSupport {
     fn observe_contract_prepare(
@@ -119,13 +119,14 @@ impl CompilerSupport {
             })
     }
 
-    async fn compile_or_load_registered<A: Actor>(
+    pub(crate) async fn compile_or_load_registered<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
         contract_name: &str,
         contract: &str,
         contract_path: &Path,
         initial_value: Value,
+        register_path: &ActorPath,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
         let started_at = Instant::now();
@@ -160,12 +161,9 @@ impl CompilerSupport {
                 .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
             let client = Self::compiler_client(ctx).await?;
 
-            let parent_path = ctx.path().parent();
-            let register_path =
-                ActorPath::from(format!("{}/contract_register", parent_path));
             let register = ctx
                 .system()
-                .get_actor::<ContractRegister>(&register_path)
+                .get_actor::<ContractRegister>(register_path)
                 .await
                 .map_err(|e| CompilerError::ContractRegisterFailed {
                     details: e.to_string(),
@@ -324,11 +322,21 @@ impl CompilerSupport {
                                                 ));
                                             }
                                             Err(error) => {
+                                                // The artifact is intact
+                                                // (hash matched) and
+                                                // precompiles: the value
+                                                // is what fails. That is
+                                                // a deterministic verdict
+                                                // — recompiling the same
+                                                // source fails the same
+                                                // way, so do not waste a
+                                                // build.
                                                 debug!(
                                                     error = %error,
                                                     path = %contract_path.display(),
-                                                    "Persisted wasm artifact is invalid, recompiling"
+                                                    "Persisted wasm artifact rejects the value"
                                                 );
+                                                return Err(error);
                                             }
                                         }
                                     }

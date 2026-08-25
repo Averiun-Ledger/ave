@@ -174,11 +174,12 @@ impl Handler<Self> for EvalCoordinator {
                             })
                             .await
                         {
-                            error!(
+                            // The phase was torn down while this timeout
+                            // was in flight: it is moot, drop it.
+                            debug!(
                                 error = %e,
-                                "Failed to send timeout response to evaluation actor"
+                                "Evaluation actor gone, dropping timeout response"
                             );
-                            crash_system(ctx, e).await;
                         } else {
                             debug!(
                                 request_id = %self.request_id,
@@ -188,12 +189,12 @@ impl Handler<Self> for EvalCoordinator {
                         }
                     }
                     Err(e) => {
-                        error!(
+                        // Same teardown race: the phase actor is gone.
+                        debug!(
                             error = %e,
                             path = %ctx.path().parent(),
-                            "Evaluation actor not found"
+                            "Evaluation actor not found, dropping timeout response"
                         );
-                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -329,23 +330,24 @@ impl Handler<Self> for EvalCoordinator {
                                 })
                                 .await
                             {
-                                error!(
+                                // The phase was torn down while this
+                                // response was in flight: it is moot,
+                                // drop it.
+                                debug!(
                                     msg_type = "NetworkResponse",
                                     error = %e,
-                                    "Failed to send response to evaluation actor"
+                                    "Evaluation actor gone, dropping response"
                                 );
-                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
-                            error!(
+                            // Same teardown race: the phase actor is gone.
+                            debug!(
                                 msg_type = "NetworkResponse",
                                 error = %e,
                                 path = %ctx.path().parent(),
-                                "Evaluation actor not found"
+                                "Evaluation actor not found, dropping response"
                             );
-
-                            return Err(crash_system(ctx, e).await);
                         }
                     }
 
