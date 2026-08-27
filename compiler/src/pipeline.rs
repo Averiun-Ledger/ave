@@ -134,10 +134,7 @@ fn cargo_config_path(contract_path: &Path) -> PathBuf {
 }
 
 fn vendor_dir_for_contract() -> PathBuf {
-    PathBuf::from(".")
-        .join("..")
-        .join("..")
-        .join(VENDOR_DIR)
+    PathBuf::from(".").join("..").join("..").join(VENDOR_DIR)
 }
 
 fn build_output_wasm_path(contract_path: &Path) -> PathBuf {
@@ -151,8 +148,7 @@ fn build_output_wasm_path(contract_path: &Path) -> PathBuf {
 fn cargo_config(target_dir: &Path, vendor_dir: Option<&Path>) -> String {
     let mut config =
         ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
-    config =
-        config.replace("{target_dir}", &target_dir.to_string_lossy());
+    config = config.replace("{target_dir}", &target_dir.to_string_lossy());
 
     if let Some(vendor_dir) = vendor_dir {
         config.push_str(&format!(
@@ -186,11 +182,12 @@ async fn build_contract(
         command.arg("--offline");
     }
 
-    let mut child = command.spawn().map_err(|e| {
-        CompilerError::CargoBuildFailed {
-            details: e.to_string(),
-        }
-    })?;
+    let mut child =
+        command
+            .spawn()
+            .map_err(|e| CompilerError::CargoBuildFailed {
+                details: e.to_string(),
+            })?;
 
     let status = match timeout(BUILD_TIMEOUT, child.wait()).await {
         Ok(result) => result.map_err(|e| CompilerError::CargoBuildFailed {
@@ -271,10 +268,7 @@ async fn prepare_contract_project(
     let vendor_dir = contracts_root.join(VENDOR_DIR);
     let cargo_config = cargo_config(
         Path::new(BUILD_TARGET_DIR),
-        vendor_dir
-            .exists()
-            .then(vendor_dir_for_contract)
-            .as_deref(),
+        vendor_dir.exists().then(vendor_dir_for_contract).as_deref(),
     );
     let cargo_config_path = cargo_config_path(contract_path);
     fs::write(&cargo_config_path, cargo_config)
@@ -362,11 +356,8 @@ pub async fn build_wasm(
     prepare_contract_project(contract, contract_path).await?;
 
     let contracts_root = contracts_root(contract_path)?;
-    build_contract(
-        contract_path,
-        contracts_root.join(VENDOR_DIR).exists(),
-    )
-    .await?;
+    build_contract(contract_path, contracts_root.join(VENDOR_DIR).exists())
+        .await?;
 
     load_compiled_wasm(contract_path).await
 }
@@ -399,8 +390,7 @@ pub async fn persist_artifact(
             details: e.to_string(),
         })?;
 
-    let legacy_metadata_path =
-        legacy_artifact_metadata_path(contract_path);
+    let legacy_metadata_path = legacy_artifact_metadata_path(contract_path);
     let _ = fs::remove_file(&legacy_metadata_path).await;
 
     Ok(())
@@ -439,11 +429,9 @@ pub async fn persist_global_cache_artifact(
     let metadata_path = global_cache_metadata_path(cache_dir);
     fs::write(
         &metadata_path,
-        to_vec(metadata).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "global cache metadata",
-                details: e.to_string(),
-            }
+        to_vec(metadata).map_err(|e| CompilerError::SerializationError {
+            context: "global cache metadata",
+            details: e.to_string(),
         })?,
     )
     .await
@@ -509,8 +497,7 @@ pub fn build_contract_record(
     toolchain_fingerprint: DigestIdentifier,
 ) -> Result<ContractArtifactRecord, CompilerError> {
     let wasm_hash = hash_bytes(hash, wasm_bytes, "wasm artifact")?;
-    let cwasm_hash =
-        hash_bytes(hash, precompiled_bytes, "cwasm artifact")?;
+    let cwasm_hash = hash_bytes(hash, precompiled_bytes, "cwasm artifact")?;
 
     Ok(ContractArtifactRecord {
         contract_hash,
@@ -553,8 +540,7 @@ pub async fn toolchain_fingerprint(
         });
     }
 
-    let fingerprint_input =
-        String::from_utf8_lossy(&output.stdout).to_string();
+    let fingerprint_input = String::from_utf8_lossy(&output.stdout).to_string();
     hash_borsh(&*hash.hasher(), &fingerprint_input).map_err(|e| {
         CompilerError::SerializationError {
             context: "toolchain fingerprint",
@@ -573,8 +559,7 @@ pub fn metadata_matches(
     persisted.contract_hash == *expected_contract_hash
         && persisted.manifest_hash == *expected_manifest_hash
         && persisted.engine_fingerprint == *expected_engine_fingerprint
-        && persisted.toolchain_fingerprint
-            == *expected_toolchain_fingerprint
+        && persisted.toolchain_fingerprint == *expected_toolchain_fingerprint
 }
 
 #[cfg(feature = "test")]
@@ -603,8 +588,7 @@ pub async fn try_load_global_cache(
         toolchain_fingerprint,
     );
 
-    let persisted = match load_global_cache_metadata(&cache_dir).await
-    {
+    let persisted = match load_global_cache_metadata(&cache_dir).await {
         Ok(metadata) => metadata,
         Err(error) => {
             debug!(

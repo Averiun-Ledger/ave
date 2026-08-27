@@ -6,6 +6,7 @@ use crate::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
     },
+    auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
     compilation::{
         payload_contract_sources,
         worker::{CompileWorker, CompileWorkerMessage},
@@ -65,14 +66,14 @@ use crate::{
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     sink::{
-        SinkManager, SinkManagerInitParams, SinkManagerMessage,
-        retry_delay_ms,
+        SinkManager, SinkManagerInitParams, SinkManagerMessage, retry_delay_ms,
     },
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata, error::SubjectError,
     },
     system::ConfigHelper,
+    update::{Update, UpdateMessage, UpdateNew, UpdateSubjectKind, UpdateType},
     validation::{
         request::LastData,
         schema::{ValidationSchema, ValidationSchemaMessage},
@@ -723,6 +724,92 @@ impl Governance {
         Ok(())
     }
 
+    /// Forces a manual governance update round (the `Update` actor
+    /// pattern of the request reboot and auth): asks the governance
+    /// witnesses and sync peers for the ledger after our sn. A round
+    /// already running is reused — the child name deduplicates.
+    async fn trigger_gov_update(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
+        else {
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let mut witnesses = self
+            .properties
+            .get_witnesses(WitnessesData::Gov)
+            .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+
+        let access_path = ActorPath::from("/user/node/auth");
+        if let Ok(access) =
+            ctx.system().get_actor::<SubjectAccess>(&access_path).await
+            && let Ok(SubjectAccessResponse::Peers(peers)) = access
+                .ask(SubjectAccessMessage::GetSyncPeers {
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                })
+                .await
+        {
+            witnesses.extend(peers);
+        }
+        witnesses.remove(&*self.our_key);
+
+        if witnesses.is_empty() {
+            debug!(
+                governance_id = %self.subject_metadata.subject_id,
+                "No witnesses to ask for a governance update"
+            );
+            return Ok(());
+        }
+
+        let updater = Update::new(UpdateNew {
+            network,
+            subject_id: self.subject_metadata.subject_id.clone(),
+            witnesses,
+            update_type: UpdateType::Auth,
+            our_sn: Some(self.subject_metadata.sn),
+            subject_kind_hint: Some(UpdateSubjectKind::Governance),
+            round_retry_interval_secs: config
+                .sync_update
+                .round_retry_interval_secs,
+            max_round_retries: config.sync_update.max_round_retries,
+            witness_retry_count: config.sync_update.witness_retry_count,
+            witness_retry_interval_secs: config
+                .sync_update
+                .witness_retry_interval_secs,
+        });
+
+        match ctx.create_child("gov_manual_update", updater).await {
+            Ok(child) => {
+                child.tell(UpdateMessage::Run).await?;
+                debug!(
+                    governance_id = %self.subject_metadata.subject_id,
+                    "Manual governance update round initiated"
+                );
+            }
+            // A round is already running: reuse it.
+            Err(ActorError::Exists { .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        Ok(())
+    }
+
     async fn update_schemas(
         &self,
         ctx: &ActorContext<Self>,
@@ -1082,20 +1169,20 @@ impl Governance {
             let official_name = format!("{}_{}", subject_id, schema_id);
             let official_path =
                 config.contracts_path.join("contracts").join(&official_name);
-            if official_path.exists() {
-                if let Err(e) = fs::remove_dir_all(&official_path).await {
-                    return Err(crash_system(
-                        ctx,
-                        ActorError::FunctionalCritical {
-                            description: format!(
-                                "Can not remove previous contract artifact {}: {}",
-                                official_path.display(),
-                                e
-                            ),
-                        },
-                    )
-                    .await);
-                }
+            if official_path.exists()
+                && let Err(e) = fs::remove_dir_all(&official_path).await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not remove previous contract artifact {}: {}",
+                            official_path.display(),
+                            e
+                        ),
+                    },
+                )
+                .await);
             }
             if let Err(e) = fs::rename(
                 config.contracts_path.join(&staging_name),
@@ -1245,6 +1332,138 @@ impl Governance {
         Ok(())
     }
 
+    /// Records the ledger anchor (the quorum-anchored wasm hash) of
+    /// every contract that just committed, whether or not this node
+    /// holds the artifact bytes: it is the local projection of the
+    /// compilation evidence that the fetch path verifies against.
+    async fn record_compile_anchors(
+        ctx: &mut ActorContext<Self>,
+        evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        if evidence_contracts.is_empty() {
+            return Ok(());
+        }
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        for (schema_id, wasm_hash) in evidence_contracts {
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::SetAnchor {
+                    contract_name: format!("{}_{}", subject_id, schema_id),
+                    wasm_hash: wasm_hash.clone(),
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not record contract anchor: {}",
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Whitelist of the artifact protocol: the governance compilers and
+    /// the evaluators of each schema. The same sets are used by the
+    /// serving actors to validate requesters and by the fetching ones to
+    /// choose whom to ask (compilers first, evaluators as plan B).
+    fn artifact_whitelists(
+        &self,
+    ) -> (
+        BTreeSet<PublicKey>,
+        BTreeMap<SchemaType, BTreeSet<PublicKey>>,
+    ) {
+        let compilers = self
+            .properties
+            .get_signers(
+                RoleTypes::Compiler,
+                &SchemaType::Governance,
+                Namespace::default(),
+            )
+            .0
+            .into_iter()
+            .collect();
+        let evaluators = self
+            .properties
+            .roles_schema
+            .iter()
+            .map(|(schema_id, roles)| {
+                let keys = roles
+                    .evaluator
+                    .iter()
+                    .filter_map(|role| {
+                        self.properties.members.get(&role.name).cloned()
+                    })
+                    .collect();
+                (schema_id.clone(), keys)
+            })
+            .collect();
+        (compilers, evaluators)
+    }
+
+    /// Whether this node has the compiler role in the governance.
+    fn is_compiler(&self) -> bool {
+        self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        })
+    }
+
+    /// Sends `ServingBlocked` to every artifact server of this node (the
+    /// standing compile worker and the contract compiler of every
+    /// evaluated schema): while a governance update is being applied,
+    /// between versions there is no good answer.
+    async fn set_artifact_serving_blocked(
+        &self,
+        ctx: &ActorContext<Self>,
+        blocked: bool,
+    ) {
+        if let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await
+            && let Err(e) = compiler
+                .tell(CompileWorkerMessage::ServingBlocked { blocked })
+                .await
+        {
+            warn!(
+                error = %e,
+                blocked,
+                "Failed to update serving gate of the compile worker"
+            );
+        }
+
+        let schemas = self
+            .properties
+            .schemas(ProtocolTypes::Evaluation, &self.our_key);
+        for schema_id in schemas.keys() {
+            if let Ok(contract_compiler) = ctx
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    schema_id
+                ))
+                .await
+                && let Err(e) = contract_compiler
+                    .tell(ContractCompilerMessage::ServingBlocked { blocked })
+                    .await
+            {
+                warn!(
+                    error = %e,
+                    schema_id = %schema_id,
+                    blocked,
+                    "Failed to update serving gate of the contract compiler"
+                );
+            }
+        }
+    }
+
     async fn manager_schemas_compilers(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1266,11 +1485,28 @@ impl Governance {
             });
         };
 
+        // Serving artifacts is blocked while the update is applied
+        // (promotion, schema compilers up/down/refresh): between
+        // versions there is no good answer. If a step fails, staying
+        // blocked is the safe failure mode — a restart clears it.
+        self.set_artifact_serving_blocked(ctx, true).await;
+
         // Staged artifacts of the contracts that just committed become
         // the official ones: the registered pipeline below then finds
         // them already in place and does not recompile.
         self.promote_staged_contracts(ctx, evidence_contracts, &hash)
             .await?;
+
+        // The ledger anchor of every committed contract is recorded by
+        // every node, with or without the artifact: it is the only hash
+        // this node accepts when fetching the artifact from the network,
+        // and must be in place before the schema compilers below run.
+        Self::record_compile_anchors(
+            ctx,
+            evidence_contracts,
+            &self.subject_metadata.subject_id,
+        )
+        .await?;
 
         let (old_schemas_eval, new_schemas_eval) = {
             let old_schemas_eval =
@@ -1303,7 +1539,7 @@ impl Governance {
                 .map(|x| (x.0.clone(), x.1.clone()))
                 .collect();
 
-            Self::up_compilers_schemas(
+            self.up_compilers_schemas(
                 ctx,
                 &up,
                 self.subject_metadata.subject_id.clone(),
@@ -1319,7 +1555,7 @@ impl Governance {
                 .map(|x| (x.0.clone(), x.1.clone()))
                 .collect();
 
-            Self::compile_schemas(
+            self.compile_schemas(
                 ctx,
                 current,
                 self.subject_metadata.subject_id.clone(),
@@ -1334,6 +1570,10 @@ impl Governance {
                     .collect::<BTreeMap<SchemaType, ValueWrapper>>(),
             )
         };
+
+        // The artifact work of the update is done: serve again.
+        self.set_artifact_serving_blocked(ctx, false).await;
+
         let old_schemas_vali =
             old_gov.schemas_name(ProtocolTypes::Validation, &self.our_key);
 
@@ -1448,14 +1688,40 @@ impl Governance {
 
         if let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await {
             let (issuers, issuer_any) = self.properties.governance_issuers();
+            let (compilers, evaluators) = self.artifact_whitelists();
             compiler
                 .tell(CompileWorkerMessage::Update {
                     gov_version: self.properties.version,
                     issuers,
                     issuer_any,
                     schemas: self.properties.schemas.clone(),
+                    compilers,
+                    evaluators,
                 })
                 .await?;
+        }
+
+        // The contract compilers hold the same whitelist in memory
+        // (compilers of the governance + evaluators of their schema):
+        // they use it to choose whom to ask for artifacts and to
+        // validate incoming requests when serving as plan B.
+        let (compilers, evaluators) = self.artifact_whitelists();
+        for (schema_id, schema_evaluators) in evaluators {
+            if let Ok(contract_compiler) = ctx
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    schema_id
+                ))
+                .await
+            {
+                contract_compiler
+                    .tell(ContractCompilerMessage::Update {
+                        gov_version: self.properties.version,
+                        compilers: compilers.clone(),
+                        evaluators: schema_evaluators,
+                    })
+                    .await?;
+            }
         }
 
         if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
@@ -1519,8 +1785,11 @@ impl Governance {
             })
             .collect();
 
+        // Only artifact entries are swept by role: the ledger anchors
+        // are a projection of the applied events and remain valid
+        // regardless of this node's roles.
         let registered: Vec<String> = match contract_register
-            .ask(ContractRegisterMessage::ListContracts)
+            .ask(ContractRegisterMessage::ListArtifacts)
             .await?
         {
             ContractRegisterResponse::Contracts(contracts) => contracts,
@@ -1532,7 +1801,7 @@ impl Governance {
                 && !allowed.contains(&contract_name)
             {
                 contract_register
-                    .tell(ContractRegisterMessage::DeleteMetadata {
+                    .tell(ContractRegisterMessage::DeleteArtifact {
                         contract_name: contract_name.clone(),
                     })
                     .await?;
@@ -1707,7 +1976,7 @@ impl Governance {
                 .properties
                 .schemas(ProtocolTypes::Evaluation, &self.our_key);
             self.sweep_contract_artifacts(ctx, &schemas).await?;
-            Self::up_compilers_schemas(
+            self.up_compilers_schemas(
                 ctx,
                 &schemas,
                 self.subject_metadata.subject_id.clone(),
@@ -1836,6 +2105,7 @@ impl Governance {
             role: RoleTypes::Compiler,
         }) {
             let (issuers, issuer_any) = self.properties.governance_issuers();
+            let (compilers, evaluators) = self.artifact_whitelists();
             // If we are a compiler
             let compiler = CompileWorker {
                 node_key: node_key.clone(),
@@ -1845,6 +2115,9 @@ impl Governance {
                 issuers,
                 issuer_any,
                 schemas: self.properties.schemas.clone(),
+                compilers,
+                evaluators,
+                serving_blocked: false,
                 hash: *hash,
                 network: network.clone(),
                 stop: false,
@@ -2010,6 +2283,7 @@ impl Governance {
             (false, true) => {
                 let (issuers, issuer_any) =
                     self.properties.governance_issuers();
+                let (compilers, evaluators) = self.artifact_whitelists();
                 let compiler = CompileWorker {
                     node_key: node_key.clone(),
                     our_key: self.our_key.clone(),
@@ -2018,6 +2292,9 @@ impl Governance {
                     issuers,
                     issuer_any,
                     schemas: self.properties.schemas.clone(),
+                    compilers,
+                    evaluators,
+                    serving_blocked: false,
                     hash: *hash,
                     network: network.clone(),
                     stop: false,
@@ -2187,9 +2464,7 @@ impl Governance {
     ) -> Result<Option<CompilerError>, ActorError>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<
-            Output = Result<CompilerResponse, ActorError>,
-        >,
+        Fut: std::future::Future<Output = Result<CompilerResponse, ActorError>>,
     {
         let mut retry = 0;
         loop {
@@ -2221,6 +2496,7 @@ impl Governance {
     }
 
     async fn up_compilers_schemas(
+        &self,
         ctx: &mut ActorContext<Self>,
         schemas: &BTreeMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
@@ -2237,11 +2513,32 @@ impl Governance {
             });
         };
 
+        let is_compiler = self.is_compiler();
+        let (whitelist_compilers, whitelist_evaluators) =
+            self.artifact_whitelists();
+
         for (id, schema) in schemas {
             let actor_name = format!("{}_contract_compiler", id);
 
             let compiler = ctx
-                .create_child(&actor_name, ContractCompiler::new(*hash))
+                .create_child(
+                    &actor_name,
+                    ContractCompiler::new(*hash, self.our_key.clone()),
+                )
+                .await?;
+
+            // Seed the artifact whitelist before anything else: the
+            // contract compiler keeps it in memory to choose fetch
+            // targets and to validate requests when serving as plan B.
+            compiler
+                .tell(ContractCompilerMessage::Update {
+                    gov_version: self.properties.version,
+                    compilers: whitelist_compilers.clone(),
+                    evaluators: whitelist_evaluators
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default(),
+                })
                 .await?;
 
             let Schema {
@@ -2250,44 +2547,65 @@ impl Governance {
                 ..
             } = schema;
 
-            let terminal_error = Self::ask_compile_with_retries(id, || async {
-                compiler
-                    .ask(ContractCompilerMessage::Compile {
-                        contract_name: format!("{}_{}", subject_id, id),
-                        contract: contract.clone(),
-                        initial_value: initial_value.0.clone(),
-                        contract_path: contracts_path
-                            .join("contracts")
-                            .join(format!("{}_{}", subject_id, id)),
-                    })
-                    .await
-            })
-            .await?;
+            let contract_name = format!("{}_{}", subject_id, id);
+            let contract_path =
+                contracts_path.join("contracts").join(&contract_name);
 
-            if let Some(error) = terminal_error {
-                // Fatal local problems (disk, register, helpers, engine)
-                // are never degraded: the node is broken and must fail
-                // like before the degraded mode existed.
-                if is_local_fatal_compiler_error(&error) {
-                    return Err(ActorError::Functional {
-                        description: format!(
-                            "Can not compile schema contract {}: {}",
-                            id, error
-                        ),
-                    });
+            if is_compiler {
+                // Compiler role: the node builds the artifact itself.
+                let terminal_error =
+                    Self::ask_compile_with_retries(id, || async {
+                        compiler
+                            .ask(ContractCompilerMessage::Compile {
+                                contract_name: contract_name.clone(),
+                                contract: contract.clone(),
+                                initial_value: initial_value.0.clone(),
+                                contract_path: contract_path.clone(),
+                            })
+                            .await
+                    })
+                    .await?;
+
+                if let Some(error) = terminal_error {
+                    // Fatal local problems (disk, register, helpers,
+                    // engine) are never degraded: the node is broken and
+                    // must fail like before the degraded mode existed.
+                    if is_local_fatal_compiler_error(&error) {
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Can not compile schema contract {}: {}",
+                                id, error
+                            ),
+                        });
+                    }
+                    // Degraded mode: this schema has no usable local
+                    // artifact and the compiler pool could not provide
+                    // one. That is not a fatal node problem — keep the
+                    // governance running and leave the contract out of
+                    // the local cache, so evaluations of this schema
+                    // answer `Unavailable` until the artifacts are
+                    // restored.
+                    error!(
+                        schema_id = %id,
+                        error = %error,
+                        "Contract artifacts unavailable; evaluations of this schema will be unavailable"
+                    );
                 }
-                // Degraded mode: this schema has no usable local artifact
-                // and the compiler pool could not provide one. That is not
-                // a fatal node problem — keep the governance running and
-                // leave the contract out of the local cache, so
-                // evaluations of this schema answer `Unavailable` until
-                // the artifacts are restored (next governance event or
-                // restart; a dedicated recovery policy is level-3 work).
-                error!(
-                    schema_id = %id,
-                    error = %error,
-                    "Contract artifacts unavailable; evaluations of this schema will be unavailable"
-                );
+            } else {
+                // No compiler role: the node fetches the official
+                // artifact from the network (message-driven; the fetch
+                // cycle is self-managed by the contract compiler).
+                compiler
+                    .tell(ContractCompilerMessage::Fetch {
+                        contract: contract.clone(),
+                        contract_name,
+                        initial_value: initial_value.0.clone(),
+                        contract_path,
+                        gov_id: subject_id.clone(),
+                        schema_id: id.clone(),
+                        gov_version: self.properties.version,
+                    })
+                    .await?;
             }
         }
 
@@ -2331,8 +2649,12 @@ impl Governance {
             actor.ask_stop().await?;
 
             let contract_name = format!("{}_{}", subject_id, schema_id);
+            // Only the artifact metadata is forgotten: the ledger anchor
+            // is a projection of the applied events and remains valid
+            // regardless of this node's roles — it is the hash this node
+            // accepts if it ever fetches the artifact again.
             contract_register
-                .tell(ContractRegisterMessage::DeleteMetadata {
+                .tell(ContractRegisterMessage::DeleteArtifact {
                     contract_name: contract_name.clone(),
                 })
                 .await?;
@@ -2350,6 +2672,7 @@ impl Governance {
     }
 
     async fn compile_schemas(
+        &self,
         ctx: &ActorContext<Self>,
         schemas: HashMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
@@ -2374,6 +2697,8 @@ impl Governance {
             });
         };
 
+        let is_compiler = self.is_compiler();
+
         for (id, schema) in schemas {
             let actor = ctx
                 .get_child::<ContractCompiler>(&format!(
@@ -2383,45 +2708,66 @@ impl Governance {
                 .await?;
 
             let contract_name = format!("{}_{}", subject_id, id);
-            let terminal_error =
-                Self::ask_compile_with_retries(&id, || async {
-                    actor
-                        .ask(ContractCompilerMessage::Compile {
-                            contract_name: contract_name.clone(),
-                            contract: schema.contract.clone(),
-                            initial_value: schema.initial_value.0.clone(),
-                            contract_path: contracts_path
-                                .join("contracts")
-                                .join(format!("{}_{}", subject_id, id)),
-                        })
-                        .await
-                })
-                .await?;
+            let contract_path =
+                contracts_path.join("contracts").join(&contract_name);
 
-            if let Some(error) = terminal_error {
-                // Fatal local problems (disk, register, helpers, engine)
-                // are never degraded: the node is broken and must fail
-                // like before the degraded mode existed.
-                if is_local_fatal_compiler_error(&error) {
-                    return Err(ActorError::Functional {
-                        description: format!(
-                            "Can not refresh schema contract {}: {}",
-                            id, error
-                        ),
-                    });
+            if is_compiler {
+                // Compiler role: the node builds the artifact itself.
+                let terminal_error =
+                    Self::ask_compile_with_retries(&id, || async {
+                        actor
+                            .ask(ContractCompilerMessage::Compile {
+                                contract_name: contract_name.clone(),
+                                contract: schema.contract.clone(),
+                                initial_value: schema.initial_value.0.clone(),
+                                contract_path: contract_path.clone(),
+                            })
+                            .await
+                    })
+                    .await?;
+
+                if let Some(error) = terminal_error {
+                    // Fatal local problems (disk, register, helpers,
+                    // engine) are never degraded: the node is broken and
+                    // must fail like before the degraded mode existed.
+                    if is_local_fatal_compiler_error(&error) {
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Can not refresh schema contract {}: {}",
+                                id, error
+                            ),
+                        });
+                    }
+                    // Degraded mode (same policy as
+                    // `up_compilers_schemas`): the refreshed artifact
+                    // could not be obtained, so evict the previous
+                    // module from the local cache — evaluating with a
+                    // stale contract would diverge from the rest of the
+                    // network. Evaluations of this schema answer
+                    // `Unavailable` until the artifacts are restored.
+                    error!(
+                        schema_id = %id,
+                        error = %error,
+                        "Contract refresh failed, stale artifact evicted; evaluations of this schema will be unavailable"
+                    );
+                    contracts.write().await.remove(&contract_name);
                 }
-                // Degraded mode (same policy as `up_compilers_schemas`):
-                // the refreshed artifact could not be obtained, so evict
-                // the previous module from the local cache — evaluating
-                // with a stale contract would diverge from the rest of
-                // the network. Evaluations of this schema answer
-                // `Unavailable` until the artifacts are restored.
-                error!(
-                    schema_id = %id,
-                    error = %error,
-                    "Contract refresh failed, stale artifact evicted; evaluations of this schema will be unavailable"
-                );
-                contracts.write().await.remove(&contract_name);
+            } else {
+                // No compiler role: the node never compiles — it fetches
+                // the official artifact from the network (same policy as
+                // `up_compilers_schemas`; message-driven, the fetch
+                // cycle is self-managed by the contract compiler).
+                actor
+                    .tell(ContractCompilerMessage::Fetch {
+                        contract: schema.contract.clone(),
+                        contract_name,
+                        initial_value: schema.initial_value.0.clone(),
+                        contract_path,
+                        gov_id: subject_id.clone(),
+                        schema_id: id.clone(),
+                        gov_version: self.properties.version,
+                    })
+                    .await?;
             }
         }
 
@@ -3698,6 +4044,10 @@ pub enum GovernanceMessage {
     },
     GetGovernance,
     GetVersion,
+    /// A contract compiler could not obtain an artifact from anyone:
+    /// force a manual governance update round in case this node is so
+    /// outdated that it is asking nodes that no longer serve it.
+    TriggerGovUpdate,
     HasRole {
         governance_id: DigestIdentifier,
         role_query: HashThisRole,
@@ -4076,6 +4426,10 @@ impl Handler<Self> for Governance {
         match msg {
             GovernanceMessage::GetVersion => {
                 Ok(GovernanceResponse::Version(self.properties.version))
+            }
+            GovernanceMessage::TriggerGovUpdate => {
+                self.trigger_gov_update(ctx).await?;
+                Ok(GovernanceResponse::Ok)
             }
             GovernanceMessage::GetLedger { lo_sn, hi_sn } => {
                 let (ledger, is_all) =

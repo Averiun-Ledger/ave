@@ -1,5 +1,8 @@
 use ave_actors::Message;
-use ave_common::identity::{DigestIdentifier, Signed};
+use ave_common::{
+    SchemaType,
+    identity::{DigestIdentifier, Signed},
+};
 use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +90,28 @@ pub enum ActorMessage {
     },
     CompilationRes {
         res: CompilationRes,
+    },
+    ArtifactProbeReq {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        receiver_actor: String,
+    },
+    ArtifactProbeRes {
+        request_nonce: u64,
+        result: crate::compilation::artifact::ArtifactProbeResult,
+    },
+    ArtifactReq {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        receiver_actor: String,
+    },
+    ArtifactRes {
+        request_nonce: u64,
+        result: crate::compilation::artifact::ArtifactFetchResult,
     },
 }
 

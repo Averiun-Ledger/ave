@@ -319,7 +319,10 @@ impl Bridge {
         &self,
     ) -> Result<Vec<TransferSubject>, BridgeError> {
         let res = self.api.get_pending_transfers().await?;
-        Ok(res.into_iter().map(core_tranfer_subject_to_common).collect())
+        Ok(res
+            .into_iter()
+            .map(core_tranfer_subject_to_common)
+            .collect())
     }
 
     ///////// Sink

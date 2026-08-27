@@ -151,9 +151,7 @@ impl EvalWorker {
         ids: &[SchemaType],
         schemas: BTreeMap<SchemaType, Schema>,
     ) -> Result<Option<CompilerError>, ActorError> {
-        let compiler = ctx
-            .create_child("temp_compiler", TempCompiler)
-            .await?;
+        let compiler = ctx.create_child("temp_compiler", TempCompiler).await?;
 
         for id in ids {
             let Some(schema) = schemas.get(id) else {

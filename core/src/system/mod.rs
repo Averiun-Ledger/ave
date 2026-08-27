@@ -156,9 +156,7 @@ pub async fn system(
             config.compiler.api_key.clone().unwrap_or_default(),
             expected_toolchain,
             compiler_public_key,
-            Some(Duration::from_secs(
-                config.compiler.request_timeout_secs,
-            )),
+            Some(Duration::from_secs(config.compiler.request_timeout_secs)),
             config.compiler.pinned_cert_pem.clone(),
         );
         system.add_helper("compiler_client", Arc::new(compiler_client));

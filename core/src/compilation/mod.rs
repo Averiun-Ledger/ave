@@ -48,6 +48,7 @@ use response::{CompilationError, CompilationRes, CompilerResponse};
 
 use tracing::{Span, debug, error, info_span, warn};
 
+pub mod artifact;
 pub mod coordinator;
 pub mod request;
 pub mod response;
@@ -310,6 +311,12 @@ impl Compilation {
                         issuers,
                         issuer_any,
                         schemas: self.state.schemas.clone(),
+                        // Ephemeral request workers never serve artifacts
+                        // (they live outside the well-known serving
+                        // path): empty whitelist rejects every probe.
+                        compilers: BTreeSet::new(),
+                        evaluators: BTreeMap::new(),
+                        serving_blocked: false,
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,

@@ -95,8 +95,7 @@ impl CompilerClient {
             api_key,
             expected_toolchain,
             compiler_public_key,
-            request_timeout: request_timeout
-                .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
+            request_timeout: request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT),
             pinned_cert_pem,
             hash: HashAlgorithm::Blake3,
             seen: Mutex::new(HashMap::new()),
@@ -120,14 +119,11 @@ impl CompilerClient {
         &self,
         source_b64: &str,
     ) -> Result<CompileOutcome, CompilerError> {
-        let api_key =
-            MetadataValue::from_str(&self.api_key).map_err(|e| {
-                CompilerError::CompilersUnavailable {
-                    details: format!(
-                        "invalid API key metadata value: {e}"
-                    ),
-                }
-            })?;
+        let api_key = MetadataValue::from_str(&self.api_key).map_err(|e| {
+            CompilerError::CompilersUnavailable {
+                details: format!("invalid API key metadata value: {e}"),
+            }
+        })?;
 
         let mut failures: Vec<String> = Vec::new();
         let mut toolchain_mismatch: Option<String> = None;
@@ -257,9 +253,7 @@ impl CompilerClient {
     ) -> Attempt {
         let parse = |value: &str, field: &'static str| {
             DigestIdentifier::from_str(value).map_err(|e| {
-                Attempt::Failed(format!(
-                    "unparseable {field} '{value}': {e}"
-                ))
+                Attempt::Failed(format!("unparseable {field} '{value}': {e}"))
             })
         };
         let source_hash = match parse(&response.source_hash, "source_hash") {
@@ -284,17 +278,15 @@ impl CompilerClient {
         };
 
         // The response must attest the exact content requested.
-        let local_source_hash = match hash_borsh(
-            &*self.hash.hasher(),
-            &source_b64.to_owned(),
-        ) {
-            Ok(hash) => hash,
-            Err(e) => {
-                return Attempt::Failed(format!(
-                    "failed to hash contract source: {e}"
-                ));
-            }
-        };
+        let local_source_hash =
+            match hash_borsh(&*self.hash.hasher(), &source_b64.to_owned()) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    return Attempt::Failed(format!(
+                        "failed to hash contract source: {e}"
+                    ));
+                }
+            };
         let manifest = pipeline::compilation_toml();
         let local_manifest_hash =
             match hash_borsh(&*self.hash.hasher(), &manifest) {
@@ -309,8 +301,7 @@ impl CompilerClient {
             || manifest_hash != local_manifest_hash
         {
             return Attempt::InvalidAttestation(
-                "response hashes do not match the requested source"
-                    .to_owned(),
+                "response hashes do not match the requested source".to_owned(),
             );
         }
 
@@ -378,9 +369,8 @@ impl CompilerClient {
         // the artifact of the same (source, manifest, toolchain). This is
         // an alarm, not a failover: honest disagreement is impossible with
         // reproducible builds.
-        let key = format!(
-            "{source_hash}_{manifest_hash}_{toolchain_fingerprint}"
-        );
+        let key =
+            format!("{source_hash}_{manifest_hash}_{toolchain_fingerprint}");
         {
             let mut seen = self.seen.lock().await;
             if let Some(previous) = seen.get(&key)

@@ -1074,7 +1074,8 @@ mod tests {
         let url = start_cors_app(cors).await;
 
         assert_eq!(
-            cors_header_for_origin(&url, "https://app.example.com").await
+            cors_header_for_origin(&url, "https://app.example.com")
+                .await
                 .as_deref(),
             Some("https://app.example.com"),
             "the configured origin must receive the allow-origin header"
@@ -1100,7 +1101,8 @@ mod tests {
         let url = start_cors_app(cors).await;
 
         assert_eq!(
-            cors_header_for_origin(&url, "https://app.example.com").await
+            cors_header_for_origin(&url, "https://app.example.com")
+                .await
                 .as_deref(),
             Some("*"),
             "the wildcard opt-in must emit '*' for any origin"

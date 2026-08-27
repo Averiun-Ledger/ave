@@ -219,8 +219,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let config = test_config(dir.path());
 
-        let first =
-            key_pair(&config, "test-password").expect("key pair should generate");
+        let first = key_pair(&config, "test-password")
+            .expect("key pair should generate");
         let key_path = dir.path().join("node_private.der");
 
         // Simulate a key written before the owner-only policy (0644).
@@ -238,10 +238,7 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "loose permissions must be tightened on read"
-        );
+        assert_eq!(mode, 0o600, "loose permissions must be tightened on read");
         assert_eq!(
             first.public_key().to_string(),
             second.public_key().to_string(),
@@ -267,11 +264,17 @@ mod tests {
         // Make the key file un-statable (no search permission on the
         // directory): a transient IO error must surface as KeyRead, not as
         // a silent identity regeneration.
-        std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o000))
-            .expect("chmod should succeed");
+        std::fs::set_permissions(
+            &keys_dir,
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod should succeed");
         let result = key_pair(&config, "test-password");
-        std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod restore should succeed");
+        std::fs::set_permissions(
+            &keys_dir,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod restore should succeed");
 
         assert!(
             matches!(result, Err(BridgeError::KeyRead(_))),

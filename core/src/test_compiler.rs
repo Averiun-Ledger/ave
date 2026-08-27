@@ -64,9 +64,8 @@ async fn embedded_compiler_endpoint() -> String {
                 .expect("embedded compiler should start");
             let listener = std::net::TcpListener::bind("127.0.0.1:0")
                 .expect("Can not bind compiler port");
-            let addr = listener
-                .local_addr()
-                .expect("listener has a local address");
+            let addr =
+                listener.local_addr().expect("listener has a local address");
             std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()

@@ -1824,8 +1824,7 @@ async fn test_events_query_quantity_cap_is_enforced() {
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let governance_id = request_data.subject_id;
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     for path in [
         format!("/subjects/{governance_id}/events?quantity=1001"),

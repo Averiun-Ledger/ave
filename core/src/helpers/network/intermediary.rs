@@ -12,6 +12,9 @@ use crate::{
         worker::{DistriWorker, DistriWorkerMessage},
     },
     evaluation::{
+        compiler::contract_compiler::{
+            ContractCompiler, ContractCompilerMessage,
+        },
         coordinator::{EvalCoordinator, EvalCoordinatorMessage},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
@@ -672,6 +675,190 @@ impl Intermediary {
                                 compilation_res: Box::new(res),
                                 request_id: message.info.request_id,
                                 version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ArtifactProbeReq {
+                        subject_id,
+                        schema_id,
+                        gov_version,
+                        request_nonce,
+                        receiver_actor,
+                    } => {
+                        // Compilers serve from the governance compile
+                        // worker; evaluators (plan B) from the contract
+                        // compiler of the schema.
+                        if path.key() == "compiler" {
+                            let actor = system
+                                .get_actor::<CompileWorker>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(
+                                    CompileWorkerMessage::ArtifactProbeRequest {
+                                        subject_id,
+                                        schema_id,
+                                        gov_version,
+                                        request_nonce,
+                                        info: message.info,
+                                        sender: sender.clone(),
+                                        receiver_actor,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        } else {
+                            let actor = system
+                                .get_actor::<ContractCompiler>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(
+                                    ContractCompilerMessage::ArtifactProbeRequest {
+                                        subject_id,
+                                        schema_id,
+                                        gov_version,
+                                        request_nonce,
+                                        info: message.info,
+                                        sender: sender.clone(),
+                                        receiver_actor,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        }
+                    }
+                    ActorMessage::ArtifactProbeRes {
+                        request_nonce,
+                        result,
+                    } => {
+                        let actor = system
+                            .get_actor::<ContractCompiler>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(
+                                ContractCompilerMessage::ArtifactProbeResponse {
+                                    result,
+                                    request_nonce,
+                                    sender: sender.clone(),
+                                },
+                            )
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ArtifactReq {
+                        subject_id,
+                        schema_id,
+                        gov_version,
+                        request_nonce,
+                        receiver_actor,
+                    } => {
+                        // Compilers serve from the governance compile
+                        // worker; evaluators (plan B) from the contract
+                        // compiler of the schema.
+                        if path.key() == "compiler" {
+                            let actor = system
+                                .get_actor::<CompileWorker>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(CompileWorkerMessage::ArtifactRequest {
+                                    subject_id,
+                                    schema_id,
+                                    gov_version,
+                                    request_nonce,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                    receiver_actor,
+                                })
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        } else {
+                            let actor = system
+                                .get_actor::<ContractCompiler>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(
+                                    ContractCompilerMessage::ArtifactRequest {
+                                        subject_id,
+                                        schema_id,
+                                        gov_version,
+                                        request_nonce,
+                                        info: message.info,
+                                        sender: sender.clone(),
+                                        receiver_actor,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        }
+                    }
+                    ActorMessage::ArtifactRes {
+                        request_nonce,
+                        result,
+                    } => {
+                        let actor = system
+                            .get_actor::<ContractCompiler>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ContractCompilerMessage::ArtifactResponse {
+                                result,
+                                request_nonce,
                                 sender: sender.clone(),
                             })
                             .await

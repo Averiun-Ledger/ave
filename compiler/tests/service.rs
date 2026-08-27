@@ -161,9 +161,8 @@ async fn shared_server() -> &'static SharedServer {
 
             let listener = std::net::TcpListener::bind("127.0.0.1:0")
                 .expect("failed to bind ephemeral port");
-            let addr = listener
-                .local_addr()
-                .expect("listener has a local address");
+            let addr =
+                listener.local_addr().expect("listener has a local address");
 
             // The server must outlive any single test runtime: each
             // `#[tokio::test]` drops its runtime on completion, which
@@ -219,10 +218,8 @@ async fn compile_dedup_single_flight() {
     let source = source_b64(CONTRACT_A);
 
     let before = counter(server);
-    let (first, second) = tokio::join!(
-        client.compile(&source),
-        client.compile(&source),
-    );
+    let (first, second) =
+        tokio::join!(client.compile(&source), client.compile(&source),);
     let first = first.expect("first concurrent compile should succeed");
     let second = second.expect("second concurrent compile should succeed");
 
@@ -295,10 +292,9 @@ async fn compile_auth_rejected() {
     let mut request = Request::new(ave_compiler::pb::CompileRequest {
         source_b64: source_b64(CONTRACT_B),
     });
-    request.metadata_mut().insert(
-        "x-api-key",
-        MetadataValue::from_static("wrong-key"),
-    );
+    request
+        .metadata_mut()
+        .insert("x-api-key", MetadataValue::from_static("wrong-key"));
     let wrong_key = client.compile(request).await;
     let status = wrong_key.expect_err("request with wrong API key must fail");
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
@@ -324,10 +320,7 @@ async fn client_failover() {
     drop(dead);
 
     let client = CompilerClient::new(
-        vec![
-            format!("http://{dead_addr}"),
-            server.endpoint.clone(),
-        ],
+        vec![format!("http://{dead_addr}"), server.endpoint.clone()],
         API_KEY.to_owned(),
         None,
         None,
@@ -349,11 +342,8 @@ async fn client_failover() {
 async fn client_toolchain_mismatch() {
     let server = shared_server().await;
 
-    let bogus = DigestIdentifier::new(
-        HashAlgorithm::Blake3,
-        vec![0xAB; 32],
-    )
-    .expect("bogus digest should be valid");
+    let bogus = DigestIdentifier::new(HashAlgorithm::Blake3, vec![0xAB; 32])
+        .expect("bogus digest should be valid");
     let client = CompilerClient::new(
         vec![server.endpoint.clone()],
         API_KEY.to_owned(),

@@ -89,4 +89,9 @@ pub enum CompilerError {
 
     #[error("engine creation failed: {details}")]
     EngineCreation { details: String },
+
+    #[error(
+        "fetched artifact hash mismatch: expected {expected}, got {actual}"
+    )]
+    FetchedArtifactMismatch { expected: String, actual: String },
 }

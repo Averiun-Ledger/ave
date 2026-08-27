@@ -5,7 +5,10 @@ use std::{
 
 use crate::{
     compilation::{
-        CompileTarget, request::CompilationReq, resolve_compile_targets,
+        CompileTarget,
+        artifact::{ArtifactFetchResult, ArtifactProbeResult},
+        request::CompilationReq,
+        resolve_compile_targets,
     },
     evaluation::compiler::{
         CompilerSupport, error::CompilerError, is_compiler_infra_error,
@@ -62,6 +65,16 @@ pub struct CompileWorker {
     /// governance version as the request means the same schemas, so
     /// nothing contract-related travels in the request itself.
     pub schemas: BTreeMap<SchemaType, Schema>,
+    /// Whitelist of legitimate artifact requesters: the governance
+    /// compilers and the evaluators of each schema. Kept up to date by
+    /// the governance actor via `Update` — in memory, no per-request
+    /// lookups against the governance actor.
+    pub compilers: BTreeSet<PublicKey>,
+    pub evaluators: BTreeMap<SchemaType, BTreeSet<PublicKey>>,
+    /// While the governance applies an update (promoting and refreshing
+    /// artifacts) nothing is served: between versions there is no good
+    /// answer.
+    pub serving_blocked: bool,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
     pub stop: bool,
@@ -101,12 +114,31 @@ enum ContractCompilation {
     Unavailable,
 }
 
+/// Gate of an incoming artifact probe/request (see
+/// `CompileWorker::artifact_gate`).
+enum ArtifactGate {
+    /// Whitelist and version negotiation passed: the request can be
+    /// served.
+    Allowed,
+    /// Answer `NotServed`: this node is itself behind — the requester
+    /// tries another peer.
+    NotServed,
+    /// Answer `Busy`: this node is applying an update — the requester
+    /// waits and retries us, every compiler is busy at once.
+    Busy,
+    /// Answer `Outdated`: the requester is behind and must sync.
+    Outdated,
+    /// Silent reject (bad governance or non-whitelisted sender), like
+    /// the `EvaluationSchema` rejects.
+    Reject,
+}
+
 impl CompileWorker {
     /// Best-effort `Unavailable` notification for the in-flight network
     /// compilation request: the node is going down before answering, so
-    /// the requester can replace this compiler immediately instead of
-    /// waiting for the coordinator retries and timeout. Errors are
-    /// logged and swallowed — the coordinator timeout is the fallback.
+    /// the requester can replace it immediately instead of waiting for
+    /// the coordinator retries and timeout. Errors are logged and
+    /// swallowed — the coordinator timeout is the fallback.
     async fn notify_unavailable(&self) {
         let Some(pending) = &self.pending else {
             return;
@@ -140,6 +172,105 @@ impl CompileWorker {
                 "Could not notify compiler unavailability while stopping"
             );
         }
+    }
+
+    fn register_path(&self) -> ActorPath {
+        ActorPath::from(format!(
+            "/user/node/subject_manager/{}/contract_register",
+            self.governance_id
+        ))
+    }
+
+    /// Whitelist and version negotiation of an incoming artifact
+    /// probe/request, in the `EvaluationSchema` order: legitimate
+    /// requester first (silent reject otherwise), then the blocked
+    /// update window, then the governance version.
+    fn artifact_gate(
+        &self,
+        msg_type: &'static str,
+        subject_id: &DigestIdentifier,
+        schema_id: &SchemaType,
+        gov_version: u64,
+        sender: &PublicKey,
+    ) -> ArtifactGate {
+        if subject_id != &self.governance_id {
+            warn!(
+                msg_type,
+                sender = %sender,
+                expected_governance_id = %self.governance_id,
+                received_governance_id = %subject_id,
+                "Invalid governance_id in artifact request"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        let whitelisted = self.compilers.contains(sender)
+            || self
+                .evaluators
+                .get(schema_id)
+                .is_some_and(|evaluators| evaluators.contains(sender));
+        if !whitelisted {
+            warn!(
+                msg_type,
+                sender = %sender,
+                schema_id = ?schema_id,
+                "Artifact request from a node that is neither a compiler nor an evaluator of the schema"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        // Updating our own artifacts: after a contract change every
+        // compiler is busy at once — tell the requester to wait for us
+        // instead of pointlessly moving to another compiler.
+        if self.serving_blocked {
+            return ArtifactGate::Busy;
+        }
+
+        match gov_version_sync(self.gov_version, gov_version) {
+            // This node is behind the request's governance version and
+            // can not have the artifact: try another peer.
+            GovVersionSync::NodeBehind => ArtifactGate::NotServed,
+            // The requester is behind: it must sync and retry.
+            GovVersionSync::RequesterBehind => ArtifactGate::Outdated,
+            GovVersionSync::Current => ArtifactGate::Allowed,
+        }
+    }
+
+    async fn send_artifact_message(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        msg_type: &'static str,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+        message: ActorMessage,
+    ) -> Result<(), ActorError> {
+        let new_info = ComunicateInfo {
+            receiver: sender,
+            request_id: info.request_id.clone(),
+            version: info.version,
+            receiver_actor,
+        };
+
+        if let Err(e) = self
+            .network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                message: NetworkMessage {
+                    info: new_info,
+                    message,
+                },
+            })
+            .await
+        {
+            error!(
+                msg_type,
+                error = %e,
+                "Failed to send artifact response to network"
+            );
+            return Err(crash_system(ctx, e).await);
+        }
+
+        Ok(())
     }
 
     fn build_request_hashes(
@@ -473,7 +604,13 @@ pub enum CompileWorkerMessage {
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
         schemas: BTreeMap<SchemaType, Schema>,
+        compilers: BTreeSet<PublicKey>,
+        evaluators: BTreeMap<SchemaType, BTreeSet<PublicKey>>,
     },
+    /// The governance is applying an update (promoting and refreshing
+    /// artifacts): serving is blocked until it finishes — between
+    /// versions there is no good answer.
+    ServingBlocked { blocked: bool },
     LocalCompilation {
         compilation_req: Signed<CompilationReq>,
     },
@@ -481,6 +618,30 @@ pub enum CompileWorkerMessage {
         compilation_req: Signed<CompilationReq>,
         sender: PublicKey,
         info: ComunicateInfo,
+    },
+    /// Light availability probe from another node: can this worker
+    /// serve the official artifact of the schema at that governance
+    /// version?
+    ArtifactProbeRequest {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    },
+    /// Another node asks for the official artifact of a schema. The
+    /// governance version is negotiated first; the requester verifies
+    /// the bytes against the compilation evidence of its own ledger.
+    ArtifactRequest {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
     },
 }
 
@@ -531,11 +692,18 @@ impl Handler<Self> for CompileWorker {
                 issuers,
                 issuer_any,
                 schemas,
+                compilers,
+                evaluators,
             } => {
                 self.gov_version = gov_version;
                 self.issuers = issuers;
                 self.issuer_any = issuer_any;
                 self.schemas = schemas;
+                self.compilers = compilers;
+                self.evaluators = evaluators;
+            }
+            CompileWorkerMessage::ServingBlocked { blocked } => {
+                self.serving_blocked = blocked;
             }
             CompileWorkerMessage::LocalCompilation { compilation_req } => {
                 let compilation =
@@ -721,6 +889,135 @@ impl Handler<Self> for CompileWorker {
                     version = info.version,
                     sender = %sender,
                     "Network compilation request processed successfully"
+                );
+
+                if self.stop {
+                    ctx.stop(None).await;
+                }
+            }
+            CompileWorkerMessage::ArtifactProbeRequest {
+                subject_id,
+                schema_id,
+                gov_version,
+                request_nonce,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let result = match self.artifact_gate(
+                    "ArtifactProbeRequest",
+                    &subject_id,
+                    &schema_id,
+                    gov_version,
+                    &sender,
+                ) {
+                    ArtifactGate::Reject => {
+                        if self.stop {
+                            ctx.stop(None).await;
+                        }
+                        return Ok(());
+                    }
+                    ArtifactGate::NotServed => ArtifactProbeResult::NotServed,
+                    ArtifactGate::Busy => ArtifactProbeResult::Busy,
+                    ArtifactGate::Outdated => ArtifactProbeResult::Outdated {
+                        gov_version: self.gov_version,
+                    },
+                    ArtifactGate::Allowed => {
+                        let contract_name =
+                            format!("{}_{}", subject_id, schema_id);
+                        if CompilerSupport::has_official_artifact(
+                            ctx,
+                            &contract_name,
+                            &self.register_path(),
+                        )
+                        .await
+                        {
+                            ArtifactProbeResult::CanServe
+                        } else {
+                            ArtifactProbeResult::NotServed
+                        }
+                    }
+                };
+
+                self.send_artifact_message(
+                    ctx,
+                    "ArtifactProbeRequest",
+                    info,
+                    sender,
+                    receiver_actor,
+                    ActorMessage::ArtifactProbeRes {
+                        request_nonce,
+                        result,
+                    },
+                )
+                .await?;
+
+                if self.stop {
+                    ctx.stop(None).await;
+                }
+            }
+            CompileWorkerMessage::ArtifactRequest {
+                subject_id,
+                schema_id,
+                gov_version,
+                request_nonce,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let result = match self.artifact_gate(
+                    "ArtifactRequest",
+                    &subject_id,
+                    &schema_id,
+                    gov_version,
+                    &sender,
+                ) {
+                    ArtifactGate::Reject => {
+                        if self.stop {
+                            ctx.stop(None).await;
+                        }
+                        return Ok(());
+                    }
+                    ArtifactGate::NotServed => ArtifactFetchResult::NotServed,
+                    ArtifactGate::Busy => ArtifactFetchResult::Busy,
+                    ArtifactGate::Outdated => ArtifactFetchResult::Outdated {
+                        gov_version: self.gov_version,
+                    },
+                    ArtifactGate::Allowed => {
+                        let contract_name =
+                            format!("{}_{}", subject_id, schema_id);
+                        match CompilerSupport::serve_official_artifact(
+                            ctx,
+                            &contract_name,
+                            &self.register_path(),
+                        )
+                        .await
+                        {
+                            Some(artifact) => {
+                                ArtifactFetchResult::Artifact(artifact)
+                            }
+                            None => ArtifactFetchResult::NotServed,
+                        }
+                    }
+                };
+
+                self.send_artifact_message(
+                    ctx,
+                    "ArtifactRequest",
+                    info,
+                    sender,
+                    receiver_actor,
+                    ActorMessage::ArtifactRes {
+                        request_nonce,
+                        result,
+                    },
+                )
+                .await?;
+
+                debug!(
+                    msg_type = "ArtifactRequest",
+                    schema_id = ?schema_id,
+                    "Artifact request processed"
                 );
 
                 if self.stop {

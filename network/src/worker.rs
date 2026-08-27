@@ -174,8 +174,7 @@ fn enqueue_pending(
         }
     }
 
-    if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit
-    {
+    if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit {
         report.dropped_bytes_limit_peer += 1;
     } else if global_limit > 0
         && total_pending_bytes.saturating_add(message_len) > global_limit

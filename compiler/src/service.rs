@@ -94,10 +94,12 @@ impl ArtifactStore {
         max_bytes: u64,
         hash: HashAlgorithm,
     ) -> Result<Self, ServiceError> {
-        fs::create_dir_all(&dir).await.map_err(|e| ServiceError::Io {
-            path: dir.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })?;
+        fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| ServiceError::Io {
+                path: dir.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })?;
 
         let mut last_access = HashMap::new();
         let mut entries =
@@ -255,11 +257,11 @@ impl ArtifactStore {
                 continue;
             }
             let key = entry.file_name().to_string_lossy().to_string();
-            let size = match fs::metadata(entry.path().join(ARTIFACT_WASM)).await
-            {
-                Ok(metadata) => metadata.len(),
-                Err(_) => continue,
-            };
+            let size =
+                match fs::metadata(entry.path().join(ARTIFACT_WASM)).await {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => continue,
+                };
             let accessed = {
                 let last_access = self.last_access.lock().await;
                 last_access.get(&key).copied()
@@ -329,8 +331,9 @@ struct ServerState {
     store: ArtifactStore,
     build_semaphore: Semaphore,
     queued_builds: AtomicUsize,
-    in_flight:
-        Mutex<HashMap<String, tokio::sync::watch::Receiver<Option<SharedBuild>>>>,
+    in_flight: Mutex<
+        HashMap<String, tokio::sync::watch::Receiver<Option<SharedBuild>>>,
+    >,
     builds_completed: Arc<AtomicU64>,
 }
 
@@ -420,9 +423,7 @@ impl CompilerServer {
         })?;
         let listener =
             tokio::net::TcpListener::from_std(listener).map_err(|e| {
-                ServiceError::Server(format!(
-                    "failed to convert listener: {e}"
-                ))
+                ServiceError::Server(format!("failed to convert listener: {e}"))
             })?;
 
         let config = self.inner.config.clone();
@@ -446,9 +447,7 @@ impl CompilerServer {
                 if authorized {
                     Ok(request)
                 } else {
-                    Err(Status::unauthenticated(
-                        "missing or invalid API key",
-                    ))
+                    Err(Status::unauthenticated("missing or invalid API key"))
                 }
             },
         );
@@ -511,7 +510,8 @@ impl CompilerServer {
         let permit = match self.inner.build_semaphore.try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
-                let queued = self.inner.queued_builds.fetch_add(1, Ordering::SeqCst) + 1;
+                let queued =
+                    self.inner.queued_builds.fetch_add(1, Ordering::SeqCst) + 1;
                 if queued > self.inner.config.max_queued_builds {
                     self.inner.queued_builds.fetch_sub(1, Ordering::SeqCst);
                     return Err(Status::resource_exhausted(
@@ -523,12 +523,10 @@ impl CompilerServer {
                     queued = queued,
                     "Build waiting for a build slot"
                 );
-                let permit = self
-                    .inner
-                    .build_semaphore
-                    .acquire()
-                    .await
-                    .map_err(|_| Status::internal("build semaphore closed"));
+                let permit =
+                    self.inner.build_semaphore.acquire().await.map_err(|_| {
+                        Status::internal("build semaphore closed")
+                    });
                 self.inner.queued_builds.fetch_sub(1, Ordering::SeqCst);
                 permit?
             }
@@ -571,12 +569,8 @@ impl CompilerServer {
         // Per-job build directory under <work_dir>/contracts/<key>: the
         // pipeline derives the contracts root (and the optional vendor
         // directory at <work_dir>/vendor) from this layout.
-        let build_dir = self
-            .inner
-            .config
-            .work_dir
-            .join(CONTRACTS_SUBDIR)
-            .join(key);
+        let build_dir =
+            self.inner.config.work_dir.join(CONTRACTS_SUBDIR).join(key);
 
         // Drop leftovers of a previous crashed attempt with the same key.
         let _ = fs::remove_dir_all(&build_dir).await;
@@ -629,9 +623,7 @@ impl CompilerServer {
         })?;
 
         let signature = self.inner.key_pair.sign(&payload).map_err(|e| {
-            Status::internal(format!(
-                "failed to sign attestation: {e}"
-            ))
+            Status::internal(format!("failed to sign attestation: {e}"))
         })?;
 
         Ok(pb::CompileResponse {
@@ -664,9 +656,7 @@ impl CompilerService for CompilerServer {
         let hash = self.inner.hash;
         let source_hash =
             hash_borsh(&*hash.hasher(), &source_b64).map_err(|e| {
-                Status::internal(format!(
-                    "failed to hash contract source: {e}"
-                ))
+                Status::internal(format!("failed to hash contract source: {e}"))
             })?;
         let key = format!(
             "{}_{}_{}",
@@ -709,8 +699,7 @@ impl CompilerService for CompilerServer {
                     Flight::Follower(entry.get().clone())
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let (sender, receiver) =
-                        tokio::sync::watch::channel(None);
+                    let (sender, receiver) = tokio::sync::watch::channel(None);
                     entry.insert(receiver);
                     Flight::Leader(sender)
                 }
@@ -719,21 +708,17 @@ impl CompilerService for CompilerServer {
 
         let shared = match flight {
             Flight::Leader(sender) => {
-                let outcome = self
-                    .build_and_store(&key, &source_b64)
-                    .await
-                    .map(Arc::new);
+                let outcome =
+                    self.build_and_store(&key, &source_b64).await.map(Arc::new);
                 let _ = sender.send(Some(outcome.clone()));
                 self.inner.in_flight.lock().await.remove(&key);
                 outcome
             }
             Flight::Follower(mut receiver) => {
-                let published = receiver
-                    .wait_for(|value| value.is_some())
-                    .await
-                    .map_err(|_| {
-                        Status::internal("build leader dropped its result")
-                    })?;
+                let published =
+                    receiver.wait_for(|value| value.is_some()).await.map_err(
+                        |_| Status::internal("build leader dropped its result"),
+                    )?;
                 match published.clone() {
                     Some(shared) => shared,
                     None => {
@@ -801,10 +786,12 @@ async fn load_or_generate_identity(
                         std::fs::Permissions::from_mode(0o600),
                     )
                     .await
-                    .map_err(|e| ServiceError::Identity(format!(
-                        "cannot tighten permissions of '{}': {e}",
-                        key_path.display()
-                    )))?;
+                    .map_err(|e| {
+                        ServiceError::Identity(format!(
+                            "cannot tighten permissions of '{}': {e}",
+                            key_path.display()
+                        ))
+                    })?;
                 }
             }
             KeyPair::from_secret_der(&bytes).map_err(|e| {
@@ -839,12 +826,12 @@ async fn load_or_generate_identity(
             // Atomic write: a crash mid-write must not leave a corrupt
             // identity behind.
             let tmp_path = key_path.with_extension("der.tmp");
-            fs::write(&tmp_path, &der).await.map_err(|e| {
-                ServiceError::Io {
+            fs::write(&tmp_path, &der)
+                .await
+                .map_err(|e| ServiceError::Io {
                     path: tmp_path.to_string_lossy().to_string(),
                     details: e.to_string(),
-                }
-            })?;
+                })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

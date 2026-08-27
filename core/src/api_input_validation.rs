@@ -300,7 +300,8 @@ mod tests {
         let zero = require_query_limit("quantity", 0)
             .expect_err("zero must be rejected");
         assert!(
-            zero.to_string().contains("quantity must be greater than zero")
+            zero.to_string()
+                .contains("quantity must be greater than zero")
         );
 
         let over = require_query_limit("quantity", MAX_QUERY_LIMIT + 1)

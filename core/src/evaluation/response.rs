@@ -182,7 +182,8 @@ impl From<CompilerError> for EvaluatorError {
             | CompilerError::InvalidAttestationSignature
             | CompilerError::AttestationMismatch { .. }
             | CompilerError::CargoBuildFailed { .. }
-            | CompilerError::BuildTimeout { .. } => {
+            | CompilerError::BuildTimeout { .. }
+            | CompilerError::FetchedArtifactMismatch { .. } => {
                 Self::CompilersUnavailable(value.to_string())
             }
             // System failures: should not happen in a healthy environment

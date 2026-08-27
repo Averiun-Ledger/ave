@@ -1,32 +1,857 @@
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    NotPersistentActor, TimerKey,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, debug, error, info_span, warn};
 
-use ave_common::identity::{DigestIdentifier, HashAlgorithm, hash_borsh};
+use ave_common::SchemaType;
+use ave_common::identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh,
+};
+use ave_network::ComunicateInfo;
 
-use super::{CompilerResponse, CompilerSupport};
+use super::{
+    CompilerResponse, CompilerSupport, error::CompilerError,
+    is_local_fatal_compiler_error,
+};
+use crate::compilation::artifact::{ArtifactFetchResult, ArtifactProbeResult};
+use crate::governance::contract_register::{
+    ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
+};
+use crate::governance::{Governance, GovernanceMessage};
+use crate::helpers::network::{
+    ActorMessage, NetworkMessage, service::NetworkSender,
+};
 use crate::metrics::try_core_metrics;
+use crate::model::common::{
+    GovVersionSync, crash_system, gov_version_sync, take_random_signers,
+};
+use crate::sink::retry_delay_ms;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Response timeout of a single artifact request attempt.
+#[cfg(any(test, feature = "test"))]
+const FETCH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Response timeout of a single artifact request attempt.
+#[cfg(not(any(test, feature = "test")))]
+const FETCH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Response timeout of a light availability probe batch: the probe
+/// only asks who can serve, slow peers are simply skipped.
+#[cfg(any(test, feature = "test"))]
+const PROBE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Response timeout of a light availability probe batch: the probe
+/// only asks who can serve, slow peers are simply skipped.
+#[cfg(not(any(test, feature = "test")))]
+const PROBE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Peers probed at a time (the `take_random_signers` batch pattern of
+/// the protocol rounds): after a contract change every evaluator needs
+/// the artifact at once, and batching spreads the herd over the
+/// compiler set instead of sweeping it.
+const PROBE_BATCH_SIZE: usize = 3;
+
+/// Total budget waiting for a busy batch to finish compiling before
+/// moving to the next one. Very generous: compilations take seconds,
+/// not minutes.
+#[cfg(any(test, feature = "test"))]
+const BUSY_TOTAL_BUDGET: Duration = Duration::from_secs(60);
+/// Total budget waiting for a busy batch to finish compiling before
+/// moving to the next one. Very generous: compilations take seconds,
+/// not minutes.
+#[cfg(not(any(test, feature = "test")))]
+const BUSY_TOTAL_BUDGET: Duration = Duration::from_secs(180);
+
+/// Wait between re-probes to the same busy batch, stepped: compilations
+/// are not instant, give them room.
+#[cfg(any(test, feature = "test"))]
+fn busy_retry_delay(_attempt: usize) -> Duration {
+    Duration::from_secs(1)
+}
+/// Wait between re-probes to the same busy batch, stepped: compilations
+/// are not instant, give them room.
+#[cfg(not(any(test, feature = "test")))]
+fn busy_retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        1..=5 => Duration::from_secs(3),
+        6..=10 => Duration::from_secs(5),
+        _ => Duration::from_secs(10),
+    }
+}
+
+/// Timeoff between exhausted fetch cycles. Non-aggressive: the
+/// artifact is needed for sure, so the cycle never gives up — the
+/// timeoff is what keeps the retry cheap.
+#[cfg(any(test, feature = "test"))]
+const TIMEOFF_BASE_MS: u64 = 1_000;
+/// Timeoff between exhausted fetch cycles. Non-aggressive: the
+/// artifact is needed for sure, so the cycle never gives up — the
+/// timeoff is what keeps the retry cheap.
+#[cfg(not(any(test, feature = "test")))]
+const TIMEOFF_BASE_MS: u64 = 5_000;
+
+#[cfg(any(test, feature = "test"))]
+const TIMEOFF_MAX_MS: u64 = 5_000;
+#[cfg(not(any(test, feature = "test")))]
+const TIMEOFF_MAX_MS: u64 = 60_000;
+
+#[derive(Debug)]
 pub struct ContractCompiler {
     contract: DigestIdentifier,
     hash: HashAlgorithm,
+    our_key: Arc<PublicKey>,
+    next_nonce: u64,
+    /// This node's governance version and the artifact whitelist (the
+    /// governance compilers and the evaluators of this schema), kept in
+    /// memory — no per-operation lookups against the governance actor —
+    /// and refreshed by `Update`. The same sets choose fetch targets
+    /// (compilers first, evaluators as plan B) and validate incoming
+    /// requests when serving.
+    gov_version: u64,
+    compilers: BTreeSet<PublicKey>,
+    evaluators: BTreeSet<PublicKey>,
+    /// While the governance applies an update (promoting and refreshing
+    /// artifacts) nothing is served: between versions there is no good
+    /// answer.
+    serving_blocked: bool,
+    fetch: Option<FetchState>,
+}
+
+/// An in-flight artifact fetch: message-driven (no blocked ask awaiting
+/// the network). Light probe batches discover who can serve at our
+/// governance version, the bytes come from the first one that answered,
+/// busy batches (compiling) are waited on with a stepped schedule, and
+/// an exhausted cycle triggers a manual governance update and a
+/// non-aggressive timeoff — the artifact is needed for sure, so the
+/// cycle never gives up.
+#[derive(Debug)]
+struct FetchState {
+    contract: String,
+    contract_hash: DigestIdentifier,
+    contract_name: String,
+    initial_value: Value,
+    contract_path: PathBuf,
+    gov_id: DigestIdentifier,
+    schema_id: SchemaType,
+    /// Ledger anchor: the received bytes are verified against it.
+    wasm_hash: DigestIdentifier,
+    phase: FetchPhase,
+    /// Nonce of the in-flight probe round or artifact request.
+    nonce: u64,
+    timer: Option<TimerKey>,
+    started_at: Instant,
+    /// Exhausted cycles so far: paces the timeoff backoff.
+    cycles: usize,
+}
+
+/// A probe batch and everything it produced: who has not answered, who
+/// can serve, who is busy compiling, and the candidates left for the
+/// next batches.
+#[derive(Debug, Default)]
+struct ProbeRound {
+    plan_b: bool,
+    /// Batch members that have not answered yet.
+    pending: HashSet<PublicKey>,
+    /// Batch members that answered `CanServe`: the failover list.
+    can_serve: VecDeque<PublicKey>,
+    /// Batch members that answered `Busy` (compiling): re-probed after
+    /// the stepped wait — after a contract change every compiler is
+    /// busy at once, so moving to another batch is pointless.
+    busy: HashSet<PublicKey>,
+    /// Candidates not tried yet (the next batches).
+    untried: Vec<PublicKey>,
+    /// Re-probes sent to the busy batch (steps the wait).
+    busy_attempts: usize,
+    /// When the busy waiting of this batch started (total budget).
+    busy_started: Option<Instant>,
+}
+
+#[derive(Debug)]
+enum FetchPhase {
+    /// Light probes in flight: who can serve at our version?
+    Probe(ProbeRound),
+    /// Fetching the bytes from a peer that answered the probe.
+    Fetch {
+        round: ProbeRound,
+        peer: PublicKey,
+        /// Nonce of the probe round that found this peer: late answers
+        /// still feed the round (failover, busy, pending).
+        probe_nonce: u64,
+    },
+    /// Waiting to re-probe the same busy batch.
+    BusyWait(ProbeRound),
+    /// Waiting between cycles (non-aggressive timeoff).
+    Timeoff,
 }
 
 impl ContractCompiler {
-    pub fn new(hash: HashAlgorithm) -> Self {
+    pub fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
         Self {
             contract: DigestIdentifier::default(),
             hash,
+            our_key,
+            next_nonce: 0,
+            gov_version: 0,
+            compilers: BTreeSet::new(),
+            evaluators: BTreeSet::new(),
+            serving_blocked: false,
+            fetch: None,
         }
     }
+
+    fn register_path(ctx: &ActorContext<Self>) -> ActorPath {
+        ActorPath::from(format!("{}/contract_register", ctx.path().parent()))
+    }
+
+    fn network<A>(
+        ctx: &ActorContext<A>,
+    ) -> Result<Arc<NetworkSender>, ActorError>
+    where
+        A: Actor,
+    {
+        ctx.system()
+            .get_helper::<Arc<NetworkSender>>("network")
+            .ok_or_else(|| ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            })
+    }
+
+    fn cancel_fetch_timer(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(fetch) = &mut self.fetch
+            && let Some(key) = fetch.timer.take()
+        {
+            ctx.cancel_timer(key);
+        }
+    }
+
+    fn allocate_nonce(&mut self) -> u64 {
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+        nonce
+    }
+
+    /// The serving path of a peer for this fetch: compilers serve from
+    /// the governance compile worker, evaluators (plan B) from the
+    /// per-schema contract compiler.
+    fn peer_path(fetch: &FetchState, plan_b: bool) -> String {
+        if plan_b {
+            format!(
+                "/user/node/subject_manager/{}/{}_contract_compiler",
+                fetch.gov_id, fetch.schema_id
+            )
+        } else {
+            format!("/user/node/subject_manager/{}/compiler", fetch.gov_id)
+        }
+    }
+
+    /// Starts a probe set (compilers, or the schema evaluators as plan
+    /// B): candidates are batched at random and probed batch by batch.
+    async fn start_probe_set(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        plan_b: bool,
+    ) -> Result<(), ActorError> {
+        let candidates: HashSet<PublicKey> = if plan_b {
+            self.evaluators.clone()
+        } else {
+            self.compilers.clone()
+        }
+        .into_iter()
+        .filter(|peer| peer != &*self.our_key)
+        .collect();
+
+        if candidates.is_empty() {
+            // No one to ask in this set: plan B over the evaluators, or
+            // an exhausted cycle (boxed — direct async recursion).
+            if !plan_b
+                && self.evaluators.iter().any(|peer| peer != &*self.our_key)
+            {
+                return Box::pin(self.start_probe_set(ctx, true)).await;
+            }
+            return self.cycle_exhausted(ctx).await;
+        }
+
+        let (batch, untried) =
+            take_random_signers(candidates, PROBE_BATCH_SIZE);
+        self.probe_batch(
+            ctx,
+            ProbeRound {
+                plan_b,
+                pending: batch.into_iter().collect(),
+                can_serve: VecDeque::new(),
+                busy: HashSet::new(),
+                untried: untried.into_iter().collect(),
+                busy_attempts: 0,
+                busy_started: None,
+            },
+        )
+        .await
+    }
+
+    /// Sends the probe to every member of the batch and arms the round
+    /// timeout.
+    async fn probe_batch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        let Some((gov_id, schema_id, contract_name)) =
+            self.fetch.as_ref().map(|fetch| {
+                (
+                    fetch.gov_id.clone(),
+                    fetch.schema_id.clone(),
+                    fetch.contract_name.clone(),
+                )
+            })
+        else {
+            return Ok(());
+        };
+
+        let plan_b = round.plan_b;
+        let batch_size = round.pending.len();
+        let nonce = self.allocate_nonce();
+        let network = Self::network(ctx)?;
+        for peer in &round.pending {
+            let target_path = match self.fetch.as_ref() {
+                Some(fetch) => Self::peer_path(fetch, plan_b),
+                None => return Ok(()),
+            };
+            network
+                .send_command(ave_network::CommandHelper::SendMessage {
+                    message: NetworkMessage {
+                        info: ComunicateInfo {
+                            receiver: peer.clone(),
+                            request_id: String::default(),
+                            version: 0,
+                            receiver_actor: target_path,
+                        },
+                        message: ActorMessage::ArtifactProbeReq {
+                            subject_id: gov_id.clone(),
+                            schema_id: schema_id.clone(),
+                            gov_version: self.gov_version,
+                            request_nonce: nonce,
+                            receiver_actor: ctx.path().to_string(),
+                        },
+                    },
+                })
+                .await?;
+        }
+
+        let key = ctx.schedule_once(
+            PROBE_RESPONSE_TIMEOUT,
+            ContractCompilerMessage::ProbeTimeout {
+                request_nonce: nonce,
+            },
+        )?;
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.nonce = nonce;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::Probe(round);
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %contract_name,
+            plan_b,
+            batch_size,
+            "Artifact probe batch sent"
+        );
+
+        Ok(())
+    }
+
+    /// Re-probes the busy members of the batch after the stepped wait.
+    async fn reprobe_busy(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        mut round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        round.pending = std::mem::take(&mut round.busy);
+        round.busy_attempts += 1;
+        self.probe_batch(ctx, round).await
+    }
+
+    /// The probe round closed (timeout or every member answered):
+    /// fetch from the first `CanServe`, wait for the busy ones, or move
+    /// to the next batch.
+    async fn resolve_probe_round(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        let FetchPhase::Probe(round) = &mut fetch.phase else {
+            return Ok(());
+        };
+
+        if let Some(peer) = round.can_serve.pop_front() {
+            let round = std::mem::take(round);
+            return self.start_fetch_from(ctx, round, peer).await;
+        }
+
+        if !round.busy.is_empty() {
+            let round = std::mem::take(round);
+            return self.wait_busy_batch(ctx, round).await;
+        }
+
+        let round = std::mem::take(round);
+        self.next_batch(ctx, round).await
+    }
+
+    /// Resumes a probe round whose answers are still in flight, with a
+    /// fresh timeout.
+    async fn resume_probe(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        probe_nonce: u64,
+        round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        let key = ctx.schedule_once(
+            PROBE_RESPONSE_TIMEOUT,
+            ContractCompilerMessage::ProbeTimeout {
+                request_nonce: probe_nonce,
+            },
+        )?;
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.nonce = probe_nonce;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::Probe(round);
+
+        Ok(())
+    }
+
+    /// Waits for a busy batch (stepped delay), or gives up on it when
+    /// the total budget is spent.
+    async fn wait_busy_batch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        mut round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        if round.busy_started.is_none() {
+            round.busy_started = Some(Instant::now());
+        }
+        let budget_spent = round
+            .busy_started
+            .is_some_and(|started| started.elapsed() >= BUSY_TOTAL_BUDGET);
+        if budget_spent {
+            debug!(
+                msg_type = "Fetch",
+                "Busy batch budget exhausted, moving to the next batch"
+            );
+            return self.next_batch(ctx, round).await;
+        }
+
+        let delay = busy_retry_delay(round.busy_attempts + 1);
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        let nonce = fetch.nonce;
+        let key = ctx.schedule_once(
+            delay,
+            ContractCompilerMessage::BusyRetry {
+                request_nonce: nonce,
+            },
+        )?;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::BusyWait(round);
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %fetch.contract_name,
+            delay_ms = delay.as_millis(),
+            "Probe batch is busy compiling; re-probing after the wait"
+        );
+
+        Ok(())
+    }
+
+    /// Moves to the next batch of the set, or to the next phase when
+    /// the set is exhausted.
+    async fn next_batch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        if round.untried.is_empty() {
+            return self.advance_set(ctx, round.plan_b).await;
+        }
+
+        let untried: HashSet<PublicKey> = round.untried.into_iter().collect();
+        let (batch, rest) = take_random_signers(untried, PROBE_BATCH_SIZE);
+        self.probe_batch(
+            ctx,
+            ProbeRound {
+                plan_b: round.plan_b,
+                pending: batch.into_iter().collect(),
+                can_serve: VecDeque::new(),
+                busy: HashSet::new(),
+                untried: rest.into_iter().collect(),
+                busy_attempts: 0,
+                busy_started: None,
+            },
+        )
+        .await
+    }
+
+    /// Moves to the next phase: plan B over the schema evaluators, or
+    /// an exhausted cycle (manual governance update + timeoff).
+    async fn advance_set(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        plan_b: bool,
+    ) -> Result<(), ActorError> {
+        if !plan_b && self.evaluators.iter().any(|peer| peer != &*self.our_key)
+        {
+            return self.start_probe_set(ctx, true).await;
+        }
+
+        self.cycle_exhausted(ctx).await
+    }
+
+    /// Starts the artifact request to a peer that answered the probe,
+    /// re-sending the current governance version in case it changed
+    /// since the probe.
+    async fn start_fetch_from(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        round: ProbeRound,
+        peer: PublicKey,
+    ) -> Result<(), ActorError> {
+        let Some((gov_id, schema_id, contract_name)) =
+            self.fetch.as_ref().map(|fetch| {
+                (
+                    fetch.gov_id.clone(),
+                    fetch.schema_id.clone(),
+                    fetch.contract_name.clone(),
+                )
+            })
+        else {
+            return Ok(());
+        };
+
+        let plan_b = round.plan_b;
+        let nonce = self.allocate_nonce();
+        let target_path = match self.fetch.as_ref() {
+            Some(fetch) => Self::peer_path(fetch, plan_b),
+            None => return Ok(()),
+        };
+
+        let network = Self::network(ctx)?;
+        network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                message: NetworkMessage {
+                    info: ComunicateInfo {
+                        receiver: peer.clone(),
+                        request_id: String::default(),
+                        version: 0,
+                        receiver_actor: target_path,
+                    },
+                    message: ActorMessage::ArtifactReq {
+                        subject_id: gov_id,
+                        schema_id,
+                        gov_version: self.gov_version,
+                        request_nonce: nonce,
+                        receiver_actor: ctx.path().to_string(),
+                    },
+                },
+            })
+            .await?;
+
+        let key = ctx.schedule_once(
+            FETCH_RESPONSE_TIMEOUT,
+            ContractCompilerMessage::FetchTimeout {
+                request_nonce: nonce,
+            },
+        )?;
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        let probe_nonce = fetch.nonce;
+        fetch.nonce = nonce;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::Fetch {
+            round,
+            peer: peer.clone(),
+            probe_nonce,
+        };
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %contract_name,
+            peer = %peer,
+            plan_b,
+            "Artifact request sent"
+        );
+
+        Ok(())
+    }
+
+    /// The current fetch attempt failed: failover peer, probe answers
+    /// still in flight, the busy batch, the next batch, or an exhausted
+    /// cycle.
+    async fn attempt_failed(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        error: Option<String>,
+    ) -> Result<(), ActorError> {
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+
+        if let Some(error) = error {
+            warn!(
+                msg_type = "Fetch",
+                contract_name = %fetch.contract_name,
+                error = %error,
+                "Artifact fetch attempt failed, trying next option"
+            );
+        }
+
+        let FetchPhase::Fetch {
+            round, probe_nonce, ..
+        } = &mut fetch.phase
+        else {
+            return Ok(());
+        };
+        let probe_nonce = *probe_nonce;
+
+        if let Some(peer) = round.can_serve.pop_front() {
+            let round = std::mem::take(round);
+            return self.start_fetch_from(ctx, round, peer).await;
+        }
+
+        // Probe answers still in flight: resume the round with a fresh
+        // timeout instead of giving up.
+        if !round.pending.is_empty() {
+            let round = std::mem::take(round);
+            return self.resume_probe(ctx, probe_nonce, round).await;
+        }
+
+        // Batch members compiling: wait for them.
+        if !round.busy.is_empty() {
+            let round = std::mem::take(round);
+            return self.wait_busy_batch(ctx, round).await;
+        }
+
+        let round = std::mem::take(round);
+        self.next_batch(ctx, round).await
+    }
+
+    /// Nobody could serve the artifact at our version. Maybe this node
+    /// is so outdated that it is asking nodes that no longer serve it:
+    /// force a manual governance update (the applied events re-trigger
+    /// the fetch) and wait a non-aggressive timeoff before the next
+    /// cycle. The artifact is needed for sure — the cycle never gives
+    /// up.
+    async fn cycle_exhausted(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let governance = ctx.get_parent::<Governance>().await?;
+        governance.tell(GovernanceMessage::TriggerGovUpdate).await?;
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.phase = FetchPhase::Timeoff;
+        fetch.cycles += 1;
+        let delay =
+            retry_delay_ms(TIMEOFF_BASE_MS, TIMEOFF_MAX_MS, fetch.cycles, None);
+        let key = ctx.schedule_once(
+            Duration::from_millis(delay),
+            ContractCompilerMessage::CycleStart {
+                cycle: fetch.cycles,
+            },
+        )?;
+        fetch.timer = Some(key);
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %fetch.contract_name,
+            cycles = fetch.cycles,
+            delay_ms = delay,
+            "Fetch cycle exhausted; governance update triggered, next cycle after timeoff"
+        );
+
+        Ok(())
+    }
+
+    /// Drops the in-memory module of the contract: serving evaluations
+    /// with a stale contract would diverge from the network.
+    async fn evict_module(
+        ctx: &ActorContext<Self>,
+        contract_name: &str,
+    ) -> Result<(), ActorError> {
+        let contracts = CompilerSupport::contracts_helper(ctx).await?;
+        contracts.write().await.remove(contract_name);
+        Ok(())
+    }
+
+    /// Terminal handling of a fetch error: fatal local problems (disk,
+    /// register, helpers, engine) bring the node down controlled, like
+    /// the compile path; anything else ends the fetch — the next
+    /// governance event or restart tries again.
+    async fn fetch_failed(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        error: CompilerError,
+    ) -> Result<(), ActorError> {
+        if is_local_fatal_compiler_error(&error) {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "Can not register fetched contract artifact: {}",
+                        error
+                    ),
+                },
+            )
+            .await);
+        }
+
+        let contract_name =
+            self.fetch.as_ref().map(|fetch| fetch.contract_name.clone());
+        error!(
+            msg_type = "Fetch",
+            error = %error,
+            "Contract artifact fetch failed"
+        );
+        self.fetch = None;
+        if let Some(contract_name) = contract_name {
+            Self::evict_module(ctx, &contract_name).await?;
+        }
+        Ok(())
+    }
+
+    /// Whitelist and version negotiation of an incoming artifact
+    /// probe/request, in the `EvaluationSchema` order: legitimate
+    /// requester first (silent reject otherwise), then the blocked
+    /// update window, then the governance version.
+    fn artifact_gate(
+        &self,
+        ctx: &ActorContext<Self>,
+        msg_type: &'static str,
+        subject_id: &DigestIdentifier,
+        schema_id: &SchemaType,
+        gov_version: u64,
+        sender: &PublicKey,
+    ) -> ArtifactGate {
+        if subject_id.to_string() != ctx.path().parent().key() {
+            warn!(
+                msg_type,
+                sender = %sender,
+                received_governance_id = %subject_id,
+                "Invalid governance_id in artifact request"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        if ctx.path().key() != format!("{}_contract_compiler", schema_id) {
+            warn!(
+                msg_type,
+                sender = %sender,
+                schema_id = ?schema_id,
+                "Invalid schema_id in artifact request"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        if !self.compilers.contains(sender) && !self.evaluators.contains(sender)
+        {
+            warn!(
+                msg_type,
+                sender = %sender,
+                "Artifact request from a node that is neither a compiler nor an evaluator of the schema"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        // Updating our own artifacts: after a contract change every
+        // compiler is busy at once — tell the requester to wait for us
+        // instead of pointlessly moving to another compiler.
+        if self.serving_blocked {
+            return ArtifactGate::Busy;
+        }
+
+        match gov_version_sync(self.gov_version, gov_version) {
+            // This node is behind the request's governance version and
+            // can not have the artifact: try another peer.
+            GovVersionSync::NodeBehind => ArtifactGate::NotServed,
+            // The requester is behind: it must sync and retry.
+            GovVersionSync::RequesterBehind => ArtifactGate::Outdated,
+            GovVersionSync::Current => ArtifactGate::Allowed,
+        }
+    }
+
+    async fn send_artifact_message(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        msg_type: &'static str,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+        message: ActorMessage,
+    ) -> Result<(), ActorError> {
+        let new_info = ComunicateInfo {
+            receiver: sender,
+            request_id: info.request_id.clone(),
+            version: info.version,
+            receiver_actor,
+        };
+
+        let network = Self::network(ctx)?;
+        if let Err(e) = network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                message: NetworkMessage {
+                    info: new_info,
+                    message,
+                },
+            })
+            .await
+        {
+            error!(
+                msg_type,
+                error = %e,
+                "Failed to send artifact response to network"
+            );
+            return Err(crash_system(ctx, e).await);
+        }
+
+        Ok(())
+    }
+}
+
+/// Gate of an incoming artifact probe/request (see
+/// `ContractCompiler::artifact_gate`).
+enum ArtifactGate {
+    /// Whitelist and version negotiation passed: the request can be
+    /// served.
+    Allowed,
+    /// Answer `NotServed`: this node is itself behind — the requester
+    /// tries another peer.
+    NotServed,
+    /// Answer `Busy`: this node is applying an update — the requester
+    /// waits and retries us, every compiler is busy at once.
+    Busy,
+    /// Answer `Outdated`: the requester is behind and must sync.
+    Outdated,
+    /// Silent reject (bad governance or schema, or non-whitelisted
+    /// sender), like the `EvaluationSchema` rejects.
+    Reject,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +861,79 @@ pub enum ContractCompilerMessage {
         contract_name: String,
         initial_value: Value,
         contract_path: PathBuf,
+    },
+    /// Fetches the official artifact from the network instead of
+    /// compiling: this node evaluates the schema but has no compiler
+    /// role. The received bytes are verified against the compilation
+    /// evidence anchored in this node's own ledger.
+    Fetch {
+        contract: String,
+        contract_name: String,
+        initial_value: Value,
+        contract_path: PathBuf,
+        gov_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+    },
+    /// Whitelist and governance version refresh from the governance
+    /// actor: the governance compilers and the evaluators of this
+    /// schema.
+    Update {
+        gov_version: u64,
+        compilers: BTreeSet<PublicKey>,
+        evaluators: BTreeSet<PublicKey>,
+    },
+    /// The governance is applying an update (promoting and refreshing
+    /// artifacts): serving is blocked until it finishes — between
+    /// versions there is no good answer.
+    ServingBlocked {
+        blocked: bool,
+    },
+    /// Light availability probe from another node (plan B serving).
+    ArtifactProbeRequest {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    },
+    ArtifactProbeResponse {
+        result: ArtifactProbeResult,
+        request_nonce: u64,
+        sender: PublicKey,
+    },
+    /// Another node asks for the official artifact of the contract
+    /// (plan B serving).
+    ArtifactRequest {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    },
+    ArtifactResponse {
+        result: ArtifactFetchResult,
+        request_nonce: u64,
+        sender: PublicKey,
+    },
+    ProbeTimeout {
+        request_nonce: u64,
+    },
+    FetchTimeout {
+        request_nonce: u64,
+    },
+    /// The stepped wait for a busy batch expired: re-probe it (or move
+    /// to the next batch if the total budget is spent).
+    BusyRetry {
+        request_nonce: u64,
+    },
+    /// The timeoff of an exhausted cycle expired: start the next one.
+    CycleStart {
+        cycle: usize,
     },
 }
 
@@ -96,10 +994,13 @@ impl Handler<Self> for ContractCompiler {
                     };
 
                 if contract_hash != self.contract {
-                    let register_path = ActorPath::from(format!(
-                        "{}/contract_register",
-                        ctx.path().parent()
-                    ));
+                    // The contract changed: the cached module is stale,
+                    // evict it before recompiling — evaluating with it
+                    // would diverge from the network (same policy as
+                    // the fetch path).
+                    Self::evict_module(ctx, &contract_name).await?;
+
+                    let register_path = Self::register_path(ctx);
                     let (module, metadata) =
                         match CompilerSupport::compile_or_load_registered(
                             self.hash,
@@ -153,6 +1054,634 @@ impl Handler<Self> for ContractCompiler {
                         contract_name = %contract_name,
                         "Contract already compiled, skipping"
                     );
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::Fetch {
+                contract,
+                contract_name,
+                initial_value,
+                contract_path,
+                gov_id,
+                schema_id,
+                gov_version,
+            } => {
+                // The governance applies events before `update_childs`
+                // refreshes this actor, so the version of the message
+                // is the freshest there is: adopt it.
+                self.gov_version = gov_version;
+
+                let contract_hash =
+                    match hash_borsh(&*self.hash.hasher(), &contract) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            error!(
+                                msg_type = "Fetch",
+                                error = %e,
+                                "Failed to hash contract"
+                            );
+                            return Err(ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not hash contract: {}",
+                                    e
+                                ),
+                            });
+                        }
+                    };
+
+                // Already obtained, or already being fetched: an
+                // unrelated governance event must not reset an
+                // in-flight fetch of the same contract.
+                if contract_hash == self.contract
+                    || self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.contract_hash == contract_hash
+                    })
+                {
+                    debug!(
+                        msg_type = "Fetch",
+                        contract_name = %contract_name,
+                        "Contract already available or being fetched, skipping"
+                    );
+                    return Ok(CompilerResponse::Ok);
+                }
+
+                // The contract changed (or was never loaded): the cached
+                // module is stale, evict it before fetching — evaluating
+                // with it would diverge from the network.
+                Self::evict_module(ctx, &contract_name).await?;
+                self.cancel_fetch_timer(ctx);
+                self.fetch = None;
+
+                let register_path = Self::register_path(ctx);
+
+                // Local first: the artifact may already be on disk.
+                let manifest = ave_compiler::compilation_toml();
+                let manifest_hash = hash_borsh(&*self.hash.hasher(), &manifest);
+                let manifest_hash = match manifest_hash {
+                    Ok(manifest_hash) => manifest_hash,
+                    Err(e) => {
+                        return self
+                            .fetch_failed(
+                                ctx,
+                                CompilerError::SerializationError {
+                                    context: "contract manifest hash",
+                                    details: e.to_string(),
+                                },
+                            )
+                            .await
+                            .map(|()| CompilerResponse::Ok);
+                    }
+                };
+                let contract_runtime =
+                    match CompilerSupport::contract_runtime(ctx).await {
+                        Ok(contract_runtime) => contract_runtime,
+                        Err(error) => {
+                            return self
+                                .fetch_failed(ctx, error)
+                                .await
+                                .map(|()| CompilerResponse::Ok);
+                        }
+                    };
+                let engine_fingerprint = match contract_runtime
+                    .engine_fingerprint(self.hash)
+                {
+                    Ok(engine_fingerprint) => engine_fingerprint,
+                    Err(e) => {
+                        return self
+                            .fetch_failed(
+                                ctx,
+                                ave_compiler::map_runtime_error_to_compiler_error(
+                                    e,
+                                ),
+                            )
+                            .await
+                            .map(|()| CompilerResponse::Ok);
+                    }
+                };
+
+                match CompilerSupport::load_registered_artifact(
+                    self.hash,
+                    ctx,
+                    &contract_name,
+                    &contract_path,
+                    &initial_value,
+                    &register_path,
+                    &contract_hash,
+                    &manifest_hash,
+                    &engine_fingerprint,
+                    None,
+                )
+                .await
+                {
+                    Ok(Some((module, metadata, _))) => {
+                        let contracts =
+                            CompilerSupport::contracts_helper(ctx).await?;
+                        contracts
+                            .write()
+                            .await
+                            .insert(contract_name.clone(), module);
+                        self.contract = metadata.contract_hash.clone();
+                        debug!(
+                            msg_type = "Fetch",
+                            contract_name = %contract_name,
+                            "Contract artifact loaded from local disk"
+                        );
+                        return Ok(CompilerResponse::Ok);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.fetch_failed(ctx, error).await?;
+                        return Ok(CompilerResponse::Ok);
+                    }
+                }
+
+                // The ledger anchor is what the received bytes are
+                // verified against: evidence of the last committed event
+                // that touched the contract, recorded at apply time.
+                let register = ctx
+                    .system()
+                    .get_actor::<ContractRegister>(&register_path)
+                    .await?;
+                let anchor = match register
+                    .ask(ContractRegisterMessage::GetAnchor {
+                        contract_name: contract_name.clone(),
+                    })
+                    .await
+                {
+                    Ok(ContractRegisterResponse::Anchor(anchor)) => anchor,
+                    Ok(_) => None,
+                    Err(error) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not read contract anchor: {}",
+                                    error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                };
+
+                let Some(wasm_hash) = anchor else {
+                    error!(
+                        msg_type = "Fetch",
+                        contract_name = %contract_name,
+                        "No ledger anchor for the contract artifact; evaluations of this schema will be unavailable"
+                    );
+                    Self::evict_module(ctx, &contract_name).await?;
+                    return Ok(CompilerResponse::Ok);
+                };
+
+                self.fetch = Some(FetchState {
+                    contract,
+                    contract_hash,
+                    contract_name,
+                    initial_value,
+                    contract_path,
+                    gov_id,
+                    schema_id,
+                    wasm_hash,
+                    phase: FetchPhase::Timeoff,
+                    nonce: 0,
+                    timer: None,
+                    started_at: Instant::now(),
+                    cycles: 0,
+                });
+
+                self.start_probe_set(ctx, false).await?;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::Update {
+                gov_version,
+                compilers,
+                evaluators,
+            } => {
+                self.gov_version = gov_version;
+                self.compilers = compilers;
+                self.evaluators = evaluators;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ServingBlocked { blocked } => {
+                self.serving_blocked = blocked;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactProbeRequest {
+                subject_id,
+                schema_id,
+                gov_version,
+                request_nonce,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let result = match self.artifact_gate(
+                    ctx,
+                    "ArtifactProbeRequest",
+                    &subject_id,
+                    &schema_id,
+                    gov_version,
+                    &sender,
+                ) {
+                    ArtifactGate::Reject => return Ok(CompilerResponse::Ok),
+                    ArtifactGate::NotServed => ArtifactProbeResult::NotServed,
+                    ArtifactGate::Busy => ArtifactProbeResult::Busy,
+                    ArtifactGate::Outdated => ArtifactProbeResult::Outdated {
+                        gov_version: self.gov_version,
+                    },
+                    ArtifactGate::Allowed => {
+                        let contract_name =
+                            format!("{}_{}", subject_id, schema_id);
+                        if CompilerSupport::has_official_artifact(
+                            ctx,
+                            &contract_name,
+                            &Self::register_path(ctx),
+                        )
+                        .await
+                        {
+                            ArtifactProbeResult::CanServe
+                        } else {
+                            ArtifactProbeResult::NotServed
+                        }
+                    }
+                };
+
+                self.send_artifact_message(
+                    ctx,
+                    "ArtifactProbeRequest",
+                    info,
+                    sender,
+                    receiver_actor,
+                    ActorMessage::ArtifactProbeRes {
+                        request_nonce,
+                        result,
+                    },
+                )
+                .await?;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactProbeResponse {
+                result,
+                request_nonce,
+                sender,
+            } => {
+                // Probe round in flight.
+                let in_probe_round = self.fetch.as_ref().is_some_and(|fetch| {
+                    fetch.nonce == request_nonce
+                        && matches!(fetch.phase, FetchPhase::Probe { .. })
+                });
+
+                if in_probe_round {
+                    match result {
+                        ArtifactProbeResult::CanServe => {
+                            // First answer wins: fetch the bytes from
+                            // this peer; the rest of the round keeps
+                            // feeding the failover and busy lists.
+                            let Some(fetch) = &mut self.fetch else {
+                                return Ok(CompilerResponse::Ok);
+                            };
+                            let FetchPhase::Probe(round) = &mut fetch.phase
+                            else {
+                                return Ok(CompilerResponse::Ok);
+                            };
+                            let round = std::mem::take(round);
+                            self.start_fetch_from(ctx, round, sender).await?;
+                        }
+                        ArtifactProbeResult::NotServed
+                        | ArtifactProbeResult::Busy => {
+                            let mut round_closed = false;
+                            if let Some(fetch) = &mut self.fetch
+                                && let FetchPhase::Probe(round) =
+                                    &mut fetch.phase
+                            {
+                                round.pending.remove(&sender);
+                                if matches!(result, ArtifactProbeResult::Busy) {
+                                    round.busy.insert(sender.clone());
+                                }
+                                round_closed = round.pending.is_empty();
+                            }
+                            if round_closed {
+                                self.resolve_probe_round(ctx).await?;
+                            }
+                        }
+                        ArtifactProbeResult::Outdated { .. } => {
+                            // We are behind: sync instead of burning the
+                            // rest of the round.
+                            self.cycle_exhausted(ctx).await?;
+                        }
+                    }
+                    return Ok(CompilerResponse::Ok);
+                }
+
+                // Late probe answers while fetching still feed the
+                // round — nothing is lost.
+                if let Some(fetch) = &mut self.fetch
+                    && let FetchPhase::Fetch {
+                        round,
+                        probe_nonce,
+                        peer,
+                        ..
+                    } = &mut fetch.phase
+                    && *probe_nonce == request_nonce
+                {
+                    match result {
+                        ArtifactProbeResult::CanServe => {
+                            if sender != *peer
+                                && !round.can_serve.contains(&sender)
+                            {
+                                round.can_serve.push_back(sender.clone());
+                            }
+                        }
+                        ArtifactProbeResult::Busy => {
+                            round.busy.insert(sender.clone());
+                        }
+                        ArtifactProbeResult::NotServed
+                        | ArtifactProbeResult::Outdated { .. } => {}
+                    }
+                    round.pending.remove(&sender);
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactRequest {
+                subject_id,
+                schema_id,
+                gov_version,
+                request_nonce,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let result = match self.artifact_gate(
+                    ctx,
+                    "ArtifactRequest",
+                    &subject_id,
+                    &schema_id,
+                    gov_version,
+                    &sender,
+                ) {
+                    ArtifactGate::Reject => return Ok(CompilerResponse::Ok),
+                    ArtifactGate::NotServed => ArtifactFetchResult::NotServed,
+                    ArtifactGate::Busy => ArtifactFetchResult::Busy,
+                    ArtifactGate::Outdated => ArtifactFetchResult::Outdated {
+                        gov_version: self.gov_version,
+                    },
+                    ArtifactGate::Allowed => {
+                        let contract_name =
+                            format!("{}_{}", subject_id, schema_id);
+                        match CompilerSupport::serve_official_artifact(
+                            ctx,
+                            &contract_name,
+                            &Self::register_path(ctx),
+                        )
+                        .await
+                        {
+                            Some(artifact) => {
+                                ArtifactFetchResult::Artifact(artifact)
+                            }
+                            None => ArtifactFetchResult::NotServed,
+                        }
+                    }
+                };
+
+                self.send_artifact_message(
+                    ctx,
+                    "ArtifactRequest",
+                    info,
+                    sender,
+                    receiver_actor,
+                    ActorMessage::ArtifactRes {
+                        request_nonce,
+                        result,
+                    },
+                )
+                .await?;
+
+                debug!(
+                    msg_type = "ArtifactRequest",
+                    schema_id = ?schema_id,
+                    "Artifact request served"
+                );
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactResponse {
+                result,
+                request_nonce,
+                sender,
+            } => {
+                // Stale or unexpected response: the fetch moved on.
+                let matches_current = self.fetch.as_ref().is_some_and(|fetch| {
+                    fetch.nonce == request_nonce
+                        && matches!(
+                            &fetch.phase,
+                            FetchPhase::Fetch { peer, .. } if *peer == sender
+                        )
+                });
+                if !matches_current {
+                    debug!(
+                        msg_type = "ArtifactResponse",
+                        request_nonce,
+                        sender = %sender,
+                        "Stale artifact response, dropping"
+                    );
+                    return Ok(CompilerResponse::Ok);
+                }
+
+                self.cancel_fetch_timer(ctx);
+
+                match result {
+                    ArtifactFetchResult::Artifact(artifact) => {
+                        let Some(fetch) = self.fetch.take() else {
+                            return Ok(CompilerResponse::Ok);
+                        };
+                        match CompilerSupport::register_fetched_artifact(
+                            self.hash,
+                            ctx,
+                            &fetch.contract_name,
+                            &fetch.contract,
+                            &fetch.contract_path,
+                            fetch.initial_value.clone(),
+                            &Self::register_path(ctx),
+                            &fetch.wasm_hash,
+                            artifact,
+                        )
+                        .await
+                        {
+                            Ok((module, metadata)) => {
+                                let contracts =
+                                    CompilerSupport::contracts_helper(ctx)
+                                        .await?;
+                                contracts.write().await.insert(
+                                    fetch.contract_name.clone(),
+                                    module,
+                                );
+                                self.contract = metadata.contract_hash.clone();
+                                if let Some(metrics) = try_core_metrics() {
+                                    metrics.observe_contract_prepare(
+                                        "fetched",
+                                        "ok",
+                                        fetch.started_at.elapsed(),
+                                    );
+                                }
+                                debug!(
+                                    msg_type = "ArtifactResponse",
+                                    contract_name = %fetch.contract_name,
+                                    sender = %sender,
+                                    "Contract artifact fetched and verified"
+                                );
+                            }
+                            Err(error) => {
+                                self.fetch = Some(fetch);
+                                // A peer that answers a same-version
+                                // request with bytes that do not match
+                                // the ledger anchor is lying or corrupt:
+                                // security log and next peer. The alerts
+                                // system (future work) will report it.
+                                if matches!(
+                                    error,
+                                    CompilerError::FetchedArtifactMismatch { .. }
+                                ) {
+                                    warn!(
+                                        msg_type = "ArtifactResponse",
+                                        contract_name = %self
+                                            .fetch
+                                            .as_ref()
+                                            .map(|f| f.contract_name.as_str())
+                                            .unwrap_or_default(),
+                                        sender = %sender,
+                                        error = %error,
+                                        "Fetched artifact does not match the ledger anchor"
+                                    );
+                                    self.attempt_failed(
+                                        ctx,
+                                        Some(error.to_string()),
+                                    )
+                                    .await?;
+                                } else {
+                                    self.fetch_failed(ctx, error).await?;
+                                }
+                            }
+                        }
+                    }
+                    ArtifactFetchResult::NotServed => {
+                        self.attempt_failed(
+                            ctx,
+                            Some("peer can not serve the artifact".to_owned()),
+                        )
+                        .await?;
+                    }
+                    ArtifactFetchResult::Busy => {
+                        // The peer started compiling after answering the
+                        // probe: it joins the busy set of the round.
+                        if let Some(fetch) = &mut self.fetch
+                            && let FetchPhase::Fetch { round, peer, .. } =
+                                &mut fetch.phase
+                        {
+                            round.busy.insert(peer.clone());
+                        }
+                        self.attempt_failed(
+                            ctx,
+                            Some("peer started compiling mid-fetch".to_owned()),
+                        )
+                        .await?;
+                    }
+                    ArtifactFetchResult::Outdated { .. } => {
+                        // We are behind: sync instead of burning the
+                        // rest of the candidates.
+                        self.cycle_exhausted(ctx).await?;
+                    }
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ProbeTimeout { request_nonce } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.nonce == request_nonce
+                            && matches!(fetch.phase, FetchPhase::Probe { .. })
+                    });
+                if matches_current {
+                    // The round is closed: whoever did not answer is
+                    // skipped (maybe down), the answered ones decide.
+                    if let Some(fetch) = &mut self.fetch
+                        && let FetchPhase::Probe(round) = &mut fetch.phase
+                    {
+                        round.pending.clear();
+                    }
+                    self.resolve_probe_round(ctx).await?;
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::FetchTimeout { request_nonce } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.nonce == request_nonce
+                            && matches!(fetch.phase, FetchPhase::Fetch { .. })
+                    });
+                if matches_current {
+                    self.attempt_failed(
+                        ctx,
+                        Some("artifact fetch timed out".to_owned()),
+                    )
+                    .await?;
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::BusyRetry { request_nonce } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.nonce == request_nonce
+                            && matches!(
+                                fetch.phase,
+                                FetchPhase::BusyWait { .. }
+                            )
+                    });
+                if matches_current {
+                    let Some(fetch) = &mut self.fetch else {
+                        return Ok(CompilerResponse::Ok);
+                    };
+                    let FetchPhase::BusyWait(round) = &mut fetch.phase else {
+                        return Ok(CompilerResponse::Ok);
+                    };
+                    let budget_spent =
+                        round.busy_started.is_some_and(|started| {
+                            started.elapsed() >= BUSY_TOTAL_BUDGET
+                        });
+                    let round = std::mem::take(round);
+                    if budget_spent {
+                        debug!(
+                            msg_type = "Fetch",
+                            "Busy batch budget exhausted, moving to the next batch"
+                        );
+                        self.next_batch(ctx, round).await?;
+                    } else {
+                        self.reprobe_busy(ctx, round).await?;
+                    }
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::CycleStart { cycle } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.cycles == cycle
+                            && matches!(fetch.phase, FetchPhase::Timeoff)
+                    });
+                if matches_current {
+                    debug!(
+                        msg_type = "Fetch",
+                        cycle, "Timeoff expired, starting new fetch cycle"
+                    );
+                    self.start_probe_set(ctx, false).await?;
                 }
 
                 Ok(CompilerResponse::Ok)
