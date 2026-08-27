@@ -3222,6 +3222,25 @@ impl Handler<Self> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    let RequestManagerState::Approval {
+                        eval_req,
+                        eval_res,
+                        compile,
+                    } = self.state.clone()
+                    else {
+                        // Benign race: the request already left the
+                        // approval phase (reboot, abort...) while this
+                        // response was in flight. Ignore it, do not
+                        // crash the node over a late message.
+                        warn!(
+                            msg_type = "ApprovalRes",
+                            request_id = %self.id,
+                            state = ?self.state,
+                            "Late approval response ignored: the request is no longer in the approval phase"
+                        );
+                        return Ok(());
+                    };
+
                     let _ = make_obsolete(ctx, &self.subject_id).await;
                     debug!(
                         msg_type = "ApprovalRes",
@@ -3240,23 +3259,6 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    let RequestManagerState::Approval {
-                        eval_req,
-                        eval_res,
-                        compile,
-                    } = self.state.clone()
-                    else {
-                        error!(
-                            msg_type = "ApprovalRes",
-                            request_id = %self.id,
-                            state = ?self.state,
-                            "Invalid state for approval response"
-                        );
-                        let e = ActorError::FunctionalCritical {
-                            description: "Invalid request state".to_owned(),
-                        };
-                        return Err(crash_system(ctx, e).await);
-                    };
                     let (
                         request,
                         quorum,
@@ -3319,16 +3321,6 @@ impl Handler<Self> for RequestManager {
                         version = self.version,
                         "Validation result received"
                     );
-                    if let Err(e) = self.stops_childs(ctx).await {
-                        error!(
-                                msg_type = "ValidationRes",
-                                request_id = %self.id,
-                                error = %e,
-                                "Failed to stop childs"
-                        );
-                        self.match_error(ctx, e).await;
-                        return Ok(());
-                    };
 
                     let distribution_plan = match &self.state {
                         RequestManagerState::Validation {
@@ -3336,22 +3328,29 @@ impl Handler<Self> for RequestManager {
                             ..
                         } => distribution_plan.clone(),
                         _ => {
-                            error!(
+                            // Benign race: the request already left the
+                            // validation phase (reboot, abort...) while
+                            // this response was in flight. Ignore it, do
+                            // not crash the node over a late message.
+                            warn!(
                                 msg_type = "ValidationRes",
                                 request_id = %self.id,
                                 state = ?self.state,
-                                "Invalid state for validation response"
+                                "Late validation response ignored: the request is no longer in the validation phase"
                             );
-                            self.match_error(
-                                ctx,
-                                RequestManagerError::InvalidRequestState {
-                                    expected: "Validation",
-                                    got: "Other",
-                                },
-                            )
-                            .await;
                             return Ok(());
                         }
+                    };
+
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "ValidationRes",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
                     };
 
                     let signed_ledger = match self

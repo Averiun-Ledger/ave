@@ -410,7 +410,32 @@ impl Handler<Self> for Evaluation {
                             signer = %signer,
                             "Failed to create evaluator"
                         );
+                        // Drop the failed signer so the round can
+                        // exhaust itself instead of hanging forever
+                        // waiting for a response that will never come.
+                        self.current_evaluators.remove(&signer);
                     }
+                }
+
+                if self.current_evaluators.is_empty() {
+                    if let Err(e) = send_reboot_to_req(
+                        ctx,
+                        request_id.clone(),
+                        self.request.content().governance_id.clone(),
+                        RebootType::TimeOut,
+                    )
+                    .await
+                    {
+                        error!(
+                            msg_type = "Create",
+                            error = %e,
+                            "Failed to send reboot to request actor"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    }
+                    Self::observe_event("reboot");
+                    self.closed = true;
+                    return Ok(());
                 }
 
                 debug!(
@@ -613,7 +638,34 @@ impl Handler<Self> for Evaluation {
                                         signer = %signer,
                                         "Failed to create evaluator from pending pool"
                                     );
+                                    // Drop the failed signer so the
+                                    // round can exhaust itself instead
+                                    // of hanging forever.
+                                    self.current_evaluators.remove(&signer);
                                 }
+                            }
+
+                            if self.current_evaluators.is_empty() {
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content()
+                                        .governance_id
+                                        .clone(),
+                                    RebootType::TimeOut,
+                                )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                                Self::observe_event("reboot");
+                                self.closed = true;
                             }
 
                             debug!(

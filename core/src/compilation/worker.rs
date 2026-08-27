@@ -1,17 +1,19 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
+    time::Instant,
 };
 
 use crate::{
     compilation::{
         CompileTarget,
-        artifact::{ArtifactFetchResult, ArtifactProbeResult},
+        artifact::{ArtifactData, ArtifactFetchResult, ArtifactProbeResult},
         request::CompilationReq,
         resolve_compile_targets,
     },
     evaluation::compiler::{
-        CompilerSupport, error::CompilerError, is_compiler_infra_error,
+        CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
+        error::CompilerError, is_compiler_infra_error,
         is_local_fatal_compiler_error,
     },
     governance::model::Schema,
@@ -75,6 +77,12 @@ pub struct CompileWorker {
     /// artifacts) nothing is served: between versions there is no good
     /// answer.
     pub serving_blocked: bool,
+    /// Official artifacts recently served, per contract: the fetch burst
+    /// after a contract change re-reads nothing from disk. Entries expire
+    /// (`SERVING_CACHE_TTL`) — contract changes are rare, the RAM must
+    /// not be held forever — and the cache is cleared when an update
+    /// blocks serving (the artifacts may change under it).
+    pub serving_cache: HashMap<String, ServingCacheEntry>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
     pub stop: bool,
@@ -172,6 +180,55 @@ impl CompileWorker {
                 "Could not notify compiler unavailability while stopping"
             );
         }
+    }
+
+    /// Serves the official artifact of a contract, from the serving
+    /// cache while the entry is fresh and from disk otherwise — filling
+    /// the cache and scheduling its expiry on a miss. The cache exists
+    /// for the fetch burst after a contract change (every evaluator
+    /// fetches at once); outside that window reading the artifact from
+    /// disk is cheap enough.
+    async fn serve_artifact(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        contract_name: &str,
+    ) -> Result<Option<ArtifactData>, ActorError> {
+        if let Some(entry) = self.serving_cache.get(contract_name)
+            && entry.filled_at.elapsed() < SERVING_CACHE_TTL
+        {
+            return Ok(Some(entry.artifact.clone()));
+        }
+
+        let Some(artifact) = CompilerSupport::serve_official_artifact(
+            ctx,
+            contract_name,
+            &self.register_path(),
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+
+        let filled_at = Instant::now();
+        // The expiry is scheduled before filling: a scheduling failure
+        // leaves no entry behind, so the RAM is never held forever.
+        ctx.schedule_once(
+            SERVING_CACHE_TTL,
+            CompileWorkerMessage::EvictServingCache {
+                contract_name: contract_name.to_owned(),
+                filled_at,
+            },
+        )?;
+
+        self.serving_cache.insert(
+            contract_name.to_owned(),
+            ServingCacheEntry {
+                artifact: artifact.clone(),
+                filled_at,
+            },
+        );
+
+        Ok(Some(artifact))
     }
 
     fn register_path(&self) -> ActorPath {
@@ -611,6 +668,12 @@ pub enum CompileWorkerMessage {
     /// artifacts): serving is blocked until it finishes — between
     /// versions there is no good answer.
     ServingBlocked { blocked: bool },
+    /// Expiry of a serving cache entry. Guarded by `filled_at`: a late
+    /// eviction of an entry that was already refilled is moot.
+    EvictServingCache {
+        contract_name: String,
+        filled_at: Instant,
+    },
     LocalCompilation {
         compilation_req: Signed<CompilationReq>,
     },
@@ -704,6 +767,26 @@ impl Handler<Self> for CompileWorker {
             }
             CompileWorkerMessage::ServingBlocked { blocked } => {
                 self.serving_blocked = blocked;
+                if blocked {
+                    // The artifacts may change under the blocked window
+                    // (promotion, schema deletion): nothing cached may
+                    // survive it.
+                    self.serving_cache.clear();
+                }
+            }
+            CompileWorkerMessage::EvictServingCache {
+                contract_name,
+                filled_at,
+            } => {
+                // Guarded: a late eviction must not drop an entry that
+                // was already refilled.
+                if self
+                    .serving_cache
+                    .get(&contract_name)
+                    .is_some_and(|entry| entry.filled_at == filled_at)
+                {
+                    self.serving_cache.remove(&contract_name);
+                }
             }
             CompileWorkerMessage::LocalCompilation { compilation_req } => {
                 let compilation =
@@ -986,12 +1069,7 @@ impl Handler<Self> for CompileWorker {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        match CompilerSupport::serve_official_artifact(
-                            ctx,
-                            &contract_name,
-                            &self.register_path(),
-                        )
-                        .await
+                        match self.serve_artifact(ctx, &contract_name).await?
                         {
                             Some(artifact) => {
                                 ArtifactFetchResult::Artifact(artifact)

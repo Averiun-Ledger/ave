@@ -4,7 +4,7 @@
 //! its initial value) go through this phase, and only the governance
 //! owner coordinates it — the same shape as the governance evaluation.
 //!
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
@@ -317,6 +317,7 @@ impl Compilation {
                         compilers: BTreeSet::new(),
                         evaluators: BTreeMap::new(),
                         serving_blocked: false,
+                        serving_cache: HashMap::new(),
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,

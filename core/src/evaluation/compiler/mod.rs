@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
@@ -71,6 +71,22 @@ pub(crate) fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
 }
 
 pub(crate) struct CompilerSupport;
+
+/// TTL of a serving cache entry: after a contract change every evaluator
+/// fetches the artifact at once (thundering herd), so the serving node
+/// keeps the bytes in memory for a short window instead of re-reading
+/// them from disk per request. Contract changes are rare, so the cache
+/// must not live forever — the entry expires and the RAM is freed.
+pub(crate) const SERVING_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// An official artifact kept in memory for serving, with the instant it
+/// was filled: drives the expiry and guards the eviction against late
+/// timer messages of an already replaced entry.
+#[derive(Debug, Clone)]
+pub struct ServingCacheEntry {
+    pub artifact: ArtifactData,
+    pub filled_at: Instant,
+}
 
 impl CompilerSupport {
     fn observe_contract_prepare(

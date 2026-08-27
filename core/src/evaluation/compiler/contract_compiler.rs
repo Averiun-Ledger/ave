@@ -18,10 +18,12 @@ use ave_common::identity::{
 use ave_network::ComunicateInfo;
 
 use super::{
-    CompilerResponse, CompilerSupport, error::CompilerError,
-    is_local_fatal_compiler_error,
+    CompilerResponse, CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
+    error::CompilerError, is_local_fatal_compiler_error,
 };
-use crate::compilation::artifact::{ArtifactFetchResult, ArtifactProbeResult};
+use crate::compilation::artifact::{
+    ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
+};
 use crate::governance::contract_register::{
     ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
 };
@@ -120,6 +122,11 @@ pub struct ContractCompiler {
     /// artifacts) nothing is served: between versions there is no good
     /// answer.
     serving_blocked: bool,
+    /// The official artifact recently served to other nodes (plan B
+    /// serving): same serving cache policy as the compile worker, but a
+    /// single entry — this actor only serves its own schema. Cleared
+    /// whenever the module is evicted (the artifact is changing).
+    serving_cache: Option<ServingCacheEntry>,
     fetch: Option<FetchState>,
 }
 
@@ -201,6 +208,7 @@ impl ContractCompiler {
             compilers: BTreeSet::new(),
             evaluators: BTreeSet::new(),
             serving_blocked: false,
+            serving_cache: None,
             fetch: None,
         }
     }
@@ -701,6 +709,48 @@ impl ContractCompiler {
         Ok(())
     }
 
+    /// Serves the official artifact to another node (plan B), from the
+    /// serving cache while the entry is fresh and from disk otherwise —
+    /// filling the cache and scheduling its expiry on a miss. Same
+    /// policy as the compile worker: the cache exists for the fetch
+    /// burst after a contract change and must not live forever.
+    async fn serve_artifact(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        contract_name: &str,
+    ) -> Result<Option<ArtifactData>, ActorError> {
+        if let Some(entry) = &self.serving_cache
+            && entry.filled_at.elapsed() < SERVING_CACHE_TTL
+        {
+            return Ok(Some(entry.artifact.clone()));
+        }
+
+        let Some(artifact) = CompilerSupport::serve_official_artifact(
+            ctx,
+            contract_name,
+            &Self::register_path(ctx),
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+
+        let filled_at = Instant::now();
+        // The expiry is scheduled before filling: a scheduling failure
+        // leaves no entry behind, so the RAM is never held forever.
+        ctx.schedule_once(
+            SERVING_CACHE_TTL,
+            ContractCompilerMessage::EvictServingCache { filled_at },
+        )?;
+
+        self.serving_cache = Some(ServingCacheEntry {
+            artifact: artifact.clone(),
+            filled_at,
+        });
+
+        Ok(Some(artifact))
+    }
+
     /// Terminal handling of a fetch error: fatal local problems (disk,
     /// register, helpers, engine) bring the node down controlled, like
     /// the compile path; anything else ends the fetch — the next
@@ -733,6 +783,7 @@ impl ContractCompiler {
         self.fetch = None;
         if let Some(contract_name) = contract_name {
             Self::evict_module(ctx, &contract_name).await?;
+            self.serving_cache = None;
         }
         Ok(())
     }
@@ -935,6 +986,11 @@ pub enum ContractCompilerMessage {
     CycleStart {
         cycle: usize,
     },
+    /// Expiry of the serving cache entry. Guarded by `filled_at`: a
+    /// late eviction of an entry that was already refilled is moot.
+    EvictServingCache {
+        filled_at: Instant,
+    },
 }
 
 impl Message for ContractCompilerMessage {}
@@ -999,6 +1055,9 @@ impl Handler<Self> for ContractCompiler {
                     // would diverge from the network (same policy as
                     // the fetch path).
                     Self::evict_module(ctx, &contract_name).await?;
+                    // The artifact itself is changing too: nothing
+                    // cached for serving may survive.
+                    self.serving_cache = None;
 
                     let register_path = Self::register_path(ctx);
                     let (module, metadata) =
@@ -1110,6 +1169,9 @@ impl Handler<Self> for ContractCompiler {
                 // module is stale, evict it before fetching — evaluating
                 // with it would diverge from the network.
                 Self::evict_module(ctx, &contract_name).await?;
+                // The artifact itself is changing too: nothing cached
+                // for serving may survive.
+                self.serving_cache = None;
                 self.cancel_fetch_timer(ctx);
                 self.fetch = None;
 
@@ -1232,6 +1294,7 @@ impl Handler<Self> for ContractCompiler {
                         "No ledger anchor for the contract artifact; evaluations of this schema will be unavailable"
                     );
                     Self::evict_module(ctx, &contract_name).await?;
+                    self.serving_cache = None;
                     return Ok(CompilerResponse::Ok);
                 };
 
@@ -1268,6 +1331,19 @@ impl Handler<Self> for ContractCompiler {
             }
             ContractCompilerMessage::ServingBlocked { blocked } => {
                 self.serving_blocked = blocked;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::EvictServingCache { filled_at } => {
+                // Guarded: a late eviction must not drop an entry that
+                // was already refilled.
+                if self
+                    .serving_cache
+                    .as_ref()
+                    .is_some_and(|entry| entry.filled_at == filled_at)
+                {
+                    self.serving_cache = None;
+                }
 
                 Ok(CompilerResponse::Ok)
             }
@@ -1435,12 +1511,7 @@ impl Handler<Self> for ContractCompiler {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        match CompilerSupport::serve_official_artifact(
-                            ctx,
-                            &contract_name,
-                            &Self::register_path(ctx),
-                        )
-                        .await
+                        match self.serve_artifact(ctx, &contract_name).await?
                         {
                             Some(artifact) => {
                                 ArtifactFetchResult::Artifact(artifact)

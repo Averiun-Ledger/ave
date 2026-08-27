@@ -329,7 +329,54 @@ impl Handler<Self> for Validation {
                             signer = %signer,
                             "Failed to create validator"
                         );
+                        // Drop the failed signer so the round can
+                        // exhaust itself instead of hanging forever
+                        // waiting for a response that will never come.
+                        self.current_validators.remove(&signer);
                     }
+                }
+
+                if self.current_validators.is_empty() {
+                    let governance_id =
+                        match self.request.content().get_governance_id() {
+                            Ok(governance_id) => governance_id,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "Create",
+                                    error = %e,
+                                    "Failed to get governance id"
+                                );
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "Cannot get governance id: {}",
+                                            e
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
+                        };
+
+                    if let Err(e) = send_reboot_to_req(
+                        ctx,
+                        request_id.clone(),
+                        governance_id,
+                        RebootType::TimeOut,
+                    )
+                    .await
+                    {
+                        error!(
+                            msg_type = "Create",
+                            error = %e,
+                            "Failed to send reboot to request actor"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    }
+                    Self::observe_event("reboot");
+                    self.closed = true;
+                    return Ok(());
                 }
 
                 debug!(
@@ -564,7 +611,56 @@ impl Handler<Self> for Validation {
                                         signer = %signer,
                                         "Failed to create validator from pending pool"
                                     );
+                                    // Drop the failed signer so the
+                                    // round can exhaust itself instead
+                                    // of hanging forever.
+                                    self.current_validators.remove(&signer);
                                 }
+                            }
+
+                            if self.current_validators.is_empty() {
+                                let governance_id = match self
+                                    .request
+                                    .content()
+                                    .get_governance_id()
+                                {
+                                    Ok(governance_id) => governance_id,
+                                    Err(e) => {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            "Failed to get governance id"
+                                        );
+                                        return Err(crash_system(
+                                            ctx,
+                                            ActorError::FunctionalCritical {
+                                                description: format!(
+                                                    "Cannot get governance id: {}",
+                                                    e
+                                                ),
+                                            },
+                                        )
+                                        .await);
+                                    }
+                                };
+
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    governance_id,
+                                    RebootType::TimeOut,
+                                )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                                Self::observe_event("reboot");
+                                self.closed = true;
                             }
 
                             debug!(
