@@ -183,7 +183,8 @@ impl From<CompilerError> for EvaluatorError {
             | CompilerError::AttestationMismatch { .. }
             | CompilerError::CargoBuildFailed { .. }
             | CompilerError::BuildTimeout { .. }
-            | CompilerError::FetchedArtifactMismatch { .. } => {
+            | CompilerError::FetchedArtifactMismatch { .. }
+            | CompilerError::FetchedArtifactDecompressionFailed { .. } => {
                 Self::CompilersUnavailable(value.to_string())
             }
             // System failures: should not happen in a healthy environment

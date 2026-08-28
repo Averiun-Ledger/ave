@@ -1611,13 +1611,15 @@ impl Handler<Self> for ContractCompiler {
                             Err(error) => {
                                 self.fetch = Some(fetch);
                                 // A peer that answers a same-version
-                                // request with bytes that do not match
-                                // the ledger anchor is lying or corrupt:
-                                // security log and next peer. The alerts
-                                // system (future work) will report it.
+                                // request with corrupt bytes or bytes
+                                // that do not match the ledger anchor is
+                                // lying or corrupt: security log and next
+                                // peer. The alerts system (future work)
+                                // will report it.
                                 if matches!(
                                     error,
                                     CompilerError::FetchedArtifactMismatch { .. }
+                                        | CompilerError::FetchedArtifactDecompressionFailed { .. }
                                 ) {
                                     warn!(
                                         msg_type = "ArtifactResponse",
@@ -1628,7 +1630,7 @@ impl Handler<Self> for ContractCompiler {
                                             .unwrap_or_default(),
                                         sender = %sender,
                                         error = %error,
-                                        "Fetched artifact does not match the ledger anchor"
+                                        "Fetched artifact is corrupt or does not match the ledger anchor"
                                     );
                                     self.attempt_failed(
                                         ctx,

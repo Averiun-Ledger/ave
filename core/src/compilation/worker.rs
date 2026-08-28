@@ -7,7 +7,10 @@ use std::{
 use crate::{
     compilation::{
         CompileTarget,
-        artifact::{ArtifactData, ArtifactFetchResult, ArtifactProbeResult},
+        artifact::{
+            ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
+            ArtifactTransferError,
+        },
         request::CompilationReq,
         resolve_compile_targets,
     },
@@ -532,6 +535,51 @@ impl CompileWorker {
             .await
             {
                 Ok((_module, record)) => {
+                    let wasm = match ave_compiler::load_artifact_wasm(
+                        &contract_path,
+                    )
+                    .await
+                    {
+                        Ok(wasm) => wasm,
+                        Err(error) => {
+                            return Err(crash_system(
+                                ctx,
+                                ActorError::FunctionalCritical {
+                                    description: format!(
+                                        "Can not read compiled contract {}: {}",
+                                        schema_id, error
+                                    ),
+                                },
+                            )
+                            .await);
+                        }
+                    };
+                    match ArtifactData::from_wasm(&wasm, None) {
+                        Ok(_) => {}
+                        Err(
+                            ArtifactTransferError::TooLarge { size, max }
+                            | ArtifactTransferError::UncompressedTooLarge {
+                                size,
+                                max,
+                            },
+                        ) => {
+                            return Ok(ContractCompilation::Failed(
+                                CompilationError::CompilationFailed(format!(
+                                    "{}: artifact is too large for network transport: {} bytes (max {})",
+                                    schema_id, size, max
+                                )),
+                            ));
+                        }
+                        Err(error) => {
+                            warn!(
+                                governance_id = %self.governance_id,
+                                schema_id = %schema_id,
+                                error = %error,
+                                "Could not prepare artifact for network transport"
+                            );
+                            return Ok(ContractCompilation::Unavailable);
+                        }
+                    }
                     contracts.insert(schema_id, record.wasm_hash);
                 }
                 Err(error) => {

@@ -696,10 +696,17 @@ impl CompilerSupport {
             Err(_) => None,
         };
 
-        Some(ArtifactData {
-            wasm: wasm_bytes,
-            toolchain_fingerprint,
-        })
+        match ArtifactData::from_wasm(&wasm_bytes, toolchain_fingerprint) {
+            Ok(artifact) => Some(artifact),
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    contract_name = %contract_name,
+                    "Can not prepare official artifact for network serving"
+                );
+                None
+            }
+        }
     }
 
     /// Registers an artifact fetched from the network: the wasm hash is
@@ -721,9 +728,14 @@ impl CompilerSupport {
         artifact: ArtifactData,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
+        let wasm = artifact.decompress().map_err(|error| {
+            CompilerError::FetchedArtifactDecompressionFailed {
+                details: error.to_string(),
+            }
+        })?;
         let wasm_hash = ave_compiler::hash_bytes(
             hash,
-            &artifact.wasm,
+            &wasm,
             "fetched wasm artifact",
         )?;
         if &wasm_hash != expected_wasm_hash {
@@ -755,7 +767,7 @@ impl CompilerSupport {
             .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
 
         let (precompiled_bytes, module) =
-            ave_compiler::precompile_module(&contract_runtime, &artifact.wasm)?;
+            ave_compiler::precompile_module(&contract_runtime, &wasm)?;
         ave_compiler::validate_module(
             &contract_runtime,
             &module,
@@ -763,7 +775,7 @@ impl CompilerSupport {
         )?;
         ave_compiler::persist_artifact(
             contract_path,
-            &artifact.wasm,
+            &wasm,
             &precompiled_bytes,
         )
         .await?;
@@ -775,7 +787,7 @@ impl CompilerSupport {
             hash,
             contract_hash,
             manifest_hash,
-            &artifact.wasm,
+            &wasm,
             &precompiled_bytes,
             engine_fingerprint,
             artifact.toolchain_fingerprint.unwrap_or_default(),

@@ -94,4 +94,7 @@ pub enum CompilerError {
         "fetched artifact hash mismatch: expected {expected}, got {actual}"
     )]
     FetchedArtifactMismatch { expected: String, actual: String },
+
+    #[error("fetched artifact decompression failed: {details}")]
+    FetchedArtifactDecompressionFailed { details: String },
 }

@@ -2619,14 +2619,6 @@ impl Governance {
         schemas: &BTreeSet<SchemaType>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
-        else {
-            return Err(ActorError::Helper {
-                name: "config".to_string(),
-                reason: "Not Found".to_string(),
-            });
-        };
-
         let Some(contracts) = ctx.system().get_helper::<Arc<
             RwLock<HashMap<String, Arc<CompiledModule>>>,
         >>("contracts") else {
@@ -2635,10 +2627,6 @@ impl Governance {
                 reason: "Not Found".to_string(),
             });
         };
-
-        let contract_register = ctx
-            .get_child::<ContractRegister>("contract_register")
-            .await?;
 
         for schema_id in schemas.iter() {
             let actor = ctx
@@ -2651,23 +2639,10 @@ impl Governance {
             actor.ask_stop().await?;
 
             let contract_name = format!("{}_{}", subject_id, schema_id);
-            // Only the artifact metadata is forgotten: the ledger anchor
-            // is a projection of the applied events and remains valid
-            // regardless of this node's roles — it is the hash this node
-            // accepts if it ever fetches the artifact again.
-            contract_register
-                .tell(ContractRegisterMessage::DeleteArtifact {
-                    contract_name: contract_name.clone(),
-                })
-                .await?;
-
             {
                 let mut contracts = contracts.write().await;
                 contracts.remove(&contract_name);
             }
-
-            let contract_path = config.contracts_path.join(&contract_name);
-            let _ = fs::remove_dir_all(contract_path).await;
         }
 
         Ok(())
