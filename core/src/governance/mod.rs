@@ -16,7 +16,7 @@ use crate::{
     evaluation::{
         compiler::{
             CompilerResponse, CompilerSupport, ContractCompiler,
-            ContractCompilerMessage,
+            ContractCompilerAction, ContractCompilerMessage,
             error::CompilerError, is_compiler_infra_error,
             is_local_fatal_compiler_error,
             is_retryable_compiler_recovery_error,
@@ -493,6 +493,7 @@ impl Subject for Governance {
                 )
                 .await?;
                 self.update_childs(ctx).await?;
+                self.set_artifact_serving_blocked(ctx, false).await;
             }
 
             let _ = make_obsolete(ctx, &self.subject_metadata.subject_id).await;
@@ -1721,9 +1722,6 @@ impl Governance {
             )
         };
 
-        // The artifact work of the update is done: serve again.
-        self.set_artifact_serving_blocked(ctx, false).await;
-
         let old_schemas_vali =
             old_gov.schemas_name(ProtocolTypes::Validation, &self.our_key);
 
@@ -1849,29 +1847,6 @@ impl Governance {
                     evaluators,
                 })
                 .await?;
-        }
-
-        // The contract compilers hold the same whitelist in memory
-        // (compilers of the governance + evaluators of their schema):
-        // they use it to choose whom to ask for artifacts and to
-        // validate incoming requests when serving as plan B.
-        let (compilers, evaluators) = self.artifact_whitelists();
-        for (schema_id, schema_evaluators) in evaluators {
-            if let Ok(contract_compiler) = ctx
-                .get_child::<ContractCompiler>(&format!(
-                    "{}_contract_compiler",
-                    schema_id
-                ))
-                .await
-            {
-                contract_compiler
-                    .tell(ContractCompilerMessage::Update {
-                        gov_version: self.properties.version,
-                        compilers: compilers.clone(),
-                        evaluators: schema_evaluators,
-                    })
-                    .await?;
-            }
         }
 
         if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
@@ -2151,9 +2126,7 @@ impl Governance {
             )
             .await?;
 
-            if self.is_compiler() {
-                self.set_artifact_serving_blocked(ctx, false).await;
-            }
+            self.set_artifact_serving_blocked(ctx, false).await;
 
             schemas
                 .iter()
@@ -2675,19 +2648,10 @@ impl Governance {
                     ContractCompiler::new(*hash, self.our_key.clone()),
                 )
                 .await?;
-
-            // Seed the artifact whitelist before anything else: the
-            // contract compiler keeps it in memory to choose fetch
-            // targets and to validate requests when serving as plan B.
+            // This actor can be created after the apply started, so it
+            // did not receive the initial governance-wide serving block.
             compiler
-                .tell(ContractCompilerMessage::Update {
-                    gov_version: self.properties.version,
-                    compilers: whitelist_compilers.clone(),
-                    evaluators: whitelist_evaluators
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_default(),
-                })
+                .tell(ContractCompilerMessage::ServingBlocked { blocked: true })
                 .await?;
 
             let Schema {
@@ -2702,18 +2666,29 @@ impl Governance {
 
             if is_compiler {
                 // Compiler role: the node builds the artifact itself.
-                let terminal_error =
-                    Self::ask_compile_with_retries(id, || async {
+                let reconcile = ContractCompilerMessage::Reconcile {
+                    gov_version: self.properties.version,
+                    compilers: whitelist_compilers.clone(),
+                    evaluators: whitelist_evaluators
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    action: ContractCompilerAction::Compile {
+                        contract_name: contract_name.clone(),
+                        contract: contract.clone(),
+                        initial_value: initial_value.0.clone(),
+                        contract_path: contract_path.clone(),
+                    },
+                };
+                let terminal_error = Self::ask_compile_with_retries(id, || {
+                    let reconcile = reconcile.clone();
+                    async {
                         compiler
-                            .ask(ContractCompilerMessage::Compile {
-                                contract_name: contract_name.clone(),
-                                contract: contract.clone(),
-                                initial_value: initial_value.0.clone(),
-                                contract_path: contract_path.clone(),
-                            })
+                            .ask(reconcile)
                             .await
-                    })
-                    .await?;
+                    }
+                })
+                .await?;
 
                 if let Some(error) = terminal_error {
                     // Fatal local problems (disk, register, helpers,
@@ -2745,14 +2720,21 @@ impl Governance {
                 // artifact from the network (message-driven; the fetch
                 // cycle is self-managed by the contract compiler).
                 compiler
-                    .tell(ContractCompilerMessage::Fetch {
-                        contract: contract.clone(),
-                        contract_name,
-                        initial_value: initial_value.0.clone(),
-                        contract_path,
-                        gov_id: subject_id.clone(),
-                        schema_id: id.clone(),
+                    .tell(ContractCompilerMessage::Reconcile {
                         gov_version: self.properties.version,
+                        compilers: whitelist_compilers.clone(),
+                        evaluators: whitelist_evaluators
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        action: ContractCompilerAction::Fetch {
+                            contract: contract.clone(),
+                            contract_name,
+                            initial_value: initial_value.0.clone(),
+                            contract_path,
+                            gov_id: subject_id.clone(),
+                            schema_id: id.clone(),
+                        },
                     })
                     .await?;
             }
@@ -2822,6 +2804,8 @@ impl Governance {
         };
 
         let is_compiler = self.is_compiler();
+        let (whitelist_compilers, whitelist_evaluators) =
+            self.artifact_whitelists();
 
         for (id, schema) in schemas {
             let actor = ctx
@@ -2837,18 +2821,29 @@ impl Governance {
 
             if is_compiler {
                 // Compiler role: the node builds the artifact itself.
-                let terminal_error =
-                    Self::ask_compile_with_retries(&id, || async {
+                let reconcile = ContractCompilerMessage::Reconcile {
+                    gov_version: self.properties.version,
+                    compilers: whitelist_compilers.clone(),
+                    evaluators: whitelist_evaluators
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    action: ContractCompilerAction::Compile {
+                        contract_name: contract_name.clone(),
+                        contract: schema.contract.clone(),
+                        initial_value: schema.initial_value.0.clone(),
+                        contract_path: contract_path.clone(),
+                    },
+                };
+                let terminal_error = Self::ask_compile_with_retries(&id, || {
+                    let reconcile = reconcile.clone();
+                    async {
                         actor
-                            .ask(ContractCompilerMessage::Compile {
-                                contract_name: contract_name.clone(),
-                                contract: schema.contract.clone(),
-                                initial_value: schema.initial_value.0.clone(),
-                                contract_path: contract_path.clone(),
-                            })
+                            .ask(reconcile)
                             .await
-                    })
-                    .await?;
+                    }
+                })
+                .await?;
 
                 if let Some(error) = terminal_error {
                     // Fatal local problems (disk, register, helpers,
@@ -2882,14 +2877,21 @@ impl Governance {
                 // `up_compilers_schemas`; message-driven, the fetch
                 // cycle is self-managed by the contract compiler).
                 actor
-                    .tell(ContractCompilerMessage::Fetch {
-                        contract: schema.contract.clone(),
-                        contract_name,
-                        initial_value: schema.initial_value.0.clone(),
-                        contract_path,
-                        gov_id: subject_id.clone(),
-                        schema_id: id.clone(),
+                    .tell(ContractCompilerMessage::Reconcile {
                         gov_version: self.properties.version,
+                        compilers: whitelist_compilers.clone(),
+                        evaluators: whitelist_evaluators
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        action: ContractCompilerAction::Fetch {
+                            contract: schema.contract.clone(),
+                            contract_name,
+                            initial_value: schema.initial_value.0.clone(),
+                            contract_path,
+                            gov_id: subject_id.clone(),
+                            schema_id: id.clone(),
+                        },
                     })
                     .await?;
             }

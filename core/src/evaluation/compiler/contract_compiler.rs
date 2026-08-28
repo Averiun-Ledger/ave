@@ -906,7 +906,7 @@ enum ArtifactGate {
 }
 
 #[derive(Debug, Clone)]
-pub enum ContractCompilerMessage {
+pub enum ContractCompilerAction {
     Compile {
         contract: String,
         contract_name: String,
@@ -924,15 +924,18 @@ pub enum ContractCompilerMessage {
         contract_path: PathBuf,
         gov_id: DigestIdentifier,
         schema_id: SchemaType,
-        gov_version: u64,
     },
-    /// Whitelist and governance version refresh from the governance
-    /// actor: the governance compilers and the evaluators of this
-    /// schema.
-    Update {
+}
+
+#[derive(Debug, Clone)]
+pub enum ContractCompilerMessage {
+    /// Applies the governance snapshot used by this actor, then prepares
+    /// the schema from that same snapshot.
+    Reconcile {
         gov_version: u64,
         compilers: BTreeSet<PublicKey>,
         evaluators: BTreeSet<PublicKey>,
+        action: ContractCompilerAction,
     },
     /// The governance is applying an update (promoting and refreshing
     /// artifacts): serving is blocked until it finishes — between
@@ -1025,12 +1028,28 @@ impl Handler<Self> for ContractCompiler {
         ctx: &mut ActorContext<Self>,
     ) -> Result<CompilerResponse, ActorError> {
         match msg {
-            ContractCompilerMessage::Compile {
-                contract,
-                contract_name,
-                initial_value,
-                contract_path,
+            ContractCompilerMessage::Reconcile {
+                gov_version,
+                compilers,
+                evaluators,
+                action,
             } => {
+                let version_changed = self.gov_version != gov_version;
+                self.gov_version = gov_version;
+                self.compilers = compilers;
+                self.evaluators = evaluators;
+
+                match action {
+                    ContractCompilerAction::Compile {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                    } => {
+                        // A local compiler must not let an obsolete fetch
+                        // register an artifact after taking over the schema.
+                        self.cancel_fetch_timer(ctx);
+                        self.fetch = None;
                 let contract_hash =
                     match hash_borsh(&*self.hash.hasher(), &contract) {
                         Ok(hash) => hash,
@@ -1118,19 +1137,18 @@ impl Handler<Self> for ContractCompiler {
 
                 Ok(CompilerResponse::Ok)
             }
-            ContractCompilerMessage::Fetch {
+                    ContractCompilerAction::Fetch {
                 contract,
                 contract_name,
                 initial_value,
                 contract_path,
                 gov_id,
                 schema_id,
-                gov_version,
             } => {
-                // The governance applies events before `update_childs`
-                // refreshes this actor, so the version of the message
-                // is the freshest there is: adopt it.
-                self.gov_version = gov_version;
+                if version_changed {
+                    self.cancel_fetch_timer(ctx);
+                    self.fetch = None;
+                }
 
                 let contract_hash =
                     match hash_borsh(&*self.hash.hasher(), &contract) {
@@ -1335,16 +1353,8 @@ impl Handler<Self> for ContractCompiler {
 
                 Ok(CompilerResponse::Ok)
             }
-            ContractCompilerMessage::Update {
-                gov_version,
-                compilers,
-                evaluators,
-            } => {
-                self.gov_version = gov_version;
-                self.compilers = compilers;
-                self.evaluators = evaluators;
-
-                Ok(CompilerResponse::Ok)
+                    }
+                }
             }
             ContractCompilerMessage::ServingBlocked { blocked } => {
                 self.serving_blocked = blocked;
