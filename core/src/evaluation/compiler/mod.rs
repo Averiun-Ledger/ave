@@ -67,6 +67,26 @@ pub(crate) fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
             | CompilerError::ToolchainFingerprintFailed { .. }
             | CompilerError::EngineCreation { .. }
             | CompilerError::SerializationError { .. }
+            | CompilerError::MissingArtifactAnchor { .. }
+            | CompilerError::ArtifactAnchorMismatch { .. }
+    )
+}
+
+/// Whether recovery may retry this local failure. `NotFound` is deliberately
+/// absent: a missing artifact is rebuilt immediately, not retried as I/O.
+pub(crate) fn is_retryable_compiler_recovery_error(
+    error: &CompilerError,
+) -> bool {
+    matches!(
+        error,
+        CompilerError::CompilersUnavailable { .. }
+            | CompilerError::FileReadFailed {
+                kind:
+                    std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut,
+                ..
+            }
     )
 }
 
@@ -145,6 +165,7 @@ impl CompilerSupport {
         contract_path: &Path,
         initial_value: Value,
         register_path: &ActorPath,
+        expected_wasm_hash: Option<&DigestIdentifier>,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
         let started_at = Instant::now();
@@ -166,14 +187,13 @@ impl CompilerSupport {
             // request error, not a build error.
             ave_compiler::validate_source_base64(contract)?;
 
-            // The node has no toolchain: the engine fingerprint is local
-            // (wasmtime), the toolchain fingerprint comes from the
-            // compiler service.
+            // The engine fingerprint is local. A valid persisted artifact
+            // does not need the compiler pool, so defer its lookup until a
+            // rebuild is actually required.
             let contract_runtime = Self::contract_runtime(ctx).await?;
             let engine_fingerprint = contract_runtime
                 .engine_fingerprint(hash)
                 .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
-            let client = Self::compiler_client(ctx).await?;
 
             if let Some((module, record, prepare_result)) =
                 Self::load_registered_artifact(
@@ -186,12 +206,15 @@ impl CompilerSupport {
                     &contract_hash,
                     &manifest_hash,
                     &engine_fingerprint,
-                    client.expected_toolchain(),
+                    None,
+                    expected_wasm_hash,
                 )
                 .await?
             {
                 return Ok((module, record, prepare_result));
             }
+
+            let client = Self::compiler_client(ctx).await?;
 
             // Global test cache: only usable once the toolchain fingerprint
             // of the pool is known (after the first remote compile).
@@ -214,6 +237,14 @@ impl CompilerSupport {
                 )
                 .await?
             {
+                if expected_wasm_hash.is_some_and(|expected_wasm_hash| {
+                    metadata.wasm_hash != *expected_wasm_hash
+                }) {
+                    return Err(CompilerError::ArtifactAnchorMismatch {
+                        expected: expected_wasm_hash.to_string(),
+                        actual: metadata.wasm_hash.to_string(),
+                    });
+                }
                 ave_compiler::persist_artifact(
                     contract_path,
                     &wasm_bytes,
@@ -245,6 +276,19 @@ impl CompilerSupport {
             // compiler pool (already verified by the client), is
             // precompiled and validated locally, and persisted.
             let outcome = client.compile(contract).await?;
+            let wasm_hash = ave_compiler::hash_bytes(
+                hash,
+                &outcome.wasm,
+                "compiler pool wasm artifact",
+            )?;
+            if expected_wasm_hash
+                .is_some_and(|expected_wasm_hash| wasm_hash != *expected_wasm_hash)
+            {
+                return Err(CompilerError::ArtifactAnchorMismatch {
+                    expected: expected_wasm_hash.to_string(),
+                    actual: wasm_hash.to_string(),
+                });
+            }
             let (precompiled_bytes, module) = ave_compiler::precompile_module(
                 &contract_runtime,
                 &outcome.wasm,
@@ -356,6 +400,7 @@ impl CompilerSupport {
         manifest_hash: &DigestIdentifier,
         engine_fingerprint: &DigestIdentifier,
         expected_toolchain: Option<DigestIdentifier>,
+        expected_wasm_hash: Option<&DigestIdentifier>,
     ) -> Result<
         Option<(Arc<CompiledModule>, ContractArtifactRecord, &'static str)>,
         CompilerError,
@@ -385,28 +430,45 @@ impl CompilerSupport {
             }
         };
 
-        let Some(persisted) = persisted else {
+        // An anchor authorizes raw wasm even when local metadata was lost.
+        // Metadata only gates a fast cwasm hit and carries cache hygiene.
+        if persisted.is_none() && expected_wasm_hash.is_none() {
             return Ok(None);
-        };
+        }
 
-        let expected_toolchain = expected_toolchain
-            .unwrap_or_else(|| persisted.toolchain_fingerprint.clone());
-        if !ave_compiler::metadata_matches(
-            &persisted,
-            contract_hash,
-            manifest_hash,
-            engine_fingerprint,
-            &expected_toolchain,
-        ) {
-            // Contract, engine or toolchain drift: the persisted bytes
-            // are simply not the ones needed — not a manipulation, they
-            // are left alone and the caller replaces them.
+        let metadata_matches = persisted.as_ref().is_some_and(|persisted| {
+            let expected_toolchain = expected_toolchain
+                .clone()
+                .unwrap_or_else(|| persisted.toolchain_fingerprint.clone());
+            ave_compiler::metadata_matches(
+                persisted,
+                contract_hash,
+                manifest_hash,
+                engine_fingerprint,
+                &expected_toolchain,
+            )
+        });
+        let persisted_matches_anchor = persisted.as_ref().is_none_or(|persisted| {
+            expected_wasm_hash
+                .is_none_or(|expected_wasm_hash| persisted.wasm_hash == *expected_wasm_hash)
+        });
+
+        // Without a ledger anchor, metadata still decides whether these
+        // bytes belong to the source requested by a regular compilation.
+        if !metadata_matches && expected_wasm_hash.is_none() {
             return Ok(None);
         }
 
         let contract_runtime = Self::contract_runtime(ctx).await?;
 
-        match ave_compiler::load_artifact_precompiled(contract_path).await {
+        if metadata_matches && persisted_matches_anchor {
+            let persisted = persisted.as_ref().ok_or_else(|| {
+                CompilerError::SerializationError {
+                    context: "persisted contract metadata",
+                    details: "metadata unexpectedly missing".to_owned(),
+                }
+            })?;
+            match ave_compiler::load_artifact_precompiled(contract_path).await {
             Ok(precompiled_bytes) => {
                 let precompiled_hash = ave_compiler::hash_bytes(
                     hash,
@@ -425,7 +487,7 @@ impl CompilerSupport {
                                 Ok(()) => {
                                     return Ok(Some((
                                         Arc::new(module),
-                                        persisted,
+                                        persisted.clone(),
                                         "cwasm_hit",
                                     )));
                                 }
@@ -462,6 +524,7 @@ impl CompilerSupport {
                     "Persisted precompiled artifact can not be read, retrying from wasm artifact"
                 );
             }
+            }
         }
 
         match ave_compiler::load_artifact_wasm(contract_path).await {
@@ -471,7 +534,12 @@ impl CompilerSupport {
                     &wasm_bytes,
                     "persisted wasm artifact",
                 )?;
-                if wasm_hash == persisted.wasm_hash {
+                if persisted.as_ref().is_none_or(|persisted| {
+                    wasm_hash == persisted.wasm_hash
+                })
+                    && expected_wasm_hash
+                        .is_none_or(|expected_wasm_hash| wasm_hash == *expected_wasm_hash)
+                {
                     match ave_compiler::precompile_module(
                         &contract_runtime,
                         &wasm_bytes,
@@ -498,8 +566,15 @@ impl CompilerSupport {
                                             &precompiled_bytes,
                                             engine_fingerprint.clone(),
                                             persisted
-                                                .toolchain_fingerprint
-                                                .clone(),
+                                                .as_ref()
+                                                .map_or_else(
+                                                    DigestIdentifier::default,
+                                                    |persisted| {
+                                                        persisted
+                                                            .toolchain_fingerprint
+                                                            .clone()
+                                                    },
+                                                ),
                                         )?;
 
                                     register
@@ -507,8 +582,7 @@ impl CompilerSupport {
                                             ContractRegisterMessage::SetMetadata {
                                                 contract_name: contract_name
                                                     .to_owned(),
-                                                metadata: refreshed_record
-                                                    .clone(),
+                                                metadata: refreshed_record.clone(),
                                             },
                                         )
                                         .await
@@ -553,7 +627,7 @@ impl CompilerSupport {
                     }
                 } else {
                     debug!(
-                        expected = %persisted.wasm_hash,
+                        expected = ?persisted.as_ref().map(|persisted| &persisted.wasm_hash),
                         actual = %wasm_hash,
                         path = %contract_path.display(),
                         "Persisted wasm artifact hash mismatch, recompiling"
@@ -582,6 +656,99 @@ impl CompilerSupport {
         .await?;
 
         Ok(None)
+    }
+
+    /// Recovers an official compiler artifact from local storage or the
+    /// compiler pool. The ledger anchor is the only authority accepted for
+    /// the wasm bytes; cache metadata merely avoids unnecessary work.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn recover_official_artifact<A: Actor>(
+        hash: HashAlgorithm,
+        ctx: &ActorContext<A>,
+        contract_name: &str,
+        contract: &str,
+        contract_path: &Path,
+        initial_value: Value,
+        register_path: &ActorPath,
+    ) -> Result<Arc<CompiledModule>, CompilerError>
+    {
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(register_path)
+            .await
+            .map_err(|e| CompilerError::ContractRegisterFailed {
+                details: e.to_string(),
+            })?;
+        let anchor = match register
+            .ask(ContractRegisterMessage::GetAnchor {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Anchor(Some(anchor))) => anchor,
+            Ok(_) => {
+                return Err(CompilerError::MissingArtifactAnchor {
+                    contract_name: contract_name.to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(CompilerError::ContractRegisterFailed {
+                    details: error.to_string(),
+                });
+            }
+        };
+
+        // A valid cached wasm cannot make a malformed committed source
+        // acceptable: the next recovery would be unable to reproduce it.
+        ave_compiler::validate_source_base64(contract)?;
+
+        let contract_hash = hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
+            CompilerError::SerializationError {
+                context: "contract hash",
+                details: e.to_string(),
+            }
+        })?;
+        let manifest = ave_compiler::compilation_toml();
+        let manifest_hash = hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
+            CompilerError::SerializationError {
+                context: "contract manifest hash",
+                details: e.to_string(),
+            }
+        })?;
+        let contract_runtime = Self::contract_runtime(ctx).await?;
+        let engine_fingerprint = contract_runtime
+            .engine_fingerprint(hash)
+            .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
+        if let Some((module, _, _)) = Self::load_registered_artifact(
+            hash,
+            ctx,
+            contract_name,
+            contract_path,
+            &initial_value,
+            register_path,
+            &contract_hash,
+            &manifest_hash,
+            &engine_fingerprint,
+            None,
+            Some(&anchor),
+        )
+        .await?
+        {
+            return Ok(module);
+        }
+
+        let (module, _) = Self::compile_or_load_registered(
+            hash,
+            ctx,
+            contract_name,
+            contract,
+            contract_path,
+            initial_value,
+            register_path,
+            Some(&anchor),
+        )
+        .await?;
+        Ok(module)
     }
 
     /// Discards a persisted artifact whose verification failed:

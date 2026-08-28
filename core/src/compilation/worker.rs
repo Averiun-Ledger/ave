@@ -531,6 +531,7 @@ impl CompileWorker {
                 &contract_path,
                 target.initial_value,
                 &register_path,
+                None,
             )
             .await
             {

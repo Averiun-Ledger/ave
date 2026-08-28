@@ -15,9 +15,11 @@ use crate::{
     db::Storable,
     evaluation::{
         compiler::{
-            CompilerResponse, ContractCompiler, ContractCompilerMessage,
+            CompilerResponse, CompilerSupport, ContractCompiler,
+            ContractCompilerMessage,
             error::CompilerError, is_compiler_infra_error,
             is_local_fatal_compiler_error,
+            is_retryable_compiler_recovery_error,
         },
         request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
@@ -393,7 +395,7 @@ impl Subject for Governance {
             let old_gov = current_properties;
             if !self.subject_metadata.active {
                 if current_owner == *self.our_key {
-                    Self::down_owner(ctx).await?;
+                    self.down_owner(ctx).await?;
                 } else {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
                         .await?;
@@ -459,7 +461,7 @@ impl Subject for Governance {
                 }
 
                 if up_not_owner {
-                    Self::down_owner(ctx).await?;
+                    self.down_owner(ctx).await?;
                     self.up_not_owner(ctx, &hash, &network).await?;
                 } else if up_owner {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
@@ -1419,6 +1421,129 @@ impl Governance {
         })
     }
 
+    async fn up_compile_worker(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        node_key: PublicKey,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        // Ownership transitions may retain the compiler role and its
+        // standing worker; its regular Update refreshes the new state.
+        if ctx.get_child::<CompileWorker>("compiler").await.is_ok() {
+            return Ok(());
+        }
+
+        let (issuers, issuer_any) = self.properties.governance_issuers();
+        let (compilers, evaluators) = self.artifact_whitelists();
+        ctx.create_child(
+            "compiler",
+            CompileWorker {
+                node_key,
+                our_key: self.our_key.clone(),
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                issuers,
+                issuer_any,
+                schemas: self.properties.schemas.clone(),
+                compilers,
+                evaluators,
+                // Governance opens the gate only after anchor recovery.
+                serving_blocked: true,
+                serving_cache: HashMap::new(),
+                hash: *hash,
+                network: network.clone(),
+                stop: false,
+                pending: None,
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn recover_compiler_artifacts(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        schemas: &BTreeMap<SchemaType, Schema>,
+        hash: &HashAlgorithm,
+    ) -> Result<(), ActorError> {
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
+        >>("contracts") else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", ctx.path()));
+
+        for (schema_id, schema) in schemas {
+            let contract_name =
+                format!("{}_{}", self.subject_metadata.subject_id, schema_id);
+            let contract_path =
+                config.contracts_path.join("contracts").join(&contract_name);
+            let mut delays = [1_u64, 2, 4].into_iter();
+
+            let recovered = loop {
+                match CompilerSupport::recover_official_artifact(
+                    *hash,
+                    ctx,
+                    &contract_name,
+                    &schema.contract,
+                    &contract_path,
+                    schema.initial_value.0.clone(),
+                    &register_path,
+                )
+                .await
+                {
+                    Ok(recovered) => break Ok(recovered),
+                    Err(error) if is_retryable_compiler_recovery_error(&error) => {
+                        let Some(delay) = delays.next() else {
+                            break Err(error);
+                        };
+                        warn!(
+                            schema_id = %schema_id,
+                            delay_secs = delay,
+                            error = %error,
+                            "Compiler artifact recovery failed transiently, retrying"
+                        );
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+
+            match recovered {
+                Ok(module) => {
+                    contracts.write().await.insert(contract_name, module);
+                }
+                Err(error) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not recover official compiler artifact {}: {}",
+                                schema_id, error
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Sends `ServingBlocked` to every artifact server of this node (the
     /// standing compile worker and the contract compiler of every
     /// evaluated schema): while a governance update is being applied,
@@ -1507,6 +1632,31 @@ impl Governance {
             &self.subject_metadata.subject_id,
         )
         .await?;
+
+        if self.is_compiler() {
+            let was_compiler = old_gov.has_this_role(HashThisRole::Gov {
+                who: (*self.our_key).clone(),
+                role: RoleTypes::Compiler,
+            });
+            let recovery_schemas = if was_compiler {
+                evidence_contracts
+                    .keys()
+                    .filter_map(|schema_id| {
+                        self.properties
+                            .schemas
+                            .get(schema_id)
+                            .map(|schema| (schema_id.clone(), schema.clone()))
+                    })
+                    .collect()
+            } else {
+                self.properties.schemas.clone()
+            };
+
+            if !recovery_schemas.is_empty() {
+                self.recover_compiler_artifacts(ctx, &recovery_schemas, &hash)
+                    .await?;
+            }
+        }
 
         let (old_schemas_eval, new_schemas_eval) = {
             let old_schemas_eval =
@@ -1975,7 +2125,24 @@ impl Governance {
             let schemas = self
                 .properties
                 .schemas(ProtocolTypes::Evaluation, &self.our_key);
-            self.sweep_contract_artifacts(ctx, &schemas).await?;
+            let artifact_schemas = if self.is_compiler() {
+                self.properties.schemas.clone()
+            } else {
+                schemas.clone()
+            };
+            self.sweep_contract_artifacts(ctx, &artifact_schemas).await?;
+
+            if self.is_compiler() {
+                // The standing compiler must not serve until every official
+                // artifact has been validated against its ledger anchor.
+                self.set_artifact_serving_blocked(ctx, true).await;
+                self.recover_compiler_artifacts(
+                    ctx,
+                    &artifact_schemas,
+                    hash,
+                )
+                .await?;
+            }
             self.up_compilers_schemas(
                 ctx,
                 &schemas,
@@ -1983,6 +2150,10 @@ impl Governance {
                 hash,
             )
             .await?;
+
+            if self.is_compiler() {
+                self.set_artifact_serving_blocked(ctx, false).await;
+            }
 
             schemas
                 .iter()
@@ -2104,27 +2275,8 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Compiler,
         }) {
-            let (issuers, issuer_any) = self.properties.governance_issuers();
-            let (compilers, evaluators) = self.artifact_whitelists();
-            // If we are a compiler
-            let compiler = CompileWorker {
-                node_key: node_key.clone(),
-                our_key: self.our_key.clone(),
-                governance_id: self.subject_metadata.subject_id.clone(),
-                gov_version: self.properties.version,
-                issuers,
-                issuer_any,
-                schemas: self.properties.schemas.clone(),
-                compilers,
-                evaluators,
-                serving_blocked: false,
-                serving_cache: HashMap::new(),
-                hash: *hash,
-                network: network.clone(),
-                stop: false,
-                pending: None,
-            };
-            ctx.create_child("compiler", compiler).await?;
+            self.up_compile_worker(ctx, node_key.clone(), hash, network)
+                .await?;
         }
 
         if self.properties.has_this_role(HashThisRole::Gov {
@@ -2282,27 +2434,8 @@ impl Governance {
                 actor.ask_stop().await?;
             }
             (false, true) => {
-                let (issuers, issuer_any) =
-                    self.properties.governance_issuers();
-                let (compilers, evaluators) = self.artifact_whitelists();
-                let compiler = CompileWorker {
-                    node_key: node_key.clone(),
-                    our_key: self.our_key.clone(),
-                    governance_id: self.subject_metadata.subject_id.clone(),
-                    gov_version: self.properties.version,
-                    issuers,
-                    issuer_any,
-                    schemas: self.properties.schemas.clone(),
-                    compilers,
-                    evaluators,
-                    serving_blocked: false,
-                    serving_cache: HashMap::new(),
-                    hash: *hash,
-                    network: network.clone(),
-                    stop: false,
-                    pending: None,
-                };
-                ctx.create_child("compiler", compiler).await?;
+                self.up_compile_worker(ctx, node_key.clone(), hash, network)
+                    .await?;
             }
             _ => {}
         };
@@ -2437,12 +2570,26 @@ impl Governance {
         ctx.create_child("approver", ApprPersist::initial(init_approver))
             .await?;
 
+        if self.is_compiler() {
+            self.up_compile_worker(ctx, (*self.our_key).clone(), hash, network)
+                .await?;
+        }
+
         Ok(())
     }
 
-    async fn down_owner(ctx: &ActorContext<Self>) -> Result<(), ActorError> {
+    async fn down_owner(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<ApprPersist>("approver").await?;
         actor.ask_stop().await?;
+
+        if !self.is_compiler()
+            && let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await
+        {
+            compiler.ask_stop().await?;
+        }
 
         Ok(())
     }

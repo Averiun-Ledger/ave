@@ -1069,6 +1069,7 @@ impl Handler<Self> for ContractCompiler {
                             &contract_path,
                             initial_value,
                             &register_path,
+                            None,
                         )
                         .await
                         {
@@ -1177,6 +1178,61 @@ impl Handler<Self> for ContractCompiler {
 
                 let register_path = Self::register_path(ctx);
 
+                // The ledger anchor is the authority for local and fetched
+                // bytes alike. Without it, this node cannot know what is
+                // safe to execute or request.
+                let register = match ctx
+                    .system()
+                    .get_actor::<ContractRegister>(&register_path)
+                    .await
+                {
+                    Ok(register) => register,
+                    Err(error) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not access contract register for anchor: {}",
+                                    error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                };
+                let wasm_hash = match register
+                    .ask(ContractRegisterMessage::GetAnchor {
+                        contract_name: contract_name.clone(),
+                    })
+                    .await
+                {
+                    Ok(ContractRegisterResponse::Anchor(Some(anchor))) => anchor,
+                    Ok(_) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "No ledger anchor for contract artifact {}",
+                                    contract_name
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                    Err(error) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not read contract anchor: {}",
+                                    error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                };
+
                 // Local first: the artifact may already be on disk.
                 let manifest = ave_compiler::compilation_toml();
                 let manifest_hash = hash_borsh(&*self.hash.hasher(), &manifest);
@@ -1233,6 +1289,7 @@ impl Handler<Self> for ContractCompiler {
                     &manifest_hash,
                     &engine_fingerprint,
                     None,
+                    Some(&wasm_hash),
                 )
                 .await
                 {
@@ -1257,46 +1314,6 @@ impl Handler<Self> for ContractCompiler {
                         return Ok(CompilerResponse::Ok);
                     }
                 }
-
-                // The ledger anchor is what the received bytes are
-                // verified against: evidence of the last committed event
-                // that touched the contract, recorded at apply time.
-                let register = ctx
-                    .system()
-                    .get_actor::<ContractRegister>(&register_path)
-                    .await?;
-                let anchor = match register
-                    .ask(ContractRegisterMessage::GetAnchor {
-                        contract_name: contract_name.clone(),
-                    })
-                    .await
-                {
-                    Ok(ContractRegisterResponse::Anchor(anchor)) => anchor,
-                    Ok(_) => None,
-                    Err(error) => {
-                        return Err(crash_system(
-                            ctx,
-                            ActorError::FunctionalCritical {
-                                description: format!(
-                                    "Can not read contract anchor: {}",
-                                    error
-                                ),
-                            },
-                        )
-                        .await);
-                    }
-                };
-
-                let Some(wasm_hash) = anchor else {
-                    error!(
-                        msg_type = "Fetch",
-                        contract_name = %contract_name,
-                        "No ledger anchor for the contract artifact; evaluations of this schema will be unavailable"
-                    );
-                    Self::evict_module(ctx, &contract_name).await?;
-                    self.serving_cache = None;
-                    return Ok(CompilerResponse::Ok);
-                };
 
                 self.fetch = Some(FetchState {
                     contract,

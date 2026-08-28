@@ -287,10 +287,7 @@ pub async fn load_artifact_wasm(
     let wasm_path = artifact_wasm_path(contract_path);
     fs::read(&wasm_path)
         .await
-        .map_err(|e| CompilerError::FileReadFailed {
-            path: wasm_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })
+        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
 }
 
 #[cfg(feature = "test")]
@@ -300,22 +297,16 @@ async fn load_artifact_wasm_from(
     let wasm_path = artifact_wasm_path_in(base_path);
     fs::read(&wasm_path)
         .await
-        .map_err(|e| CompilerError::FileReadFailed {
-            path: wasm_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })
+        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
 }
 
 pub async fn load_artifact_precompiled(
     contract_path: &Path,
 ) -> Result<Vec<u8>, CompilerError> {
     let precompiled_path = artifact_precompiled_path(contract_path);
-    fs::read(&precompiled_path).await.map_err(|e| {
-        CompilerError::FileReadFailed {
-            path: precompiled_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        }
-    })
+    fs::read(&precompiled_path)
+        .await
+        .map_err(|e| CompilerError::file_read(precompiled_path.to_string_lossy(), e))
 }
 
 #[cfg(feature = "test")]
@@ -323,12 +314,9 @@ async fn load_artifact_precompiled_from(
     base_path: &Path,
 ) -> Result<Vec<u8>, CompilerError> {
     let precompiled_path = artifact_precompiled_path_in(base_path);
-    fs::read(&precompiled_path).await.map_err(|e| {
-        CompilerError::FileReadFailed {
-            path: precompiled_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        }
-    })
+    fs::read(&precompiled_path)
+        .await
+        .map_err(|e| CompilerError::file_read(precompiled_path.to_string_lossy(), e))
 }
 
 async fn load_compiled_wasm(
@@ -337,10 +325,7 @@ async fn load_compiled_wasm(
     let wasm_path = build_output_wasm_path(contract_path);
     fs::read(&wasm_path)
         .await
-        .map_err(|e| CompilerError::FileReadFailed {
-            path: wasm_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })
+        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
 }
 
 /// Builds a base64-encoded contract source into raw wasm bytes.
@@ -448,12 +433,9 @@ async fn load_global_cache_metadata(
     cache_dir: &Path,
 ) -> Result<ContractArtifactRecord, CompilerError> {
     let metadata_path = global_cache_metadata_path(cache_dir);
-    let metadata_bytes = fs::read(&metadata_path).await.map_err(|e| {
-        CompilerError::FileReadFailed {
-            path: metadata_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        }
-    })?;
+    let metadata_bytes = fs::read(&metadata_path)
+        .await
+        .map_err(|e| CompilerError::file_read(metadata_path.to_string_lossy(), e))?;
 
     ContractArtifactRecord::try_from_slice(&metadata_bytes).map_err(|e| {
         CompilerError::SerializationError {

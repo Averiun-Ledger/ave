@@ -16,8 +16,12 @@ pub enum CompilerError {
     #[error("file write failed [{path}]: {details}")]
     FileWriteFailed { path: String, details: String },
 
-    #[error("file read failed [{path}]: {details}")]
-    FileReadFailed { path: String, details: String },
+    #[error("file read failed [{path}] ({kind:?}): {details}")]
+    FileReadFailed {
+        path: String,
+        kind: std::io::ErrorKind,
+        details: String,
+    },
 
     #[error("cargo build failed: {details}")]
     CargoBuildFailed { details: String },
@@ -97,4 +101,20 @@ pub enum CompilerError {
 
     #[error("fetched artifact decompression failed: {details}")]
     FetchedArtifactDecompressionFailed { details: String },
+
+    #[error("missing ledger anchor for artifact [{contract_name}]")]
+    MissingArtifactAnchor { contract_name: String },
+
+    #[error("artifact hash does not match ledger anchor: expected {expected}, got {actual}")]
+    ArtifactAnchorMismatch { expected: String, actual: String },
+}
+
+impl CompilerError {
+    pub fn file_read(path: impl Into<String>, error: std::io::Error) -> Self {
+        Self::FileReadFailed {
+            path: path.into(),
+            kind: error.kind(),
+            details: error.to_string(),
+        }
+    }
 }
