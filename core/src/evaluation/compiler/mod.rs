@@ -24,7 +24,9 @@ pub mod error;
 pub mod temp_compiler;
 
 pub use ave_compiler::ContractArtifactRecord;
-pub use contract_compiler::{ContractCompiler, ContractCompilerMessage};
+pub use contract_compiler::{
+    ContractCompiler, ContractCompilerAction, ContractCompilerMessage,
+};
 pub use temp_compiler::{TempCompiler, TempCompilerMessage};
 
 use error::CompilerError;
@@ -237,11 +239,11 @@ impl CompilerSupport {
                 )
                 .await?
             {
-                if expected_wasm_hash.is_some_and(|expected_wasm_hash| {
-                    metadata.wasm_hash != *expected_wasm_hash
-                }) {
+                if let Some(expected) = expected_wasm_hash
+                    && metadata.wasm_hash != *expected
+                {
                     return Err(CompilerError::ArtifactAnchorMismatch {
-                        expected: expected_wasm_hash.to_string(),
+                        expected: expected.to_string(),
                         actual: metadata.wasm_hash.to_string(),
                     });
                 }
@@ -281,11 +283,11 @@ impl CompilerSupport {
                 &outcome.wasm,
                 "compiler pool wasm artifact",
             )?;
-            if expected_wasm_hash
-                .is_some_and(|expected_wasm_hash| wasm_hash != *expected_wasm_hash)
+            if let Some(expected) = expected_wasm_hash
+                && wasm_hash != *expected
             {
                 return Err(CompilerError::ArtifactAnchorMismatch {
-                    expected: expected_wasm_hash.to_string(),
+                    expected: expected.to_string(),
                     actual: wasm_hash.to_string(),
                 });
             }

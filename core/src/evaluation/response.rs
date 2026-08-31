@@ -196,7 +196,13 @@ impl From<CompilerError> for EvaluatorError {
             | CompilerError::ContractRegisterFailed { .. }
             | CompilerError::ToolchainFingerprintFailed { .. }
             | CompilerError::EngineCreation { .. }
-            | CompilerError::SerializationError { .. } => {
+            | CompilerError::SerializationError { .. }
+            // Anchor problems are local integrity failures (manipulated
+            // or corrupt artifact, register drift): never a verdict on
+            // the contract. Kept in sync with
+            // `is_local_fatal_compiler_error`.
+            | CompilerError::MissingArtifactAnchor { .. }
+            | CompilerError::ArtifactAnchorMismatch { .. } => {
                 Self::InternalError(value.to_string())
             }
         }
