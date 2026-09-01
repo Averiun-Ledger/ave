@@ -76,11 +76,12 @@ pub struct CompileWorker {
     /// governance version as the request means the same schemas, so
     /// nothing contract-related travels in the request itself.
     pub schemas: BTreeMap<SchemaType, Schema>,
-    /// Whitelist of legitimate artifact requesters: the governance
-    /// compilers and the evaluators of each schema. Kept up to date by
-    /// the governance actor via `Update` — in memory, no per-request
-    /// lookups against the governance actor.
-    pub compilers: BTreeSet<PublicKey>,
+    /// Whitelist of legitimate artifact requesters: the evaluators of
+    /// each schema (schema-level and tracker-schemas roles). Compilers
+    /// are never requesters — they compile their artifacts locally — so
+    /// even a compiler is rejected here. Kept up to date by the
+    /// governance actor via `Update` — in memory, no per-request lookups
+    /// against the governance actor.
     pub evaluators: BTreeMap<SchemaType, BTreeSet<PublicKey>>,
     /// While the governance applies an update (promoting and refreshing
     /// artifacts) nothing is served: between versions there is no good
@@ -270,17 +271,19 @@ impl CompileWorker {
             return ArtifactGate::Reject;
         }
 
-        let whitelisted = self.compilers.contains(sender)
-            || self
-                .evaluators
-                .get(schema_id)
-                .is_some_and(|evaluators| evaluators.contains(sender));
+        // Only evaluators of the schema may request artifacts:
+        // compilers compile locally and never fetch — even a compiler
+        // is rejected.
+        let whitelisted = self
+            .evaluators
+            .get(schema_id)
+            .is_some_and(|evaluators| evaluators.contains(sender));
         if !whitelisted {
             warn!(
                 msg_type,
                 sender = %sender,
                 schema_id = ?schema_id,
-                "Artifact request from a node that is neither a compiler nor an evaluator of the schema"
+                "Artifact request from a node that is not an evaluator of the schema"
             );
             return ArtifactGate::Reject;
         }
@@ -793,7 +796,6 @@ pub enum CompileWorkerMessage {
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
         schemas: BTreeMap<SchemaType, Schema>,
-        compilers: BTreeSet<PublicKey>,
         evaluators: BTreeMap<SchemaType, BTreeSet<PublicKey>>,
     },
     /// The governance is applying an update (promoting and refreshing
@@ -887,14 +889,12 @@ impl Handler<Self> for CompileWorker {
                 issuers,
                 issuer_any,
                 schemas,
-                compilers,
                 evaluators,
             } => {
                 self.gov_version = gov_version;
                 self.issuers = issuers;
                 self.issuer_any = issuer_any;
                 self.schemas = schemas;
-                self.compilers = compilers;
                 self.evaluators = evaluators;
             }
             CompileWorkerMessage::ServingBlocked { blocked } => {

@@ -109,12 +109,14 @@ pub struct ContractCompiler {
     hash: HashAlgorithm,
     our_key: Arc<PublicKey>,
     next_nonce: u64,
-    /// This node's governance version and the artifact whitelist (the
-    /// governance compilers and the evaluators of this schema), kept in
-    /// memory — no per-operation lookups against the governance actor —
-    /// and refreshed by `Update`. The same sets choose fetch targets
-    /// (compilers first, evaluators as plan B) and validate incoming
-    /// requests when serving.
+    /// This node's governance version and the artifact whitelists, kept
+    /// in memory and refreshed by `Reconcile` — no per-operation lookups
+    /// against the governance actor. The governance compilers are plan A
+    /// fetch targets only (they compile their artifacts, they never
+    /// request them); the evaluators of this schema (schema-level and
+    /// tracker-schemas roles — namespaces only balance the load, the
+    /// artifact bytes are the same for all) validate incoming requests
+    /// when serving and are the plan B fetch targets.
     gov_version: u64,
     compilers: BTreeSet<PublicKey>,
     evaluators: BTreeSet<PublicKey>,
@@ -248,6 +250,11 @@ impl ContractCompiler {
         nonce
     }
 
+    /// Whether any evaluator can be asked for the artifact (plan B).
+    fn has_evaluator_targets(&self) -> bool {
+        self.evaluators.iter().any(|peer| peer != &*self.our_key)
+    }
+
     /// The serving path of a peer for this fetch: compilers serve from
     /// the governance compile worker, evaluators (plan B) from the
     /// per-schema contract compiler.
@@ -281,9 +288,7 @@ impl ContractCompiler {
         if candidates.is_empty() {
             // No one to ask in this set: plan B over the evaluators, or
             // an exhausted cycle (boxed — direct async recursion).
-            if !plan_b
-                && self.evaluators.iter().any(|peer| peer != &*self.our_key)
-            {
+            if !plan_b && self.has_evaluator_targets() {
                 return Box::pin(self.start_probe_set(ctx, true)).await;
             }
             return self.cycle_exhausted(ctx).await;
@@ -552,8 +557,7 @@ impl ContractCompiler {
         ctx: &mut ActorContext<Self>,
         plan_b: bool,
     ) -> Result<(), ActorError> {
-        if !plan_b && self.evaluators.iter().any(|peer| peer != &*self.our_key)
-        {
+        if !plan_b && self.has_evaluator_targets() {
             return self.start_probe_set(ctx, true).await;
         }
 
@@ -894,12 +898,14 @@ impl ContractCompiler {
             return ArtifactGate::Reject;
         }
 
-        if !self.compilers.contains(sender) && !self.evaluators.contains(sender)
-        {
+        // Only evaluators of the schema may request artifacts:
+        // compilers compile their artifacts locally and never fetch —
+        // even a compiler is rejected.
+        if !self.evaluators.contains(sender) {
             warn!(
                 msg_type,
                 sender = %sender,
-                "Artifact request from a node that is neither a compiler nor an evaluator of the schema"
+                "Artifact request from a node that is not an evaluator of the schema"
             );
             return ArtifactGate::Reject;
         }

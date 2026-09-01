@@ -8124,10 +8124,12 @@ async fn test_gov_evaluator_wrong_compiler_pin_unavailable_reboot() {
 }
 
 #[test(tokio::test)]
-// La compilación final con el pool caído degrada pero no tumba el nodo:
-// el schema queda sin artefacto local y sus evaluaciones responden
-// `Unavailable`, el quorum se cierra con el resto de evaluadores y el
-// nodo degradado sigue aplicando el ledger como testigo.
+// La compilación con el pool caído degrada la evaluación sin tumbar el
+// nodo: mientras node3 no dispone del artefacto responde `Unavailable`,
+// el quorum se cierra con el resto de evaluadores y el nodo sigue
+// aplicando el ledger como testigo. Tras commitear el evento, node3
+// intenta reponer el artefacto por fetch desde los compiladores de la
+// red, así que la degradación puede ser transitoria.
 async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
     let (nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -8211,10 +8213,9 @@ async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
 
     // SN 2: schema con contrato y roles de schema. La evaluación temporal
     // de node3 responde `Unavailable` pero el quorum Majority (2 de 3) se
-    // cierra con node1 y node2. Al commitear, node3 intenta la
-    // compilación final, agota los reintentos (~30s de backoff; el poll
-    // de get_subject absorbe la espera) y degrada: el schema queda sin
-    // artefacto local.
+    // cierra con node1 y node2. Al commitear, node3 no puede compilar
+    // (pool muerto) y arranca el fetch del artefacto desde un compilador
+    // de la red; hasta que el fetch termina sigue sin artefacto local.
     let json = json!({
         "schemas": {
             "add": [
@@ -8304,8 +8305,10 @@ async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
         .await
         .unwrap();
 
-    // Creación del subject: node3 responde `Unavailable` (contrato no
-    // encontrado) y el quorum se cierra con node1 y node2.
+    // Creación del subject: si node3 aún no ha terminado el fetch
+    // responde `Unavailable` (contrato no encontrado) y el quorum se
+    // cierra con node1 y node2; si ya lo tiene, evalúa con normalidad.
+    // En ambos casos el evento commitea.
     let (subject_id, ..) =
         create_subject(node1, governance_id.clone(), "Example", "", true)
             .await
@@ -8318,7 +8321,8 @@ async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
         .await
         .unwrap();
 
-    // El fact se evalúa sin node3 y commitea con el quorum restante.
+    // El fact commitea con independencia de si node3 ya recuperó el
+    // artefacto por fetch (quorum Majority: basta 2 de 3 evaluadores).
     emit_fact(
         node1,
         subject_id.clone(),
@@ -8334,7 +8338,7 @@ async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
     assert_eq!(state.sn, 1);
     assert_eq!(state.properties, json!({"one": 7, "two": 0, "three": 0}));
 
-    // El nodo degradado sigue vivo y aplica el ledger como testigo.
+    // El nodo sigue vivo y aplica el ledger como testigo.
     let state = get_subject(node3, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
@@ -8343,12 +8347,12 @@ async fn test_gov_evaluator_degraded_compile_survives_and_serves_ledger() {
 }
 
 #[test(tokio::test)]
-// Si el refresh de un contrato modificado falla por infraestructura del
-// pool, el módulo anterior se expulsa del caché local: evaluar con el
-// contrato stale divergiría del resto de la red. El evaluador responde
-// `Unavailable` (RebootTimeOut) en lugar de votar con la versión vieja,
-// lo que produciría un RebootDiff.
-async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
+// Un evaluador con el pool muerto no queda bloqueado tras un cambio de
+// contrato: al commitear el evento registra el ancla de compilación de
+// la nueva versión y repone el artefacto por fetch desde los
+// compiladores de la red (verificado contra el ancla), volviendo a
+// evaluar con el quorum completo.
+async fn test_evaluator_with_dead_pool_fetches_contract_and_evaluates() {
     let (nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
@@ -8362,7 +8366,7 @@ async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
     // node2 con un directorio de contratos explícito: el artefacto v1
     // debe sobrevivir al reinicio para que el arranque lo cargue de
     // disco (si no se preserva, el restart genera un directorio vacío y
-    // el nodo arrancaría ya degradado, sin módulo stale que expulsar).
+    // el escenario cambia: el nodo arrancaría ya sin artefacto).
     let contracts_dir = tempfile::tempdir().unwrap();
     let (mut node2_data, mut node2_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
@@ -8547,9 +8551,9 @@ async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
     let node2 = &node2.api;
 
     // SN 2: cambio de contrato a la v2 (ModThree=50 pasa a ser válido).
-    // Lo evalúa el Owner únicamente. Al commitear, node2 intenta el
-    // refresh contra su pool muerto, agota los reintentos (~30s de
-    // backoff) y expulsa el módulo v1 del caché.
+    // Lo evalúa el Owner únicamente. Al commitear, node2 registra el
+    // ancla de compilación de la v2 y, como no puede recompilar (pool
+    // muerto), arranca el fetch del artefacto desde node1.
     let json = json!({
         "schemas": {
             "change": [
@@ -8569,39 +8573,48 @@ async fn test_contract_refresh_failure_evicts_stale_module_reboot_timeout() {
         .await
         .unwrap();
 
-    // Sincronizar node2: su gobernanza queda ocupada con los reintentos
-    // del refresh, así que este poll espera a que la expulsión ya haya
-    // ocurrido antes de emitir el siguiente fact.
+    // Sincronizar node2: al aplicar SN 2 arranca el fetch de la v2.
     node2.update_subject(governance_id.clone()).await.unwrap();
     get_subject(node2, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
-    // ModThree=50: node1 (v2) vota OK; node2, sin módulo, responde
-    // `Unavailable`. Sin quorum la request entra en RebootTimeOut. Si la
-    // expulsión no existiera, node2 votaría Error con la v1 y el
-    // resultado sería RebootDiff.
-    let request_id = emit_fact(
+    // ModThree=50 solo es válido con la v2 y el quorum Majority con 2
+    // evaluadores exige el visto bueno de ambos. Si node2 aún no ha
+    // terminado el fetch responde `Unavailable` y la request reintenta
+    // hasta que dispone del artefacto: el evento solo commitea cuando
+    // node2 evalúa con la v2 verificada contra el ancla.
+    emit_fact(
         node1,
         subject_id.clone(),
         json!({"ModThree": {"data": 50}}),
-        false,
+        true,
     )
     .await
     .unwrap();
 
-    wait_request_state(
-        node1,
-        request_id,
-        Some(RequestState::RebootTimeOut {
-            seconds: 0,
-            count: 0,
-        }),
-    )
-    .await
-    .unwrap();
+    let state = get_subject(node1, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 1, "two": 0, "three": 50}));
 
-    // El nodo degradado sigue operativo.
+    // node2 commiteó el evento: evaluó con la v2 obtenida por fetch.
+    let state = get_subject(node2, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 1, "two": 0, "three": 50}));
+
+    // El artefacto fetcheado quedó persistido en el directorio de
+    // contratos preservado de node2.
+    assert!(
+        contracts_dir
+            .path()
+            .join("contracts")
+            .join(format!("{governance_id}_Example"))
+            .exists()
+    );
+
+    // El evaluador recuperado sigue operativo.
     node_running(node2).await.unwrap();
 }
 

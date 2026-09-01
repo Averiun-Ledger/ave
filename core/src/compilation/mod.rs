@@ -320,7 +320,6 @@ impl Compilation {
                         // Ephemeral request workers never serve artifacts
                         // (they live outside the well-known serving
                         // path): empty whitelist rejects every probe.
-                        compilers: BTreeSet::new(),
                         evaluators: BTreeMap::new(),
                         serving_blocked: false,
                         serving_cache: HashMap::new(),

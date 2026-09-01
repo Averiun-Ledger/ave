@@ -1526,6 +1526,11 @@ impl Governance {
     /// the evaluators of each schema. The same sets are used by the
     /// serving actors to validate requesters and by the fetching ones to
     /// choose whom to ask (compilers first, evaluators as plan B).
+    /// Artifact whitelists: the governance compilers (plan A fetch
+    /// targets — they compile their artifacts, they never request them)
+    /// and, per schema, its evaluators (schema-level and tracker-schemas
+    /// roles; namespaces only balance the evaluation load, every
+    /// evaluator of a schema uses the same contract artifact).
     fn artifact_whitelists(
         &self,
     ) -> (
@@ -1542,18 +1547,30 @@ impl Governance {
             .0
             .into_iter()
             .collect();
+        // Per-schema evaluator whitelist, mirroring `get_signers`: the
+        // evaluators of a schema are the schema-level roles UNION the
+        // tracker-schemas roles. Every declared schema gets an entry,
+        // even one without schema-level roles.
         let evaluators = self
             .properties
-            .roles_schema
-            .iter()
-            .map(|(schema_id, roles)| {
-                let keys = roles
+            .schemas
+            .keys()
+            .map(|schema_id| {
+                let mut keys: BTreeSet<PublicKey> = self
+                    .properties
+                    .roles_tracker_schemas
                     .evaluator
                     .iter()
                     .filter_map(|role| {
                         self.properties.members.get(&role.name).cloned()
                     })
                     .collect();
+                if let Some(roles) = self.properties.roles_schema.get(schema_id)
+                {
+                    keys.extend(roles.evaluator.iter().filter_map(|role| {
+                        self.properties.members.get(&role.name).cloned()
+                    }));
+                }
                 (schema_id.clone(), keys)
             })
             .collect();
@@ -1582,7 +1599,9 @@ impl Governance {
         }
 
         let (issuers, issuer_any) = self.properties.governance_issuers();
-        let (compilers, evaluators) = self.artifact_whitelists();
+        // The compile worker serves artifacts: only the evaluator
+        // whitelist matters (compilers compile, they never request).
+        let (_, evaluators) = self.artifact_whitelists();
         ctx.create_child(
             "compiler",
             CompileWorker {
@@ -1593,7 +1612,6 @@ impl Governance {
                 issuers,
                 issuer_any,
                 schemas: self.properties.schemas.clone(),
-                compilers,
                 evaluators,
                 // Governance opens the gate only after anchor recovery.
                 serving_blocked: true,
@@ -1984,14 +2002,13 @@ impl Governance {
 
         if let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await {
             let (issuers, issuer_any) = self.properties.governance_issuers();
-            let (compilers, evaluators) = self.artifact_whitelists();
+            let (_, evaluators) = self.artifact_whitelists();
             compiler
                 .tell(CompileWorkerMessage::Update {
                     gov_version: self.properties.version,
                     issuers,
                     issuer_any,
                     schemas: self.properties.schemas.clone(),
-                    compilers,
                     evaluators,
                 })
                 .await?;
