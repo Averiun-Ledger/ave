@@ -173,6 +173,9 @@ struct ProbeRound {
     busy: HashSet<PublicKey>,
     /// Candidates not tried yet (the next batches).
     untried: Vec<PublicKey>,
+    /// Peers whose fetch attempt already failed this round: never
+    /// re-probed nor re-admitted as failover candidates.
+    failed: HashSet<PublicKey>,
     /// Re-probes sent to the busy batch (steps the wait).
     busy_attempts: usize,
     /// When the busy waiting of this batch started (total budget).
@@ -296,6 +299,7 @@ impl ContractCompiler {
                 can_serve: VecDeque::new(),
                 busy: HashSet::new(),
                 untried: untried.into_iter().collect(),
+                failed: HashSet::new(),
                 busy_attempts: 0,
                 busy_started: None,
             },
@@ -331,7 +335,9 @@ impl ContractCompiler {
                 Some(fetch) => Self::peer_path(fetch, plan_b),
                 None => return Ok(()),
             };
-            network
+            // A send failure would leave the probes half-sent with no
+            // live timer: local infrastructure failure, fail loud.
+            if let Err(e) = network
                 .send_command(ave_network::CommandHelper::SendMessage {
                     message: NetworkMessage {
                         info: ComunicateInfo {
@@ -349,15 +355,24 @@ impl ContractCompiler {
                         },
                     },
                 })
-                .await?;
+                .await
+            {
+                return Err(crash_system(ctx, e).await);
+            }
         }
 
-        let key = ctx.schedule_once(
+        // One live timer per fetch: cancel the previous phase's timer
+        // before arming the round timeout.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
             PROBE_RESPONSE_TIMEOUT,
             ContractCompilerMessage::ProbeTimeout {
                 request_nonce: nonce,
             },
-        )?;
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
 
         let Some(fetch) = &mut self.fetch else {
             return Ok(());
@@ -424,12 +439,18 @@ impl ContractCompiler {
         probe_nonce: u64,
         round: ProbeRound,
     ) -> Result<(), ActorError> {
-        let key = ctx.schedule_once(
+        // One live timer per fetch: cancel the failed attempt's timer
+        // before arming the resumed round timeout.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
             PROBE_RESPONSE_TIMEOUT,
             ContractCompilerMessage::ProbeTimeout {
                 request_nonce: probe_nonce,
             },
-        )?;
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
 
         let Some(fetch) = &mut self.fetch else {
             return Ok(());
@@ -463,16 +484,25 @@ impl ContractCompiler {
         }
 
         let delay = busy_retry_delay(round.busy_attempts + 1);
-        let Some(fetch) = &mut self.fetch else {
+        let Some(nonce) = self.fetch.as_ref().map(|fetch| fetch.nonce)
+        else {
             return Ok(());
         };
-        let nonce = fetch.nonce;
-        let key = ctx.schedule_once(
+        // One live timer per fetch: cancel the probe round's timeout
+        // before arming the busy wait.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
             delay,
             ContractCompilerMessage::BusyRetry {
                 request_nonce: nonce,
             },
-        )?;
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
         fetch.timer = Some(key);
         fetch.phase = FetchPhase::BusyWait(round);
 
@@ -507,6 +537,7 @@ impl ContractCompiler {
                 can_serve: VecDeque::new(),
                 busy: HashSet::new(),
                 untried: rest.into_iter().collect(),
+                failed: HashSet::new(),
                 busy_attempts: 0,
                 busy_started: None,
             },
@@ -558,7 +589,9 @@ impl ContractCompiler {
         };
 
         let network = Self::network(ctx)?;
-        network
+        // A send failure would leave the fetch with no live timer:
+        // local infrastructure failure, fail loud.
+        if let Err(e) = network
             .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info: ComunicateInfo {
@@ -576,14 +609,24 @@ impl ContractCompiler {
                     },
                 },
             })
-            .await?;
+            .await
+        {
+            return Err(crash_system(ctx, e).await);
+        }
 
-        let key = ctx.schedule_once(
+        // One live timer per fetch: cancel the probe round's timeout
+        // before arming the fetch timeout — a stale ProbeTimeout could
+        // close a later resumed round reusing the same nonce.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
             FETCH_RESPONSE_TIMEOUT,
             ContractCompilerMessage::FetchTimeout {
                 request_nonce: nonce,
             },
-        )?;
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
 
         let Some(fetch) = &mut self.fetch else {
             return Ok(());
@@ -610,11 +653,15 @@ impl ContractCompiler {
 
     /// The current fetch attempt failed: failover peer, probe answers
     /// still in flight, the busy batch, the next batch, or an exhausted
-    /// cycle.
+    /// cycle. A burned peer is never re-probed nor re-admitted as a
+    /// failover candidate for the rest of the round; a `Busy` answer
+    /// mid-fetch is NOT a failure (the peer joined the busy set and is
+    /// re-probed as such).
     async fn attempt_failed(
         &mut self,
         ctx: &mut ActorContext<Self>,
         error: Option<String>,
+        burn_peer: bool,
     ) -> Result<(), ActorError> {
         let Some(fetch) = &mut self.fetch else {
             return Ok(());
@@ -630,12 +677,19 @@ impl ContractCompiler {
         }
 
         let FetchPhase::Fetch {
-            round, probe_nonce, ..
+            round, peer, probe_nonce,
         } = &mut fetch.phase
         else {
             return Ok(());
         };
         let probe_nonce = *probe_nonce;
+
+        if burn_peer {
+            round.pending.remove(peer);
+            round.busy.remove(peer);
+            round.can_serve.retain(|candidate| candidate != peer);
+            round.failed.insert(peer.clone());
+        }
 
         if let Some(peer) = round.can_serve.pop_front() {
             let round = std::mem::take(round);
@@ -669,28 +723,47 @@ impl ContractCompiler {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let governance = ctx.get_parent::<Governance>().await?;
-        governance.tell(GovernanceMessage::TriggerGovUpdate).await?;
+        // The parent is expected to exist and accept messages: a failure
+        // here is local infrastructure, fail loud.
+        let governance = match ctx.get_parent::<Governance>().await {
+            Ok(governance) => governance,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+        if let Err(e) = governance.tell(GovernanceMessage::TriggerGovUpdate).await
+        {
+            return Err(crash_system(ctx, e).await);
+        }
 
         let Some(fetch) = &mut self.fetch else {
             return Ok(());
         };
         fetch.phase = FetchPhase::Timeoff;
         fetch.cycles += 1;
+        let cycles = fetch.cycles;
+        let contract_name = fetch.contract_name.clone();
         let delay =
-            retry_delay_ms(TIMEOFF_BASE_MS, TIMEOFF_MAX_MS, fetch.cycles, None);
-        let key = ctx.schedule_once(
+            retry_delay_ms(TIMEOFF_BASE_MS, TIMEOFF_MAX_MS, cycles, None);
+
+        // One live timer per fetch: cancel the exhausted cycle's timer
+        // before arming the timeoff.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
             Duration::from_millis(delay),
-            ContractCompilerMessage::CycleStart {
-                cycle: fetch.cycles,
-            },
-        )?;
+            ContractCompilerMessage::CycleStart { cycle: cycles },
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
         fetch.timer = Some(key);
 
         debug!(
             msg_type = "Fetch",
-            contract_name = %fetch.contract_name,
-            cycles = fetch.cycles,
+            contract_name = %contract_name,
+            cycles,
             delay_ms = delay,
             "Fetch cycle exhausted; governance update triggered, next cycle after timeoff"
         );
@@ -1034,7 +1107,8 @@ impl Handler<Self> for ContractCompiler {
                 evaluators,
                 action,
             } => {
-                let version_changed = self.gov_version != gov_version;
+                let whitelists_changed =
+                    self.compilers != compilers || self.evaluators != evaluators;
                 self.gov_version = gov_version;
                 self.compilers = compilers;
                 self.evaluators = evaluators;
@@ -1145,11 +1219,6 @@ impl Handler<Self> for ContractCompiler {
                         gov_id,
                         schema_id,
                     } => {
-                        if version_changed {
-                            self.cancel_fetch_timer(ctx);
-                            self.fetch = None;
-                        }
-
                         let contract_hash =
                             match hash_borsh(&*self.hash.hasher(), &contract) {
                                 Ok(hash) => hash,
@@ -1168,19 +1237,79 @@ impl Handler<Self> for ContractCompiler {
                                 }
                             };
 
-                        // Already obtained, or already being fetched: an
-                        // unrelated governance event must not reset an
-                        // in-flight fetch of the same contract.
-                        if contract_hash == self.contract
-                            || self.fetch.as_ref().is_some_and(|fetch| {
-                                fetch.contract_hash == contract_hash
-                            })
-                        {
+                        // Already obtained: an unrelated governance event
+                        // must not reset anything.
+                        if contract_hash == self.contract {
                             debug!(
                                 msg_type = "Fetch",
                                 contract_name = %contract_name,
-                                "Contract already available or being fetched, skipping"
+                                "Contract already available, skipping"
                             );
+                            return Ok(CompilerResponse::Ok);
+                        }
+
+                        // In-flight fetch of the same contract: an
+                        // unrelated governance event must not reset it.
+                        // A whitelist change only matters when it drops
+                        // peers this fetch is using (probing, waiting on
+                        // or downloading from); then re-probe with the
+                        // live sets, keeping the fetch (contract, anchor,
+                        // cycle backoff). Probes and requests always
+                        // carry the current governance version.
+                        if self.fetch.as_ref().is_some_and(|fetch| {
+                            fetch.contract_hash == contract_hash
+                        }) {
+                            let fetch_peers_dropped = whitelists_changed
+                                && self.fetch.as_ref().is_some_and(|fetch| {
+                                    match &fetch.phase {
+                                        FetchPhase::Fetch {
+                                            round, peer, ..
+                                        } => {
+                                            let live = if round.plan_b {
+                                                &self.evaluators
+                                            } else {
+                                                &self.compilers
+                                            };
+                                            !live.contains(peer)
+                                        }
+                                        FetchPhase::Probe(round)
+                                        | FetchPhase::BusyWait(round) => {
+                                            let live = if round.plan_b {
+                                                &self.evaluators
+                                            } else {
+                                                &self.compilers
+                                            };
+                                            round
+                                                .pending
+                                                .iter()
+                                                .chain(round.busy.iter())
+                                                .chain(round.can_serve.iter())
+                                                .chain(round.untried.iter())
+                                                .any(|peer| {
+                                                    !live.contains(peer)
+                                                })
+                                        }
+                                        // The next cycle re-reads the
+                                        // live sets anyway.
+                                        FetchPhase::Timeoff => false,
+                                    }
+                                });
+
+                            if fetch_peers_dropped {
+                                debug!(
+                                    msg_type = "Fetch",
+                                    contract_name = %contract_name,
+                                    "Fetch peers left the whitelist, re-probing with the live sets"
+                                );
+                                self.cancel_fetch_timer(ctx);
+                                self.start_probe_set(ctx, false).await?;
+                            } else {
+                                debug!(
+                                    msg_type = "Fetch",
+                                    contract_name = %contract_name,
+                                    "Contract already being fetched, skipping"
+                                );
+                            }
                             return Ok(CompilerResponse::Ok);
                         }
 
@@ -1452,6 +1581,9 @@ impl Handler<Self> for ContractCompiler {
                             else {
                                 return Ok(CompilerResponse::Ok);
                             };
+                            // The chosen peer is being fetched now: it no
+                            // longer counts as a pending answer.
+                            round.pending.remove(&sender);
                             let round = std::mem::take(round);
                             self.start_fetch_from(ctx, round, sender).await?;
                         }
@@ -1494,14 +1626,20 @@ impl Handler<Self> for ContractCompiler {
                 {
                     match result {
                         ArtifactProbeResult::CanServe => {
+                            // A peer burned this round (failed attempt)
+                            // is never re-admitted as a failover
+                            // candidate.
                             if sender != *peer
+                                && !round.failed.contains(&sender)
                                 && !round.can_serve.contains(&sender)
                             {
                                 round.can_serve.push_back(sender.clone());
                             }
                         }
                         ArtifactProbeResult::Busy => {
-                            round.busy.insert(sender.clone());
+                            if !round.failed.contains(&sender) {
+                                round.busy.insert(sender.clone());
+                            }
                         }
                         ArtifactProbeResult::NotServed
                         | ArtifactProbeResult::Outdated { .. } => {}
@@ -1661,6 +1799,7 @@ impl Handler<Self> for ContractCompiler {
                                     self.attempt_failed(
                                         ctx,
                                         Some(error.to_string()),
+                                        true,
                                     )
                                     .await?;
                                 } else {
@@ -1673,6 +1812,7 @@ impl Handler<Self> for ContractCompiler {
                         self.attempt_failed(
                             ctx,
                             Some("peer can not serve the artifact".to_owned()),
+                            true,
                         )
                         .await?;
                     }
@@ -1688,6 +1828,7 @@ impl Handler<Self> for ContractCompiler {
                         self.attempt_failed(
                             ctx,
                             Some("peer started compiling mid-fetch".to_owned()),
+                            false,
                         )
                         .await?;
                     }
@@ -1729,6 +1870,7 @@ impl Handler<Self> for ContractCompiler {
                     self.attempt_failed(
                         ctx,
                         Some("artifact fetch timed out".to_owned()),
+                        true,
                     )
                     .await?;
                 }

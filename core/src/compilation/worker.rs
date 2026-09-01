@@ -19,7 +19,13 @@ use crate::{
         error::CompilerError, is_compiler_infra_error,
         is_local_fatal_compiler_error,
     },
-    governance::model::Schema,
+    governance::{
+        contract_register::{
+            ContractRegister, ContractRegisterMessage,
+            ContractRegisterResponse,
+        },
+        model::Schema,
+    },
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
         GovVersionSync, crash_system, gov_version_sync,
@@ -510,8 +516,10 @@ impl CompileWorker {
                 .map_err(|e| ActorError::Functional {
                     description: format!("Can not hash contract source: {}", e),
                 })?;
-                let staging_name =
-                    format!("{}_temp_staging_{}", subject_id, contract_hash);
+                let staging_name = format!(
+                    "{}_temp_staging_{}_{}",
+                    subject_id, schema_id, contract_hash
+                );
                 let staging_path = config.contracts_path.join(&staging_name);
                 (staging_name, staging_path)
             } else {
@@ -523,6 +531,81 @@ impl CompileWorker {
                 (official_name, official_path)
             };
 
+            // Unchanged contract: the init check re-runs against the
+            // official artifact, and the recompile fallback (missing or
+            // corrupt local artifact) must reproduce the ledger-anchored
+            // bytes exactly — compilation is deterministic with the same
+            // toolchain, so a mismatch is a local integrity failure,
+            // never a divergent vote or an anchor drift.
+            let expected_wasm_hash = if target.contract_changed {
+                None
+            } else {
+                let register = match ctx
+                    .system()
+                    .get_actor::<ContractRegister>(&register_path)
+                    .await
+                {
+                    Ok(register) => register,
+                    Err(error) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not access contract register for anchor: {}",
+                                    error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                };
+                match register
+                    .ask(ContractRegisterMessage::GetAnchor {
+                        contract_name: contract_name.clone(),
+                    })
+                    .await
+                {
+                    Ok(ContractRegisterResponse::Anchor(Some(anchor))) => {
+                        Some(anchor)
+                    }
+                    Ok(ContractRegisterResponse::Anchor(None)) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "No ledger anchor for committed contract {}",
+                                    contract_name
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                    Ok(_) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::UnexpectedResponse {
+                                path: register_path.clone(),
+                                expected: "ContractRegisterResponse::Anchor"
+                                    .to_owned(),
+                            },
+                        )
+                        .await);
+                    }
+                    Err(error) => {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not read contract anchor: {}",
+                                    error
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                }
+            };
+
             match CompilerSupport::compile_or_load_registered(
                 self.hash,
                 ctx,
@@ -531,7 +614,7 @@ impl CompileWorker {
                 &contract_path,
                 target.initial_value,
                 &register_path,
-                None,
+                expected_wasm_hash.as_ref(),
             )
             .await
             {

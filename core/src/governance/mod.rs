@@ -1005,11 +1005,11 @@ impl Governance {
     /// Splits the compilation evidence of the governance fact events
     /// being applied: artifact hashes per schema of the successful ones
     /// (their staged artifacts are promoted to official) and the payload
-    /// contract sources of the failed ones (their staged artifacts are
-    /// dropped).
+    /// contract sources per schema of the failed ones (their staged
+    /// artifacts are dropped).
     fn compile_evidence_of(
         events: &[Ledger],
-    ) -> (BTreeMap<SchemaType, DigestIdentifier>, Vec<String>) {
+    ) -> (BTreeMap<SchemaType, DigestIdentifier>, Vec<(SchemaType, String)>) {
         let mut evidence_contracts = BTreeMap::new();
         let mut failed_sources = Vec::new();
 
@@ -1105,8 +1105,10 @@ impl Governance {
                     .await);
                 }
             };
-            let staging_name =
-                format!("{}_temp_staging_{}", subject_id, contract_hash);
+            let staging_name = format!(
+                "{}_temp_staging_{}_{}",
+                subject_id, schema_id, contract_hash
+            );
 
             let staged = match contract_register
                 .ask(ContractRegisterMessage::GetMetadata {
@@ -1256,7 +1258,7 @@ impl Governance {
     /// committed as failed: their contracts never become official.
     async fn drop_failed_staged_contracts(
         ctx: &mut ActorContext<Self>,
-        sources: &[String],
+        sources: &[(SchemaType, String)],
         subject_id: &DigestIdentifier,
         hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
@@ -1276,7 +1278,7 @@ impl Governance {
             .get_child::<ContractRegister>("contract_register")
             .await?;
 
-        for source in sources {
+        for (schema_id, source) in sources {
             let contract_hash = hash_borsh(&*hash.hasher(), source);
             let contract_hash = match contract_hash {
                 Ok(contract_hash) => contract_hash,
@@ -1293,8 +1295,10 @@ impl Governance {
                     .await);
                 }
             };
-            let staging_name =
-                format!("{}_temp_staging_{}", subject_id, contract_hash);
+            let staging_name = format!(
+                "{}_temp_staging_{}_{}",
+                subject_id, schema_id, contract_hash
+            );
             if let Err(e) = contract_register
                 .tell(ContractRegisterMessage::DeleteMetadata {
                     contract_name: staging_name.clone(),
@@ -1371,6 +1375,148 @@ impl Governance {
                 )
                 .await);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Rebuilds missing ledger anchors from the committed governance
+    /// events at boot. The anchor is a local projection of the
+    /// compilation evidence: a crash (or power loss) between the event
+    /// persistence and its recording must never be fatal. Walks the
+    /// ledger backwards from the tip until the most recent event that
+    /// committed each missing contract with Ok evidence is found. A
+    /// committed contract without evidence in the ledger means local
+    /// ledger corruption — a controlled crash.
+    async fn recover_missing_compile_anchors(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let subject_id = &self.subject_metadata.subject_id;
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        let mut missing: BTreeMap<SchemaType, String> = BTreeMap::new();
+        for schema_id in self
+            .properties
+            .schemas
+            .iter()
+            .filter(|(_, schema)| !schema.contract.is_empty())
+            .map(|(schema_id, _)| schema_id)
+        {
+            let contract_name = format!("{}_{}", subject_id, schema_id);
+            match contract_register
+                .ask(ContractRegisterMessage::GetAnchor {
+                    contract_name: contract_name.clone(),
+                })
+                .await
+            {
+                Ok(ContractRegisterResponse::Anchor(Some(_))) => {}
+                Ok(ContractRegisterResponse::Anchor(None)) => {
+                    missing.insert(schema_id.clone(), contract_name);
+                }
+                Ok(_) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::UnexpectedResponse {
+                            path: ActorPath::from(format!(
+                                "{}/contract_register",
+                                ctx.path()
+                            )),
+                            expected: "ContractRegisterResponse::Anchor"
+                                .to_owned(),
+                        },
+                    )
+                    .await);
+                }
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not read contract anchor: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            }
+        }
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        warn!(
+            count = missing.len(),
+            "Rebuilding missing contract anchors from the ledger"
+        );
+
+        let batch = Self::ledger_batch_size(ctx).await? as u64;
+        let mut hi_sn = self.subject_metadata.sn;
+
+        while !missing.is_empty() {
+            let lo_sn = hi_sn.saturating_sub(batch.saturating_sub(1));
+            let (events, _) = if lo_sn == 0 {
+                self.get_ledger(ctx, None, hi_sn).await?
+            } else {
+                self.get_ledger(ctx, Some(lo_sn - 1), hi_sn).await?
+            };
+
+            if events.is_empty() {
+                break;
+            }
+
+            for event in events.iter().rev() {
+                let (evidence, _) =
+                    Self::compile_evidence_of(std::slice::from_ref(event));
+                for (schema_id, wasm_hash) in evidence {
+                    let Some(contract_name) = missing.get(&schema_id).cloned()
+                    else {
+                        continue;
+                    };
+                    if let Err(e) = contract_register
+                        .tell(ContractRegisterMessage::SetAnchor {
+                            contract_name,
+                            wasm_hash,
+                        })
+                        .await
+                    {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not record contract anchor: {}",
+                                    e
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                    missing.remove(&schema_id);
+                }
+            }
+
+            if lo_sn == 0 {
+                break;
+            }
+            hi_sn = lo_sn - 1;
+        }
+
+        if !missing.is_empty() {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "No compilation evidence in the ledger for committed contracts: {:?}",
+                        missing.keys().collect::<Vec<_>>()
+                    ),
+                },
+            )
+            .await);
         }
 
         Ok(())
@@ -1617,22 +1763,24 @@ impl Governance {
         // blocked is the safe failure mode — a restart clears it.
         self.set_artifact_serving_blocked(ctx, true).await;
 
-        // Staged artifacts of the contracts that just committed become
-        // the official ones: the registered pipeline below then finds
-        // them already in place and does not recompile.
-        self.promote_staged_contracts(ctx, evidence_contracts, &hash)
-            .await?;
-
         // The ledger anchor of every committed contract is recorded by
         // every node, with or without the artifact: it is the only hash
-        // this node accepts when fetching the artifact from the network,
-        // and must be in place before the schema compilers below run.
+        // this node accepts when fetching the artifact from the network.
+        // It is a pure function of the committed event and is recorded
+        // BEFORE promotion, so a crash during promotion leaves the anchor
+        // in place and recovery can re-obtain the artifact.
         Self::record_compile_anchors(
             ctx,
             evidence_contracts,
             &self.subject_metadata.subject_id,
         )
         .await?;
+
+        // Staged artifacts of the contracts that just committed become
+        // the official ones: the registered pipeline below then finds
+        // them already in place and does not recompile.
+        self.promote_staged_contracts(ctx, evidence_contracts, &hash)
+            .await?;
 
         if self.is_compiler() {
             let was_compiler = old_gov.has_this_role(HashThisRole::Gov {
@@ -2105,6 +2253,12 @@ impl Governance {
             } else {
                 schemas.clone()
             };
+
+            // Anchors are a rebuildable projection of the ledger: a
+            // crash between the event persistence and their recording
+            // is repaired here, before any artifact recovery reads them.
+            self.recover_missing_compile_anchors(ctx).await?;
+
             self.sweep_contract_artifacts(ctx, &artifact_schemas).await?;
 
             if self.is_compiler() {

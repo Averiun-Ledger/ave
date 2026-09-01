@@ -2032,7 +2032,7 @@ impl RequestManager {
             .await
             .ok();
 
-        for source in sources {
+        for (schema_id, source) in sources {
             let contract_hash = match hash_borsh(&*hash.hasher(), &source) {
                 Ok(contract_hash) => contract_hash,
                 Err(error) => {
@@ -2045,8 +2045,10 @@ impl RequestManager {
                     continue;
                 }
             };
-            let staging_name =
-                format!("{}_temp_staging_{}", self.subject_id, contract_hash);
+            let staging_name = format!(
+                "{}_temp_staging_{}_{}",
+                self.subject_id, schema_id, contract_hash
+            );
 
             if let Some(register) = &register
                 && let Err(error) = register

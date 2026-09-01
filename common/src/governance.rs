@@ -600,6 +600,12 @@ impl Quorum {
             return Err("the percentage must be between 1 and 100".to_owned());
         }
 
+        if let Self::Fixed(fixed) = self
+            && *fixed == 0_u32
+        {
+            return Err("the fixed quorum must be greater than 0".to_owned());
+        }
+
         Ok(())
     }
 
@@ -611,7 +617,9 @@ impl Quorum {
             }
             Self::Majority => total_members / 2 + 1,
             Self::Percentage(percentage) => {
-                total_members * (percentage / 100) as u32
+                // Multiply before dividing to keep precision; ceil so any
+                // valid percentage (1..=100) never yields a zero quorum.
+                (total_members as u64 * *percentage as u64).div_ceil(100) as u32
             }
         };
 
@@ -626,7 +634,8 @@ impl Quorum {
             }
             Self::Majority => signers > total_members / 2,
             Self::Percentage(percentage) => {
-                signers >= (total_members * (percentage / 100) as u32)
+                signers as u64 * 100
+                    >= total_members as u64 * *percentage as u64
             }
         }
     }
@@ -748,6 +757,7 @@ mod tests {
     fn test_quorum_check_values() {
         assert!(Quorum::Majority.check_values().is_ok());
         assert!(Quorum::Fixed(3).check_values().is_ok());
+        assert!(Quorum::Fixed(0).check_values().is_err());
         assert!(Quorum::Percentage(50).check_values().is_ok());
         assert!(Quorum::Percentage(0).check_values().is_err());
         assert!(Quorum::Percentage(101).check_values().is_err());
@@ -758,7 +768,12 @@ mod tests {
         assert_eq!(Quorum::Majority.get_signers(10, 10), 6);
         assert_eq!(Quorum::Fixed(3).get_signers(10, 10), 3);
         assert_eq!(Quorum::Fixed(15).get_signers(10, 10), 10);
-        assert_eq!(Quorum::Percentage(50).get_signers(10, 10), 0);
+        assert_eq!(Quorum::Percentage(50).get_signers(10, 10), 5);
+        assert_eq!(Quorum::Percentage(50).get_signers(3, 3), 2);
+        assert_eq!(Quorum::Percentage(1).get_signers(10, 10), 1);
+        assert_eq!(Quorum::Percentage(100).get_signers(10, 10), 10);
+        // Capped by pending signers.
+        assert_eq!(Quorum::Percentage(50).get_signers(10, 2), 2);
         assert_eq!(Quorum::Majority.get_signers(10, 3), 3);
     }
 
@@ -768,8 +783,8 @@ mod tests {
         assert!(!Quorum::Majority.check_quorum(10, 5));
         assert!(Quorum::Fixed(3).check_quorum(10, 3));
         assert!(!Quorum::Fixed(3).check_quorum(10, 2));
-        // Percentage uses integer division percentage/100, so any value <100 yields 0
-        assert!(Quorum::Percentage(50).check_quorum(10, 0));
+        assert!(Quorum::Percentage(50).check_quorum(10, 5));
+        assert!(!Quorum::Percentage(50).check_quorum(10, 4));
         assert!(Quorum::Percentage(100).check_quorum(10, 10));
         assert!(!Quorum::Percentage(100).check_quorum(10, 9));
     }
