@@ -1,11 +1,10 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::Arc,
 };
 
 use crate::{
     evaluation::{
-        compiler::{CompilerResponse, error::CompilerError},
         request::{EvalWorkerContext, EvaluateData},
         response::{
             EvalRunnerError, EvaluationResult, EvaluatorError,
@@ -13,7 +12,6 @@ use crate::{
         },
         runner::types::EvaluateInfo,
     },
-    governance::{data::GovernanceData, model::Schema},
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
         GovVersionSync, crash_system, gov_version_sync,
@@ -26,7 +24,7 @@ use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
 use ave_common::{
-    SchemaType, ValueWrapper,
+    ValueWrapper,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
@@ -45,7 +43,6 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use super::{
     Evaluation, EvaluationMessage,
-    compiler::{TempCompiler, TempCompilerMessage},
     request::EvaluationReq,
     response::EvaluationRes,
     runner::{Runner, RunnerMessage, RunnerResponse, types::RunnerResult},
@@ -145,37 +142,6 @@ impl EvalWorker {
         response
     }
 
-    async fn compile_contracts(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        ids: &[SchemaType],
-        schemas: BTreeMap<SchemaType, Schema>,
-    ) -> Result<Option<CompilerError>, ActorError> {
-        let compiler = ctx.create_child("temp_compiler", TempCompiler).await?;
-
-        for id in ids {
-            let Some(schema) = schemas.get(id) else {
-                return Err(ActorError::Functional { description: "There is a contract that requires compilation but its scheme could not be found".to_owned()});
-            };
-
-            let response = compiler
-                .ask(TempCompilerMessage::Compile {
-                    contract_name: format!("{}_{}", self.governance_id, id),
-                    contract: schema.contract.clone(),
-                    initial_value: schema.initial_value.0.clone(),
-                })
-                .await?;
-
-            if let CompilerResponse::Error(e) = response {
-                compiler.ask_stop().await?;
-                return Ok(Some(e));
-            }
-        }
-
-        compiler.ask_stop().await?;
-        Ok(None)
-    }
-
     async fn evaluate(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -190,38 +156,15 @@ impl EvalWorker {
             .await
             .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
 
-        let (result, compilations) = match response {
-            RunnerResponse::Ok {
-                result,
-                compilations,
-            } => (result, compilations),
+        // The init check of new or changed schema contracts is done by the
+        // compilation phase (with quorum) BEFORE evaluation, so the runner
+        // result is final here.
+        match response {
+            RunnerResponse::Ok { result } => Ok(result),
             RunnerResponse::Error(runner_error) => {
-                return Err(EvaluatorError::from(runner_error));
+                Err(EvaluatorError::from(runner_error))
             }
-        };
-
-        if self.init_state.is_none() && !compilations.is_empty() {
-            let governance_data = GovernanceData::try_from(
-                result.final_state.clone(),
-            )
-            .map_err(|e| {
-                let e = format!(
-                    "can not convert GovernanceData from properties: {}",
-                    e
-                );
-                EvaluatorError::InternalError(e)
-            })?;
-
-            if let Some(error) = self
-                .compile_contracts(ctx, &compilations, governance_data.schemas)
-                .await
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?
-            {
-                return Err(EvaluatorError::from(error));
-            };
         }
-
-        Ok(result)
     }
 
     fn generate_json_patch(
@@ -391,13 +334,11 @@ impl EvalWorker {
             | EvaluatorError::InvalidEventRequest(..) => {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
-            // The evaluator can not evaluate (its compiler pool is
-            // unreachable, its local artifacts are missing or its own
-            // resources are not enough): not the request's fault, cast no
-            // verdict. The requester replaces this evaluator from its
-            // pending pool.
+            // The evaluator can not evaluate (its local artifacts are
+            // missing or its own resources are not enough): not the
+            // request's fault, cast no verdict. The requester replaces
+            // this evaluator from its pending pool.
             EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..))
-            | EvaluatorError::CompilersUnavailable(..)
             | EvaluatorError::ResourceUnavailable(..) => {
                 return Ok(EvaluationRes::Unavailable);
             }

@@ -4,7 +4,6 @@ use ave_common::{ValueWrapper, identity::DigestIdentifier};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::evaluation::compiler::error::CompilerError;
 use crate::evaluation::runner::error::RunnerError;
 
 /// A struct representing an evaluation response.
@@ -28,8 +27,8 @@ pub enum EvaluationRes {
     TimeOut,
     Reboot,
     /// The evaluator can not evaluate right now for reasons unrelated to
-    /// the request (its compiler pool is down, its local artifacts are
-    /// missing...): not a verdict. The requester drops the evaluator from
+    /// the request (its local artifacts are missing, its own resources are
+    /// not enough...): not a verdict. The requester drops the evaluator from
     /// the current set, pulls fresh ones from the pending pool and only
     /// reboots the request when no evaluator can answer at all.
     ///
@@ -79,10 +78,6 @@ pub enum EvaluatorError {
     InvalidEventRequest(String),
     Runner(EvalRunnerError),
     InternalError(String),
-    /// The compiler infrastructure is unavailable or untrustworthy: not a
-    /// contract failure and not a request failure — the evaluator answers
-    /// `EvaluationRes::Unavailable` and casts no verdict.
-    CompilersUnavailable(String),
     /// The node cannot do the work with its own resources (memory or
     /// instantiation limits, which derive from this machine's spec):
     /// another evaluator with more capacity may succeed, so the evaluator
@@ -129,81 +124,8 @@ impl std::fmt::Display for EvaluatorError {
             }
             Self::Runner(e) => write!(f, "runner error: {}", e),
             Self::InternalError(msg) => write!(f, "internal error: {}", msg),
-            Self::CompilersUnavailable(msg) => {
-                write!(f, "compilers unavailable: {}", msg)
-            }
             Self::ResourceUnavailable(msg) => {
                 write!(f, "resource unavailable: {}", msg)
-            }
-        }
-    }
-}
-
-impl From<CompilerError> for EvaluatorError {
-    fn from(value: CompilerError) -> Self {
-        match value {
-            // User errors: the submitted contract is invalid
-            CompilerError::Base64DecodeFailed { .. } => {
-                Self::InvalidEventRequest(value.to_string())
-            }
-            // Deterministic contract failures: every healthy evaluator hits
-            // them identically (same artifact, pinned engine, fixed
-            // network-wide fuel limit), so they are a failed evaluation
-            // vote, never a node crash. A pathological contract must not
-            // take evaluators down.
-            CompilerError::CompilationFailed
-            | CompilerError::InvalidModule { .. }
-            | CompilerError::EntryPointNotFound { .. }
-            | CompilerError::ContractCheckFailed { .. }
-            | CompilerError::ContractExecutionFailed { .. }
-            | CompilerError::InvalidContractOutput { .. }
-            | CompilerError::FuelLimitError { .. }
-            | CompilerError::WasmPrecompileFailed { .. }
-            | CompilerError::WasmDeserializationFailed { .. } => {
-                Self::Runner(EvalRunnerError::ContractFailed(value.to_string()))
-            }
-            // Resource limits whose ceiling derives from this machine's
-            // spec: another evaluator with more capacity may succeed, so
-            // the node casts no verdict instead of calling the request
-            // invalid.
-            CompilerError::InstantiationFailed { .. }
-            | CompilerError::MemoryAllocationFailed { .. } => {
-                Self::ResourceUnavailable(value.to_string())
-            }
-            // Compiler infrastructure: a liveness problem, not a contract
-            // validity problem. The worker maps these to
-            // `EvaluationRes::Unavailable` (the evaluator casts no verdict;
-            // the request only escalates to reboot if nobody can evaluate).
-            // The node no longer compiles: `CargoBuildFailed`/`BuildTimeout`
-            // are only produced by the compiler service, so if they ever
-            // reach the node they come from there.
-            CompilerError::CompilersUnavailable { .. }
-            | CompilerError::ToolchainMismatch { .. }
-            | CompilerError::InvalidAttestationSignature
-            | CompilerError::AttestationMismatch { .. }
-            | CompilerError::CargoBuildFailed { .. }
-            | CompilerError::BuildTimeout { .. }
-            | CompilerError::FetchedArtifactMismatch { .. }
-            | CompilerError::FetchedArtifactDecompressionFailed { .. } => {
-                Self::CompilersUnavailable(value.to_string())
-            }
-            // System failures: should not happen in a healthy environment
-            CompilerError::InvalidContractPath { .. }
-            | CompilerError::DirectoryCreationFailed { .. }
-            | CompilerError::FileWriteFailed { .. }
-            | CompilerError::FileReadFailed { .. }
-            | CompilerError::MissingHelper { .. }
-            | CompilerError::ContractRegisterFailed { .. }
-            | CompilerError::ToolchainFingerprintFailed { .. }
-            | CompilerError::EngineCreation { .. }
-            | CompilerError::SerializationError { .. }
-            // Anchor problems are local integrity failures (manipulated
-            // or corrupt artifact, register drift): never a verdict on
-            // the contract. Kept in sync with
-            // `is_local_fatal_compiler_error`.
-            | CompilerError::MissingArtifactAnchor { .. }
-            | CompilerError::ArtifactAnchorMismatch { .. } => {
-                Self::InternalError(value.to_string())
             }
         }
     }

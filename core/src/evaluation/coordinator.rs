@@ -241,7 +241,7 @@ impl Handler<Self> for EvalCoordinator {
                 #[cfg(not(any(test, feature = "test")))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
                     3,
-                    Duration::from_secs(60),
+                    Duration::from_secs(10),
                 ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(

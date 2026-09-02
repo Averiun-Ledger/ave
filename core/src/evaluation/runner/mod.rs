@@ -100,7 +100,7 @@ impl Runner {
         ctx: &ActorContext<Self>,
         data: &EvaluateInfo,
         is_owner: bool,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         match data {
             EvaluateInfo::GovFact { payload, state } => {
                 Self::execute_fact_gov(state.clone(), payload).await
@@ -153,7 +153,7 @@ impl Runner {
         old_owner: &PublicKey,
         namespace: Namespace,
         schema_id: &SchemaType,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         if new_owner.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
@@ -199,19 +199,16 @@ impl Runner {
             });
         }
 
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: ValueWrapper(json!([])),
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: ValueWrapper(json!([])),
+        })
     }
 
     fn execute_transfer_gov(
         governance: &GovernanceData,
         new_owner: &PublicKey,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         if new_owner.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_gov",
@@ -251,20 +248,17 @@ impl Runner {
             });
         }
 
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: ValueWrapper(json!([])),
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: ValueWrapper(json!([])),
+        })
     }
 
     fn execute_confirm_gov(
         mut governance: GovernanceData,
         old_owner_name: Option<String>,
         new_owner: &PublicKey,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         if new_owner.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_confirm_gov",
@@ -374,13 +368,10 @@ impl Runner {
 
         let mod_governance = governance.to_value_wrapper();
 
-        Ok((
-            RunnerResult {
-                final_state: mod_governance,
-                approval_required: false,
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            final_state: mod_governance,
+            approval_required: false,
+        })
     }
 
     async fn execute_fact_not_gov(
@@ -390,7 +381,7 @@ impl Runner {
         payload: &ValueWrapper,
         contract_name: &str,
         is_owner: bool,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         let Some(contract_runtime) = ctx
             .system()
             .get_helper::<Arc<ContractRuntime>>("contract_runtime")
@@ -430,19 +421,16 @@ impl Runner {
             });
         }
 
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: result.final_state,
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: result.final_state,
+        })
     }
 
     async fn execute_fact_gov(
         mut governance: GovernanceData,
         event: &ValueWrapper,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         let event: GovernanceEvent = serde_json::from_value(event.0.clone())
             .map_err(|e| RunnerError::InvalidEvent {
                 location: "execute_fact_gov",
@@ -470,19 +458,12 @@ impl Runner {
             }
         }
 
-        let add_change_schemas = if let Some(schema_event) = event.schemas {
-            let (add_schemas, remove_schemas, change_schemas) =
+        if let Some(schema_event) = event.schemas {
+            let (add_schemas, remove_schemas, _) =
                 Self::apply_schemas(&schema_event, &mut governance)?;
             governance.remove_schema(remove_schemas);
-            governance.add_schema(add_schemas.clone());
-
-            add_schemas
-                .union(&change_schemas)
-                .cloned()
-                .collect::<Vec<SchemaType>>()
-        } else {
-            vec![]
-        };
+            governance.add_schema(add_schemas);
+        }
 
         if let Some(roles_event) = event.roles {
             Self::check_roles(roles_event, &mut governance)?;
@@ -504,13 +485,10 @@ impl Runner {
 
         let mod_governance = governance.to_value_wrapper();
 
-        Ok((
-            RunnerResult {
-                final_state: mod_governance,
-                approval_required: true,
-            },
-            add_change_schemas,
-        ))
+        Ok(RunnerResult {
+            final_state: mod_governance,
+            approval_required: true,
+        })
     }
 
     fn check_policies(
@@ -1579,10 +1557,7 @@ impl Message for RunnerMessage {}
 
 #[derive(Debug, Clone)]
 pub enum RunnerResponse {
-    Ok {
-        result: RunnerResult,
-        compilations: Vec<SchemaType>,
-    },
+    Ok { result: RunnerResult },
     Error(RunnerError),
 }
 
@@ -1616,18 +1591,14 @@ impl Handler<Self> for Runner {
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
-            Ok((result, compilations)) => {
+            Ok(result) => {
                 debug!(
                     msg_type = "Execute",
                     approval_required = result.approval_required,
-                    compilations_count = compilations.len(),
                     is_owner = msg.is_owner,
                     "Contract executed successfully"
                 );
-                Ok(RunnerResponse::Ok {
-                    result,
-                    compilations,
-                })
+                Ok(RunnerResponse::Ok { result })
             }
             Err(e) => {
                 error!(

@@ -21,13 +21,11 @@ use crate::system::ConfigHelper;
 
 pub mod contract_compiler;
 pub mod error;
-pub mod temp_compiler;
 
 pub use ave_compiler::ContractArtifactRecord;
 pub use contract_compiler::{
     ContractCompiler, ContractCompilerAction, ContractCompilerMessage,
 };
-pub use temp_compiler::{TempCompiler, TempCompilerMessage};
 
 use error::CompilerError;
 
