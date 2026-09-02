@@ -743,3 +743,122 @@ pub fn map_runtime_error_to_compiler_error(
         }
     }
 }
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+
+    /// Distinct fingerprints per case so parallel tests never share a
+    /// global cache entry.
+    fn test_fingerprints(
+        tag: &str,
+    ) -> (
+        DigestIdentifier,
+        DigestIdentifier,
+        DigestIdentifier,
+        DigestIdentifier,
+    ) {
+        let hash = HashAlgorithm::Blake3;
+        let digest = |label: &str| {
+            hash_borsh(&*hash.hasher(), &format!("global-cache-test-{tag}-{label}"))
+                .expect("hashing a static label must succeed")
+        };
+        (digest("contract"), digest("manifest"), digest("engine"), digest("toolchain"))
+    }
+
+    /// Corrupt or missing global cache entries must be a clean miss
+    /// (`None` → fall through to the compiler pool), never a bad module:
+    /// a poisoned shared cache would silently corrupt the whole suite.
+    #[tokio::test]
+    async fn global_cache_integrity_guards() {
+        let runtime = Arc::new(
+            ContractRuntime::new(None).expect("runtime must be created"),
+        );
+
+        // Case 1: corrupt metadata.borsh (invalid borsh) → miss.
+        let (contract, manifest, engine, toolchain) = test_fingerprints("meta");
+        let cache_dir =
+            global_cache_entry_dir(&contract, &manifest, &engine, &toolchain);
+        fs::create_dir_all(&cache_dir)
+            .await
+            .expect("cache dir must be created");
+        fs::write(global_cache_metadata_path(&cache_dir), b"not borsh")
+            .await
+            .expect("metadata must be written");
+        let result = try_load_global_cache(
+            HashAlgorithm::Blake3,
+            &runtime,
+            Value::Null,
+            &contract,
+            &manifest,
+            &engine,
+            &toolchain,
+        )
+        .await
+        .expect("corrupt metadata must be a miss, not an error");
+        assert!(result.is_none(), "corrupt metadata must not be served");
+        let _ = fs::remove_dir_all(&cache_dir).await;
+
+        // Case 2: valid metadata, but the wasm bytes do not match the
+        // recorded hash → miss.
+        let (contract, manifest, engine, toolchain) = test_fingerprints("wasm");
+        let cache_dir =
+            global_cache_entry_dir(&contract, &manifest, &engine, &toolchain);
+        let wasm_bytes = b"fake wasm".to_vec();
+        let precompiled_bytes = b"fake cwasm".to_vec();
+        let mut record = build_contract_record(
+            HashAlgorithm::Blake3,
+            contract.clone(),
+            manifest.clone(),
+            &wasm_bytes,
+            &precompiled_bytes,
+            engine.clone(),
+            toolchain.clone(),
+        )
+        .expect("record must be built");
+        // Poison the record: the hash no longer describes the bytes.
+        record.wasm_hash = hash_bytes(
+            HashAlgorithm::Blake3,
+            b"different bytes",
+            "poisoned wasm hash",
+        )
+        .expect("hash must be computed");
+        persist_global_cache_artifact(
+            &cache_dir,
+            &record,
+            &wasm_bytes,
+            &precompiled_bytes,
+        )
+        .await
+        .expect("artifact must be persisted");
+        let result = try_load_global_cache(
+            HashAlgorithm::Blake3,
+            &runtime,
+            Value::Null,
+            &contract,
+            &manifest,
+            &engine,
+            &toolchain,
+        )
+        .await
+        .expect("corrupt wasm must be a miss, not an error");
+        assert!(result.is_none(), "corrupt wasm must not be served");
+        let _ = fs::remove_dir_all(&cache_dir).await;
+
+        // Case 3: lookup under a toolchain key with no entry → miss.
+        let (contract, manifest, engine, _) = test_fingerprints("toolchain");
+        let (_, _, _, absent_toolchain) = test_fingerprints("absent");
+        let result = try_load_global_cache(
+            HashAlgorithm::Blake3,
+            &runtime,
+            Value::Null,
+            &contract,
+            &manifest,
+            &engine,
+            &absent_toolchain,
+        )
+        .await
+        .expect("absent entry must be a miss, not an error");
+        assert!(result.is_none(), "unknown toolchain key must be a miss");
+    }
+}

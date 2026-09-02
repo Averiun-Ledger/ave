@@ -974,3 +974,192 @@ impl CompilerSupport {
         Ok((module, metadata))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::error::InvalidModuleKind;
+    use super::*;
+
+    fn sample_errors() -> Vec<CompilerError> {
+        vec![
+            CompilerError::InvalidContractPath {
+                path: "p".to_owned(),
+                details: "d".to_owned(),
+            },
+            CompilerError::Base64DecodeFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::DirectoryCreationFailed {
+                path: "p".to_owned(),
+                details: "d".to_owned(),
+            },
+            CompilerError::FileWriteFailed {
+                path: "p".to_owned(),
+                details: "d".to_owned(),
+            },
+            CompilerError::FileReadFailed {
+                path: "p".to_owned(),
+                kind: std::io::ErrorKind::NotFound,
+                details: "d".to_owned(),
+            },
+            CompilerError::FileReadFailed {
+                path: "p".to_owned(),
+                kind: std::io::ErrorKind::Interrupted,
+                details: "d".to_owned(),
+            },
+            CompilerError::FileReadFailed {
+                path: "p".to_owned(),
+                kind: std::io::ErrorKind::WouldBlock,
+                details: "d".to_owned(),
+            },
+            CompilerError::FileReadFailed {
+                path: "p".to_owned(),
+                kind: std::io::ErrorKind::TimedOut,
+                details: "d".to_owned(),
+            },
+            CompilerError::CargoBuildFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::BuildTimeout { secs: 1 },
+            CompilerError::CompilationFailed,
+            CompilerError::CompilersUnavailable {
+                details: "d".to_owned(),
+            },
+            CompilerError::ToolchainMismatch {
+                expected: "e".to_owned(),
+                actual: "a".to_owned(),
+            },
+            CompilerError::InvalidAttestationSignature,
+            CompilerError::AttestationMismatch {
+                expected: "e".to_owned(),
+                actual: "a".to_owned(),
+            },
+            CompilerError::MissingHelper { name: "h" },
+            CompilerError::ContractRegisterFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::ToolchainFingerprintFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::WasmPrecompileFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::WasmDeserializationFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::InvalidModule {
+                kind: InvalidModuleKind::MissingImports { missing: vec![] },
+            },
+            CompilerError::FuelLimitError {
+                details: "d".to_owned(),
+            },
+            CompilerError::InstantiationFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::EntryPointNotFound { function: "f" },
+            CompilerError::ContractExecutionFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::SerializationError {
+                context: "c",
+                details: "d".to_owned(),
+            },
+            CompilerError::InvalidContractOutput {
+                details: "d".to_owned(),
+            },
+            CompilerError::MemoryAllocationFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::ContractCheckFailed {
+                error: "e".to_owned(),
+            },
+            CompilerError::EngineCreation {
+                details: "d".to_owned(),
+            },
+            CompilerError::FetchedArtifactMismatch {
+                expected: "e".to_owned(),
+                actual: "a".to_owned(),
+            },
+            CompilerError::FetchedArtifactDecompressionFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::MissingArtifactAnchor {
+                contract_name: "c".to_owned(),
+            },
+            CompilerError::ArtifactAnchorMismatch {
+                expected: "e".to_owned(),
+                actual: "a".to_owned(),
+            },
+        ]
+    }
+
+    /// Expected classification of every `CompilerError` variant:
+    /// (infrastructure, local fatal, retryable recovery). The match is
+    /// exhaustive on purpose: adding a variant fails compilation here,
+    /// forcing an explicit classification decision instead of silently
+    /// falling into a `matches!` default.
+    fn expected_classification(error: &CompilerError) -> (bool, bool, bool) {
+        match error {
+            CompilerError::CompilersUnavailable { .. } => (true, false, true),
+            CompilerError::ToolchainMismatch { .. }
+            | CompilerError::InvalidAttestationSignature
+            | CompilerError::AttestationMismatch { .. } => (true, false, false),
+            CompilerError::FileReadFailed { kind, .. } => (
+                false,
+                true,
+                matches!(
+                    kind,
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ),
+            ),
+            CompilerError::InvalidContractPath { .. }
+            | CompilerError::DirectoryCreationFailed { .. }
+            | CompilerError::FileWriteFailed { .. }
+            | CompilerError::MissingHelper { .. }
+            | CompilerError::ContractRegisterFailed { .. }
+            | CompilerError::ToolchainFingerprintFailed { .. }
+            | CompilerError::EngineCreation { .. }
+            | CompilerError::SerializationError { .. }
+            | CompilerError::MissingArtifactAnchor { .. }
+            | CompilerError::ArtifactAnchorMismatch { .. } => {
+                (false, true, false)
+            }
+            CompilerError::Base64DecodeFailed { .. }
+            | CompilerError::CargoBuildFailed { .. }
+            | CompilerError::BuildTimeout { .. }
+            | CompilerError::CompilationFailed
+            | CompilerError::WasmPrecompileFailed { .. }
+            | CompilerError::WasmDeserializationFailed { .. }
+            | CompilerError::InvalidModule { .. }
+            | CompilerError::FuelLimitError { .. }
+            | CompilerError::InstantiationFailed { .. }
+            | CompilerError::EntryPointNotFound { .. }
+            | CompilerError::ContractExecutionFailed { .. }
+            | CompilerError::InvalidContractOutput { .. }
+            | CompilerError::MemoryAllocationFailed { .. }
+            | CompilerError::ContractCheckFailed { .. }
+            | CompilerError::FetchedArtifactMismatch { .. }
+            | CompilerError::FetchedArtifactDecompressionFailed { .. } => {
+                (false, false, false)
+            }
+        }
+    }
+
+    #[test]
+    fn compiler_error_taxonomy_matches_classification() {
+        for error in sample_errors() {
+            let expected = expected_classification(&error);
+            let actual = (
+                is_compiler_infra_error(&error),
+                is_local_fatal_compiler_error(&error),
+                is_retryable_compiler_recovery_error(&error),
+            );
+            assert_eq!(
+                actual, expected,
+                "unexpected classification for {error}"
+            );
+        }
+    }
+}

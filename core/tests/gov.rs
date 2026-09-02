@@ -9284,3 +9284,691 @@ async fn test_contract_cached_artifact_evaluates_with_dead_compiler_pool() {
     assert_eq!(state.sn, 2);
     assert_eq!(state.properties, json!({"one": 1, "two": 9, "three": 0}));
 }
+
+#[test(tokio::test)]
+// Un evaluador de gobernanza SIN rol compiler y con el pool muerto evalúa
+// y vota eventos de gobernanza (incluido un alta de schema que compilan
+// OTROS nodos): la evaluación de gobernanza es código nativo y nunca toca
+// el pool. El quorum Majority con 2 evaluadores exige ambos votos, así que
+// el commit prueba que AveNode2 evaluó con el pool caído.
+async fn test_gov_evaluator_dead_pool_votes_schema_add() {
+    let (nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    // AveNode2: evaluador y testigo de gobernanza con el pool muerto.
+    let (node2, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node2_dirs);
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser evaluador y testigo de la gobernanza.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "evaluator": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 2: alta del schema con contrato. Lo compila el Owner (único
+    // compiler); la evaluación de gobernanza exige el voto de AveNode2,
+    // que evalúa nativamente con su pool muerto.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let state = get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+
+    node_running(&node2.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Un cambio de schema que solo toca viewpoints (sin contrato ni
+// initial_value) no pasa por la fase de compilación: con el pool muerto
+// tras el reinicio el evento commitea igualmente y el schema sigue
+// evaluando con el artefacto persistido.
+async fn test_gov_viewpoints_only_change_no_compile_dead_pool() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+
+    let (mut node1, mut node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: schema "Example" con viewpoints iniciales y sus roles.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["base"]
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Reinicio con el pool muerto conservando claves, bases de datos y el
+    // directorio de contratos (el artefacto v1 carga de disco).
+    let keys = node1.keys.clone();
+    let local_db = node1_dirs[0].path().to_path_buf();
+    let ext_db = node1_dirs[1].path().to_path_buf();
+
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    let (node1, mut node1_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    node1_dirs.append(&mut node1_dirs_new);
+    node_running(&node1.api).await.unwrap();
+
+    // SN 2: cambio solo de viewpoints. Nada que compilar: el evento
+    // commitea con el pool muerto.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_viewpoints": ["agua"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    let schema = gov
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.viewpoints, BTreeSet::from(["agua".to_owned()]));
+
+    // El schema sigue evaluando con el artefacto persistido.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 7}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 7, "two": 0, "three": 0}));
+
+    node_running(&node1.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Un cambio solo de initial_value con el pool muerto y el artefacto
+// oficial sano reutiliza los bytes persistidos: la fase de compilación
+// revalida el nuevo init contra el artefacto en disco, el evento commitea
+// sin ninguna build (el pool muerto lo prueba: cualquier llamada al pool
+// impediría el commit) y el ancla no se mueve (mismo wasm tras el commit).
+async fn test_gov_init_only_change_reuses_artifact_dead_pool() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+
+    let (mut node1, mut node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: schema "Example" con la v1 del contrato.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let wasm_path = contracts_dir
+        .path()
+        .join("contracts")
+        .join(format!("{governance_id}_Example"))
+        .join("contract.wasm");
+    let wasm_before = fs::read(&wasm_path).unwrap();
+
+    // Reinicio con el pool muerto conservando claves, bases de datos y el
+    // directorio de contratos.
+    let keys = node1.keys.clone();
+    let local_db = node1_dirs[0].path().to_path_buf();
+    let ext_db = node1_dirs[1].path().to_path_buf();
+
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    let (node1, mut node1_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    node1_dirs.append(&mut node1_dirs_new);
+    node_running(&node1.api).await.unwrap();
+
+    // SN 2: cambio solo de initial_value. El worker revalida el nuevo
+    // valor contra el artefacto persistido y commitea sin tocar el pool.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_initial_value": {
+                        "one": 1,
+                        "two": 2,
+                        "three": 3
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert_eq!(gov.version, 2);
+    let schema = gov
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 1, "two": 2, "three": 3})
+    );
+
+    // El ancla no se movió: el wasm oficial es byte a byte el mismo.
+    let wasm_after = fs::read(&wasm_path).unwrap();
+    assert_eq!(wasm_before, wasm_after);
+
+    node_running(&node1.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Un mismo evento que da de alta dos schemas con la MISMA fuente de
+// contrato promueve ambos artefactos (staging nombrado por schema) y
+// ambos schemas evalúan con normalidad.
+async fn test_gov_compile_same_source_two_schemas() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: dos schemas con la misma fuente de contrato en un evento.
+    let schema_roles = |schema_id: &str| {
+        json!({
+            "schema_id": schema_id,
+            "add": {
+                "evaluator": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "validator": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "witness": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "creator": [
+                    {
+                        "name": "Owner",
+                        "namespace": [],
+                        "quantity": 10
+                    }
+                ],
+                "issuer": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ]
+            }
+        })
+    };
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "ExampleA",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "ExampleB",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                schema_roles("ExampleA"),
+                schema_roles("ExampleB")
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("ExampleA".to_owned()))
+    );
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("ExampleB".to_owned()))
+    );
+
+    // Ambos artefactos quedaron promovidos.
+    for schema_id in ["ExampleA", "ExampleB"] {
+        assert!(
+            contracts_dir
+                .path()
+                .join("contracts")
+                .join(format!("{governance_id}_{schema_id}"))
+                .join("contract.cwasm")
+                .exists()
+        );
+    }
+
+    // Y ambos schemas evalúan.
+    for (schema_id, value) in [("ExampleA", 1), ("ExampleB", 2)] {
+        let (subject_id, ..) = create_subject(
+            &node1.api,
+            governance_id.clone(),
+            schema_id,
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact(
+            &node1.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": value}}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.properties,
+            json!({"one": value, "two": 0, "three": 0})
+        );
+    }
+
+    node_running(&node1.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Un cambio solo de initial_value con el artefacto oficial borrado del
+// disco fuerza una recompilación verificada contra el ancla del ledger:
+// la build reproduce los bytes anclados, la ronda cierra Ok y el ancla no
+// se mueve (el wasm repuesto es byte a byte el original).
+async fn test_gov_init_only_change_missing_artifact_recompiles_anchored() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: schema "Example" con la v1 del contrato.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let artifact_dir = contracts_dir
+        .path()
+        .join("contracts")
+        .join(format!("{governance_id}_Example"));
+    let wasm_before = fs::read(artifact_dir.join("contract.wasm")).unwrap();
+
+    // El artefacto oficial desaparece del disco en caliente.
+    fs::remove_dir_all(&artifact_dir).unwrap();
+
+    // SN 2: cambio solo de initial_value. El worker no encuentra el
+    // artefacto, recompila desde el pool y la verificación contra el
+    // ancla pasa: la build es determinista y reproduce los bytes
+    // anclados.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_initial_value": {
+                        "one": 5,
+                        "two": 6,
+                        "three": 7
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert_eq!(gov.version, 2);
+    let schema = gov
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 5, "two": 6, "three": 7})
+    );
+
+    // El ancla no se movió: el artefacto repuesto reproduce los bytes
+    // originales.
+    let wasm_after = fs::read(artifact_dir.join("contract.wasm")).unwrap();
+    assert_eq!(wasm_before, wasm_after);
+
+    node_running(&node1.api).await.unwrap();
+}

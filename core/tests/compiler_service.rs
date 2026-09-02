@@ -362,3 +362,136 @@ async fn client_toolchain_mismatch() {
         "expected ToolchainMismatch, got: {error}"
     );
 }
+
+/// Same minimal contract with a different field: a fresh source, so its
+/// artifact store entry belongs to this test alone.
+const CONTRACT_C: &str = r#"
+use serde::{Serialize, Deserialize};
+use ave_contract_sdk as sdk;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct State {
+    pub three: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+enum StateEvent {
+    ModThree { data: u32 },
+}
+
+#[unsafe(no_mangle)]
+pub unsafe fn main_function(
+    state_ptr: i32,
+    init_state_ptr: i32,
+    event_ptr: i32,
+    is_owner: i32,
+) -> u32 {
+    sdk::execute_contract(
+        state_ptr,
+        init_state_ptr,
+        event_ptr,
+        is_owner,
+        contract_logic,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe fn init_check_function(state_ptr: i32) -> u32 {
+    sdk::check_init_data(state_ptr, init_logic)
+}
+
+fn init_logic(
+    _state: &State,
+    contract_result: &mut sdk::ContractInitCheck,
+) {
+    contract_result.success = true;
+}
+
+fn contract_logic(
+    context: &sdk::Context<StateEvent>,
+    contract_result: &mut sdk::ContractResult<State>,
+) {
+    let StateEvent::ModThree { data } = context.event;
+    contract_result.state.three = data;
+}
+"#;
+
+/// Names of the entries currently in the shared server's artifact store.
+fn artifact_entries(server: &SharedServer) -> Vec<String> {
+    let mut entries: Vec<String> = std::fs::read_dir(
+        server._root.path().join("artifacts"),
+    )
+    .expect("artifacts dir must exist")
+    .filter_map(|entry| {
+        let entry = entry.expect("entry must be readable");
+        entry.file_type().ok()?.is_dir().then(|| {
+            entry.file_name().to_string_lossy().into_owned()
+        })
+    })
+    .collect();
+    entries.sort();
+    entries
+}
+
+/// Artifact store integrity: an entry whose wasm bytes do not match the
+/// persisted hash, and an entry missing the hash file, are dropped and
+/// rebuilt — never served. Guards the `ArtifactStore::lookup` corruption
+/// paths the rest of the suite does not exercise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn compile_artifact_store_corruption_rebuilds() {
+    let server = shared_server().await;
+    let client = client_for(&server.endpoint);
+    let source = source_b64(CONTRACT_C);
+
+    let before_entries = artifact_entries(server);
+    let baseline = client
+        .compile(&source)
+        .await
+        .expect("initial compile should succeed");
+
+    // The entry created by the compile above belongs to CONTRACT_C.
+    let entry_dir = artifact_entries(server)
+        .into_iter()
+        .find(|entry| !before_entries.contains(entry))
+        .expect("the compile must create a new artifact store entry");
+    let entry_path = server
+        ._root
+        .path()
+        .join("artifacts")
+        .join(&entry_dir);
+
+    // Corrupt the wasm bytes: the hash check must drop the entry and the
+    // compile must rebuild it, serving the same good artifact.
+    std::fs::write(entry_path.join("contract.wasm"), b"corrupted")
+        .expect("wasm file must be writable");
+    let before = counter(server);
+    let rebuilt = client
+        .compile(&source)
+        .await
+        .expect("compile after wasm corruption should succeed");
+    assert_eq!(
+        counter(server) - before,
+        1,
+        "a corrupt entry must be rebuilt, not served"
+    );
+    assert_eq!(rebuilt.wasm, baseline.wasm);
+    assert_eq!(rebuilt.wasm_hash, baseline.wasm_hash);
+
+    // Remove the hash file: the entry is incomplete, so it must also be
+    // dropped and rebuilt.
+    std::fs::remove_file(entry_path.join("wasm.hash"))
+        .expect("hash file must exist after the rebuild");
+    let before = counter(server);
+    let rebuilt = client
+        .compile(&source)
+        .await
+        .expect("compile after hash file removal should succeed");
+    assert_eq!(
+        counter(server) - before,
+        1,
+        "an entry without hash file must be rebuilt, not served"
+    );
+    assert_eq!(rebuilt.wasm, baseline.wasm);
+    assert_eq!(rebuilt.wasm_hash, baseline.wasm_hash);
+}

@@ -196,3 +196,178 @@ impl ResponseSummary {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_common::identity::{
+        DSAlgorithm, PublicKey, SignatureIdentifier, TimeStamp,
+    };
+    use borsh::{BorshDeserialize, to_vec};
+
+    /// Borsh of `DigestIdentifier::default()`: algorithm tag (Blake3 = 0)
+    /// plus an empty byte vector (u32 length 0).
+    fn default_digest_bytes() -> Vec<u8> {
+        vec![0, 0, 0, 0, 0]
+    }
+
+    /// Borsh of a `String`: u32 little-endian length plus raw bytes.
+    fn string_bytes(s: &str) -> Vec<u8> {
+        let mut bytes = (s.len() as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(s.as_bytes());
+        bytes
+    }
+
+    fn sample_signature() -> Signature {
+        Signature {
+            signer: PublicKey::default(),
+            timestamp: TimeStamp::from_nanos(1),
+            content_hash: DigestIdentifier::default(),
+            value: SignatureIdentifier::new(
+                DSAlgorithm::Ed25519,
+                vec![0xAB; 64],
+            )
+            .expect("64 bytes is a valid Ed25519 signature length"),
+        }
+    }
+
+    fn sample_signature_bytes() -> Vec<u8> {
+        let mut bytes = vec![0, 0, 0, 0, 0]; // signer: Ed25519 + empty key
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // timestamp
+        bytes.extend_from_slice(&default_digest_bytes()); // content hash
+        bytes.push(0); // signature algorithm: Ed25519
+        bytes.extend_from_slice(&64u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAB; 64]);
+        bytes
+    }
+
+    fn sample_ok_result() -> EvaluationResult {
+        EvaluationResult::Ok {
+            response: EvaluatorResponse {
+                patch: ValueWrapper(serde_json::Value::Bool(true)),
+                properties_hash: DigestIdentifier::default(),
+                appr_required: false,
+            },
+            eval_req_hash: DigestIdentifier::default(),
+            req_subject_data_hash: DigestIdentifier::default(),
+        }
+    }
+
+    fn sample_ok_result_bytes() -> Vec<u8> {
+        let mut bytes = vec![0]; // EvaluationResult::Ok
+        bytes.extend_from_slice(&[0, 1]); // patch: bool true
+        bytes.extend_from_slice(&default_digest_bytes()); // properties hash
+        bytes.push(0); // appr_required: false
+        bytes.extend_from_slice(&default_digest_bytes()); // eval_req_hash
+        bytes.extend_from_slice(&default_digest_bytes()); // req_subject_data_hash
+        bytes
+    }
+
+    fn assert_wire_shape<T>(value: &T, expected: &[u8])
+    where
+        T: BorshSerialize + BorshDeserialize + Eq + std::fmt::Debug,
+    {
+        let encoded = to_vec(value).expect("serialization must succeed");
+        assert_eq!(
+            encoded, expected,
+            "wire shape changed: this type is signed and hash-covered; \
+             an enum edit (reorder, insert, remove) is a breaking protocol \
+             change and must be an explicit, reviewed decision"
+        );
+        let decoded =
+            T::try_from_slice(&encoded).expect("deserialization must succeed");
+        assert_eq!(&decoded, value, "round trip must be lossless");
+    }
+
+    // Wire-shape pin: borsh encodes the variant ordinal, so these exact
+    // bytes pin both the order and the field layout of the evaluation
+    // protocol messages.
+    #[test]
+    fn evaluation_wire_shape_is_pinned() {
+        // EvaluationRes::Response
+        let mut expected = vec![0];
+        expected.extend_from_slice(&sample_ok_result_bytes());
+        expected.extend_from_slice(&default_digest_bytes());
+        expected.extend_from_slice(&sample_signature_bytes());
+        assert_wire_shape(
+            &EvaluationRes::Response {
+                result: sample_ok_result(),
+                result_hash: DigestIdentifier::default(),
+                result_hash_signature: sample_signature(),
+            },
+            &expected,
+        );
+
+        // EvaluationRes::Abort
+        let mut expected = vec![1];
+        expected.extend_from_slice(&string_bytes("abort"));
+        assert_wire_shape(&EvaluationRes::Abort("abort".to_owned()), &expected);
+
+        // EvaluationRes::TimeOut / Reboot / Unavailable
+        assert_wire_shape(&EvaluationRes::TimeOut, &[2]);
+        assert_wire_shape(&EvaluationRes::Reboot, &[3]);
+        assert_wire_shape(&EvaluationRes::Unavailable, &[4]);
+
+        // EvaluationResult::Error
+        let mut expected = vec![1];
+        expected.push(0); // EvaluatorError::InvalidEventSignature
+        expected.extend_from_slice(&default_digest_bytes());
+        expected.extend_from_slice(&default_digest_bytes());
+        assert_wire_shape(
+            &EvaluationResult::Error {
+                error: EvaluatorError::InvalidEventSignature,
+                eval_req_hash: DigestIdentifier::default(),
+                req_subject_data_hash: DigestIdentifier::default(),
+            },
+            &expected,
+        );
+
+        // EvaluatorError variants
+        assert_wire_shape(&EvaluatorError::InvalidEventSignature, &[0]);
+
+        let mut expected = vec![1];
+        expected.extend_from_slice(&string_bytes("req"));
+        assert_wire_shape(
+            &EvaluatorError::InvalidEventRequest("req".to_owned()),
+            &expected,
+        );
+
+        let mut expected = vec![2, 1]; // Runner + ContractFailed
+        expected.extend_from_slice(&string_bytes("failed"));
+        assert_wire_shape(
+            &EvaluatorError::Runner(EvalRunnerError::ContractFailed(
+                "failed".to_owned(),
+            )),
+            &expected,
+        );
+
+        let mut expected = vec![3];
+        expected.extend_from_slice(&string_bytes("internal"));
+        assert_wire_shape(
+            &EvaluatorError::InternalError("internal".to_owned()),
+            &expected,
+        );
+
+        let mut expected = vec![4];
+        expected.extend_from_slice(&string_bytes("resources"));
+        assert_wire_shape(
+            &EvaluatorError::ResourceUnavailable("resources".to_owned()),
+            &expected,
+        );
+
+        // EvalRunnerError variants
+        let mut expected = vec![0];
+        expected.extend_from_slice(&string_bytes("event"));
+        assert_wire_shape(
+            &EvalRunnerError::InvalidEvent("event".to_owned()),
+            &expected,
+        );
+
+        let mut expected = vec![2];
+        expected.extend_from_slice(&string_bytes("missing"));
+        assert_wire_shape(
+            &EvalRunnerError::ContractNotFound("missing".to_owned()),
+            &expected,
+        );
+    }
+}
