@@ -21,8 +21,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Code, Request};
 use tracing::{debug, error, warn};
 
-use crate::error::CompilerError;
-use crate::pipeline;
+use super::error::CompilerError;
+use super::pipeline;
 
 use pb::compiler_service_client::CompilerServiceClient;
 

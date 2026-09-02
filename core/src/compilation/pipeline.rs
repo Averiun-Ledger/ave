@@ -25,7 +25,7 @@ use tokio::time::timeout;
 use tokio::{fs, process::Command};
 use tracing::debug;
 
-use crate::error::CompilerError;
+use super::error::CompilerError;
 
 /// Maximum time allowed for a single contract build.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(600);

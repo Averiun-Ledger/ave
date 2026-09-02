@@ -38,8 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(&generated, code)?;
     }
     // The gRPC compiler service protobuf types are only needed by the
-    // compiler crate and the node (feature `compiler-grpc`); same
-    // compilation-out rationale as `sink-grpc` above.
+    // node (feature `compiler-grpc`); same compilation-out rationale as
+    // `sink-grpc` above.
     #[cfg(feature = "compiler-grpc")]
     {
         let protoc = protoc_bin_vendored::protoc_bin_path()?;

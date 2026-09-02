@@ -2,7 +2,8 @@
 
 use std::process::ExitCode;
 
-use ave_compiler::{CompilerServer, ServiceConfig};
+use ave_core::compilation::service::CompilerServer;
+use ave_core::compilation::service_config::ServiceConfig;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 

@@ -8,19 +8,21 @@ use crate::{
     },
     auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
     compilation::{
+        contract_compiler::{
+            ContractCompiler, ContractCompilerAction, ContractCompilerMessage,
+        },
+        error::CompilerError,
         payload_contract_sources,
+        support::{
+            CompilerResponse, CompilerSupport, is_compiler_infra_error,
+            is_local_fatal_compiler_error,
+            is_retryable_compiler_recovery_error,
+        },
         worker::{CompileWorker, CompileWorkerMessage},
     },
     config::SinkTarget,
     db::Storable,
     evaluation::{
-        compiler::{
-            CompilerResponse, CompilerSupport, ContractCompiler,
-            ContractCompilerAction, ContractCompilerMessage,
-            error::CompilerError, is_compiler_infra_error,
-            is_local_fatal_compiler_error,
-            is_retryable_compiler_recovery_error,
-        },
         request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},

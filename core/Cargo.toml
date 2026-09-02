@@ -14,9 +14,8 @@ rust-version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 borsh = { workspace = true }
-ave-common = { workspace = true, features = ["sink-grpc"] }
+ave-common = { workspace = true, features = ["sink-grpc", "compiler-grpc"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
-ave-compiler = { workspace = true, features = ["client"] }
 json-patch = "4.2.0"
 ave-actors = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
@@ -47,6 +46,9 @@ tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-types = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
+subtle = { workspace = true, optional = true }
+config = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 test-log = { workspace = true }
@@ -54,7 +56,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-stream = "0.1"
 ave-network = { workspace = true, features = ["test"] }
-ave-compiler = { workspace = true, features = ["server"] }
+serial_test = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
@@ -70,4 +72,19 @@ rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["ave-actors/export-sqlite"]
 prometheus = ["ave-actors/prometheus"]
-test = ["ave-compiler/test", "ave-compiler/server"]
+# gRPC compiler service (the standalone `ave-compiler` binary and the
+# embedded test compiler): not part of the node image.
+compiler-service = [
+    "dep:subtle",
+    "dep:config",
+    "dep:tracing-subscriber",
+    "tokio-stream/net",
+    "tokio/signal",
+    "tokio/rt-multi-thread",
+]
+test = ["compiler-service"]
+
+[[bin]]
+name = "ave-compiler"
+path = "src/bin/ave-compiler.rs"
+required-features = ["compiler-service"]

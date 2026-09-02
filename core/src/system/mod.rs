@@ -77,7 +77,7 @@ pub async fn system(
     // `test` feature compiles contracts without extra wiring. An
     // explicitly configured pool always wins: failure-path tests point
     // at dead endpoints on purpose.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     let config = if config.compiler.endpoints.is_empty() {
         Config {
             compiler: crate::test_compiler::test_compiler_config().await,
@@ -151,14 +151,17 @@ pub async fn system(
                     "invalid compiler_public_key: {e}"
                 ))
             })?;
-        let compiler_client = ave_compiler::CompilerClient::new(
-            config.compiler.endpoints.clone(),
-            config.compiler.api_key.clone().unwrap_or_default(),
-            expected_toolchain,
-            compiler_public_key,
-            Some(Duration::from_secs(config.compiler.request_timeout_secs)),
-            config.compiler.pinned_cert_pem.clone(),
-        );
+        let compiler_client =
+            crate::compilation::client::CompilerClient::new(
+                config.compiler.endpoints.clone(),
+                config.compiler.api_key.clone().unwrap_or_default(),
+                expected_toolchain,
+                compiler_public_key,
+                Some(Duration::from_secs(
+                    config.compiler.request_timeout_secs,
+                )),
+                config.compiler.pinned_cert_pem.clone(),
+            );
         system.add_helper("compiler_client", Arc::new(compiler_client));
     }
 

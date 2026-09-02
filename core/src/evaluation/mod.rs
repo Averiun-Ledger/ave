@@ -37,7 +37,6 @@ use response::{EvaluationRes, EvaluatorResponse as EvalRes};
 
 use tracing::{Span, debug, error, info_span, warn};
 
-pub mod compiler;
 pub mod coordinator;
 pub mod request;
 pub mod response;

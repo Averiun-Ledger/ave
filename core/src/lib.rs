@@ -26,7 +26,7 @@ pub mod validation;
 
 /// Embedded compiler service for tests (lib tests and integration tests
 /// built with the `test` feature).
-#[cfg(any(test, feature = "test"))]
+#[cfg(feature = "test")]
 pub mod test_compiler;
 
 use std::collections::{HashMap, HashSet};

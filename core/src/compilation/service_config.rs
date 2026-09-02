@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::service::ServiceError;
+use crate::compilation::service::ServiceError;
 
 /// Default listen address of the compiler gRPC service.
 fn default_listen_addr() -> String {

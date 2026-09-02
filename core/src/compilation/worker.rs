@@ -13,11 +13,12 @@ use crate::{
         },
         request::CompilationReq,
         resolve_compile_targets,
-    },
-    evaluation::compiler::{
-        CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
-        error::CompilerError, is_compiler_infra_error,
-        is_local_fatal_compiler_error,
+        error::CompilerError,
+        pipeline,
+        support::{
+            CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
+            is_compiler_infra_error, is_local_fatal_compiler_error,
+        },
     },
     governance::{
         contract_register::{
@@ -622,7 +623,7 @@ impl CompileWorker {
             .await
             {
                 Ok((_module, record)) => {
-                    let wasm = match ave_compiler::load_artifact_wasm(
+                    let wasm = match pipeline::load_artifact_wasm(
                         &contract_path,
                     )
                     .await

@@ -12,12 +12,12 @@ use crate::{
         worker::{DistriWorker, DistriWorkerMessage},
     },
     evaluation::{
-        compiler::contract_compiler::{
-            ContractCompiler, ContractCompilerMessage,
-        },
         coordinator::{EvalCoordinator, EvalCoordinatorMessage},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
+    },
+    compilation::contract_compiler::{
+        ContractCompiler, ContractCompilerMessage,
     },
     governance::tracker_sync::{
         TrackerSync, TrackerSyncMessage, TrackerSyncNetworkRequest,

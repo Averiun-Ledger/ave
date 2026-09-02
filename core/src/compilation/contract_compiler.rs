@@ -17,9 +17,11 @@ use ave_common::identity::{
 };
 use ave_network::ComunicateInfo;
 
-use super::{
+use super::error::CompilerError;
+use super::pipeline;
+use super::support::{
     CompilerResponse, CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
-    error::CompilerError, is_local_fatal_compiler_error,
+    is_local_fatal_compiler_error,
 };
 use crate::compilation::artifact::{
     ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
@@ -1387,7 +1389,7 @@ impl Handler<Self> for ContractCompiler {
                         };
 
                         // Local first: the artifact may already be on disk.
-                        let manifest = ave_compiler::compilation_toml();
+                        let manifest = pipeline::compilation_toml();
                         let manifest_hash = hash_borsh(&*self.hash.hasher(), &manifest);
                         let manifest_hash = match manifest_hash {
                             Ok(manifest_hash) => manifest_hash,
@@ -1422,7 +1424,7 @@ impl Handler<Self> for ContractCompiler {
                                 return self
                                     .fetch_failed(
                                         ctx,
-                                        ave_compiler::map_runtime_error_to_compiler_error(
+                                        pipeline::map_runtime_error_to_compiler_error(
                                             e,
                                         ),
                                     )

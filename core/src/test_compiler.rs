@@ -48,7 +48,7 @@ async fn embedded_compiler_endpoint() -> String {
             ));
             std::fs::create_dir_all(&root)
                 .expect("Can not create compiler directory");
-            let config = ave_compiler::ServiceConfig {
+            let config = crate::compilation::service_config::ServiceConfig {
                 api_keys: vec![TEST_COMPILER_API_KEY.to_owned()],
                 max_concurrent_builds: Some(2),
                 // Shared across test processes: content-addressed entries,
@@ -57,9 +57,9 @@ async fn embedded_compiler_endpoint() -> String {
                     .join("ave-test-compiler-artifacts"),
                 work_dir: root.join("work"),
                 key_path: root.join("identity.der"),
-                ..ave_compiler::ServiceConfig::default()
+                ..crate::compilation::service_config::ServiceConfig::default()
             };
-            let server = ave_compiler::CompilerServer::new(config)
+            let server = crate::compilation::service::CompilerServer::new(config)
                 .await
                 .expect("embedded compiler should start");
             let listener = std::net::TcpListener::bind("127.0.0.1:0")

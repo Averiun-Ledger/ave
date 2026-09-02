@@ -2,17 +2,19 @@
 //! server (ephemeral port, real cargo builds) exercised through the real
 //! client. Builds are slow, so a single shared server is used and the
 //! suite is serialized (`#[serial]`) to keep assertions deterministic.
-#![cfg(all(feature = "client", feature = "server"))]
+#![cfg(feature = "test")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use ave_common::compiler::pb;
+use ave_common::compiler::pb::compiler_service_client::CompilerServiceClient;
 use ave_common::identity::{DigestIdentifier, HashAlgorithm};
-use ave_compiler::pb::compiler_service_client::CompilerServiceClient;
-use ave_compiler::{
-    CompilerClient, CompilerError, CompilerServer, ServiceConfig,
-};
+use ave_core::compilation::client::CompilerClient;
+use ave_core::compilation::error::CompilerError;
+use ave_core::compilation::service::CompilerServer;
+use ave_core::compilation::service_config::ServiceConfig;
 use base64::Engine as Base64Engine;
 use base64::prelude::BASE64_STANDARD;
 use serial_test::serial;
@@ -282,14 +284,14 @@ async fn compile_auth_rejected() {
         .expect("failed to connect to the compiler service");
 
     let no_key = client
-        .compile(Request::new(ave_compiler::pb::CompileRequest {
+        .compile(Request::new(pb::CompileRequest {
             source_b64: source_b64(CONTRACT_B),
         }))
         .await;
     let status = no_key.expect_err("request without API key must fail");
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
 
-    let mut request = Request::new(ave_compiler::pb::CompileRequest {
+    let mut request = Request::new(pb::CompileRequest {
         source_b64: source_b64(CONTRACT_B),
     });
     request

@@ -7468,10 +7468,11 @@ async fn test_update_offer_gov() {
 }
 
 #[test(tokio::test)]
-// Un evaluador con el compilador caído responde `Unavailable` y no arrastra
-// la request: el quorum de evaluación se cierra con el resto de evaluadores
-// y el fact de gobernanza con contrato se confirma.
-async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
+// Un compilador con el pool caído responde `Unavailable` y no arrastra
+// la request: el quorum de compilación (Majority de 3 = 2) se cierra con
+// el resto de compiladores y el fact de gobernanza con contrato se
+// confirma.
+async fn test_gov_compiler_unavailable_quorum_holds() {
     let (nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
@@ -7486,8 +7487,7 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
 
     // Tercer nodo cuyo compilador apunta a un endpoint muerto: toda
     // compilación falla con `CompilersUnavailable`.
-    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (node3, mut node3_dirs) = create_node(CreateNodeConfig {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);    let (node3, mut node3_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
         listen_address: format!("/memory/{}", port),
         peers: vec![RoutingNode {
@@ -7509,9 +7509,10 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
     let governance_id =
         create_and_authorize_governance(node1, vec![node2, node3]).await;
 
-    // SN 1: los tres nodos pasan a ser evaluadores y witnesses de la
-    // gobernanza. Este fact no añade contratos, así que no necesita
-    // compilación y lo evalúa el Owner (quorum Majority de 1 evaluador).
+    // SN 1: los tres nodos pasan a ser evaluadores, witnesses y
+    // compiladores de la gobernanza. Este fact no añade contratos, así
+    // que no necesita compilación y lo evalúa el Owner (quorum Majority
+    // de 1 evaluador y 1 compilador).
     let json = json!({
         "members": {
             "add": [
@@ -7529,7 +7530,8 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
             "governance": {
                 "add": {
                     "witness": ["AveNode2", "AveNode3"],
-                    "evaluator": ["AveNode2", "AveNode3"]
+                    "evaluator": ["AveNode2", "AveNode3"],
+                    "compiler": ["AveNode2", "AveNode3"]
                 }
             }
         }
@@ -7556,9 +7558,10 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
         .await
         .unwrap();
 
-    // SN 2: fact que añade un schema con contrato. La evaluación exige
-    // compilarlo de forma temporal; node3 no puede y responde `Unavailable`,
-    // pero el quorum Majority (2 de 3) se cierra con node1 y node2.
+    // SN 2: fact que añade un schema con contrato. La fase de compilación
+    // exige quorum Majority de 3 compiladores (2): node3 no puede compilar
+    // y responde `Unavailable`, pero el quorum se cierra con node1 y
+    // node2. La evaluación posterior es nativa y no toca el pool.
     let json = json!({
         "schemas": {
             "add": [
@@ -7596,10 +7599,10 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_holds() {
 }
 
 #[test(tokio::test)]
-// Si el quorum de evaluación es inalcanzable porque los compiladores no
-// están disponibles, la request no se pierde ni se marca inválida: entra en
+// Si el quorum de compilación es inalcanzable porque un compilador no
+// está disponible, la request no se pierde ni se marca inválida: entra en
 // RebootTimeOut y el nodo emisor sigue operativo.
-async fn test_gov_evaluator_compiler_unavailable_quorum_fails_reboot() {
+async fn test_gov_compiler_unavailable_quorum_fails_reboot() {
     let (nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
@@ -7634,8 +7637,9 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_fails_reboot() {
     let governance_id =
         create_and_authorize_governance(node1, vec![node2]).await;
 
-    // SN 1: node2 pasa a ser evaluador y witness. Con 2 evaluadores y
-    // quorum Majority la evaluación exige el visto bueno de ambos.
+    // SN 1: node2 pasa a ser evaluador, witness y compilador. Con 2
+    // compiladores y quorum Majority la fase de compilación exige el
+    // visto bueno de ambos.
     let json = json!({
         "members": {
             "add": [
@@ -7649,7 +7653,8 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_fails_reboot() {
             "governance": {
                 "add": {
                     "witness": ["AveNode2"],
-                    "evaluator": ["AveNode2"]
+                    "evaluator": ["AveNode2"],
+                    "compiler": ["AveNode2"]
                 }
             }
         }
@@ -7670,8 +7675,9 @@ async fn test_gov_evaluator_compiler_unavailable_quorum_fails_reboot() {
         .await
         .unwrap();
 
-    // Fact con contrato: node1 evalúa correctamente pero node2 responde
-    // `Unavailable`; sin quorum la request entra en RebootTimeOut.
+    // Fact con contrato: node1 compila correctamente pero node2 responde
+    // `Unavailable` (pool muerto); sin quorum de compilación la request
+    // entra en RebootTimeOut.
     let json = json!({
         "schemas": {
             "add": [
@@ -7997,10 +8003,11 @@ async fn test_gov_contract_artifacts_disk_failure_node_fails_boot() {
 #[test(tokio::test)]
 // Un compilador cuya clave pública no coincide con el pin configurado es
 // indistinguible de uno comprometido: el cliente descarta sus respuestas
-// (firma de atestación inválida), el evaluador responde `Unavailable` sin
-// emitir veredicto y, al no cerrarse el quorum, la request entra en
-// RebootTimeOut en lugar de perderse. Ambos nodos siguen operativos.
-async fn test_gov_evaluator_wrong_compiler_pin_unavailable_reboot() {
+// (firma de atestación inválida), el nodo responde `Unavailable` en la
+// fase de compilación sin emitir veredicto y, al no cerrarse el quorum,
+// la request entra en RebootTimeOut en lugar de perderse. Ambos nodos
+// siguen operativos.
+async fn test_gov_compiler_wrong_pin_unavailable_reboot() {
     let (nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
@@ -8043,8 +8050,9 @@ async fn test_gov_evaluator_wrong_compiler_pin_unavailable_reboot() {
     let governance_id =
         create_and_authorize_governance(node1, vec![node2]).await;
 
-    // SN 1: node2 pasa a ser evaluador y testigo. Con 2 evaluadores y
-    // quorum Majority la evaluación exige el visto bueno de ambos.
+    // SN 1: node2 pasa a ser evaluador, testigo y compilador. Con 2
+    // compiladores y quorum Majority la compilación exige el visto
+    // bueno de ambos.
     let json = json!({
         "members": {
             "add": [
@@ -8058,7 +8066,8 @@ async fn test_gov_evaluator_wrong_compiler_pin_unavailable_reboot() {
             "governance": {
                 "add": {
                     "witness": ["AveNode2"],
-                    "evaluator": ["AveNode2"]
+                    "evaluator": ["AveNode2"],
+                    "compiler": ["AveNode2"]
                 }
             }
         }
@@ -8079,9 +8088,9 @@ async fn test_gov_evaluator_wrong_compiler_pin_unavailable_reboot() {
         .await
         .unwrap();
 
-    // Fact con contrato: node1 evalúa correctamente pero las respuestas
-    // del compilador de node2 se descartan por el pin; sin quorum la
-    // request entra en RebootTimeOut.
+    // Fact con contrato: node1 compila correctamente pero las respuestas
+    // del compilador de node2 se descartan por el pin; sin quorum de
+    // compilación la request entra en RebootTimeOut.
     let json = json!({
         "schemas": {
             "add": [
@@ -8730,11 +8739,11 @@ async fn test_gov_contract_refresh_disk_failure_restart_is_fatal() {
 }
 
 #[test(tokio::test)]
-// Un evaluador degradado se recupera al reiniciar con un pool sano: los
-// artefactos se obtienen en el arranque y el nodo vuelve a votar. El
-// quorum Majority exige a los dos evaluadores, así que el commit del
-// fact prueba que el nodo recuperado participa de nuevo.
-async fn test_gov_evaluator_recovers_after_compiler_restart() {
+// Un compilador degradado se recupera al reiniciar con un pool sano:
+// vuelve a compilar en la fase de compilación y la request sale del
+// reboot. El quorum Majority exige a los dos compiladores, así que el
+// commit del fact prueba que el nodo recuperado participa de nuevo.
+async fn test_gov_compiler_recovers_after_pool_restart() {
     let (nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
@@ -8769,8 +8778,9 @@ async fn test_gov_evaluator_recovers_after_compiler_restart() {
     let governance_id =
         create_and_authorize_governance(node1, vec![&node2.api]).await;
 
-    // SN 1: node2 pasa a ser evaluador y testigo. Con 2 evaluadores y
-    // quorum Majority la evaluación exige el visto bueno de ambos.
+    // SN 1: node2 pasa a ser evaluador, testigo y compilador. Con 2
+    // compiladores y quorum Majority la compilación exige el visto
+    // bueno de ambos.
     let json = json!({
         "members": {
             "add": [
@@ -8784,7 +8794,8 @@ async fn test_gov_evaluator_recovers_after_compiler_restart() {
             "governance": {
                 "add": {
                     "witness": ["AveNode2"],
-                    "evaluator": ["AveNode2"]
+                    "evaluator": ["AveNode2"],
+                    "compiler": ["AveNode2"]
                 }
             }
         }
@@ -8807,8 +8818,9 @@ async fn test_gov_evaluator_recovers_after_compiler_restart() {
         .await
         .unwrap();
 
-    // Intento de fact con contrato: node2 no puede evaluar y la request
-    // entra en RebootTimeOut.
+    // Intento de fact con contrato: node2 no puede compilar (pool
+    // muerto), el quorum de compilación no se cierra y la request entra
+    // en RebootTimeOut.
     let json = json!({
         "schemas": {
             "add": [
@@ -8840,8 +8852,8 @@ async fn test_gov_evaluator_recovers_after_compiler_restart() {
     .await
     .unwrap();
 
-    // Reinicio con el pool sano (el embebido autoinyectado): los
-    // artefactos se obtienen al arrancar y node2 vuelve a evaluar.
+    // Reinicio con el pool sano (el embebido autoinyectado): node2
+    // vuelve a compilar en la fase de compilación.
     let keys = node2.keys.clone();
     let local_db = node2_dirs[0].path().to_path_buf();
     let ext_db = node2_dirs[1].path().to_path_buf();
@@ -8871,9 +8883,10 @@ async fn test_gov_evaluator_recovers_after_compiler_restart() {
     node_running(&node2.api).await.unwrap();
 
     // Con el pool recuperado, la propia request sale del reboot y
-    // commitea: como el quorum exige el voto de node2, el commit prueba
-    // la recuperación. No hace falta reemitir nada — los reboots por
-    // TimeOut son ilimitados (el schedule repite su último valor).
+    // commitea: como el quorum de compilación exige el voto de node2, el
+    // commit prueba la recuperación. No hace falta reemitir nada — los
+    // reboots por TimeOut son ilimitados (el schedule repite su último
+    // valor).
     let state = get_subject(node1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();

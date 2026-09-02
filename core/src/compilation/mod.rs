@@ -49,9 +49,18 @@ use response::{CompilationError, CompilationRes, CompilerResponse};
 use tracing::{Span, debug, error, info_span, warn};
 
 pub mod artifact;
+pub mod client;
+pub mod contract_compiler;
 pub mod coordinator;
+pub mod error;
+pub mod pipeline;
 pub mod request;
 pub mod response;
+#[cfg(feature = "compiler-service")]
+pub mod service;
+#[cfg(feature = "compiler-service")]
+pub mod service_config;
+pub mod support;
 pub mod worker;
 
 /// Schemas whose contract must go through the compilation phase for this

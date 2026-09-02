@@ -13,8 +13,8 @@ use tracing::{Span, error, info_span};
 use ave_common::identity::DigestIdentifier;
 
 use crate::{
+    compilation::support::ContractArtifactRecord,
     db::Storable,
-    evaluation::compiler::ContractArtifactRecord,
     model::common::{crash_system, purge_storage},
 };
 

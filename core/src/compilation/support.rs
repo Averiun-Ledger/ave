@@ -6,12 +6,14 @@ use ave_common::{
     ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
-use ave_compiler::CompilerClient;
 use ave_contract_sdk::runtime::{CompiledModule, ContractRuntime};
 use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use super::client::CompilerClient;
+use super::error::CompilerError;
+use super::pipeline;
 use crate::compilation::artifact::ArtifactData;
 use crate::governance::contract_register::{
     ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
@@ -19,15 +21,7 @@ use crate::governance::contract_register::{
 use crate::metrics::try_core_metrics;
 use crate::system::ConfigHelper;
 
-pub mod contract_compiler;
-pub mod error;
-
-pub use ave_compiler::ContractArtifactRecord;
-pub use contract_compiler::{
-    ContractCompiler, ContractCompilerAction, ContractCompilerMessage,
-};
-
-use error::CompilerError;
+pub use super::pipeline::ContractArtifactRecord;
 
 #[derive(Debug, Clone)]
 pub enum CompilerResponse {
@@ -123,7 +117,7 @@ impl CompilerSupport {
         }
     }
 
-    async fn contract_runtime<A: Actor>(
+    pub(crate) async fn contract_runtime<A: Actor>(
         ctx: &ActorContext<A>,
     ) -> Result<Arc<ContractRuntime>, CompilerError> {
         ctx.system()
@@ -143,7 +137,7 @@ impl CompilerSupport {
             })
     }
 
-    async fn contracts_helper<A: Actor>(
+    pub(crate) async fn contracts_helper<A: Actor>(
         ctx: &ActorContext<A>,
     ) -> Result<Arc<RwLock<HashMap<String, Arc<CompiledModule>>>>, ActorError>
     {
@@ -175,7 +169,7 @@ impl CompilerSupport {
                     context: "contract hash",
                     details: e.to_string(),
                 })?;
-            let manifest = ave_compiler::compilation_toml();
+            let manifest = pipeline::compilation_toml();
             let manifest_hash = hash_borsh(&*hash.hasher(), &manifest)
                 .map_err(|e| CompilerError::SerializationError {
                     context: "contract manifest hash",
@@ -185,7 +179,7 @@ impl CompilerSupport {
             // Payload format check (same position as the old
             // `prepare_contract_project`): a malformed payload is a
             // request error, not a build error.
-            ave_compiler::validate_source_base64(contract)?;
+            pipeline::validate_source_base64(contract)?;
 
             // The engine fingerprint is local. A valid persisted artifact
             // does not need the compiler pool, so defer its lookup until a
@@ -193,7 +187,7 @@ impl CompilerSupport {
             let contract_runtime = Self::contract_runtime(ctx).await?;
             let engine_fingerprint = contract_runtime
                 .engine_fingerprint(hash)
-                .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
+                .map_err(pipeline::map_runtime_error_to_compiler_error)?;
 
             if let Some((module, record, prepare_result)) =
                 Self::load_registered_artifact(
@@ -226,7 +220,7 @@ impl CompilerSupport {
                     prepare_result,
                     wasm_bytes,
                     precompiled_bytes,
-                )) = ave_compiler::try_load_global_cache(
+                )) = pipeline::try_load_global_cache(
                     hash,
                     &contract_runtime,
                     initial_value.clone(),
@@ -245,7 +239,7 @@ impl CompilerSupport {
                         actual: metadata.wasm_hash.to_string(),
                     });
                 }
-                ave_compiler::persist_artifact(
+                pipeline::persist_artifact(
                     contract_path,
                     &wasm_bytes,
                     &precompiled_bytes,
@@ -276,7 +270,7 @@ impl CompilerSupport {
             // compiler pool (already verified by the client), is
             // precompiled and validated locally, and persisted.
             let outcome = client.compile(contract).await?;
-            let wasm_hash = ave_compiler::hash_bytes(
+            let wasm_hash = pipeline::hash_bytes(
                 hash,
                 &outcome.wasm,
                 "compiler pool wasm artifact",
@@ -289,23 +283,23 @@ impl CompilerSupport {
                     actual: wasm_hash.to_string(),
                 });
             }
-            let (precompiled_bytes, module) = ave_compiler::precompile_module(
+            let (precompiled_bytes, module) = pipeline::precompile_module(
                 &contract_runtime,
                 &outcome.wasm,
             )?;
-            ave_compiler::validate_module(
+            pipeline::validate_module(
                 &contract_runtime,
                 &module,
                 ValueWrapper(initial_value),
             )?;
-            ave_compiler::persist_artifact(
+            pipeline::persist_artifact(
                 contract_path,
                 &outcome.wasm,
                 &precompiled_bytes,
             )
             .await?;
 
-            let metadata = ave_compiler::build_contract_record(
+            let metadata = pipeline::build_contract_record(
                 hash,
                 contract_hash,
                 manifest_hash,
@@ -317,13 +311,13 @@ impl CompilerSupport {
 
             #[cfg(feature = "test")]
             {
-                let global_cache_dir = ave_compiler::global_cache_entry_dir(
+                let global_cache_dir = pipeline::global_cache_entry_dir(
                     &metadata.contract_hash,
                     &metadata.manifest_hash,
                     &metadata.engine_fingerprint,
                     &metadata.toolchain_fingerprint,
                 );
-                if let Err(error) = ave_compiler::persist_global_cache_artifact(
+                if let Err(error) = pipeline::persist_global_cache_artifact(
                     &global_cache_dir,
                     &metadata,
                     &outcome.wasm,
@@ -440,7 +434,7 @@ impl CompilerSupport {
             let expected_toolchain = expected_toolchain
                 .clone()
                 .unwrap_or_else(|| persisted.toolchain_fingerprint.clone());
-            ave_compiler::metadata_matches(
+            pipeline::metadata_matches(
                 persisted,
                 contract_hash,
                 manifest_hash,
@@ -468,9 +462,9 @@ impl CompilerSupport {
                     details: "metadata unexpectedly missing".to_owned(),
                 }
             })?;
-            match ave_compiler::load_artifact_precompiled(contract_path).await {
+            match pipeline::load_artifact_precompiled(contract_path).await {
             Ok(precompiled_bytes) => {
-                let precompiled_hash = ave_compiler::hash_bytes(
+                let precompiled_hash = pipeline::hash_bytes(
                     hash,
                     &precompiled_bytes,
                     "persisted cwasm artifact",
@@ -479,7 +473,7 @@ impl CompilerSupport {
                     match contract_runtime.load_precompiled(&precompiled_bytes)
                     {
                         Ok(module) => {
-                            match ave_compiler::validate_module(
+                            match pipeline::validate_module(
                                 &contract_runtime,
                                 &module,
                                 ValueWrapper(initial_value.clone()),
@@ -527,9 +521,9 @@ impl CompilerSupport {
             }
         }
 
-        match ave_compiler::load_artifact_wasm(contract_path).await {
+        match pipeline::load_artifact_wasm(contract_path).await {
             Ok(wasm_bytes) => {
-                let wasm_hash = ave_compiler::hash_bytes(
+                let wasm_hash = pipeline::hash_bytes(
                     hash,
                     &wasm_bytes,
                     "persisted wasm artifact",
@@ -540,25 +534,25 @@ impl CompilerSupport {
                     && expected_wasm_hash
                         .is_none_or(|expected_wasm_hash| wasm_hash == *expected_wasm_hash)
                 {
-                    match ave_compiler::precompile_module(
+                    match pipeline::precompile_module(
                         &contract_runtime,
                         &wasm_bytes,
                     ) {
                         Ok((precompiled_bytes, module)) => {
-                            match ave_compiler::validate_module(
+                            match pipeline::validate_module(
                                 &contract_runtime,
                                 &module,
                                 ValueWrapper(initial_value.clone()),
                             ) {
                                 Ok(()) => {
-                                    ave_compiler::persist_artifact(
+                                    pipeline::persist_artifact(
                                         contract_path,
                                         &wasm_bytes,
                                         &precompiled_bytes,
                                     )
                                     .await?;
                                     let refreshed_record =
-                                        ave_compiler::build_contract_record(
+                                        pipeline::build_contract_record(
                                             hash,
                                             contract_hash.clone(),
                                             manifest_hash.clone(),
@@ -700,7 +694,7 @@ impl CompilerSupport {
 
         // A valid cached wasm cannot make a malformed committed source
         // acceptable: the next recovery would be unable to reproduce it.
-        ave_compiler::validate_source_base64(contract)?;
+        pipeline::validate_source_base64(contract)?;
 
         let contract_hash = hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
             CompilerError::SerializationError {
@@ -708,7 +702,7 @@ impl CompilerSupport {
                 details: e.to_string(),
             }
         })?;
-        let manifest = ave_compiler::compilation_toml();
+        let manifest = pipeline::compilation_toml();
         let manifest_hash = hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
             CompilerError::SerializationError {
                 context: "contract manifest hash",
@@ -718,7 +712,7 @@ impl CompilerSupport {
         let contract_runtime = Self::contract_runtime(ctx).await?;
         let engine_fingerprint = contract_runtime
             .engine_fingerprint(hash)
-            .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
+            .map_err(pipeline::map_runtime_error_to_compiler_error)?;
         if let Some((module, _, _)) = Self::load_registered_artifact(
             hash,
             ctx,
@@ -831,7 +825,7 @@ impl CompilerSupport {
             config.contracts_path.join("contracts").join(contract_name);
 
         let wasm_bytes =
-            match ave_compiler::load_artifact_wasm(&contract_path).await {
+            match pipeline::load_artifact_wasm(&contract_path).await {
                 Ok(wasm_bytes) => wasm_bytes,
                 Err(error) => {
                     debug!(
@@ -900,7 +894,7 @@ impl CompilerSupport {
                 details: error.to_string(),
             }
         })?;
-        let wasm_hash = ave_compiler::hash_bytes(
+        let wasm_hash = pipeline::hash_bytes(
             hash,
             &wasm,
             "fetched wasm artifact",
@@ -919,7 +913,7 @@ impl CompilerSupport {
                     details: e.to_string(),
                 }
             })?;
-        let manifest = ave_compiler::compilation_toml();
+        let manifest = pipeline::compilation_toml();
         let manifest_hash =
             hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
                 CompilerError::SerializationError {
@@ -931,16 +925,16 @@ impl CompilerSupport {
         let contract_runtime = Self::contract_runtime(ctx).await?;
         let engine_fingerprint = contract_runtime
             .engine_fingerprint(hash)
-            .map_err(ave_compiler::map_runtime_error_to_compiler_error)?;
+            .map_err(pipeline::map_runtime_error_to_compiler_error)?;
 
         let (precompiled_bytes, module) =
-            ave_compiler::precompile_module(&contract_runtime, &wasm)?;
-        ave_compiler::validate_module(
+            pipeline::precompile_module(&contract_runtime, &wasm)?;
+        pipeline::validate_module(
             &contract_runtime,
             &module,
             ValueWrapper(initial_value),
         )?;
-        ave_compiler::persist_artifact(
+        pipeline::persist_artifact(
             contract_path,
             &wasm,
             &precompiled_bytes,
@@ -950,7 +944,7 @@ impl CompilerSupport {
         // The build toolchain fingerprint comes from the serving node;
         // unknown (default) forces a recompile if this node ever becomes
         // a compiler with a pinned toolchain.
-        let metadata = ave_compiler::build_contract_record(
+        let metadata = pipeline::build_contract_record(
             hash,
             contract_hash,
             manifest_hash,

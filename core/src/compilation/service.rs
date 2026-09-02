@@ -24,9 +24,9 @@ use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
 
-use crate::config::ServiceConfig;
-use crate::error::CompilerError;
-use crate::pipeline;
+use super::error::CompilerError;
+use super::pipeline;
+use super::service_config::ServiceConfig;
 
 use pb::compiler_service_server::{CompilerService, CompilerServiceServer};
 
