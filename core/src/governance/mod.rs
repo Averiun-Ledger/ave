@@ -2194,45 +2194,51 @@ impl Governance {
             }
         }
 
-        let contracts_dir = config.contracts_path;
-        if !contracts_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not read contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
+        // Official artifacts live under `contracts/` and staging dirs
+        // at the root: both must be swept (BUG-016 — iterating only the
+        // root left official artifacts on disk forever).
+        for contracts_dir in [
+            config.contracts_path.join("contracts"),
+            config.contracts_path.clone(),
+        ] {
+            if !contracts_dir.exists() {
+                continue;
             }
-        })?;
 
-        while let Some(entry) =
-            entries
-                .next_entry()
-                .await
-                .map_err(|e| ActorError::Functional {
+            let mut entries =
+                fs::read_dir(&contracts_dir).await.map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Can not read contracts directory {}: {}",
+                            contracts_dir.display(),
+                            e
+                        ),
+                    }
+                })?;
+
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                ActorError::Functional {
                     description: format!(
                         "Can not iterate contracts directory {}: {}",
                         contracts_dir.display(),
                         e
                     ),
-                })?
-        {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if file_name.starts_with(&prefix) {
-                let path = entry.path();
-                fs::remove_dir_all(&path).await.map_err(|e| {
-                    ActorError::Functional {
-                        description: format!(
-                            "Can not remove contract directory {}: {}",
-                            path.display(),
-                            e
-                        ),
-                    }
-                })?;
+                }
+            })? {
+                let file_name =
+                    entry.file_name().to_string_lossy().to_string();
+                if file_name.starts_with(&prefix) {
+                    let path = entry.path();
+                    fs::remove_dir_all(&path).await.map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Can not remove contract directory {}: {}",
+                                path.display(),
+                                e
+                            ),
+                        }
+                    })?;
+                }
             }
         }
 
