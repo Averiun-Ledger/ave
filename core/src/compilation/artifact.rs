@@ -188,4 +188,21 @@ mod tests {
             Err(ArtifactTransferError::Decompression { .. })
         ));
     }
+
+    /// Transport invariant: the artifact payload plus the reserved
+    /// envelope headroom must fit in the network application message cap.
+    /// The two constants live in different crates; this pin makes a
+    /// divergent edit an explicit failure here instead of silent dropped
+    /// messages in production.
+    #[test]
+    fn artifact_wire_budget_fits_network_message_cap() {
+        let network_cap =
+            ave_network::Config::default().max_app_message_bytes;
+        assert!(
+            MAX_ARTIFACT_WIRE_BYTES + 64 * 1024 <= network_cap,
+            "artifact wire budget ({MAX_ARTIFACT_WIRE_BYTES}) + 64 KiB \
+             envelope headroom exceeds the network message cap \
+             ({network_cap})"
+        );
+    }
 }
