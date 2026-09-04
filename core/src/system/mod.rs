@@ -73,6 +73,22 @@ pub async fn system(
     crash_token: CancellationToken,
     #[cfg(feature = "prometheus")] mut registry: Option<&mut Registry>,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
+    // The network message cap must fit the artifact wire budget plus the
+    // envelope headroom: a smaller cap would make artifact responses
+    // silently undeliverable (the network worker drops oversized
+    // outbound messages). The default cap is bound at compile time in
+    // `compilation::artifact`; this catches a configured smaller value.
+    let artifact_budget =
+        crate::compilation::artifact::MAX_ARTIFACT_WIRE_BYTES
+            + crate::compilation::artifact::ARTIFACT_ENVELOPE_HEADROOM_BYTES;
+    if config.network.max_app_message_bytes < artifact_budget {
+        return Err(SystemError::NetworkConfig(format!(
+            "max_app_message_bytes ({}) is below the artifact wire \
+             budget ({artifact_budget})",
+            config.network.max_app_message_bytes
+        )));
+    }
+
     // Test builds get the embedded test compiler automatically when no
     // compiler pool is configured, so any crate driving core with the
     // `test` feature compiles contracts without extra wiring. An

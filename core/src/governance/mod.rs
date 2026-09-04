@@ -1176,27 +1176,38 @@ impl Governance {
             let official_name = format!("{}_{}", subject_id, schema_id);
             let official_path =
                 config.contracts_path.join("contracts").join(&official_name);
-            if official_path.exists()
-                && let Err(e) = fs::remove_dir_all(&official_path).await
-            {
-                return Err(crash_system(
-                    ctx,
-                    ActorError::FunctionalCritical {
-                        description: format!(
-                            "Can not remove previous contract artifact {}: {}",
-                            official_path.display(),
-                            e
-                        ),
-                    },
-                )
-                .await);
+            let staging_path = config.contracts_path.join(&staging_name);
+            // Swap through a backup instead of delete + rename: a crash
+            // leaves the old or the new official artifact, never an
+            // empty window. The backup lives at the contracts root with
+            // the governance prefix, so the boot sweep removes it.
+            let backup_path = config
+                .contracts_path
+                .join(format!("{official_name}_temp_promote"));
+            if official_path.exists() {
+                // Stale backup from an interrupted promotion.
+                let _ = fs::remove_dir_all(&backup_path).await;
+                if let Err(e) = fs::rename(&official_path, &backup_path).await
+                {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not move aside previous contract artifact {}: {}",
+                                official_path.display(),
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
             }
-            if let Err(e) = fs::rename(
-                config.contracts_path.join(&staging_name),
-                &official_path,
-            )
-            .await
-            {
+            if let Err(e) = fs::rename(&staging_path, &official_path).await {
+                // Restore the previous official artifact if it was
+                // moved aside.
+                if backup_path.exists() {
+                    let _ = fs::rename(&backup_path, &official_path).await;
+                }
                 return Err(crash_system(
                     ctx,
                     ActorError::FunctionalCritical {
@@ -1208,6 +1219,18 @@ impl Governance {
                     },
                 )
                 .await);
+            }
+            let _ = fs::remove_dir_all(&backup_path).await;
+            // fsync both parent directories so the rename survives a
+            // power cut (best-effort: the anchor + heal paths recover
+            // from any residual loss).
+            if let Ok(dir) =
+                fs::File::open(config.contracts_path.join("contracts")).await
+            {
+                let _ = dir.sync_all().await;
+            }
+            if let Ok(dir) = fs::File::open(&config.contracts_path).await {
+                let _ = dir.sync_all().await;
             }
 
             if let Err(e) = contract_register

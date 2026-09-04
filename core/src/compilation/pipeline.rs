@@ -21,6 +21,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "test")]
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
 use tokio::time::timeout;
 use tokio::{fs, process::Command};
 use tracing::debug;
@@ -347,6 +348,35 @@ pub async fn build_wasm(
     load_compiled_wasm(contract_path).await
 }
 
+/// Atomic file write: write to a temp sibling, fsync it, rename over
+/// the target and fsync the directory. A crash or power cut leaves
+/// either the old bytes or the new ones, never a truncated file.
+async fn write_file_atomic(
+    dir: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(), CompilerError> {
+    let target = dir.join(file_name);
+    let tmp = dir.join(format!("{file_name}.tmp"));
+    let result = async {
+        let mut file = fs::File::create(&tmp).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(&tmp, &target).await?;
+        fs::File::open(dir).await?.sync_all().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp).await;
+    }
+    result.map_err(|e| CompilerError::FileWriteFailed {
+        path: target.to_string_lossy().to_string(),
+        details: e.to_string(),
+    })
+}
+
 pub async fn persist_artifact(
     contract_path: &Path,
     wasm_bytes: &[u8],
@@ -359,21 +389,11 @@ pub async fn persist_artifact(
         }
     })?;
 
-    let artifact_path = artifact_wasm_path(contract_path);
-    fs::write(&artifact_path, wasm_bytes).await.map_err(|e| {
-        CompilerError::FileWriteFailed {
-            path: artifact_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        }
-    })?;
-
-    let precompiled_path = artifact_precompiled_path(contract_path);
-    fs::write(&precompiled_path, precompiled_bytes)
-        .await
-        .map_err(|e| CompilerError::FileWriteFailed {
-            path: precompiled_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })?;
+    // wasm first, precompiled second: the precompiled file marks a
+    // complete artifact (readers require it before trusting the wasm).
+    write_file_atomic(contract_path, ARTIFACT_WASM, wasm_bytes).await?;
+    write_file_atomic(contract_path, ARTIFACT_PRECOMPILED, precompiled_bytes)
+        .await?;
 
     let legacy_metadata_path = legacy_artifact_metadata_path(contract_path);
     let _ = fs::remove_file(&legacy_metadata_path).await;

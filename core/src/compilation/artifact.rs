@@ -16,6 +16,23 @@ pub const MAX_ARTIFACT_WIRE_BYTES: usize = 960 * 1024;
 /// Bounds decompression and the subsequent Wasmtime preparation work.
 pub const MAX_ARTIFACT_UNCOMPRESSED_BYTES: usize = 4 * 1024 * 1024;
 
+/// Envelope headroom reserved on top of the artifact payload
+/// (MessagePack-serialized response envelope).
+pub const ARTIFACT_ENVELOPE_HEADROOM_BYTES: usize = 64 * 1024;
+
+/// Transport invariant, bound at COMPILE TIME and cross-crate: the
+/// artifact payload plus the envelope headroom must fit in the network
+/// application message cap. A divergent edit on either side fails the
+/// build instead of silently dropping artifact responses in production.
+/// (The cap is configurable at runtime; a configured value below this
+/// budget is rejected at node startup in `system()`.)
+const _: () = assert!(
+    MAX_ARTIFACT_WIRE_BYTES + ARTIFACT_ENVELOPE_HEADROOM_BYTES
+        <= ave_network::MAX_APP_MESSAGE_BYTES,
+    "artifact wire budget + envelope headroom exceeds the network \
+     default message cap"
+);
+
 #[derive(Debug, Error)]
 pub enum ArtifactTransferError {
     #[error("artifact compression failed: {details}")]
@@ -187,22 +204,5 @@ mod tests {
             oversized.decompress(),
             Err(ArtifactTransferError::Decompression { .. })
         ));
-    }
-
-    /// Transport invariant: the artifact payload plus the reserved
-    /// envelope headroom must fit in the network application message cap.
-    /// The two constants live in different crates; this pin makes a
-    /// divergent edit an explicit failure here instead of silent dropped
-    /// messages in production.
-    #[test]
-    fn artifact_wire_budget_fits_network_message_cap() {
-        let network_cap =
-            ave_network::Config::default().max_app_message_bytes;
-        assert!(
-            MAX_ARTIFACT_WIRE_BYTES + 64 * 1024 <= network_cap,
-            "artifact wire budget ({MAX_ARTIFACT_WIRE_BYTES}) + 64 KiB \
-             envelope headroom exceeds the network message cap \
-             ({network_cap})"
-        );
     }
 }

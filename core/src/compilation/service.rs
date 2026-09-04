@@ -31,8 +31,10 @@ use super::service_config::ServiceConfig;
 use pb::compiler_service_server::{CompilerService, CompilerServiceServer};
 
 /// gRPC message size cap (encoding and decoding). Far above the maximum
-/// source size and the expected wasm artifact sizes.
-const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// source size and the expected wasm artifact sizes. Single source for
+/// client and server — a divergent edit on one side would break the
+/// other at runtime.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 const ARTIFACT_WASM: &str = "contract.wasm";
 const ARTIFACT_WASM_HASH: &str = "wasm.hash";

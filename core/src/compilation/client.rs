@@ -23,15 +23,13 @@ use tracing::{debug, error, warn};
 
 use super::error::CompilerError;
 use super::pipeline;
+use super::service::MAX_MESSAGE_BYTES;
 
 use pb::compiler_service_client::CompilerServiceClient;
 
 /// Default per-attempt timeout (builds are long; cache hits and
 /// single-flight followers answer immediately).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// gRPC message size cap; mirrors the server side.
-const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Verified result of a remote compilation.
 #[derive(Debug, Clone)]

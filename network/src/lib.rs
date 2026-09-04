@@ -30,7 +30,7 @@ pub use libp2p::{
 pub use monitor::*;
 pub use routing::{Config as RoutingConfig, RoutingNode};
 pub use service::NetworkService;
-pub use utils::NetworkState;
+pub use utils::{MAX_APP_MESSAGE_BYTES, NetworkState};
 pub use worker::{NetworkWorker, NetworkWorkerRuntime};
 
 use bytes::Bytes;

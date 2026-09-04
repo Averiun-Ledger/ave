@@ -30,6 +30,9 @@ pub const REQRES_PROTOCOL: &str = "/ave/reqres/1.0.0";
 pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
+/// Default application-level message size cap (both directions).
+/// `ave-core` binds its artifact wire budget against this constant at
+/// compile time.
 pub const MAX_APP_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
 pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB

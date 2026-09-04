@@ -37,4 +37,8 @@ pub enum SystemError {
     /// Invalid compiler service configuration.
     #[error("invalid compiler configuration: {0}")]
     CompilerConfig(String),
+
+    /// Invalid network configuration.
+    #[error("invalid network configuration: {0}")]
+    NetworkConfig(String),
 }

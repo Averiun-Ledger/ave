@@ -180,25 +180,28 @@ impl CompilerSupport {
 
     /// Compiles a contract in-process with the local toolchain: the
     /// level-3 production path — a compiler node never delegates
-    /// builds. The build runs in a scratch directory next to the
-    /// artifact store (unique suffix avoids collisions between
-    /// concurrent builds; a crash leftover carries the governance
-    /// prefix, so the boot sweep removes it as an unknown entry) and
-    /// is always cleaned up — only the verified wasm reaches the
-    /// artifact store.
+    /// builds. The build runs in a scratch directory at the contracts
+    /// ROOT (unique suffix avoids collisions between concurrent builds);
+    /// a crash leftover carries the governance prefix, so the boot sweep
+    /// — which only scans the root level — removes it as an unknown
+    /// entry. The scratch is always cleaned up after the build; only
+    /// the verified wasm reaches the artifact store.
     #[cfg(all(not(feature = "test"), feature = "toolchain"))]
     async fn build_local(
         hash: HashAlgorithm,
         contract: &str,
         contract_path: &Path,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
-        let Some(contracts_root) = contract_path.parent() else {
-            return Err(CompilerError::InvalidContractPath {
+        // contract_path is `<root>/contracts/<name>`; scratch lives at
+        // `<root>` so the boot sweep (root-level only) collects it.
+        let scratch_root = contract_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| CompilerError::InvalidContractPath {
                 path: contract_path.display().to_string(),
-                details: "no parent directory".to_owned(),
-            });
-        };
-        let build_dir = contracts_root.join(format!(
+                details: "no contracts root directory".to_owned(),
+            })?;
+        let build_dir = scratch_root.join(format!(
             "{}_temp_build_{}_{}",
             contract_path
                 .file_name()
