@@ -933,6 +933,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         ledger_batch_size: None,
         safe_mode,
         sinks,
+        #[cfg(feature = "test")]
         compiler: None,
         contracts_path: None,
     }

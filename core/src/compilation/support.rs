@@ -11,6 +11,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+#[cfg(feature = "test")]
 use super::client::CompilerClient;
 use super::error::CompilerError;
 use super::pipeline;
@@ -111,6 +112,12 @@ pub(crate) const HEAL_RETRY_MAX_MS: u64 = 5_000;
 #[cfg(not(any(test, feature = "test")))]
 pub(crate) const HEAL_RETRY_MAX_MS: u64 = 60_000;
 
+/// Serializes the scratch build directories of in-process compiles
+/// (production path; test builds compile through the embedded pool).
+#[cfg(all(not(feature = "test"), feature = "toolchain"))]
+static BUILD_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Outcome of serving an official artifact: the bytes were verified
 /// against the registered metadata, there is nothing to serve (the
 /// requester fails over to another peer), or the persisted bytes failed
@@ -158,6 +165,9 @@ impl CompilerSupport {
             })
     }
 
+    /// Client of the embedded compiler pool — test builds only;
+    /// production nodes compile in-process (`build_local`).
+    #[cfg(feature = "test")]
     async fn compiler_client<A: Actor>(
         ctx: &ActorContext<A>,
     ) -> Result<Arc<CompilerClient>, CompilerError> {
@@ -166,6 +176,57 @@ impl CompilerSupport {
             .ok_or(CompilerError::CompilersUnavailable {
                 details: "no compiler endpoints configured".to_owned(),
             })
+    }
+
+    /// Compiles a contract in-process with the local toolchain: the
+    /// level-3 production path — a compiler node never delegates
+    /// builds. The build runs in a scratch directory next to the
+    /// artifact store (unique suffix avoids collisions between
+    /// concurrent builds; a crash leftover carries the governance
+    /// prefix, so the boot sweep removes it as an unknown entry) and
+    /// is always cleaned up — only the verified wasm reaches the
+    /// artifact store.
+    #[cfg(all(not(feature = "test"), feature = "toolchain"))]
+    async fn build_local(
+        hash: HashAlgorithm,
+        contract: &str,
+        contract_path: &Path,
+    ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
+        let Some(contracts_root) = contract_path.parent() else {
+            return Err(CompilerError::InvalidContractPath {
+                path: contract_path.display().to_string(),
+                details: "no parent directory".to_owned(),
+            });
+        };
+        let build_dir = contracts_root.join(format!(
+            "{}_temp_build_{}_{}",
+            contract_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            std::process::id(),
+            BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ));
+        let wasm = pipeline::build_wasm(contract, &build_dir).await;
+        let _ = tokio::fs::remove_dir_all(&build_dir).await;
+        let wasm = wasm?;
+        let toolchain_fingerprint =
+            pipeline::toolchain_fingerprint(hash).await?;
+        Ok((wasm, toolchain_fingerprint))
+    }
+
+    /// A node built without the `toolchain` feature can not compile
+    /// (light image): it must not hold the compiler role.
+    #[cfg(all(not(feature = "test"), not(feature = "toolchain")))]
+    async fn build_local(
+        _hash: HashAlgorithm,
+        _contract: &str,
+        _contract_path: &Path,
+    ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
+        Err(CompilerError::CompilersUnavailable {
+            details: "node built without the `toolchain` feature"
+                .to_owned(),
+        })
     }
 
     pub(crate) async fn contracts_helper<A: Actor>(
@@ -239,6 +300,13 @@ impl CompilerSupport {
                 return Ok((module, record, prepare_result));
             }
 
+            // Test builds compile through the embedded gRPC compiler
+            // (shared content-addressed store across the suite);
+            // production nodes compile in-process with the local
+            // toolchain (`build_local`). Everything after the build —
+            // anchor check, precompile, validation, persistence — is
+            // identical either way.
+            #[cfg(feature = "test")]
             let client = Self::compiler_client(ctx).await?;
 
             // Global test cache: only usable once the toolchain fingerprint
@@ -297,14 +365,22 @@ impl CompilerSupport {
                 return Ok((module, metadata, prepare_result));
             }
 
-            // The node never compiles locally: the wasm comes from the
-            // compiler pool (already verified by the client), is
-            // precompiled and validated locally, and persisted.
-            let outcome = client.compile(contract).await?;
+            // The build source differs by build kind; the bytes are
+            // verified against the ledger anchor (when known) either
+            // way.
+            #[cfg(feature = "test")]
+            let (wasm, toolchain_fingerprint) = {
+                let outcome = client.compile(contract).await?;
+                (outcome.wasm, outcome.toolchain_fingerprint)
+            };
+            #[cfg(not(feature = "test"))]
+            let (wasm, toolchain_fingerprint) =
+                Self::build_local(hash, contract, contract_path).await?;
+
             let wasm_hash = pipeline::hash_bytes(
                 hash,
-                &outcome.wasm,
-                "compiler pool wasm artifact",
+                &wasm,
+                "compiled wasm artifact",
             )?;
             if let Some(expected) = expected_wasm_hash
                 && wasm_hash != *expected
@@ -314,10 +390,8 @@ impl CompilerSupport {
                     actual: wasm_hash.to_string(),
                 });
             }
-            let (precompiled_bytes, module) = pipeline::precompile_module(
-                &contract_runtime,
-                &outcome.wasm,
-            )?;
+            let (precompiled_bytes, module) =
+                pipeline::precompile_module(&contract_runtime, &wasm)?;
             pipeline::validate_module(
                 &contract_runtime,
                 &module,
@@ -325,7 +399,7 @@ impl CompilerSupport {
             )?;
             pipeline::persist_artifact(
                 contract_path,
-                &outcome.wasm,
+                &wasm,
                 &precompiled_bytes,
             )
             .await?;
@@ -334,10 +408,10 @@ impl CompilerSupport {
                 hash,
                 contract_hash,
                 manifest_hash,
-                &outcome.wasm,
+                &wasm,
                 &precompiled_bytes,
                 engine_fingerprint,
-                outcome.toolchain_fingerprint,
+                toolchain_fingerprint,
             )?;
 
             #[cfg(feature = "test")]
@@ -351,7 +425,7 @@ impl CompilerSupport {
                 if let Err(error) = pipeline::persist_global_cache_artifact(
                     &global_cache_dir,
                     &metadata,
-                    &outcome.wasm,
+                    &wasm,
                     &precompiled_bytes,
                 )
                 .await

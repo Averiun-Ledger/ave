@@ -49,6 +49,9 @@ use response::{CompilationError, CompilationRes, CompilerResponse};
 use tracing::{Span, debug, error, info_span, warn};
 
 pub mod artifact;
+/// gRPC client of the embedded compiler pool — test builds only
+/// (production nodes compile in-process, see `support`).
+#[cfg(feature = "test")]
 pub mod client;
 pub mod contract_compiler;
 pub mod coordinator;

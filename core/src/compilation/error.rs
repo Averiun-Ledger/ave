@@ -32,15 +32,22 @@ pub enum CompilerError {
     #[error("compilation failed")]
     CompilationFailed,
 
+    /// Production: the node was built without the `toolchain` feature,
+    /// so it cannot compile contracts in-process. Test builds: the
+    /// embedded compiler pool is down or unreachable.
     #[error("compilers unavailable: {details}")]
     CompilersUnavailable { details: String },
 
     #[error("compiler toolchain mismatch: expected {expected}, got {actual}")]
     ToolchainMismatch { expected: String, actual: String },
 
+    /// Only raised in test builds: the embedded compiler pool is the
+    /// only client that performs attestation (production nodes compile
+    /// in-process, so there is nothing to attest).
     #[error("invalid compiler attestation signature")]
     InvalidAttestationSignature,
 
+    /// Only raised in test builds (see `InvalidAttestationSignature`).
     #[error(
         "compiler attestation mismatch: known wasm hash {expected}, got {actual}"
     )]

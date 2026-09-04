@@ -5,6 +5,11 @@
 //! governance events through real nodes — the tests live apart from
 //! `gov.rs` because that file pins governance flows (approvals, roles,
 //! schema CRUD, viewpoints), not the compiler machinery.
+//!
+//! Requires the `test` feature: dead-pool tests inject compiler
+//! endpoints, a config surface that only exists in test builds
+//! (production nodes compile in-process).
+#![cfg(feature = "test")]
 
 mod common;
 

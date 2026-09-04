@@ -1,4 +1,5 @@
 pub use error::SystemError;
+#[cfg(feature = "test")]
 use std::time::Duration;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -88,6 +89,12 @@ pub async fn system(
     };
 
     // Create de actor system.
+    // `system` is only mutated when the prometheus or test features add
+    // helpers to it, hence the conditional allow.
+    #[cfg_attr(
+        not(any(feature = "test", feature = "prometheus")),
+        allow(unused_mut)
+    )]
     let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
@@ -124,10 +131,12 @@ pub async fn system(
     let contracts: HashMap<String, Arc<CompiledModule>> = HashMap::new();
     system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
 
-    // The node never compiles contracts locally: when a compiler pool is
-    // configured, register the client as a helper. Without endpoints the
-    // helper is absent and compilations fail with an explicit
-    // "compilers unavailable" error.
+    // The node never compiles contracts remotely in production: the
+    // gRPC compiler client is a TEST-BUILD helper (embedded pool or
+    // explicit endpoints, e.g. dead ones for failure-path tests).
+    // Production nodes compile in-process (`toolchain` feature); a
+    // node built without it answers `CompilersUnavailable`.
+    #[cfg(feature = "test")]
     if !config.compiler.endpoints.is_empty() {
         let expected_toolchain = config
             .compiler
@@ -344,6 +353,7 @@ pub mod tests {
                 ledger_batch_size: 100,
             },
             spec: None,
+            #[cfg(feature = "test")]
             compiler: Default::default(),
         };
 

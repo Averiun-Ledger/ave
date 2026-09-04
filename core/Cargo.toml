@@ -14,7 +14,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 borsh = { workspace = true }
-ave-common = { workspace = true, features = ["sink-grpc", "compiler-grpc"] }
+ave-common = { workspace = true, features = ["sink-grpc"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
 json-patch = "4.2.0"
 ave-actors = { workspace = true }
@@ -51,6 +51,10 @@ config = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Self dev-dependency: enables the `test` feature (embedded compiler,
+# short timeouts) whenever test targets are built, so plain
+# `cargo test` gets the test optimization without `--features test`.
+ave-core = { path = ".", features = ["test"] }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -67,14 +71,19 @@ tokio-rustls = "0.26"
 aws-lc-rs = { version = "1", features = ["ring-io"] }
 
 [features]
-default = ["sqlite", "ext-sqlite", "prometheus"]
+default = ["sqlite", "ext-sqlite", "prometheus", "toolchain"]
 rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["ave-actors/export-sqlite"]
 prometheus = ["ave-actors/prometheus"]
-# gRPC compiler service (the standalone `ave-compiler` binary and the
-# embedded test compiler): not part of the node image.
+# In-process contract toolchain (cargo + rustc): a node built without
+# it can not take the compiler role (light node image).
+toolchain = []
+# gRPC compiler service, TEST BUILDS ONLY: the embedded compiler with
+# the shared content-addressed artifact store. Production nodes compile
+# in-process (`toolchain`); there is no compiler pool in production.
 compiler-service = [
+    "ave-common/compiler-grpc",
     "dep:subtle",
     "dep:config",
     "dep:tracing-subscriber",
@@ -83,8 +92,3 @@ compiler-service = [
     "tokio/rt-multi-thread",
 ]
 test = ["compiler-service"]
-
-[[bin]]
-name = "ave-compiler"
-path = "src/bin/ave-compiler.rs"
-required-features = ["compiler-service"]

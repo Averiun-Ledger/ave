@@ -69,7 +69,11 @@ pub struct Config {
     pub only_clear_events: bool,
     /// Sync protocol configuration.
     pub sync: SyncConfig,
-    /// Compiler service pool the node delegates contract builds to.
+    /// Compiler pool the node delegates contract builds to — TEST
+    /// BUILDS ONLY: production nodes compile in-process (`toolchain`
+    /// feature). The field exists so tests can point at the embedded
+    /// compiler or at dead endpoints on purpose.
+    #[cfg(feature = "test")]
     pub compiler: CompilerNodeConfig,
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
@@ -91,18 +95,19 @@ impl Default for Config {
             is_service: false,
             only_clear_events: false,
             sync: Default::default(),
+            #[cfg(feature = "test")]
             compiler: Default::default(),
             spec: None,
         }
     }
 }
 
-/// Compiler service pool configuration of the node.
-///
-/// The node never compiles contracts locally: builds are delegated to the
-/// configured compiler pool. An empty `endpoints` list is valid (the node
-/// starts without compilers; compilations fail with an explicit
-/// "compilers unavailable" error until configured).
+/// Compiler pool configuration of the node — TEST BUILDS ONLY. The
+/// embedded test compiler is auto-injected when no endpoints are set;
+/// explicit endpoints win, so failure-path tests can point at dead
+/// addresses. Production nodes compile in-process (`toolchain`
+/// feature) and have no compiler pool at all.
+#[cfg(feature = "test")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +128,7 @@ pub struct CompilerNodeConfig {
     pub request_timeout_secs: u64,
 }
 
+#[cfg(feature = "test")]
 impl Default for CompilerNodeConfig {
     fn default() -> Self {
         Self {

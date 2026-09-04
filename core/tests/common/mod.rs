@@ -23,12 +23,14 @@ use ave_core::{
     Api,
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, CompilerNodeConfig, Config,
+        AveInternalDBFeatureConfig, Config,
         GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry, SyncConfig,
         TrackerSyncConfig, UpdateSyncConfig,
     },
     governance::data::GovernanceData,
 };
+#[cfg(feature = "test")]
+use ave_core::config::CompilerNodeConfig;
 use ave_network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use serde_json::{Value, from_value};
@@ -122,7 +124,9 @@ pub struct CreateNodeConfig {
     pub safe_mode: bool,
     pub sinks: Vec<SinkConfigEntry>,
     /// Explicit compiler configuration; `None` uses the default (in tests,
-    /// the auto-injected embedded compiler).
+    /// the auto-injected embedded compiler). Only exists in test builds:
+    /// production nodes compile in-process and have no pool config.
+    #[cfg(feature = "test")]
     pub compiler: Option<CompilerNodeConfig>,
     /// Explicit contracts directory; `None` generates a fresh one. Needed
     /// by tests that manipulate the on-disk artifacts (permissions,
@@ -153,6 +157,7 @@ pub async fn try_create_node(
         ledger_batch_size,
         safe_mode,
         sinks,
+        #[cfg(feature = "test")]
         compiler,
         contracts_path,
     } = config;
@@ -231,6 +236,9 @@ pub async fn try_create_node(
             update: UpdateSyncConfig::default(),
             reboot: RebootSyncConfig::default(),
         },
+        // The field only exists in test builds (production nodes
+        // compile in-process and have no compiler pool config).
+        #[cfg(feature = "test")]
         compiler: compiler.unwrap_or_default(),
         spec: None,
     };
