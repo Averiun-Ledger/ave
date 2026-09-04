@@ -9,7 +9,7 @@ use ave_actors::{
     NotPersistentActor, TimerKey,
 };
 use serde_json::Value;
-use tracing::{Span, debug, error, info_span, warn};
+use tracing::{Span, debug, error, info, info_span, warn};
 
 use ave_common::SchemaType;
 use ave_common::identity::{
@@ -20,8 +20,10 @@ use ave_network::ComunicateInfo;
 use super::error::CompilerError;
 use super::pipeline;
 use super::support::{
-    CompilerResponse, CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
-    is_local_fatal_compiler_error,
+    CompilerResponse, CompilerSupport, HEAL_RETRY_BASE_MS,
+    HEAL_RETRY_MAX_MS, SERVING_CACHE_TTL, ServedArtifact,
+    ServingCacheEntry, is_compiler_infra_error,
+    is_local_fatal_compiler_error, is_retryable_compiler_recovery_error,
 };
 use crate::compilation::artifact::{
     ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
@@ -132,6 +134,10 @@ pub struct ContractCompiler {
     /// whenever the module is evicted (the artifact is changing).
     serving_cache: Option<ServingCacheEntry>,
     fetch: Option<FetchState>,
+    /// The provisioning action of the last `Reconcile`: how this node
+    /// obtains the artifact (compile locally or fetch it). Healing a
+    /// corrupt persisted artifact re-runs it.
+    provision: Option<ContractCompilerAction>,
 }
 
 /// An in-flight artifact fetch: message-driven (no blocked ask awaiting
@@ -217,6 +223,7 @@ impl ContractCompiler {
             serving_blocked: false,
             serving_cache: None,
             fetch: None,
+            provision: None,
         }
     }
 
@@ -777,6 +784,181 @@ impl ContractCompiler {
         Ok(())
     }
 
+    /// Obtains the official artifact of the schema from the network
+    /// path: local disk first (the artifact may already be there), a
+    /// fetch cycle that never gives up otherwise. The ledger anchor is
+    /// the authority for local and fetched bytes alike — without it
+    /// this node cannot know what is safe to execute or request, so a
+    /// missing anchor is fatal.
+    #[allow(clippy::too_many_arguments)]
+    async fn begin_fetch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        contract: String,
+        contract_name: String,
+        initial_value: Value,
+        contract_path: PathBuf,
+        gov_id: DigestIdentifier,
+        schema_id: SchemaType,
+        contract_hash: DigestIdentifier,
+    ) -> Result<CompilerResponse, ActorError> {
+        let register_path = Self::register_path(ctx);
+
+        let register = match ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+        {
+            Ok(register) => register,
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not access contract register for anchor: {}",
+                            error
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        let wasm_hash = match register
+            .ask(ContractRegisterMessage::GetAnchor {
+                contract_name: contract_name.clone(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Anchor(Some(anchor))) => anchor,
+            Ok(_) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "No ledger anchor for contract artifact {}",
+                            contract_name
+                        ),
+                    },
+                )
+                .await);
+            }
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read contract anchor: {}",
+                            error
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+
+        // Local first: the artifact may already be on disk.
+        let manifest = pipeline::compilation_toml();
+        let manifest_hash = hash_borsh(&*self.hash.hasher(), &manifest);
+        let manifest_hash = match manifest_hash {
+            Ok(manifest_hash) => manifest_hash,
+            Err(e) => {
+                return self
+                    .fetch_failed(
+                        ctx,
+                        CompilerError::SerializationError {
+                            context: "contract manifest hash",
+                            details: e.to_string(),
+                        },
+                    )
+                    .await
+                    .map(|()| CompilerResponse::Ok);
+            }
+        };
+        let contract_runtime =
+            match CompilerSupport::contract_runtime(ctx).await {
+                Ok(contract_runtime) => contract_runtime,
+                Err(error) => {
+                    return self
+                        .fetch_failed(ctx, error)
+                        .await
+                        .map(|()| CompilerResponse::Ok);
+                }
+            };
+        let engine_fingerprint = match contract_runtime
+            .engine_fingerprint(self.hash)
+        {
+            Ok(engine_fingerprint) => engine_fingerprint,
+            Err(e) => {
+                return self
+                    .fetch_failed(
+                        ctx,
+                        pipeline::map_runtime_error_to_compiler_error(
+                            e,
+                        ),
+                    )
+                    .await
+                    .map(|()| CompilerResponse::Ok);
+            }
+        };
+
+        match CompilerSupport::load_registered_artifact(
+            self.hash,
+            ctx,
+            &contract_name,
+            &contract_path,
+            &initial_value,
+            &register_path,
+            &contract_hash,
+            &manifest_hash,
+            &engine_fingerprint,
+            None,
+            Some(&wasm_hash),
+        )
+        .await
+        {
+            Ok(Some((module, metadata, _))) => {
+                let contracts =
+                    CompilerSupport::contracts_helper(ctx).await?;
+                contracts
+                    .write()
+                    .await
+                    .insert(contract_name.clone(), module);
+                self.contract = metadata.contract_hash.clone();
+                debug!(
+                    msg_type = "Fetch",
+                    contract_name = %contract_name,
+                    "Contract artifact loaded from local disk"
+                );
+                return Ok(CompilerResponse::Ok);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.fetch_failed(ctx, error).await?;
+                return Ok(CompilerResponse::Ok);
+            }
+        }
+
+        self.fetch = Some(FetchState {
+            contract,
+            contract_hash,
+            contract_name,
+            initial_value,
+            contract_path,
+            gov_id,
+            schema_id,
+            wasm_hash,
+            phase: FetchPhase::Timeoff,
+            nonce: 0,
+            timer: None,
+            started_at: Instant::now(),
+            cycles: 0,
+        });
+
+        self.start_probe_set(ctx, false).await?;
+
+        Ok(CompilerResponse::Ok)
+    }
+
     /// Drops the in-memory module of the contract: serving evaluations
     /// with a stale contract would diverge from the network.
     async fn evict_module(
@@ -793,6 +975,10 @@ impl ContractCompiler {
     /// filling the cache and scheduling its expiry on a miss. Same
     /// policy as the compile worker: the cache exists for the fetch
     /// burst after a contract change and must not live forever.
+    /// Persisted bytes that fail verification are discarded by the
+    /// support layer: nothing is served and healing is scheduled at
+    /// once — the provisioning action decides how the artifact is
+    /// re-obtained.
     async fn serve_artifact(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -804,14 +990,45 @@ impl ContractCompiler {
             return Ok(Some(entry.artifact.clone()));
         }
 
-        let Some(artifact) = CompilerSupport::serve_official_artifact(
+        let artifact = match CompilerSupport::serve_official_artifact(
+            self.hash,
             ctx,
             contract_name,
             &Self::register_path(ctx),
         )
         .await
-        else {
-            return Ok(None);
+        {
+            Ok(ServedArtifact::Verified(artifact)) => artifact,
+            Ok(ServedArtifact::Missing) => return Ok(None),
+            Ok(ServedArtifact::Corrupt) => {
+                // Serving nothing until the artifact is healed: the
+                // in-memory module (from a verified load) keeps
+                // evaluating meanwhile. Resetting the provisioned
+                // contract re-arms the provisioning guards.
+                self.contract = DigestIdentifier::default();
+                if self.provision.is_some()
+                    && let Err(e) = ctx.schedule_once(
+                        Duration::ZERO,
+                        ContractCompilerMessage::HealArtifact {
+                            attempts: 1,
+                        },
+                    )
+                {
+                    return Err(crash_system(ctx, e).await);
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not serve official artifact {contract_name}: {error}"
+                        ),
+                    },
+                )
+                .await);
+            }
         };
 
         let filled_at = Instant::now();
@@ -1070,6 +1287,14 @@ pub enum ContractCompilerMessage {
     CycleStart {
         cycle: usize,
     },
+    /// Re-obtains the official artifact after the serving path found
+    /// the persisted bytes corrupt and discarded them: a compiler
+    /// recompiles against the ledger anchor (transient failures retry
+    /// with backoff — healing never gives up), an evaluator restarts
+    /// the fetch cycle.
+    HealArtifact {
+        attempts: usize,
+    },
     /// Expiry of the serving cache entry. Guarded by `filled_at`: a
     /// late eviction of an entry that was already refilled is moot.
     EvictServingCache {
@@ -1120,6 +1345,7 @@ impl Handler<Self> for ContractCompiler {
                 self.gov_version = gov_version;
                 self.compilers = compilers;
                 self.evaluators = evaluators;
+                self.provision = Some(action.clone());
 
                 match action {
                     ContractCompilerAction::Compile {
@@ -1161,6 +1387,29 @@ impl Handler<Self> for ContractCompiler {
                             self.serving_cache = None;
 
                             let register_path = Self::register_path(ctx);
+                            // The ledger anchor, when recorded, pins
+                            // the wasm bytes this compile must produce
+                            // or load: the anchor is recorded before
+                            // this action runs, so it always belongs to
+                            // the committed contract.
+                            let expected_wasm_hash = match ctx
+                                .system()
+                                .get_actor::<ContractRegister>(&register_path)
+                                .await
+                            {
+                                Ok(register) => match register
+                                    .ask(ContractRegisterMessage::GetAnchor {
+                                        contract_name: contract_name.clone(),
+                                    })
+                                    .await
+                                {
+                                    Ok(ContractRegisterResponse::Anchor(
+                                        anchor,
+                                    )) => anchor,
+                                    _ => None,
+                                },
+                                Err(_) => None,
+                            };
                             let (module, metadata) =
                                 match CompilerSupport::compile_or_load_registered(
                                     self.hash,
@@ -1170,7 +1419,7 @@ impl Handler<Self> for ContractCompiler {
                                     &contract_path,
                                     initial_value,
                                     &register_path,
-                                    None,
+                                    expected_wasm_hash.as_ref(),
                                 )
                                 .await
                                 {
@@ -1331,165 +1580,167 @@ impl Handler<Self> for ContractCompiler {
                         self.cancel_fetch_timer(ctx);
                         self.fetch = None;
 
-                        let register_path = Self::register_path(ctx);
-
-                        // The ledger anchor is the authority for local and fetched
-                        // bytes alike. Without it, this node cannot know what is
-                        // safe to execute or request.
-                        let register = match ctx
-                            .system()
-                            .get_actor::<ContractRegister>(&register_path)
-                            .await
-                        {
-                            Ok(register) => register,
-                            Err(error) => {
-                                return Err(crash_system(
-                                    ctx,
-                                    ActorError::FunctionalCritical {
-                                        description: format!(
-                                            "Can not access contract register for anchor: {}",
-                                            error
-                                        ),
-                                    },
-                                )
-                                .await);
-                            }
-                        };
-                        let wasm_hash = match register
-                            .ask(ContractRegisterMessage::GetAnchor {
-                                contract_name: contract_name.clone(),
-                            })
-                            .await
-                        {
-                            Ok(ContractRegisterResponse::Anchor(Some(anchor))) => anchor,
-                            Ok(_) => {
-                                return Err(crash_system(
-                                    ctx,
-                                    ActorError::FunctionalCritical {
-                                        description: format!(
-                                            "No ledger anchor for contract artifact {}",
-                                            contract_name
-                                        ),
-                                    },
-                                )
-                                .await);
-                            }
-                            Err(error) => {
-                                return Err(crash_system(
-                                    ctx,
-                                    ActorError::FunctionalCritical {
-                                        description: format!(
-                                            "Can not read contract anchor: {}",
-                                            error
-                                        ),
-                                    },
-                                )
-                                .await);
-                            }
-                        };
-
-                        // Local first: the artifact may already be on disk.
-                        let manifest = pipeline::compilation_toml();
-                        let manifest_hash = hash_borsh(&*self.hash.hasher(), &manifest);
-                        let manifest_hash = match manifest_hash {
-                            Ok(manifest_hash) => manifest_hash,
-                            Err(e) => {
-                                return self
-                                    .fetch_failed(
-                                        ctx,
-                                        CompilerError::SerializationError {
-                                            context: "contract manifest hash",
-                                            details: e.to_string(),
-                                        },
-                                    )
-                                    .await
-                                    .map(|()| CompilerResponse::Ok);
-                            }
-                        };
-                        let contract_runtime =
-                            match CompilerSupport::contract_runtime(ctx).await {
-                                Ok(contract_runtime) => contract_runtime,
-                                Err(error) => {
-                                    return self
-                                        .fetch_failed(ctx, error)
-                                        .await
-                                        .map(|()| CompilerResponse::Ok);
-                                }
-                            };
-                        let engine_fingerprint = match contract_runtime
-                            .engine_fingerprint(self.hash)
-                        {
-                            Ok(engine_fingerprint) => engine_fingerprint,
-                            Err(e) => {
-                                return self
-                                    .fetch_failed(
-                                        ctx,
-                                        pipeline::map_runtime_error_to_compiler_error(
-                                            e,
-                                        ),
-                                    )
-                                    .await
-                                    .map(|()| CompilerResponse::Ok);
-                            }
-                        };
-
-                        match CompilerSupport::load_registered_artifact(
-                            self.hash,
+                        self.begin_fetch(
                             ctx,
-                            &contract_name,
-                            &contract_path,
-                            &initial_value,
-                            &register_path,
-                            &contract_hash,
-                            &manifest_hash,
-                            &engine_fingerprint,
-                            None,
-                            Some(&wasm_hash),
-                        )
-                        .await
-                        {
-                            Ok(Some((module, metadata, _))) => {
-                                let contracts =
-                                    CompilerSupport::contracts_helper(ctx).await?;
-                                contracts
-                                    .write()
-                                    .await
-                                    .insert(contract_name.clone(), module);
-                                self.contract = metadata.contract_hash.clone();
-                                debug!(
-                                    msg_type = "Fetch",
-                                    contract_name = %contract_name,
-                                    "Contract artifact loaded from local disk"
-                                );
-                                return Ok(CompilerResponse::Ok);
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                self.fetch_failed(ctx, error).await?;
-                                return Ok(CompilerResponse::Ok);
-                            }
-                        }
-
-                        self.fetch = Some(FetchState {
                             contract,
-                            contract_hash,
                             contract_name,
                             initial_value,
                             contract_path,
                             gov_id,
                             schema_id,
-                            wasm_hash,
-                            phase: FetchPhase::Timeoff,
-                            nonce: 0,
-                            timer: None,
-                            started_at: Instant::now(),
-                            cycles: 0,
-                        });
-
-                        self.start_probe_set(ctx, false).await?;
-
+                            contract_hash,
+                        )
+                        .await
+                    }
+                }
+            }
+            ContractCompilerMessage::HealArtifact { attempts } => {
+                match self.provision.clone() {
+                    Some(ContractCompilerAction::Compile {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                    }) => {
+                        if self.contract != DigestIdentifier::default() {
+                            // A governance apply already re-provisioned
+                            // the artifact.
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        match CompilerSupport::recover_official_artifact(
+                            self.hash,
+                            ctx,
+                            &contract_name,
+                            &contract,
+                            &contract_path,
+                            initial_value,
+                            &Self::register_path(ctx),
+                        )
+                        .await
+                        {
+                            Ok(module) => {
+                                let contracts =
+                                    CompilerSupport::contracts_helper(ctx)
+                                        .await?;
+                                contracts
+                                    .write()
+                                    .await
+                                    .insert(contract_name.clone(), module);
+                                self.contract =
+                                    hash_borsh(&*self.hash.hasher(), &contract)
+                                        .map_err(|e| {
+                                            ActorError::FunctionalCritical {
+                                                description: format!(
+                                                    "Can not hash contract: {}",
+                                                    e
+                                                ),
+                                            }
+                                        })?;
+                                info!(
+                                    msg_type = "HealArtifact",
+                                    contract_name = %contract_name,
+                                    "Official artifact healed: recompiled against the ledger anchor"
+                                );
+                            }
+                            Err(error)
+                                if is_compiler_infra_error(&error)
+                                    || is_retryable_compiler_recovery_error(
+                                        &error,
+                                    ) =>
+                            {
+                                let delay = retry_delay_ms(
+                                    HEAL_RETRY_BASE_MS,
+                                    HEAL_RETRY_MAX_MS,
+                                    attempts,
+                                    None,
+                                );
+                                warn!(
+                                    msg_type = "HealArtifact",
+                                    contract_name = %contract_name,
+                                    error = %error,
+                                    delay_ms = delay,
+                                    "Artifact healing failed transiently, retrying"
+                                );
+                                if let Err(e) = ctx.schedule_once(
+                                    Duration::from_millis(delay),
+                                    ContractCompilerMessage::HealArtifact {
+                                        attempts: attempts + 1,
+                                    },
+                                ) {
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                            }
+                            Err(error) => {
+                                // The committed, quorum-anchored
+                                // contract can not be reproduced
+                                // locally: this node can not fulfill
+                                // its compiler role — same fatal policy
+                                // as boot recovery.
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "Can not heal official artifact {contract_name}: {error}"
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
+                        }
                         Ok(CompilerResponse::Ok)
                     }
+                    Some(ContractCompilerAction::Fetch {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                        gov_id,
+                        schema_id,
+                    }) => {
+                        // A governance apply (or a fetch already in
+                        // flight) is re-obtaining the artifact: the
+                        // in-memory module stays, the fetch cycle does
+                        // the rest.
+                        if self.contract != DigestIdentifier::default()
+                            || self.fetch.is_some()
+                        {
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        let contract_hash =
+                            match hash_borsh(&*self.hash.hasher(), &contract)
+                            {
+                                Ok(hash) => hash,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "HealArtifact",
+                                        error = %e,
+                                        "Failed to hash contract"
+                                    );
+                                    return Err(
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not hash contract: {}",
+                                                e
+                                            ),
+                                        },
+                                    );
+                                }
+                            };
+                        self.begin_fetch(
+                            ctx,
+                            contract,
+                            contract_name,
+                            initial_value,
+                            contract_path,
+                            gov_id,
+                            schema_id,
+                            contract_hash,
+                        )
+                        .await
+                    }
+                    // Never provisioned: the next Reconcile provisions
+                    // from scratch.
+                    None => Ok(CompilerResponse::Ok),
                 }
             }
             ContractCompilerMessage::ServingBlocked { blocked } => {

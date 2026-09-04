@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -16,8 +16,10 @@ use crate::{
         error::CompilerError,
         pipeline,
         support::{
-            CompilerSupport, SERVING_CACHE_TTL, ServingCacheEntry,
+            CompilerSupport, HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS,
+            SERVING_CACHE_TTL, ServedArtifact, ServingCacheEntry,
             is_compiler_infra_error, is_local_fatal_compiler_error,
+            is_retryable_compiler_recovery_error,
         },
     },
     governance::{
@@ -32,6 +34,7 @@ use crate::{
         GovVersionSync, crash_system, gov_version_sync,
         node::{SignTypesNode, get_sign},
     },
+    sink::retry_delay_ms,
     subject::RequestSubjectData,
     system::ConfigHelper,
 };
@@ -54,7 +57,7 @@ use ave_actors::{
     NotPersistentActor,
 };
 
-use tracing::{Span, debug, error, info_span, warn};
+use tracing::{Span, debug, error, info, info_span, warn};
 
 use super::{
     Compilation, CompilationMessage,
@@ -198,10 +201,13 @@ impl CompileWorker {
     /// the cache and scheduling its expiry on a miss. The cache exists
     /// for the fetch burst after a contract change (every evaluator
     /// fetches at once); outside that window reading the artifact from
-    /// disk is cheap enough.
+    /// disk is cheap enough. Persisted bytes that fail verification are
+    /// discarded by the support layer: nothing is served and healing is
+    /// scheduled at once — a compiler recompiles against the anchor.
     async fn serve_artifact(
         &mut self,
         ctx: &mut ActorContext<Self>,
+        schema_id: &SchemaType,
         contract_name: &str,
     ) -> Result<Option<ArtifactData>, ActorError> {
         if let Some(entry) = self.serving_cache.get(contract_name)
@@ -210,14 +216,41 @@ impl CompileWorker {
             return Ok(Some(entry.artifact.clone()));
         }
 
-        let Some(artifact) = CompilerSupport::serve_official_artifact(
+        let artifact = match CompilerSupport::serve_official_artifact(
+            self.hash,
             ctx,
             contract_name,
             &self.register_path(),
         )
         .await
-        else {
-            return Ok(None);
+        {
+            Ok(ServedArtifact::Verified(artifact)) => artifact,
+            Ok(ServedArtifact::Missing) => return Ok(None),
+            Ok(ServedArtifact::Corrupt) => {
+                // Serving nothing until the artifact is healed:
+                // recompile it against the ledger anchor right away.
+                if let Err(e) = ctx.schedule_once(
+                    Duration::ZERO,
+                    CompileWorkerMessage::HealArtifact {
+                        schema_id: schema_id.clone(),
+                        attempts: 1,
+                    },
+                ) {
+                    return Err(crash_system(ctx, e).await);
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not serve official artifact {contract_name}: {error}"
+                        ),
+                    },
+                )
+                .await);
+            }
         };
 
         let filled_at = Instant::now();
@@ -841,6 +874,15 @@ pub enum CompileWorkerMessage {
         sender: PublicKey,
         receiver_actor: String,
     },
+    /// Re-obtains the official artifact of a schema after the serving
+    /// path found the persisted bytes corrupt and discarded them:
+    /// recompile against the ledger anchor. Transient failures retry
+    /// with backoff — the artifact is needed for sure, healing never
+    /// gives up.
+    HealArtifact {
+        schema_id: SchemaType,
+        attempts: usize,
+    },
 }
 
 impl Message for CompileWorkerMessage {}
@@ -1202,7 +1244,9 @@ impl Handler<Self> for CompileWorker {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        match self.serve_artifact(ctx, &contract_name).await?
+                        match self
+                            .serve_artifact(ctx, &schema_id, &contract_name)
+                            .await?
                         {
                             Some(artifact) => {
                                 ArtifactFetchResult::Artifact(artifact)
@@ -1230,6 +1274,121 @@ impl Handler<Self> for CompileWorker {
                     schema_id = ?schema_id,
                     "Artifact request processed"
                 );
+
+                if self.stop {
+                    ctx.stop(None).await;
+                }
+            }
+            CompileWorkerMessage::HealArtifact {
+                schema_id,
+                attempts,
+            } => {
+                let Some(schema) = self.schemas.get(&schema_id).cloned()
+                else {
+                    // The schema left the governance meanwhile: nothing
+                    // to heal.
+                    return Ok(());
+                };
+                let contract_name =
+                    format!("{}_{}", self.governance_id, schema_id);
+                // A governance apply may have re-obtained the artifact
+                // first.
+                if CompilerSupport::has_official_artifact(
+                    ctx,
+                    &contract_name,
+                    &self.register_path(),
+                )
+                .await
+                {
+                    return Ok(());
+                }
+
+                let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config")
+                else {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::Helper {
+                            name: "config".to_owned(),
+                            reason: "Not found".to_owned(),
+                        },
+                    )
+                    .await);
+                };
+                let contract_path = config
+                    .contracts_path
+                    .join("contracts")
+                    .join(&contract_name);
+
+                match CompilerSupport::recover_official_artifact(
+                    self.hash,
+                    ctx,
+                    &contract_name,
+                    &schema.contract,
+                    &contract_path,
+                    schema.initial_value.0.clone(),
+                    &self.register_path(),
+                )
+                .await
+                {
+                    Ok(module) => {
+                        let contracts =
+                            CompilerSupport::contracts_helper(ctx).await?;
+                        contracts
+                            .write()
+                            .await
+                            .insert(contract_name.clone(), module);
+                        info!(
+                            msg_type = "HealArtifact",
+                            schema_id = ?schema_id,
+                            "Official artifact healed: recompiled against the ledger anchor"
+                        );
+                    }
+                    Err(error)
+                        if is_compiler_infra_error(&error)
+                            || is_retryable_compiler_recovery_error(
+                                &error,
+                            ) =>
+                    {
+                        let delay = retry_delay_ms(
+                            HEAL_RETRY_BASE_MS,
+                            HEAL_RETRY_MAX_MS,
+                            attempts,
+                            None,
+                        );
+                        warn!(
+                            msg_type = "HealArtifact",
+                            schema_id = ?schema_id,
+                            error = %error,
+                            delay_ms = delay,
+                            "Artifact healing failed transiently, retrying"
+                        );
+                        if let Err(e) = ctx.schedule_once(
+                            Duration::from_millis(delay),
+                            CompileWorkerMessage::HealArtifact {
+                                schema_id: schema_id.clone(),
+                                attempts: attempts + 1,
+                            },
+                        ) {
+                            return Err(crash_system(ctx, e).await);
+                        }
+                    }
+                    Err(error) => {
+                        // The committed, quorum-anchored contract can
+                        // not be reproduced locally: this node can not
+                        // fulfill its compiler role — same fatal policy
+                        // as boot recovery.
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not heal official artifact of {schema_id}: {error}"
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                }
 
                 if self.stop {
                     ctx.stop(None).await;

@@ -9,7 +9,7 @@ use ave_common::{
 use ave_contract_sdk::runtime::{CompiledModule, ContractRuntime};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::client::CompilerClient;
 use super::error::CompilerError;
@@ -92,6 +92,37 @@ pub(crate) struct CompilerSupport;
 /// them from disk per request. Contract changes are rare, so the cache
 /// must not live forever — the entry expires and the RAM is freed.
 pub(crate) const SERVING_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Backoff between artifact healing attempts: a healed artifact is
+/// needed for sure, so healing never gives up on transient failures —
+/// the backoff is what keeps the retry cheap. Same policy as the fetch
+/// cycle timeoff.
+#[cfg(any(test, feature = "test"))]
+pub(crate) const HEAL_RETRY_BASE_MS: u64 = 1_000;
+/// Backoff between artifact healing attempts: a healed artifact is
+/// needed for sure, so healing never gives up on transient failures —
+/// the backoff is what keeps the retry cheap. Same policy as the fetch
+/// cycle timeoff.
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const HEAL_RETRY_BASE_MS: u64 = 5_000;
+
+#[cfg(any(test, feature = "test"))]
+pub(crate) const HEAL_RETRY_MAX_MS: u64 = 5_000;
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const HEAL_RETRY_MAX_MS: u64 = 60_000;
+
+/// Outcome of serving an official artifact: the bytes were verified
+/// against the registered metadata, there is nothing to serve (the
+/// requester fails over to another peer), or the persisted bytes failed
+/// verification and were discarded — the caller re-obtains the artifact
+/// (a compiler recompiles against the ledger anchor, an evaluator
+/// fetches from the network again).
+#[derive(Debug)]
+pub(crate) enum ServedArtifact {
+    Verified(ArtifactData),
+    Missing,
+    Corrupt,
+}
 
 /// An official artifact kept in memory for serving, with the instant it
 /// was filled: drives the expiry and guards the eviction against late
@@ -640,12 +671,14 @@ impl CompilerSupport {
         // The persisted artifact could not be verified (unreadable,
         // hash mismatch or unusable bytes): presume it was or could have
         // been manipulated — discard it, so the caller rebuilds it from
-        // its own source (compiler pool or network fetch).
+        // its own source (compiler pool or network fetch). The
+        // in-memory module goes with it: it was never verified.
         Self::discard_persisted_artifact(
             ctx,
             contract_name,
             contract_path,
             &register,
+            true,
         )
         .await?;
 
@@ -749,12 +782,16 @@ impl CompilerSupport {
     /// unreadable, hash mismatch or unusable bytes mean it was or could
     /// have been manipulated, so it must not survive. The ledger anchor
     /// is kept — it is a projection of the applied events, not of the
-    /// bytes on disk.
+    /// bytes on disk. `evict_module` drops the in-memory module too: the
+    /// load path does (its module was never verified), the serving path
+    /// does not (its module came from a verified load and keeps
+    /// evaluating while the artifact is re-obtained).
     async fn discard_persisted_artifact<A: Actor>(
         ctx: &ActorContext<A>,
         contract_name: &str,
         contract_path: &Path,
         register: &ave_actors::ActorRef<ContractRegister>,
+        evict_module: bool,
     ) -> Result<(), CompilerError> {
         if let Err(error) = tokio::fs::remove_dir_all(contract_path).await
             && error.kind() != std::io::ErrorKind::NotFound
@@ -774,9 +811,11 @@ impl CompilerSupport {
                 details: e.to_string(),
             })?;
 
-        // Best-effort: the in-memory module, if any, is stale the same
-        // way the bytes were.
-        if let Ok(contracts) = Self::contracts_helper(ctx).await {
+        // Best-effort eviction, only when the in-memory module is stale
+        // the same way the bytes were.
+        if evict_module
+            && let Ok(contracts) = Self::contracts_helper(ctx).await
+        {
             contracts.write().await.remove(contract_name);
         }
 
@@ -813,16 +852,51 @@ impl CompilerSupport {
     /// governance version was already negotiated by the caller, so the
     /// official store holds exactly what the requester needs. The staged
     /// area is never served — until the event commits, the good contract
-    /// is the previous one. Returns `None` when the artifact is missing
-    /// or unreadable.
+    /// is the previous one.
+    ///
+    /// The bytes are verified against the registered metadata before
+    /// serving: a node must never hand out an artifact it cannot prove
+    /// correct. A mismatch discards the persisted artifact (the anchor
+    /// is kept) and reports `Corrupt`, so the caller re-obtains the
+    /// artifact. Without metadata there is nothing to verify against —
+    /// nothing is served and nothing is discarded.
     pub(crate) async fn serve_official_artifact<A: Actor>(
+        hash: HashAlgorithm,
         ctx: &ActorContext<A>,
         contract_name: &str,
         register_path: &ActorPath,
-    ) -> Option<ArtifactData> {
-        let config = ctx.system().get_helper::<ConfigHelper>("config")?;
+    ) -> Result<ServedArtifact, CompilerError> {
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Ok(ServedArtifact::Missing);
+        };
         let contract_path =
             config.contracts_path.join("contracts").join(contract_name);
+
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(register_path)
+            .await
+            .map_err(|e| CompilerError::ContractRegisterFailed {
+                details: e.to_string(),
+            })?;
+        let record = match register
+            .ask(ContractRegisterMessage::GetMetadata {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Metadata(record)) => record,
+            Ok(_) => None,
+            Err(error) => {
+                return Err(CompilerError::ContractRegisterFailed {
+                    details: error.to_string(),
+                });
+            }
+        };
+        let Some(record) = record else {
+            return Ok(ServedArtifact::Missing);
+        };
 
         let wasm_bytes =
             match pipeline::load_artifact_wasm(&contract_path).await {
@@ -833,39 +907,42 @@ impl CompilerSupport {
                         contract_name = %contract_name,
                         "Can not read official artifact to serve it"
                     );
-                    return None;
+                    return Ok(ServedArtifact::Missing);
                 }
             };
 
-        // Cache-hygiene metadata of the build, when registered.
-        let toolchain_fingerprint = match ctx
-            .system()
-            .get_actor::<ContractRegister>(register_path)
-            .await
-        {
-            Ok(register) => match register
-                .ask(ContractRegisterMessage::GetMetadata {
-                    contract_name: contract_name.to_owned(),
-                })
-                .await
-            {
-                Ok(ContractRegisterResponse::Metadata(Some(record))) => {
-                    Some(record.toolchain_fingerprint)
-                }
-                _ => None,
-            },
-            Err(_) => None,
-        };
+        let wasm_hash =
+            pipeline::hash_bytes(hash, &wasm_bytes, "served wasm artifact")?;
+        if wasm_hash != record.wasm_hash {
+            warn!(
+                expected = %record.wasm_hash,
+                actual = %wasm_hash,
+                contract_name = %contract_name,
+                "Persisted official artifact failed verification before serving, discarding it"
+            );
+            Self::discard_persisted_artifact(
+                ctx,
+                contract_name,
+                &contract_path,
+                &register,
+                false,
+            )
+            .await?;
+            return Ok(ServedArtifact::Corrupt);
+        }
 
-        match ArtifactData::from_wasm(&wasm_bytes, toolchain_fingerprint) {
-            Ok(artifact) => Some(artifact),
+        match ArtifactData::from_wasm(
+            &wasm_bytes,
+            Some(record.toolchain_fingerprint),
+        ) {
+            Ok(artifact) => Ok(ServedArtifact::Verified(artifact)),
             Err(error) => {
                 debug!(
                     error = %error,
                     contract_name = %contract_name,
                     "Can not prepare official artifact for network serving"
                 );
-                None
+                Ok(ServedArtifact::Missing)
             }
         }
     }
