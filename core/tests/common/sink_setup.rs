@@ -1,7 +1,8 @@
 use std::{collections::BTreeSet, collections::HashMap, time::Duration};
 
+use ave_core::test_contracts::EXAMPLE_CONTRACT;
 use ave_common::{
-    IncomingSinkEvent, SinkTypes,
+    IncomingSinkEvent, LightEvent, SchemaType, SinkTypes,
     sink::{
         DataToSink, DataToSinkEvent, HttpProxyConfig, HttpTlsConfig,
         SinkAuthMethod, SinkCompression,
@@ -18,8 +19,6 @@ use ave_network::NodeType;
 use serde_json::{Value, json};
 
 use crate::common::CreateNodeConfig;
-
-pub const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
 #[allow(dead_code)]
 pub fn example_schema_governance_fact() -> serde_json::Value {
@@ -1573,3 +1572,39 @@ pub fn assert_sink_events_page(
     assert_eq!(page.next_sn, expected_next_sn);
     assert_eq!(page.events.len(), expected_events_len);
 }
+
+#[allow(dead_code)]
+pub fn example_data_to_sink(subject_id: &str, schema_id: &str) -> DataToSink {
+    DataToSink {
+        payload: DataToSinkEvent::Create {
+            governance_id: None,
+            subject_id: subject_id.to_string(),
+            owner: "owner".to_string(),
+            schema_id: SchemaType::Type(schema_id.to_string()),
+            namespace: "".to_string(),
+            sn: 0,
+            gov_version: 1,
+            state: serde_json::json!({ "one": 1 }),
+        },
+        public_key: "pk".to_string(),
+        event_request_timestamp: 1,
+        event_ledger_timestamp: 2,
+        sink_timestamp: 3,
+    }
+}
+
+#[allow(dead_code)]
+pub fn example_light_event(subject_id: &str, schema_id: &str) -> LightEvent {
+    LightEvent {
+        subject_id: subject_id.to_string(),
+        schema_id: schema_id.to_string(),
+        governance_id: None,
+        sn: 1,
+        event_type: SinkTypes::Fact,
+        success: true,
+    }
+}
+
+/// Schema id shared by the sink suites.
+#[allow(dead_code)]
+pub const SCHEMA_ID: &str = "Example";

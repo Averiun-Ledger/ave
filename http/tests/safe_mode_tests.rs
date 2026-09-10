@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use test_log::test;
 
 use crate::common::{
-    TestPersistencePaths, TestServer, TestServerOptions,
+    MEMBER_PUBLIC_KEY, TestPersistencePaths, TestServer, TestServerOptions,
     add_example_schema_to_governance, add_governance_member_as_witness,
     create_governance, create_subject, login, make_request,
     server_auth_route_catalog, server_main_route_catalog,
@@ -14,8 +14,6 @@ use crate::common::{
 };
 
 pub mod common;
-
-const MEMBER_PUBLIC_KEY: &str = "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
 
 fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
     matches!(
@@ -871,7 +869,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
         "PUT",
         &format!("/governances/{}/authorize", fixture.governance_id),
-        Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
+        Some(json!([MEMBER_PUBLIC_KEY])),
     )
     .await;
     assert_safe_mode_blocked(

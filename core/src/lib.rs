@@ -29,6 +29,10 @@ pub mod validation;
 #[cfg(feature = "test")]
 pub mod test_compiler;
 
+/// Contract fixtures shared by unit tests and integration suites.
+#[cfg(any(test, feature = "test"))]
+pub mod test_contracts;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

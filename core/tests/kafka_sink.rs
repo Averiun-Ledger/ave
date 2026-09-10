@@ -14,7 +14,7 @@ use ave_common::{
         BLAKE3_HASHER, Hash as _, PublicKey, SignatureIdentifier, TimeStamp,
         keys::KeyPair,
     },
-    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent},
+    sink::{DataToSinkEvent, IncomingSinkEvent},
 };
 use ave_core::config::{
     KafkaAcks, KafkaCompression, KafkaKeyStrategy, KafkaSaslMechanism,
@@ -41,9 +41,10 @@ use common::{
     create_subject, emit_confirm, emit_eol, emit_fact, emit_reject,
     emit_transfer, get_subject, node_running,
     sink_setup::{
-        assert_sink_contains_confirm, assert_sink_contains_create,
+        SCHEMA_ID, assert_sink_contains_confirm, assert_sink_contains_create,
         assert_sink_contains_eol, assert_sink_contains_fact_full,
         assert_sink_contains_reject, assert_sink_contains_transfer,
+        example_data_to_sink, example_light_event,
         example_schema_governance_fact, governance_with_transfer_roles_fact,
         restart_config, restart_config_with_peers, wait_for_sink_caught_up,
         wait_for_sink_lagging_subjects,
@@ -51,7 +52,6 @@ use common::{
 };
 
 const SUBJECT_ID: &str = "KAFKA-SUBJECT-ID";
-const SCHEMA_ID: &str = "Example";
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 fn kafka_sink_config(bootstrap_servers: &str, topic: &str) -> KafkaSinkConfig {
@@ -85,36 +85,6 @@ fn kafka_sink_config_sasl(
             username: username.to_string(),
         },
         ..KafkaSinkConfig::default()
-    }
-}
-
-fn example_data_to_sink(subject_id: &str, schema_id: &str) -> DataToSink {
-    DataToSink {
-        payload: DataToSinkEvent::Create {
-            governance_id: None,
-            subject_id: subject_id.to_string(),
-            owner: "owner".to_string(),
-            schema_id: SchemaType::Type(schema_id.to_string()),
-            namespace: "".to_string(),
-            sn: 0,
-            gov_version: 1,
-            state: serde_json::json!({ "one": 1 }),
-        },
-        public_key: "pk".to_string(),
-        event_request_timestamp: 1,
-        event_ledger_timestamp: 2,
-        sink_timestamp: 3,
-    }
-}
-
-fn example_light_event(subject_id: &str, schema_id: &str) -> LightEvent {
-    LightEvent {
-        subject_id: subject_id.to_string(),
-        schema_id: schema_id.to_string(),
-        governance_id: None,
-        sn: 1,
-        event_type: SinkTypes::Fact,
-        success: true,
     }
 }
 

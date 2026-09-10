@@ -11,14 +11,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ave_common::{
-    LightEvent, SchemaType, SinkTarget, SinkTypes,
+    SinkTarget, SinkTypes,
     bridge::request::{SinkReplayItem, SinkReplayRequest},
     bridge::response::{SinkServerView, SinkTransportView},
     identity::{
         BLAKE3_HASHER, DigestIdentifier, Hash as _, PublicKey,
         SignatureIdentifier, TimeStamp, keys::KeyPair,
     },
-    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
+    sink::{IncomingSinkEvent, SinkAuthConfig},
 };
 use ave_core::config::{
     GrpcSinkConfig, GrpcTlsConfig, SinkAuthMethod, SinkCompression,
@@ -37,6 +37,7 @@ use common::{
     create_and_authorize_governance, create_node, create_subject, emit_fact,
     node_running,
     sink_setup::{
+        SCHEMA_ID, example_data_to_sink, example_light_event,
         example_schema_governance_fact, wait_for_sink_blocked,
         wait_for_sink_caught_up, wait_for_sink_lagging_subjects,
     },
@@ -47,37 +48,6 @@ use test_log::test;
 use tonic::Code;
 
 const SUBJECT_ID: &str = "GRPC-SUBJECT-ID";
-const SCHEMA_ID: &str = "Example";
-
-fn example_data_to_sink(subject_id: &str, schema_id: &str) -> DataToSink {
-    DataToSink {
-        payload: DataToSinkEvent::Create {
-            governance_id: None,
-            subject_id: subject_id.to_string(),
-            owner: "owner".to_string(),
-            schema_id: SchemaType::Type(schema_id.to_string()),
-            namespace: "".to_string(),
-            sn: 0,
-            gov_version: 1,
-            state: serde_json::json!({ "one": 1 }),
-        },
-        public_key: "pk".to_string(),
-        event_request_timestamp: 1,
-        event_ledger_timestamp: 2,
-        sink_timestamp: 3,
-    }
-}
-
-fn example_light_event(subject_id: &str, schema_id: &str) -> LightEvent {
-    LightEvent {
-        subject_id: subject_id.to_string(),
-        schema_id: schema_id.to_string(),
-        governance_id: None,
-        sn: 1,
-        event_type: SinkTypes::Fact,
-        success: true,
-    }
-}
 
 fn grpc_config(endpoint: &str) -> GrpcSinkConfig {
     GrpcSinkConfig {
