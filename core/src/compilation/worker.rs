@@ -1053,6 +1053,21 @@ impl Handler<Self> for CompileWorker {
                         .get_subject_id(),
                 });
 
+                let new_info = ComunicateInfo {
+                    receiver: sender.clone(),
+                    request_id: info.request_id.clone(),
+                    version: info.version,
+                    receiver_actor: format!(
+                        "/user/request/{}/compilation/{}",
+                        compilation_req
+                            .content()
+                            .event_request
+                            .content()
+                            .get_subject_id(),
+                        self.our_key.clone()
+                    ),
+                };
+
                 let compilation = if let Err(error) =
                     self.check_data(&compilation_req)
                 {
@@ -1083,6 +1098,35 @@ impl Handler<Self> for CompileWorker {
                             CompilationRes::Reboot
                         }
                         GovVersionSync::Current => {
+                            // ACK before compiling: the requester stops
+                            // resending the request and awaits the final
+                            // result under a longer result deadline. A
+                            // large contract legitimately takes longer to
+                            // compile than the ACK retry budget — without
+                            // the ACK this node would be dropped as a
+                            // timeout while compiling correctly.
+                            if let Err(e) = self
+                                .network
+                                .send_command(
+                                    ave_network::CommandHelper::SendMessage {
+                                        message: NetworkMessage {
+                                            info: new_info.clone(),
+                                            message:
+                                                ActorMessage::CompilationRes {
+                                                    res: CompilationRes::Working,
+                                                },
+                                        },
+                                    },
+                                )
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to send working ACK to network"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            };
                             match self.create_res(ctx, &compilation_req).await {
                                 Ok(compilation) => compilation,
                                 Err(e) => {
@@ -1102,21 +1146,6 @@ impl Handler<Self> for CompileWorker {
                             }
                         }
                     }
-                };
-
-                let new_info = ComunicateInfo {
-                    receiver: sender.clone(),
-                    request_id: info.request_id.clone(),
-                    version: info.version,
-                    receiver_actor: format!(
-                        "/user/request/{}/compilation/{}",
-                        compilation_req
-                            .content()
-                            .event_request
-                            .content()
-                            .get_subject_id(),
-                        self.our_key.clone()
-                    ),
                 };
 
                 if let Err(e) = self

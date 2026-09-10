@@ -684,6 +684,11 @@ impl Handler<Self> for Compilation {
 
                                 return Ok(());
                             }
+                            // Consumed by the coordinator (it cancels
+                            // the request retry and arms the result
+                            // deadline there): it is never forwarded to
+                            // this actor. Defensive arm only.
+                            CompilationRes::Working => {}
                         };
 
                         if self.quorum.check_quorum(

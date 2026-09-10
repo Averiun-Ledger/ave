@@ -35,6 +35,13 @@ pub enum CompilationRes {
     /// request when no compiler can answer at all. Same semantics as
     /// `EvaluationRes::Unavailable`.
     Unavailable,
+    /// Immediate ACK: the compiler accepted the request and is working
+    /// on it. The requester stops resending the request and awaits the
+    /// final result under a separate, longer result deadline — a large
+    /// contract legitimately takes longer to compile than the ACK retry
+    /// budget. Consumed by the coordinator: it is never voted, never
+    /// forwarded to the compilation phase actor.
+    Working,
 }
 
 #[derive(
@@ -221,10 +228,11 @@ mod tests {
         expected.extend_from_slice(&string_bytes("abort"));
         assert_wire_shape(&CompilationRes::Abort("abort".to_owned()), &expected);
 
-        // CompilationRes::TimeOut / Reboot / Unavailable
+        // CompilationRes::TimeOut / Reboot / Unavailable / Working
         assert_wire_shape(&CompilationRes::TimeOut, &[2]);
         assert_wire_shape(&CompilationRes::Reboot, &[3]);
         assert_wire_shape(&CompilationRes::Unavailable, &[4]);
+        assert_wire_shape(&CompilationRes::Working, &[5]);
 
         // CompilationResult::Ok
         assert_wire_shape(&sample_ok_result(), &sample_ok_result_bytes());

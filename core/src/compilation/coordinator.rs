@@ -24,6 +24,23 @@ use super::{
     response::CompilationRes,
 };
 
+/// Deadline for the final result once a compiler has ACKed the request
+/// (`CompilationRes::Working`): compiling a large contract legitimately
+/// exceeds the ACK retry budget, so after the ACK the request is no
+/// longer resent and the result is awaited up to this limit. When it
+/// fires, the compiler is dropped as a timeout — exactly like an
+/// exhausted ACK retry.
+#[cfg(any(test, feature = "test"))]
+const RESULT_DEADLINE: Duration = Duration::from_secs(300);
+/// Deadline for the final result once a compiler has ACKed the request
+/// (`CompilationRes::Working`): compiling a large contract legitimately
+/// exceeds the ACK retry budget, so after the ACK the request is no
+/// longer resent and the result is awaited up to this limit. When it
+/// fires, the compiler is dropped as a timeout — exactly like an
+/// exhausted ACK retry.
+#[cfg(not(any(test, feature = "test")))]
+const RESULT_DEADLINE: Duration = Duration::from_secs(600);
+
 /// A struct representing a CompileCoordinator actor.
 #[derive(Clone, Debug)]
 pub struct CompileCoordinator {
@@ -32,6 +49,10 @@ pub struct CompileCoordinator {
     version: u64,
     network: Arc<NetworkSender>,
     hash: HashAlgorithm,
+    /// The compiler ACKed the request (`CompilationRes::Working`): the
+    /// request retry is cancelled and the final result is awaited under
+    /// `RESULT_DEADLINE`.
+    acked: bool,
 }
 
 impl CompileCoordinator {
@@ -48,6 +69,7 @@ impl CompileCoordinator {
             version,
             network,
             hash,
+            acked: false,
         }
     }
 
@@ -111,11 +133,55 @@ impl CompileCoordinator {
 
         Ok(())
     }
+
+    /// The compiler never answered in time — the ACK retry was
+    /// exhausted, or the result deadline fired after a
+    /// `CompilationRes::Working` ACK: report it as a timeout so the
+    /// compilation phase drops it and replaces it from the pending
+    /// pool. If the phase was already torn down, the timeout is moot
+    /// and dropped.
+    async fn notify_timeout(&self, ctx: &mut ActorContext<Self>) {
+        match ctx.get_parent::<Compilation>().await {
+            Ok(compilation_actor) => {
+                if let Err(e) = compilation_actor
+                    .tell(CompilationMessage::Response {
+                        compilation_res: CompilationRes::TimeOut,
+                        sender: self.node_key.clone(),
+                    })
+                    .await
+                {
+                    // The phase was torn down while this timeout
+                    // was in flight: it is moot, drop it.
+                    debug!(
+                        error = %e,
+                        "Compilation actor gone, dropping timeout response"
+                    );
+                } else {
+                    debug!(
+                        request_id = %self.request_id,
+                        version = self.version,
+                        "Timeout response sent to compilation actor"
+                    );
+                }
+            }
+            Err(e) => {
+                // Same teardown race: the phase actor is gone.
+                debug!(
+                    error = %e,
+                    path = %ctx.path().parent(),
+                    "Compilation actor not found, dropping timeout response"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum CompileCoordinatorMessage {
     EndRetry,
+    /// The result deadline fired after a `CompilationRes::Working` ACK:
+    /// the compiler accepted the job but never delivered the result.
+    ResultDeadline,
     NetworkCompilation {
         compilation_req: Box<Signed<CompilationReq>>,
         node_key: PublicKey,
@@ -166,38 +232,19 @@ impl Handler<Self> for CompileCoordinator {
                     "Retry exhausted, notifying parent and stopping"
                 );
 
-                match ctx.get_parent::<Compilation>().await {
-                    Ok(compilation_actor) => {
-                        if let Err(e) = compilation_actor
-                            .tell(CompilationMessage::Response {
-                                compilation_res: CompilationRes::TimeOut,
-                                sender: self.node_key.clone(),
-                            })
-                            .await
-                        {
-                            // The phase was torn down while this timeout
-                            // was in flight: it is moot, drop it.
-                            debug!(
-                                error = %e,
-                                "Compilation actor gone, dropping timeout response"
-                            );
-                        } else {
-                            debug!(
-                                request_id = %self.request_id,
-                                version = self.version,
-                                "Timeout response sent to compilation actor"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        // Same teardown race: the phase actor is gone.
-                        debug!(
-                            error = %e,
-                            path = %ctx.path().parent(),
-                            "Compilation actor not found, dropping timeout response"
-                        );
-                    }
-                }
+                self.notify_timeout(ctx).await;
+
+                ctx.stop(None).await;
+            }
+            CompileCoordinatorMessage::ResultDeadline => {
+                warn!(
+                    node_key = %self.node_key,
+                    request_id = %self.request_id,
+                    version = self.version,
+                    "Result deadline fired after working ACK, notifying parent and stopping"
+                );
+
+                self.notify_timeout(ctx).await;
 
                 ctx.stop(None).await;
             }
@@ -298,6 +345,59 @@ impl Handler<Self> for CompileCoordinator {
                                 "We received a compilation response from an unexpected sender"
                                     .to_string(),
                         });
+                    }
+
+                    // Working ACK: the compiler accepted the job. Stop
+                    // resending the request and await the final result
+                    // under the result deadline — it carries no verdict,
+                    // so it is never forwarded to the compilation actor.
+                    if matches!(&*compilation_res, CompilationRes::Working) {
+                        if self.acked {
+                            // A duplicate ACK (a request retry was
+                            // already in flight when the first one
+                            // arrived): harmless, ignore it.
+                            debug!(
+                                msg_type = "NetworkResponse",
+                                sender = %sender,
+                                "Duplicate working ACK ignored"
+                            );
+                            return Ok(());
+                        }
+                        self.acked = true;
+
+                        if let Ok(retry) = ctx
+                            .get_child::<RetryActor<RetryNetwork>>("retry")
+                            .await
+                            && let Err(e) = retry.tell(RetryMessage::End).await
+                        {
+                            warn!(
+                                msg_type = "NetworkResponse",
+                                error = %e,
+                                "Failed to end retry actor after working ACK"
+                            );
+                        }
+
+                        if let Err(e) = ctx.schedule_once(
+                            RESULT_DEADLINE,
+                            CompileCoordinatorMessage::ResultDeadline,
+                        ) {
+                            error!(
+                                msg_type = "NetworkResponse",
+                                error = %e,
+                                "Failed to schedule the result deadline"
+                            );
+                            return Err(crash_system(ctx, e).await);
+                        }
+
+                        debug!(
+                            msg_type = "NetworkResponse",
+                            request_id = %request_id,
+                            version = version,
+                            sender = %sender,
+                            "Working ACK received, retry stopped, awaiting result"
+                        );
+
+                        return Ok(());
                     }
 
                     if let CompilationRes::Response {
