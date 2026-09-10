@@ -1,9 +1,15 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
-    approval::response::ApprovalRes,
-    compilation::{response::CompilationResult, schemas_to_compile},
-    evaluation::response::EvaluationResult,
+    approval::{request::ApprovalReq, response::ApprovalRes},
+    compilation::{
+        request::CompilationReq, response::CompilationResult,
+        schemas_to_compile,
+    },
+    evaluation::{
+        request::{EvaluateData, EvaluationReq},
+        response::EvaluationResult,
+    },
     governance::{
         data::GovernanceData,
         model::Quorum,
@@ -462,14 +468,53 @@ impl ValiWorker {
     }
 
     fn check_approval(
+        &self,
         approval: ApprovalData,
         appr_data: RoleDataRegister,
+        metadata: &Metadata,
+        gov_version: u64,
+        patch: ValueWrapper,
         req_subject_data_hash: DigestIdentifier,
         signer: PublicKey,
     ) -> Result<(), ValidatorError> {
         if signer != approval.approval_req_signature.signer {
             return Err(ValidatorError::InvalidSigner {
                 signer: signer.to_string(),
+            });
+        }
+
+        // The approval request is fully determined by the event under
+        // validation and the verified evaluation evidence (the patch), so
+        // it is rebuilt here: the stored request signature must verify
+        // cryptographically over it and the stored request hash must
+        // reproduce exactly. Note the approval phase hashes the request
+        // CONTENT, not the signed envelope (unlike compilation and
+        // evaluation).
+        let approval_req = ApprovalReq {
+            subject_id: metadata.subject_id.clone(),
+            sn: metadata.sn + 1,
+            gov_version,
+            patch,
+            signer: signer.clone(),
+        };
+        let signed_approval_req = Signed::from_parts(
+            approval_req.clone(),
+            approval.approval_req_signature.clone(),
+        );
+        if signed_approval_req.verify().is_err() {
+            return Err(ValidatorError::InvalidSignature {
+                data: "approval request",
+            });
+        }
+        let recomputed_req_hash =
+            hash_borsh(&*self.hash.hasher(), &approval_req).map_err(|e| {
+                ValidatorError::InternalError {
+                    problem: e.to_string(),
+                }
+            })?;
+        if recomputed_req_hash != approval.approval_req_hash {
+            return Err(ValidatorError::InvalidData {
+                value: "approval request hash",
             });
         }
 
@@ -554,12 +599,96 @@ impl ValiWorker {
         evaluation: EvaluationData,
         eval_data: RoleDataRegister,
         mut properties: ValueWrapper,
+        event_request: &Signed<EventRequest>,
+        metadata: &Metadata,
+        gov_version: u64,
         req_subject_data_hash: DigestIdentifier,
         signer: PublicKey,
-    ) -> Result<(bool, ValueWrapper), ValidatorError> {
+    ) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
+    {
         if signer != evaluation.eval_req_signature.signer {
             return Err(ValidatorError::InvalidSigner {
                 signer: signer.to_string(),
+            });
+        }
+
+        // The evaluation request is fully determined by the event under
+        // validation (signed event request, subject metadata and
+        // governance version), so it is rebuilt here: the stored request
+        // signature must verify cryptographically over it and the stored
+        // request hash must reproduce exactly. The state sent to the
+        // evaluators is the pre-event subject properties, the same data
+        // this validator re-evaluates over.
+        let eval_state = match (
+            metadata.schema_id.is_gov(),
+            EventRequestType::from(event_request.content()),
+        ) {
+            (true, EventRequestType::Fact) => EvaluateData::GovFact {
+                state: GovernanceData::try_from(metadata.properties.clone())
+                    .map_err(|_| ValidatorError::InvalidData {
+                        value: "evaluation gov state",
+                    })?,
+            },
+            (true, EventRequestType::Transfer) => {
+                EvaluateData::GovTransfer {
+                    state: GovernanceData::try_from(
+                        metadata.properties.clone(),
+                    )
+                    .map_err(|_| ValidatorError::InvalidData {
+                        value: "evaluation gov state",
+                    })?,
+                }
+            }
+            (true, EventRequestType::Confirm) => EvaluateData::GovConfirm {
+                state: GovernanceData::try_from(metadata.properties.clone())
+                    .map_err(|_| ValidatorError::InvalidData {
+                        value: "evaluation gov state",
+                    })?,
+            },
+            (false, EventRequestType::Fact) => {
+                EvaluateData::TrackerSchemasFact {
+                    state: metadata.properties.clone(),
+                }
+            }
+            (false, EventRequestType::Transfer) => {
+                EvaluateData::TrackerSchemasTransfer {
+                    state: metadata.properties.clone(),
+                }
+            }
+            _ => {
+                return Err(ValidatorError::InvalidData {
+                    value: "evaluation event type",
+                });
+            }
+        };
+        let signed_eval_req = Signed::from_parts(
+            EvaluationReq {
+                event_request: event_request.clone(),
+                governance_id: metadata.governance_id.clone(),
+                data: eval_state,
+                sn: metadata.sn + 1,
+                gov_version,
+                namespace: metadata.namespace.clone(),
+                schema_id: metadata.schema_id.clone(),
+                signer: signer.clone(),
+                signer_is_owner: signer == event_request.signature().signer,
+            },
+            evaluation.eval_req_signature.clone(),
+        );
+        if signed_eval_req.verify().is_err() {
+            return Err(ValidatorError::InvalidSignature {
+                data: "evaluation request",
+            });
+        }
+        let recomputed_req_hash =
+            hash_borsh(&*self.hash.hasher(), &signed_eval_req).map_err(
+                |e| ValidatorError::InternalError {
+                    problem: e.to_string(),
+                },
+            )?;
+        if recomputed_req_hash != evaluation.eval_req_hash {
+            return Err(ValidatorError::InvalidData {
+                value: "eval request hash",
             });
         }
 
@@ -621,9 +750,12 @@ impl ValiWorker {
             }
         }
 
-        let appr_required = if let Some(evaluator_res) =
+        let (appr_required, req_patch) = if let Some(evaluator_res) =
             evaluation.evaluator_response_ok()
         {
+            // Keep the patch: it is part of the approval request that
+            // `check_approval` rebuilds and verifies.
+            let req_patch = evaluator_res.patch.clone();
             let json_patch =
                 serde_json::from_value::<Patch>(evaluator_res.patch.0)
                     .map_err(|_| ValidatorError::InvalidData {
@@ -647,24 +779,60 @@ impl ValiWorker {
                 });
             }
 
-            evaluator_res.appr_required
+            (evaluator_res.appr_required, Some(req_patch))
         } else {
-            false
+            (false, None)
         };
 
-        Ok((appr_required, properties))
+        Ok((appr_required, req_patch, properties))
     }
 
     fn check_compilation(
         &self,
         compilation: CompilationData,
         comp_data: RoleDataRegister,
+        event_request: &Signed<EventRequest>,
+        metadata: &Metadata,
+        gov_version: u64,
         req_subject_data_hash: DigestIdentifier,
         signer: PublicKey,
     ) -> Result<(), ValidatorError> {
         if signer != compilation.compile_req_signature.signer {
             return Err(ValidatorError::InvalidSigner {
                 signer: signer.to_string(),
+            });
+        }
+
+        // The compilation request is fully determined by the event under
+        // validation (signed event request, governance, sn and governance
+        // version), so it is rebuilt here: the stored request signature
+        // must verify cryptographically over it and the stored request
+        // hash must reproduce exactly. This closes the chain from the
+        // event request to the compiler votes, which sign a result hash
+        // embedding this request hash.
+        let signed_compile_req = Signed::from_parts(
+            CompilationReq {
+                event_request: event_request.clone(),
+                governance_id: metadata.governance_id.clone(),
+                sn: metadata.sn + 1,
+                gov_version,
+            },
+            compilation.compile_req_signature.clone(),
+        );
+        if signed_compile_req.verify().is_err() {
+            return Err(ValidatorError::InvalidSignature {
+                data: "compilation request",
+            });
+        }
+        let recomputed_req_hash =
+            hash_borsh(&*self.hash.hasher(), &signed_compile_req).map_err(
+                |e| ValidatorError::InternalError {
+                    problem: e.to_string(),
+                },
+            )?;
+        if recomputed_req_hash != compilation.compile_req_hash {
+            return Err(ValidatorError::InvalidData {
+                value: "compile request hash",
             });
         }
 
@@ -724,6 +892,31 @@ impl ValiWorker {
             if signature.verify(&compile_result_hash).is_err() {
                 return Err(ValidatorError::InvalidSignature {
                     data: "compilation",
+                });
+            }
+        }
+
+        // The response must cover exactly the contracts this event sends
+        // through the compilation phase: a missing schema would commit
+        // without a ledger anchor and an extra one would overwrite the
+        // anchor of a contract the event did not touch.
+        if let CompilationResponse::Ok { result, .. } = &compilation.response
+        {
+            let EventRequest::Fact(fact_request) = event_request.content()
+            else {
+                return Err(ValidatorError::InvalidData {
+                    value: "event request",
+                });
+            };
+            let expected = schemas_to_compile(&fact_request.payload).ok_or(
+                ValidatorError::InvalidData {
+                    value: "compilation schemas",
+                },
+            )?;
+            let got = result.contracts.keys().collect::<BTreeSet<_>>();
+            if got != expected.iter().collect::<BTreeSet<_>>() {
+                return Err(ValidatorError::InvalidData {
+                    value: "compilation contracts",
                 });
             }
         }
@@ -865,19 +1058,26 @@ impl ValiWorker {
                 self.check_compilation(
                     compilation,
                     comp_data,
+                    event_request,
+                    metadata,
+                    gov_version,
                     req_subject_data_hash.clone(),
                     signer.clone(),
                 )?;
             }
 
             if let Some(evaluation) = evaluation {
-                let (appr_required, properties) = self.check_evaluation(
-                    evaluation,
-                    eval_data,
-                    metadata.properties.clone(),
-                    req_subject_data_hash.clone(),
-                    signer.clone(),
-                )?;
+                let (appr_required, req_patch, properties) = self
+                    .check_evaluation(
+                        evaluation,
+                        eval_data,
+                        metadata.properties.clone(),
+                        event_request,
+                        metadata,
+                        gov_version,
+                        req_subject_data_hash.clone(),
+                        signer.clone(),
+                    )?;
 
                 if let Some(approval) = approval
                     && let Some(appr_data) = appro_data
@@ -888,9 +1088,20 @@ impl ValiWorker {
                         });
                     }
 
-                    Self::check_approval(
+                    // Approval requires a successful evaluation: its
+                    // request carries the evaluated patch.
+                    let Some(req_patch) = req_patch else {
+                        return Err(ValidatorError::InvalidData {
+                            value: "approval patch",
+                        });
+                    };
+
+                    self.check_approval(
                         approval,
                         appr_data,
+                        metadata,
+                        gov_version,
+                        req_patch,
                         req_subject_data_hash,
                         signer,
                     )?;

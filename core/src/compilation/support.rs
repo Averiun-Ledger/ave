@@ -274,7 +274,7 @@ impl CompilerSupport {
             // Payload format check (same position as the old
             // `prepare_contract_project`): a malformed payload is a
             // request error, not a build error.
-            pipeline::validate_source_base64(contract)?;
+            pipeline::validate_contract_source(contract)?;
 
             // The engine fingerprint is local. A valid persisted artifact
             // does not need the compiler pool, so defer its lookup until a
@@ -804,7 +804,7 @@ impl CompilerSupport {
 
         // A valid cached wasm cannot make a malformed committed source
         // acceptable: the next recovery would be unable to reproduce it.
-        pipeline::validate_source_base64(contract)?;
+        pipeline::validate_contract_source(contract)?;
 
         let contract_hash = hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
             CompilerError::SerializationError {
@@ -1143,6 +1143,10 @@ mod tests {
             CompilerError::Base64DecodeFailed {
                 details: "d".to_owned(),
             },
+            CompilerError::SourceDecompressionFailed {
+                details: "d".to_owned(),
+            },
+            CompilerError::ContractSourceTooLarge { size: 1, max: 1 },
             CompilerError::DirectoryCreationFailed {
                 path: "p".to_owned(),
                 details: "d".to_owned(),
@@ -1281,6 +1285,8 @@ mod tests {
                 (false, true, false)
             }
             CompilerError::Base64DecodeFailed { .. }
+            | CompilerError::SourceDecompressionFailed { .. }
+            | CompilerError::ContractSourceTooLarge { .. }
             | CompilerError::CargoBuildFailed { .. }
             | CompilerError::BuildTimeout { .. }
             | CompilerError::CompilationFailed

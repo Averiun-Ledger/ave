@@ -58,19 +58,53 @@ pub fn compilation_toml() -> String {
     ave_contract_sdk::runtime::CONTRACT_CARGO_TOML.to_owned()
 }
 
-/// Validates that `contract` is well-formed base64 (standard alphabet).
-///
-/// The node runs this cheap local check before delegating a build to the
-/// compiler service: a malformed payload is a request error
-/// ([`CompilerError::Base64DecodeFailed`]), not a build error, and must
-/// not be conflated with "the contract does not compile".
-pub fn validate_source_base64(contract: &str) -> Result<(), CompilerError> {
-    BASE64_STANDARD.decode(contract).map_err(|e| {
+/// Largest contract source accepted once decoded and, when it carries the
+/// zstd magic number, decompressed. Bounds memory against zip-bomb
+/// payloads; production minified sources are a few KiB.
+pub const MAX_CONTRACT_SOURCE_BYTES: usize = 1024 * 1024;
+
+/// zstd frame magic number (little-endian 0xFD2FB528). A base64-decoded
+/// contract payload starting with these bytes is a compressed source;
+/// anything else is a plain UTF-8 source — a Rust source can never begin
+/// with this non-UTF-8 prefix, so the formats are unambiguous and both
+/// stay accepted (plain payloads in already-committed events keep
+/// replaying).
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Decodes a governance-event contract payload into source bytes: base64,
+/// then bounded zstd decompression when the decoded payload carries the
+/// zstd magic number. Deterministic and identical on every node.
+pub fn decode_contract_source(contract: &str) -> Result<Vec<u8>, CompilerError> {
+    let decoded = BASE64_STANDARD.decode(contract).map_err(|e| {
         CompilerError::Base64DecodeFailed {
             details: e.to_string(),
         }
     })?;
-    Ok(())
+    if decoded.starts_with(&ZSTD_MAGIC) {
+        return zstd::bulk::decompress(&decoded, MAX_CONTRACT_SOURCE_BYTES)
+            .map_err(|e| CompilerError::SourceDecompressionFailed {
+                details: e.to_string(),
+            });
+    }
+    if decoded.len() > MAX_CONTRACT_SOURCE_BYTES {
+        return Err(CompilerError::ContractSourceTooLarge {
+            size: decoded.len(),
+            max: MAX_CONTRACT_SOURCE_BYTES,
+        });
+    }
+    Ok(decoded)
+}
+
+/// Validates that `contract` is a well-formed contract payload: base64
+/// carrying a plain or zstd-compressed source within
+/// [`MAX_CONTRACT_SOURCE_BYTES`].
+///
+/// The node runs this cheap local check before delegating a build to the
+/// compiler: a malformed payload is a request error
+/// ([`CompilerError::Base64DecodeFailed`] and friends), not a build
+/// error, and must not be conflated with "the contract does not compile".
+pub fn validate_contract_source(contract: &str) -> Result<(), CompilerError> {
+    decode_contract_source(contract).map(|_| ())
 }
 
 fn contracts_root(contract_path: &Path) -> Result<PathBuf, CompilerError> {
@@ -218,15 +252,7 @@ async fn prepare_contract_project(
     contract: &str,
     contract_path: &Path,
 ) -> Result<(), CompilerError> {
-    let decode_base64 = BASE64_STANDARD.decode(contract).map_err(|e| {
-        CompilerError::Base64DecodeFailed {
-            details: format!(
-                "{} (path: {})",
-                e,
-                contract_path.to_string_lossy()
-            ),
-        }
-    })?;
+    let source = decode_contract_source(contract)?;
 
     let contracts_root = contracts_root(contract_path)?;
     let dir = contract_path.join("src");
@@ -259,7 +285,7 @@ async fn prepare_contract_project(
     })?;
 
     let lib_rs = contract_path.join("src").join("lib.rs");
-    fs::write(&lib_rs, decode_base64).await.map_err(|e| {
+    fs::write(&lib_rs, source).await.map_err(|e| {
         CompilerError::FileWriteFailed {
             path: lib_rs.to_string_lossy().to_string(),
             details: e.to_string(),

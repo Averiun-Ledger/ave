@@ -10,6 +10,12 @@ pub enum CompilerError {
     #[error("base64 decode failed: {details}")]
     Base64DecodeFailed { details: String },
 
+    #[error("contract source decompression failed: {details}")]
+    SourceDecompressionFailed { details: String },
+
+    #[error("contract source too large: {size} bytes (max {max})")]
+    ContractSourceTooLarge { size: usize, max: usize },
+
     #[error("directory creation failed [{path}]: {details}")]
     DirectoryCreationFailed { path: String, details: String },
 
