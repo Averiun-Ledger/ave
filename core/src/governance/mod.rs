@@ -1678,6 +1678,14 @@ impl Governance {
         let register_path =
             ActorPath::from(format!("{}/contract_register", ctx.path()));
 
+        // Module residency follows the evaluator role: schemas this node
+        // does not evaluate are recovered and verified the same way, but
+        // their module is dropped once the init check passes — it is never
+        // executed locally and the node serves raw bytes from disk.
+        let evaluated = self
+            .properties
+            .schemas(ProtocolTypes::Evaluation, &self.our_key);
+
         for (schema_id, schema) in schemas {
             let contract_name =
                 format!("{}_{}", self.subject_metadata.subject_id, schema_id);
@@ -1716,7 +1724,9 @@ impl Governance {
 
             match recovered {
                 Ok(module) => {
-                    contracts.write().await.insert(contract_name, module);
+                    if evaluated.contains_key(schema_id) {
+                        contracts.write().await.insert(contract_name, module);
+                    }
                 }
                 Err(error) => {
                     return Err(crash_system(
@@ -3217,18 +3227,18 @@ impl Governance {
 
         for schema_id in schemas.iter() {
             // The actor may not exist: deferred catch-up applies
-            // never created it.
-            let Ok(actor) = ctx
+            // never created it. The module eviction below is
+            // unconditional — residency follows the evaluator role,
+            // with or without actor.
+            if let Ok(actor) = ctx
                 .get_child::<ContractCompiler>(&format!(
                     "{}_contract_compiler",
                     schema_id
                 ))
                 .await
-            else {
-                continue;
-            };
-
-            actor.ask_stop().await?;
+            {
+                actor.ask_stop().await?;
+            }
 
             let contract_name = format!("{}_{}", subject_id, schema_id);
             {

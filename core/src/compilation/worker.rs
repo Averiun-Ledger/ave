@@ -101,6 +101,8 @@ pub struct CompileWorker {
     pub network: Arc<NetworkSender>,
     pub stop: bool,
     /// In-flight network compilation request, if any (see `pre_stop`).
+    /// Only ever set on the ephemeral build children: the standing
+    /// worker answers gates and serves artifacts, it never compiles.
     pub pending: Option<PendingCompilation>,
 }
 
@@ -850,6 +852,16 @@ pub enum CompileWorkerMessage {
         sender: PublicKey,
         info: ComunicateInfo,
     },
+    /// Accepted remote compilation, offloaded to an ephemeral child of
+    /// the standing worker: the build takes far longer than any gate or
+    /// serving answer, and running it inline would mute the standing
+    /// worker (probes, fetches and gate updates of the whole governance
+    /// would queue behind the build).
+    NetworkCompilation {
+        compilation_req: Signed<CompilationReq>,
+        sender: PublicKey,
+        info: ComunicateInfo,
+    },
     /// Light availability probe from another node: can this worker
     /// serve the official artifact of the schema at that governance
     /// version?
@@ -1042,6 +1054,173 @@ impl Handler<Self> for CompileWorker {
                     return Ok(());
                 }
 
+                let new_info = ComunicateInfo {
+                    receiver: sender.clone(),
+                    request_id: info.request_id.clone(),
+                    version: info.version,
+                    receiver_actor: format!(
+                        "/user/request/{}/compilation/{}",
+                        compilation_req
+                            .content()
+                            .event_request
+                            .content()
+                            .get_subject_id(),
+                        self.our_key.clone()
+                    ),
+                };
+
+                // Cheap gates answer in place; only an accepted request
+                // spawns compilation work.
+                let gate = if let Err(error) = self.check_data(&compilation_req)
+                {
+                    Some(CompilationRes::Abort(error))
+                } else {
+                    match gov_version_sync(
+                        self.gov_version,
+                        compilation_req.content().gov_version,
+                    ) {
+                        // This node is behind the request's governance
+                        // version and can not compile it: say so instead
+                        // of staying silent — the requester replaces this
+                        // compiler from its pending pool.
+                        GovVersionSync::NodeBehind => {
+                            warn!(
+                                msg_type = "NetworkRequest",
+                                local_gov_version = self.gov_version,
+                                request_gov_version = compilation_req.content().gov_version,
+                                governance_id = %self.governance_id,
+                                sender = %self.node_key,
+                                "Request governance version is higher than local; answering unavailable"
+                            );
+                            Some(CompilationRes::Unavailable)
+                        }
+                        // The requester is behind: it must sync its
+                        // governance and retry the request.
+                        GovVersionSync::RequesterBehind => {
+                            Some(CompilationRes::Reboot)
+                        }
+                        GovVersionSync::Current => None,
+                    }
+                };
+
+                if let Some(gate_res) = gate {
+                    if let Err(e) = self.network.send_command(
+                        ave_network::CommandHelper::SendMessage {
+                            message: NetworkMessage {
+                                info: new_info,
+                                message: ActorMessage::CompilationRes {
+                                    res: gate_res,
+                                },
+                            },
+                        },
+                    )
+                    .await
+                    {
+                        error!(
+                            msg_type = "NetworkRequest",
+                            error = %e,
+                            "Failed to send response to network"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    };
+
+                    if self.stop {
+                        ctx.stop(None).await;
+                    }
+
+                    return Ok(());
+                }
+
+                // Accepted: the build runs in an ephemeral child named
+                // after the request, so this standing worker keeps
+                // answering probes, fetches and gate updates while
+                // compiling. A retry of the same request (its ACK is
+                // still in flight or was lost) finds the child already
+                // working: re-ACK instead of duplicating the build.
+                let child_name = format!("{}", info.request_id);
+                if ctx
+                    .get_child::<CompileWorker>(&child_name)
+                    .await
+                    .is_ok()
+                {
+                    if let Err(e) = self.network.send_command(
+                        ave_network::CommandHelper::SendMessage {
+                            message: NetworkMessage {
+                                info: new_info,
+                                message: ActorMessage::CompilationRes {
+                                    res: CompilationRes::Working,
+                                },
+                            },
+                        },
+                    )
+                    .await
+                    {
+                        error!(
+                            msg_type = "NetworkRequest",
+                            error = %e,
+                            "Failed to re-send working ACK to network"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    };
+
+                    if self.stop {
+                        ctx.stop(None).await;
+                    }
+
+                    return Ok(());
+                }
+
+                let child = ctx
+                    .create_child(
+                        &child_name,
+                        CompileWorker {
+                            node_key: self.node_key.clone(),
+                            our_key: self.our_key.clone(),
+                            governance_id: self.governance_id.clone(),
+                            gov_version: self.gov_version,
+                            issuers: self.issuers.clone(),
+                            issuer_any: self.issuer_any,
+                            schemas: self.schemas.clone(),
+                            // Ephemeral build workers never serve
+                            // artifacts (they live outside the well-known
+                            // serving path): empty whitelist rejects
+                            // every probe.
+                            evaluators: BTreeMap::new(),
+                            serving_blocked: false,
+                            serving_cache: HashMap::new(),
+                            hash: self.hash,
+                            network: self.network.clone(),
+                            stop: true,
+                            pending: None,
+                        },
+                    )
+                    .await?;
+
+                child
+                    .tell(CompileWorkerMessage::NetworkCompilation {
+                        compilation_req,
+                        sender: sender.clone(),
+                        info: info.clone(),
+                    })
+                    .await?;
+
+                debug!(
+                    msg_type = "NetworkRequest",
+                    request_id = %info.request_id,
+                    version = info.version,
+                    sender = %sender,
+                    "Network compilation request accepted, build offloaded to ephemeral worker"
+                );
+
+                if self.stop {
+                    ctx.stop(None).await;
+                }
+            }
+            CompileWorkerMessage::NetworkCompilation {
+                compilation_req,
+                info,
+                sender,
+            } => {
                 self.pending = Some(PendingCompilation {
                     sender: sender.clone(),
                     request_id: info.request_id.clone(),
@@ -1068,83 +1247,49 @@ impl Handler<Self> for CompileWorker {
                     ),
                 };
 
-                let compilation = if let Err(error) =
-                    self.check_data(&compilation_req)
+                // ACK before compiling: the requester stops resending
+                // the request and awaits the final result under a
+                // longer result deadline. A large contract legitimately
+                // takes longer to compile than the ACK retry budget —
+                // without the ACK this node would be dropped as a
+                // timeout while compiling correctly.
+                if let Err(e) = self
+                    .network
+                    .send_command(ave_network::CommandHelper::SendMessage {
+                        message: NetworkMessage {
+                            info: new_info.clone(),
+                            message: ActorMessage::CompilationRes {
+                                res: CompilationRes::Working,
+                            },
+                        },
+                    })
+                    .await
                 {
-                    CompilationRes::Abort(error)
-                } else {
-                    match gov_version_sync(
-                        self.gov_version,
-                        compilation_req.content().gov_version,
-                    ) {
-                        // This node is behind the request's governance
-                        // version and can not compile it: say so instead
-                        // of staying silent — the requester replaces this
-                        // compiler from its pending pool.
-                        GovVersionSync::NodeBehind => {
-                            warn!(
-                                msg_type = "NetworkRequest",
-                                local_gov_version = self.gov_version,
-                                request_gov_version = compilation_req.content().gov_version,
-                                governance_id = %self.governance_id,
-                                sender = %self.node_key,
-                                "Request governance version is higher than local; answering unavailable"
-                            );
-                            CompilationRes::Unavailable
-                        }
-                        // The requester is behind: it must sync its
-                        // governance and retry the request.
-                        GovVersionSync::RequesterBehind => {
-                            CompilationRes::Reboot
-                        }
-                        GovVersionSync::Current => {
-                            // ACK before compiling: the requester stops
-                            // resending the request and awaits the final
-                            // result under a longer result deadline. A
-                            // large contract legitimately takes longer to
-                            // compile than the ACK retry budget — without
-                            // the ACK this node would be dropped as a
-                            // timeout while compiling correctly.
-                            if let Err(e) = self
-                                .network
-                                .send_command(
-                                    ave_network::CommandHelper::SendMessage {
-                                        message: NetworkMessage {
-                                            info: new_info.clone(),
-                                            message:
-                                                ActorMessage::CompilationRes {
-                                                    res: CompilationRes::Working,
-                                                },
-                                        },
-                                    },
-                                )
-                                .await
-                            {
-                                error!(
-                                    msg_type = "NetworkRequest",
-                                    error = %e,
-                                    "Failed to send working ACK to network"
-                                );
-                                return Err(crash_system(ctx, e).await);
-                            };
-                            match self.create_res(ctx, &compilation_req).await {
-                                Ok(compilation) => compilation,
-                                Err(e) => {
-                                    error!(
-                                        msg_type = "NetworkRequest",
-                                        error = %e,
-                                        "Internal error during compilation"
-                                    );
-                                    return Err(crash_system(
-                                        ctx,
-                                        ActorError::FunctionalCritical {
-                                            description: e.to_string(),
-                                        },
-                                    )
-                                    .await);
-                                }
-                            }
-                        }
+                    error!(
+                        msg_type = "NetworkCompilation",
+                        error = %e,
+                        "Failed to send working ACK to network"
+                    );
+                    return Err(crash_system(ctx, e).await);
+                };
+
+                let compilation = match self.create_res(ctx, &compilation_req)
+                    .await
+                {
+                    Ok(compilation) => compilation,
+                    Err(e) => {
+                        error!(
+                            msg_type = "NetworkCompilation",
+                            error = %e,
+                            "Internal error during compilation"
+                        );
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: e.to_string(),
+                            },
+                        )
+                        .await);
                     }
                 };
 
@@ -1161,7 +1306,7 @@ impl Handler<Self> for CompileWorker {
                     .await
                 {
                     error!(
-                        msg_type = "NetworkRequest",
+                        msg_type = "NetworkCompilation",
                         error = %e,
                         "Failed to send response to network"
                     );
@@ -1171,16 +1316,15 @@ impl Handler<Self> for CompileWorker {
                 self.pending = None;
 
                 debug!(
-                    msg_type = "NetworkRequest",
+                    msg_type = "NetworkCompilation",
                     request_id = %info.request_id,
                     version = info.version,
                     sender = %sender,
                     "Network compilation request processed successfully"
                 );
 
-                if self.stop {
-                    ctx.stop(None).await;
-                }
+                // Ephemeral build worker: the work is done.
+                ctx.stop(None).await;
             }
             CompileWorkerMessage::ArtifactProbeRequest {
                 subject_id,
@@ -1361,12 +1505,25 @@ impl Handler<Self> for CompileWorker {
                 .await
                 {
                     Ok(module) => {
-                        let contracts =
-                            CompilerSupport::contracts_helper(ctx).await?;
-                        contracts
-                            .write()
-                            .await
-                            .insert(contract_name.clone(), module);
+                        // Module residency follows the evaluator role:
+                        // a compiler that does not evaluate this schema
+                        // only needed the module for the recovery init
+                        // check — it serves raw bytes from disk.
+                        if self
+                            .evaluators
+                            .get(&schema_id)
+                            .is_some_and(|evaluators| {
+                                evaluators.contains(&*self.our_key)
+                            })
+                        {
+                            let contracts =
+                                CompilerSupport::contracts_helper(ctx)
+                                    .await?;
+                            contracts
+                                .write()
+                                .await
+                                .insert(contract_name, module);
+                        }
                         info!(
                             msg_type = "HealArtifact",
                             schema_id = ?schema_id,
