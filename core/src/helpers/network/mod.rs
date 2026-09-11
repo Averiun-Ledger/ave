@@ -19,6 +19,8 @@ use crate::{
 pub mod error;
 pub mod intermediary;
 pub mod service;
+#[cfg(feature = "test")]
+pub mod test_faults;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ActorMessage {

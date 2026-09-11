@@ -2308,6 +2308,137 @@ fn manager_sort_key(manager: &SinkManagerTarget) -> String {
     }
 }
 
+/// Test-only control surface (feature `test`): deterministic fault
+/// injection, message injection and introspection for the e2e suites.
+/// The faults live at the node's single network chokepoint (the
+/// intermediary), so the test drives the exact interleaving.
+#[cfg(feature = "test")]
+impl Api {
+    fn test_faults(
+        &self,
+    ) -> Result<
+        helpers::network::test_faults::SharedFaultRegistry,
+        Error,
+    > {
+        self.system
+            .get_helper::<helpers::network::test_faults::SharedFaultRegistry>(
+                "test_faults",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "test_faults".to_owned(),
+                reason: "Test fault registry helper not found".to_owned(),
+            })
+    }
+
+    /// Installs a network fault rule on this node.
+    pub async fn test_install_fault(
+        &self,
+        rule: helpers::network::test_faults::FaultRule,
+    ) -> Result<(), Error> {
+        let faults = self.test_faults()?;
+        // Test infrastructure: the lock is never held across an await
+        // and poisoning only means the test panicked.
+        #[allow(clippy::unwrap_used)]
+        faults.lock().unwrap().install(rule);
+        Ok(())
+    }
+
+    /// Clears every fault rule and drops every held message.
+    pub async fn test_clear_faults(&self) -> Result<(), Error> {
+        let faults = self.test_faults()?;
+        #[allow(clippy::unwrap_used)]
+        faults.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// How many messages are currently held by fault rules.
+    pub async fn test_held_count(&self) -> Result<usize, Error> {
+        let faults = self.test_faults()?;
+        #[allow(clippy::unwrap_used)]
+        let count = faults.lock().unwrap().held_count();
+        Ok(count)
+    }
+
+    /// Delivers every held message through the node's normal flow and
+    /// removes the hold rules. Returns how many messages were
+    /// delivered.
+    pub async fn test_release_held(&self) -> Result<usize, Error> {
+        let faults = self.test_faults()?;
+        let (commands, control) = {
+            #[allow(clippy::unwrap_used)]
+            let mut faults = faults.lock().unwrap();
+            let commands = faults.take_held_commands();
+            (commands, faults.control_sender())
+        };
+        let count = commands.len();
+        for command in commands {
+            // A closed channel means the node is shutting down:
+            // nothing to deliver to, and a test fault is never fatal.
+            let _ = control.send(command).await;
+        }
+        Ok(count)
+    }
+
+    /// Delivers a test-crafted message to this node as if it came from
+    /// `from` over the network.
+    pub async fn test_inject_inbound(
+        &self,
+        message: NetworkMessage,
+        from: &PublicKey,
+    ) -> Result<(), Error> {
+        let faults = self.test_faults()?;
+        let control = {
+            #[allow(clippy::unwrap_used)]
+            let faults = faults.lock().unwrap();
+            faults.control_sender()
+        };
+        let command =
+            helpers::network::test_faults::TestFaultRegistry::inject_command(
+                message, from,
+            )
+            .map_err(Error::Network)?;
+        control
+            .send(command)
+            .await
+            .map_err(|e| Error::Network(e.to_string()))
+    }
+
+    /// Whether the contract module is currently resident in memory
+    /// (the `contracts` map).
+    pub async fn test_has_contract_module(
+        &self,
+        contract_name: &str,
+    ) -> bool {
+        let Some(contracts) = self.system.get_helper::<
+            Arc<
+                tokio::sync::RwLock<
+                    HashMap<
+                        String,
+                        Arc<ave_contract_sdk::runtime::CompiledModule>,
+                    >,
+                >,
+            >,
+        >("contracts") else {
+            return false;
+        };
+        contracts.read().await.contains_key(contract_name)
+    }
+
+    /// Snapshot of the fetch state machine of a contract, if the node
+    /// has any fetch observability recorded for it.
+    pub async fn test_fetch_obs(
+        &self,
+        contract_name: &str,
+    ) -> Option<compilation::contract_compiler::FetchObs> {
+        let obs = self.system.get_helper::<
+            compilation::contract_compiler::SharedFetchObs,
+        >("test_fetch_obs")?;
+        #[allow(clippy::unwrap_used)]
+        let obs = obs.lock().unwrap();
+        obs.get(contract_name).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

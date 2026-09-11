@@ -1,4 +1,6 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
+#[cfg(feature = "test")]
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -210,6 +212,28 @@ enum FetchPhase {
     Timeoff,
 }
 
+/// Test-only (feature `test`) observability snapshot of the fetch state
+/// machine: the suites read this through the API instead of racing
+/// timers or tracing logs.
+#[cfg(feature = "test")]
+#[derive(Debug, Clone, Default)]
+pub struct FetchObs {
+    /// Probe requests sent so far.
+    pub probes_sent: usize,
+    /// Artifact downloads started so far.
+    pub downloads_started: usize,
+    /// Cycles exhausted (timeoff entered) so far.
+    pub cycles_exhausted: usize,
+    /// Current phase of the fetch, if any.
+    pub phase: Option<&'static str>,
+}
+
+/// Handle of the per-node fetch observability registry (feature
+/// `test`), keyed by contract name.
+#[cfg(feature = "test")]
+pub type SharedFetchObs =
+    Arc<std::sync::Mutex<HashMap<String, FetchObs>>>;
+
 impl ContractCompiler {
     pub fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
         Self {
@@ -251,6 +275,26 @@ impl ContractCompiler {
         {
             ctx.cancel_timer(key);
         }
+    }
+
+    /// Records a test-only (feature `test`) fetch observability update.
+    #[cfg(feature = "test")]
+    fn record_fetch_obs(
+        ctx: &ActorContext<Self>,
+        contract_name: &str,
+        update: impl FnOnce(&mut FetchObs),
+    ) {
+        let Some(obs) = ctx
+            .system()
+            .get_helper::<SharedFetchObs>("test_fetch_obs")
+        else {
+            return;
+        };
+        // Test infrastructure: the lock is never held across an await
+        // and poisoning only means the test panicked.
+        #[allow(clippy::unwrap_used)]
+        let mut obs = obs.lock().unwrap();
+        update(obs.entry(contract_name.to_owned()).or_default());
     }
 
     fn allocate_nonce(&mut self) -> u64 {
@@ -403,6 +447,12 @@ impl ContractCompiler {
             "Artifact probe batch sent"
         );
 
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &contract_name, |obs| {
+            obs.probes_sent += batch_size;
+            obs.phase = Some("probe");
+        });
+
         Ok(())
     }
 
@@ -526,6 +576,11 @@ impl ContractCompiler {
             delay_ms = delay.as_millis(),
             "Probe batch is busy compiling; re-probing after the wait"
         );
+
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &fetch.contract_name, |obs| {
+            obs.phase = Some("busy_wait");
+        });
 
         Ok(())
     }
@@ -661,6 +716,12 @@ impl ContractCompiler {
             "Artifact request sent"
         );
 
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &contract_name, |obs| {
+            obs.downloads_started += 1;
+            obs.phase = Some("fetch");
+        });
+
         Ok(())
     }
 
@@ -780,6 +841,16 @@ impl ContractCompiler {
             delay_ms = delay,
             "Fetch cycle exhausted; governance update triggered, next cycle after timeoff"
         );
+
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_fetch_cycle_exhausted();
+        }
+
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &contract_name, |obs| {
+            obs.cycles_exhausted += 1;
+            obs.phase = Some("timeoff");
+        });
 
         Ok(())
     }
@@ -2017,6 +2088,14 @@ impl Handler<Self> for ContractCompiler {
                                     module,
                                 );
                                 self.contract = metadata.contract_hash.clone();
+                                #[cfg(feature = "test")]
+                                Self::record_fetch_obs(
+                                    ctx,
+                                    &fetch.contract_name,
+                                    |obs| {
+                                        obs.phase = Some("done");
+                                    },
+                                );
                                 if let Some(metrics) = try_core_metrics() {
                                     metrics.observe_contract_prepare(
                                         "fetched",
@@ -2055,6 +2134,12 @@ impl Handler<Self> for ContractCompiler {
                                         error = %error,
                                         "Fetched artifact is corrupt or does not match the ledger anchor"
                                     );
+                                    if let Some(metrics) =
+                                        try_core_metrics()
+                                    {
+                                        metrics
+                                            .observe_fetch_failover("corrupt");
+                                    }
                                     self.attempt_failed(
                                         ctx,
                                         Some(error.to_string()),
@@ -2068,6 +2153,9 @@ impl Handler<Self> for ContractCompiler {
                         }
                     }
                     ArtifactFetchResult::NotServed => {
+                        if let Some(metrics) = try_core_metrics() {
+                            metrics.observe_fetch_failover("not_served");
+                        }
                         self.attempt_failed(
                             ctx,
                             Some("peer can not serve the artifact".to_owned()),
@@ -2126,6 +2214,9 @@ impl Handler<Self> for ContractCompiler {
                             && matches!(fetch.phase, FetchPhase::Fetch { .. })
                     });
                 if matches_current {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_fetch_failover("timeout");
+                    }
                     self.attempt_failed(
                         ctx,
                         Some("artifact fetch timed out".to_owned()),

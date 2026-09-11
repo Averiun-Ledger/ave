@@ -34,6 +34,8 @@ use crate::{
 use super::error::IntermediaryError;
 
 use super::ActorMessage;
+#[cfg(feature = "test")]
+use super::test_faults;
 use super::{NetworkMessage, service::NetworkSender};
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
@@ -59,24 +61,52 @@ impl Intermediary {
     ) -> Arc<NetworkSender> {
         let (command_sender, mut command_receiver) = mpsc::channel(2048);
 
+        // Test-only fault injection: one registry per node, shared by
+        // the network sender (outbound) and this task (inbound), and
+        // exposed to the test suites through the `test_faults` helper.
+        #[cfg(feature = "test")]
+        let faults = {
+            let faults: test_faults::SharedFaultRegistry =
+                Arc::new(std::sync::Mutex::new(
+                    test_faults::TestFaultRegistry::new(
+                        command_sender.clone(),
+                    ),
+                ));
+            system.add_helper("test_faults", faults.clone());
+            faults
+        };
+
+        #[cfg(feature = "test")]
+        let service_sender =
+            NetworkSender::new(command_sender, faults.clone());
+        #[cfg(not(feature = "test"))]
+        let service_sender = NetworkSender::new(command_sender);
+
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     command = command_receiver.recv() => {
-                        if let Some(command) = command
-                            && let Err(e) = Self::handle_command(command, &system, &network_sender).await
-                        {
-                            match e {
-                                IntermediaryError::NetworkSendFailed { .. } => {
-                                    error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
-                                    crash_token.cancel();
-                                    break;
-                                }
-                                _ => {
-                                    warn!(
-                                        error = %e,
-                                        "Intermediary command failed with non-fatal error"
-                                    );
+                        if let Some(command) = command {
+                            let result = Self::handle_command(
+                                command,
+                                &system,
+                                &network_sender,
+                                #[cfg(feature = "test")]
+                                &faults,
+                            ).await;
+                            if let Err(e) = result {
+                                match e {
+                                    IntermediaryError::NetworkSendFailed { .. } => {
+                                        error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
+                                        crash_token.cancel();
+                                        break;
+                                    }
+                                    _ => {
+                                        warn!(
+                                            error = %e,
+                                            "Intermediary command failed with non-fatal error"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -93,13 +123,14 @@ impl Intermediary {
             }
         });
 
-        Arc::new(NetworkSender::new(command_sender))
+        Arc::new(service_sender)
     }
 
     async fn handle_command(
         command: Command<NetworkMessage>,
         system: &SystemRef,
         network_sender: &mpsc::Sender<NetworkCommand>,
+        #[cfg(feature = "test")] faults: &test_faults::SharedFaultRegistry,
     ) -> Result<(), IntermediaryError> {
         match command {
             Command::SendMessage { message } => {
@@ -155,6 +186,11 @@ impl Intermediary {
                 );
             }
             Command::ReceivedMessage { message, sender } => {
+                #[cfg(feature = "test")]
+                let raw_message = message.clone();
+                #[cfg(feature = "test")]
+                let sender_raw = sender;
+
                 let sender =
                     match PublicKey::new(DSAlgorithm::Ed25519, sender.to_vec())
                     {
@@ -189,6 +225,43 @@ impl Intermediary {
                             );
                         }
                     };
+
+                // Test-only fault injection: drop/hold/corrupt inbound
+                // messages by rule before they reach any actor.
+                #[cfg(feature = "test")]
+                let message = {
+                    let mut message = message;
+                    // Test infrastructure: the lock is never held across
+                    // an await and poisoning only means the test
+                    // panicked.
+                    #[allow(clippy::unwrap_used)]
+                    let verdict = faults.lock().unwrap().check_inbound(
+                        &sender,
+                        sender_raw,
+                        &raw_message,
+                        &mut message,
+                    );
+                    match verdict {
+                        test_faults::InboundVerdict::Pass => {}
+                        test_faults::InboundVerdict::Drop => {
+                            debug!(
+                                msg_type = "TestFault",
+                                sender = %sender,
+                                "Inbound message dropped by test fault rule"
+                            );
+                            return Ok(());
+                        }
+                        test_faults::InboundVerdict::Held => {
+                            debug!(
+                                msg_type = "TestFault",
+                                sender = %sender,
+                                "Inbound message held by test fault rule"
+                            );
+                            return Ok(());
+                        }
+                    }
+                    message
+                };
 
                 let path = ActorPath::from(message.info.receiver_actor.clone());
                 let request_id = message.info.request_id.clone();

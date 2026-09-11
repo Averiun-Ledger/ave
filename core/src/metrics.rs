@@ -74,6 +74,11 @@ struct ContractPrepareLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct FetchFailoverLabels {
+    reason: &'static str,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
@@ -84,6 +89,8 @@ pub struct CoreMetrics {
     contract_preparations: Family<ContractPrepareLabels, Counter>,
     contract_prepare_seconds:
         Family<ContractPrepareLabels, Histogram, fn() -> Histogram>,
+    contract_fetch_failovers: Family<FetchFailoverLabels, Counter>,
+    contract_fetch_cycles_exhausted: Counter,
     tracker_sync_rounds: Family<TrackerSyncRoundLabels, Counter>,
     tracker_sync_updates: Family<TrackerSyncUpdateLabels, Counter>,
     protocol_events: Family<ProtocolEventLabels, Counter>,
@@ -143,6 +150,8 @@ impl CoreMetrics {
                     60.0, 120.0,
                 ])
             }),
+            contract_fetch_failovers: Family::default(),
+            contract_fetch_cycles_exhausted: Counter::default(),
             tracker_sync_rounds: Family::default(),
             tracker_sync_updates: Family::default(),
             protocol_events: Family::default(),
@@ -216,6 +225,16 @@ impl CoreMetrics {
             "core_contract_prepare_seconds",
             "Contract preparation duration labeled by kind and result.",
             self.contract_prepare_seconds.clone(),
+        );
+        registry.register(
+            "core_contract_fetch_failovers",
+            "Artifact fetch attempts that failed against a peer, labeled by reason.",
+            self.contract_fetch_failovers.clone(),
+        );
+        registry.register(
+            "core_contract_fetch_cycles_exhausted_total",
+            "Fetch cycles that found no peer able to serve (governance update plus timeoff before the next cycle).",
+            self.contract_fetch_cycles_exhausted.clone(),
         );
         registry.register(
             "core_tracker_sync_rounds",
@@ -394,6 +413,20 @@ impl CoreMetrics {
         self.contract_prepare_seconds
             .get_or_create(&labels)
             .observe(Self::seconds(duration));
+    }
+
+    /// A fetch attempt against a peer failed (`corrupt`, `not_served`,
+    /// `timeout`) and the fetch moved on to the next option.
+    pub fn observe_fetch_failover(&self, reason: &'static str) {
+        self.contract_fetch_failovers
+            .get_or_create(&FetchFailoverLabels { reason })
+            .inc();
+    }
+
+    /// A fetch cycle found no peer able to serve: governance update
+    /// triggered and timeoff armed before the next cycle.
+    pub fn observe_fetch_cycle_exhausted(&self) {
+        self.contract_fetch_cycles_exhausted.inc();
     }
 
     pub fn observe_tracker_sync_round(&self, result: &'static str) {

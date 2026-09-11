@@ -147,6 +147,14 @@ pub async fn system(
     let contracts: HashMap<String, Arc<CompiledModule>> = HashMap::new();
     system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
 
+    // Test-only fetch observability registry (feature `test`): the e2e
+    // suites read fetch state-machine snapshots through the API.
+    #[cfg(feature = "test")]
+    system.add_helper(
+        "test_fetch_obs",
+        crate::compilation::contract_compiler::SharedFetchObs::default(),
+    );
+
     // The node never compiles contracts remotely in production: the
     // gRPC compiler client is a TEST-BUILD helper (embedded pool or
     // explicit endpoints, e.g. dead ones for failure-path tests).

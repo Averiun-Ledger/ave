@@ -814,6 +814,16 @@ pub mod tests {
 
         let (command_sender, command_receiver) = mpsc::channel(10);
         spawn_dummy_network(command_receiver);
+        #[cfg(feature = "test")]
+        let network = Arc::new(NetworkSender::new(
+            command_sender.clone(),
+            Arc::new(std::sync::Mutex::new(
+                crate::helpers::network::test_faults::TestFaultRegistry::new(
+                    command_sender,
+                ),
+            )),
+        ));
+        #[cfg(not(feature = "test"))]
         let network = Arc::new(NetworkSender::new(command_sender));
 
         system.add_helper("network", network.clone());
