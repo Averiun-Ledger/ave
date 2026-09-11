@@ -544,6 +544,9 @@ impl SubjectManager {
         if let Err(error) = governance_actor
             .ask(GovernanceMessage::UpdateLedger {
                 events: vec![ledger],
+                // The create event of a just-created governance is
+                // applied standalone: nothing to defer.
+                defer_acquisition: false,
             })
             .await
         {

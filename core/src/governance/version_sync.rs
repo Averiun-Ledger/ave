@@ -18,6 +18,8 @@ use crate::helpers::network::{
 use crate::metrics::try_core_metrics;
 use ave_network::ComunicateInfo;
 
+use super::{Governance, GovernanceMessage};
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct UpdateTarget {
     pub peer: PublicKey,
@@ -138,8 +140,15 @@ impl GovernanceVersionSync {
         }
     }
 
-    async fn trigger_update_if_needed(&self) -> Result<(), ActorError> {
-        let Some(UpdateTarget { peer, .. }) = self.update_target.clone() else {
+    async fn trigger_update_if_needed(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(UpdateTarget { peer, .. }) = self.update_target.clone()
+        else {
+            // No peer is ahead: this node is at the tip — deferred
+            // artifact acquisitions are due if any are pending.
+            self.notify_idle_round(ctx).await;
             return Ok(());
         };
 
@@ -166,6 +175,33 @@ impl GovernanceVersionSync {
                 },
             })
             .await
+    }
+
+    /// A completed round with no update needed means this node is
+    /// at the tip — tell the governance actor that deferred artifact
+    /// acquisitions (if any) are due. Covers a reboot with pending
+    /// markers where no distribution round will ever fire.
+    async fn notify_idle_round(&self, ctx: &ActorContext<Self>) {
+        match ctx.get_parent::<Governance>().await {
+            Ok(governance) => {
+                if let Err(error) =
+                    governance.tell(GovernanceMessage::SyncRoundIdle).await
+                {
+                    debug!(
+                        governance_id = %self.governance_id,
+                        error = %error,
+                        "Failed to notify idle sync round to governance"
+                    );
+                }
+            }
+            Err(error) => {
+                debug!(
+                    governance_id = %self.governance_id,
+                    error = %error,
+                    "Governance actor not found for idle sync round"
+                );
+            }
+        }
     }
 
     async fn get_sync_peers(
@@ -252,6 +288,9 @@ impl GovernanceVersionSync {
         let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
+            // Nobody to compare against: nothing newer is reachable —
+            // treat it as an idle round for deferred acquisitions.
+            self.notify_idle_round(ctx).await;
             self.schedule_tick(ctx)?;
             return Ok(());
         }
@@ -372,7 +411,9 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
-                    if let Err(error) = self.trigger_update_if_needed().await {
+                    if let Err(error) =
+                        self.trigger_update_if_needed(ctx).await
+                    {
                         if let Some(metrics) = try_core_metrics() {
                             metrics.observe_governance_version_sync_failure(
                                 "trigger_update_failed",
@@ -390,7 +431,9 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.peer_version(peer, version) {
                     self.cancel_timeout(ctx);
                     self.round_open = false;
-                    if let Err(error) = self.trigger_update_if_needed().await {
+                    if let Err(error) =
+                        self.trigger_update_if_needed(ctx).await
+                    {
                         if let Some(metrics) = try_core_metrics() {
                             metrics.observe_governance_version_sync_failure(
                                 "trigger_update_failed",

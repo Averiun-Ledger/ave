@@ -1460,7 +1460,7 @@ impl RequestManager {
             )
             .await?;
             let update_result =
-                update_ledger(ctx, &self.subject_id, vec![ledger.clone()])
+                update_ledger(ctx, &self.subject_id, vec![ledger.clone()], false)
                     .await;
             lease.finish(ctx).await?;
             update_result?;

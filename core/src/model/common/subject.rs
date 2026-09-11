@@ -476,7 +476,7 @@ where
     result
 }
 
-async fn get_subject_path_and_data<A>(
+pub(crate) async fn get_subject_path_and_data<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<(ActorPath, SubjectData), ActorError>
@@ -604,6 +604,7 @@ pub async fn update_ledger<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     events: Vec<Ledger>,
+    defer_acquisition: bool,
 ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>
 where
     A: Actor + Handler<A>,
@@ -632,7 +633,10 @@ where
             let governance_actor =
                 ctx.system().get_actor::<Governance>(&path).await?;
             let response = governance_actor
-                .ask(GovernanceMessage::UpdateLedger { events })
+                .ask(GovernanceMessage::UpdateLedger {
+                    events,
+                    defer_acquisition,
+                })
                 .await?;
             match response {
                 GovernanceResponse::UpdateResult(last_sn, owner, new_owner) => {

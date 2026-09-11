@@ -272,6 +272,9 @@ impl Subject for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
+        // Trackers never compile during apply: the flag only gates
+        // governance artifact acquisition.
+        _defer_acquisition: bool,
     ) -> Result<(), ActorError> {
         let Some(hash) = self.hash else {
             return Err(ActorError::FunctionalCritical {
@@ -997,7 +1000,7 @@ impl Handler<Self> for Tracker {
             TrackerMessage::UpdateLedger { events } => {
                 let events_count = events.len();
                 if let Err(e) =
-                    self.manager_new_ledger_events(ctx, events).await
+                    self.manager_new_ledger_events(ctx, events, false).await
                 {
                     warn!(
                         msg_type = "UpdateLedger",

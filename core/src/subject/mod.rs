@@ -1967,6 +1967,7 @@ where
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
+        defer_acquisition: bool,
     ) -> Result<(), ActorError>;
 
     async fn get_last_ledger(

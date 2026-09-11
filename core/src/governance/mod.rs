@@ -336,6 +336,7 @@ impl Subject for Governance {
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
+        defer_acquisition: bool,
     ) -> Result<(), ActorError> {
         let Some(network) =
             ctx.system().get_helper::<Arc<NetworkSender>>("network")
@@ -485,6 +486,7 @@ impl Subject for Governance {
                     ctx,
                     &old_gov,
                     &evidence_contracts,
+                    defer_acquisition,
                 )
                 .await?;
                 Self::drop_failed_staged_contracts(
@@ -1784,6 +1786,7 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
         old_gov: &GovernanceData,
         evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
+        defer_acquisition: bool,
     ) -> Result<(), ActorError> {
         let Some(network) =
             ctx.system().get_helper::<Arc<NetworkSender>>("network")
@@ -1845,8 +1848,34 @@ impl Governance {
             };
 
             if !recovery_schemas.is_empty() {
-                self.recover_compiler_artifacts(ctx, &recovery_schemas, &hash)
+                if defer_acquisition {
+                    // Intermediate versions of the sync window are
+                    // never built — mark the owed acquisition; the pass
+                    // at the certified tip builds the final version
+                    // only.
+                    Self::set_acquisition_pending(
+                        ctx,
+                        recovery_schemas
+                            .keys()
+                            .map(|schema_id| {
+                                format!(
+                                    "{}_{}",
+                                    self.subject_metadata.subject_id,
+                                    schema_id
+                                )
+                            })
+                            .collect(),
+                        true,
+                    )
                     .await?;
+                } else {
+                    self.recover_compiler_artifacts(
+                        ctx,
+                        &recovery_schemas,
+                        &hash,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -1874,35 +1903,56 @@ impl Governance {
             .await?;
 
             // Subimos los compilers que soy nuevo evaluador
-            let up = new_schemas_eval
+            let up: BTreeMap<SchemaType, Schema> = new_schemas_eval
                 .clone()
                 .iter()
                 .filter(|x| !old_schemas_eval.contains(x.0))
                 .map(|x| (x.0.clone(), x.1.clone()))
                 .collect();
 
-            self.up_compilers_schemas(
-                ctx,
-                &up,
-                self.subject_metadata.subject_id.clone(),
-                &hash,
-            )
-            .await?;
-
             // Compilo los nuevos contratos en el caso de que hayan sido modificados, sino no afecta.
-            let current = new_schemas_eval
+            let current: HashMap<SchemaType, Schema> = new_schemas_eval
                 .clone()
                 .iter()
                 .filter(|x| old_schemas_eval.contains(x.0))
                 .map(|x| (x.0.clone(), x.1.clone()))
                 .collect();
 
-            self.compile_schemas(
-                ctx,
-                current,
-                self.subject_metadata.subject_id.clone(),
-            )
-            .await?;
+            if defer_acquisition {
+                // The artifact work (fetch/compile) is deferred to
+                // the certified-tip pass — intermediate versions of the
+                // sync window are never acquired. The ContractCompiler
+                // actors are NOT created here; the pass creates them.
+                Self::set_acquisition_pending(
+                    ctx,
+                    up.keys()
+                        .chain(current.keys())
+                        .map(|schema_id| {
+                            format!(
+                                "{}_{}",
+                                self.subject_metadata.subject_id, schema_id
+                            )
+                        })
+                        .collect(),
+                    true,
+                )
+                .await?;
+            } else {
+                self.up_compilers_schemas(
+                    ctx,
+                    &up,
+                    self.subject_metadata.subject_id.clone(),
+                    &hash,
+                )
+                .await?;
+
+                self.compile_schemas(
+                    ctx,
+                    current,
+                    self.subject_metadata.subject_id.clone(),
+                )
+                .await?;
+            }
 
             (
                 old_schemas_eval,
@@ -2008,6 +2058,185 @@ impl Governance {
             &update_vali,
         )
         .await
+    }
+
+    /// Marks or clears the deferred-acquisition marker of the given
+    /// contract names. The marker is what distinguishes an expected
+    /// missing artifact at boot (acquisition deferred by a catch-up
+    /// sync, node crashed mid-window) from a corrupt one (immediate
+    /// anchored heal / crash-fast).
+    async fn set_acquisition_pending(
+        ctx: &ActorContext<Self>,
+        contract_names: Vec<String>,
+        pending: bool,
+    ) -> Result<(), ActorError> {
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", ctx.path()));
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!(
+                    "Can not access contract register for deferred acquisition: {}",
+                    e
+                ),
+            })?;
+
+        for contract_name in contract_names {
+            register
+                .ask(ContractRegisterMessage::SetAcquisitionPending {
+                    contract_name,
+                    pending,
+                })
+                .await
+                .map_err(|e| ActorError::Functional {
+                    description: format!(
+                        "Can not update deferred acquisition marker: {}",
+                        e
+                    ),
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Contract names whose artifact acquisition is pending
+    /// (deferred by a catch-up sync).
+    async fn list_acquisition_pending(
+        ctx: &ActorContext<Self>,
+    ) -> Result<Vec<String>, ActorError> {
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", ctx.path()));
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!(
+                    "Can not access contract register for deferred acquisition: {}",
+                    e
+                ),
+            })?;
+
+        match register
+            .ask(ContractRegisterMessage::ListPending)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!("Can not list deferred acquisitions: {}", e),
+            })? {
+            ContractRegisterResponse::Contracts(names) => Ok(names),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: register_path,
+                expected: "ContractRegisterResponse::Contracts".to_owned(),
+            }),
+        }
+    }
+
+    /// Single artifact acquisition pass, fired when a catch-up
+    /// round reaches the witness-certified tip (`RunDeferredAcquisition`)
+    /// or a version-sync round proves this node is already at it
+    /// (`SyncRoundIdle`). Only the CURRENT contracts are acquired:
+    /// compilers recover against the ledger anchor (same crash-fast
+    /// policy the per-batch apply had), evaluators start their fetch
+    /// cycle (their ContractCompiler actors are created here — deferred
+    /// applies do not create them). Markers of schemas that left the
+    /// governance mid-window or that no current role needs are just
+    /// cleared.
+    async fn run_deferred_acquisition(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
+        };
+
+        let pending = Self::list_acquisition_pending(ctx).await?;
+
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let subject_id = self.subject_metadata.subject_id.clone();
+        let is_compiler = self.is_compiler();
+        let eval_schemas = self
+            .properties
+            .schemas(ProtocolTypes::Evaluation, &self.our_key);
+
+        let mut recover_schemas: BTreeMap<SchemaType, Schema> =
+            BTreeMap::new();
+        let mut fetch_schemas: BTreeMap<SchemaType, Schema> = BTreeMap::new();
+
+        for contract_name in &pending {
+            let schema_entry = self.properties.schemas.iter().find(
+                |(schema_id, _)| {
+                    format!("{}_{}", subject_id, schema_id) == *contract_name
+                },
+            );
+
+            let Some((schema_id, schema)) = schema_entry else {
+                // The schema left the governance mid-window: nothing to
+                // acquire, the marker is cleared below.
+                continue;
+            };
+
+            if is_compiler {
+                recover_schemas.insert(schema_id.clone(), schema.clone());
+            }
+            // Independent of the compiler branch: an evaluated schema
+            // also needs its ContractCompiler actor (it compiles or
+            // fetches inside, by role).
+            if eval_schemas.contains_key(schema_id) {
+                fetch_schemas.insert(schema_id.clone(), schema.clone());
+            }
+            // No current role needs the artifact: the marker is cleared
+            // below.
+        }
+
+        if !recover_schemas.is_empty() {
+            self.recover_compiler_artifacts(ctx, &recover_schemas, &hash)
+                .await?;
+        }
+
+        if !fetch_schemas.is_empty() {
+            // Deferred applies did not create the ContractCompiler
+            // actors: schemas without one go through the create path,
+            // the rest through the refresh path.
+            let mut up: BTreeMap<SchemaType, Schema> = BTreeMap::new();
+            let mut current: HashMap<SchemaType, Schema> = HashMap::new();
+            for (schema_id, schema) in fetch_schemas {
+                let actor_name = format!("{}_contract_compiler", schema_id);
+                if ctx
+                    .get_child::<ContractCompiler>(&actor_name)
+                    .await
+                    .is_ok()
+                {
+                    current.insert(schema_id, schema);
+                } else {
+                    up.insert(schema_id, schema);
+                }
+            }
+
+            if !up.is_empty() {
+                self.up_compilers_schemas(ctx, &up, subject_id.clone(), &hash)
+                    .await?;
+            }
+            if !current.is_empty() {
+                self.compile_schemas(ctx, current, subject_id.clone())
+                    .await?;
+            }
+        }
+
+        // The pass ran: nothing is owed anymore. Actors created in this
+        // pass were born serving-blocked (they missed the
+        // governance-wide gate); their artifacts are verified against
+        // the anchor, so the gate opens.
+        Self::set_acquisition_pending(ctx, pending, false).await?;
+        self.set_artifact_serving_blocked(ctx, false).await;
+
+        Ok(())
     }
 
     async fn update_childs(
@@ -2218,7 +2447,7 @@ impl Governance {
         }
 
         // Official artifacts live under `contracts/` and staging dirs
-        // at the root: both must be swept (BUG-016 — iterating only the
+        // at the root: both must be swept (iterating only the
         // root left official artifacts on disk forever).
         for contracts_dir in [
             config.contracts_path.join("contracts"),
@@ -2309,20 +2538,47 @@ impl Governance {
 
             self.sweep_contract_artifacts(ctx, &artifact_schemas).await?;
 
+            // Schemas with a deferred acquisition pending (the
+            // node crashed mid-catch-up) are NOT acquired here —
+            // building the local-tip version could be blind work if the
+            // network has moved on. The first completed sync round (or
+            // an idle version-sync round when already at tip) runs the
+            // acquisition pass for them.
+            let pending: std::collections::BTreeSet<String> =
+                Self::list_acquisition_pending(ctx)
+                    .await?
+                    .into_iter()
+                    .collect();
+            let not_pending = |schema_id: &SchemaType| {
+                !pending.contains(&format!(
+                    "{}_{}",
+                    self.subject_metadata.subject_id, schema_id
+                ))
+            };
+
             if self.is_compiler() {
                 // The standing compiler must not serve until every official
                 // artifact has been validated against its ledger anchor.
                 self.set_artifact_serving_blocked(ctx, true).await;
-                self.recover_compiler_artifacts(
-                    ctx,
-                    &artifact_schemas,
-                    hash,
-                )
-                .await?;
+                let to_recover: BTreeMap<SchemaType, Schema> =
+                    artifact_schemas
+                        .iter()
+                        .filter(|(schema_id, _)| not_pending(schema_id))
+                        .map(|(schema_id, schema)| {
+                            (schema_id.clone(), schema.clone())
+                        })
+                        .collect();
+                self.recover_compiler_artifacts(ctx, &to_recover, hash)
+                    .await?;
             }
+            let to_up: BTreeMap<SchemaType, Schema> = schemas
+                .iter()
+                .filter(|(schema_id, _)| not_pending(schema_id))
+                .map(|(schema_id, schema)| (schema_id.clone(), schema.clone()))
+                .collect();
             self.up_compilers_schemas(
                 ctx,
-                &schemas,
+                &to_up,
                 self.subject_metadata.subject_id.clone(),
                 hash,
             )
@@ -2960,12 +3216,17 @@ impl Governance {
         };
 
         for schema_id in schemas.iter() {
-            let actor = ctx
+            // The actor may not exist: deferred catch-up applies
+            // never created it.
+            let Ok(actor) = ctx
                 .get_child::<ContractCompiler>(&format!(
                     "{}_contract_compiler",
                     schema_id
                 ))
-                .await?;
+                .await
+            else {
+                continue;
+            };
 
             actor.ask_stop().await?;
 
@@ -4369,7 +4630,21 @@ pub enum GovernanceMessage {
     DeleteGovernanceStorage,
     UpdateLedger {
         events: Vec<Ledger>,
+        /// The events arrive from a catch-up distribution round:
+        /// artifact acquisition is deferred — intermediate contract
+        /// versions of the window are never built — and a single
+        /// acquisition pass runs when the round reaches the
+        /// witness-certified tip (`RunDeferredAcquisition`).
+        defer_acquisition: bool,
     },
+    /// The catch-up round reached the certified tip: run the deferred
+    /// artifact acquisition pass over the current schemas.
+    RunDeferredAcquisition,
+    /// A governance version-sync round completed and no peer is ahead:
+    /// the node is at the tip, so any deferred artifact acquisition
+    /// is due now — covers a reboot with pending markers where no
+    /// distribution round will ever fire.
+    SyncRoundIdle,
     GetGovernance,
     GetVersion,
     /// A contract compiler could not obtain an artifact from anyone:
@@ -4797,10 +5072,14 @@ impl Handler<Self> for Governance {
 
                 Ok(GovernanceResponse::Ok)
             }
-            GovernanceMessage::UpdateLedger { events } => {
+            GovernanceMessage::UpdateLedger {
+                events,
+                defer_acquisition,
+            } => {
                 let events_count = events.len();
-                if let Err(e) =
-                    self.manager_new_ledger_events(ctx, events).await
+                if let Err(e) = self
+                    .manager_new_ledger_events(ctx, events, defer_acquisition)
+                    .await
                 {
                     warn!(
                         msg_type = "UpdateLedger",
@@ -4825,6 +5104,16 @@ impl Handler<Self> for Governance {
                     self.subject_metadata.owner.clone(),
                     self.subject_metadata.new_owner.clone(),
                 ))
+            }
+            GovernanceMessage::RunDeferredAcquisition
+            | GovernanceMessage::SyncRoundIdle => {
+                // The certified tip was reached (the catch-up round
+                // completed, or a version-sync round proved no peer is
+                // ahead): the deferred artifact acquisition pass is due.
+                // No-op when no markers are pending.
+                self.run_deferred_acquisition(ctx).await?;
+
+                Ok(GovernanceResponse::Ok)
             }
             GovernanceMessage::GetGovernance => {
                 Ok(GovernanceResponse::Governance(Box::new(

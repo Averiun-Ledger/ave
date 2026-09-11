@@ -35,6 +35,15 @@ pub struct ContractRegister {
     /// it holds the artifact bytes. It is the local projection used to
     /// request and verify artifacts fetched from the network.
     anchors: HashMap<String, DigestIdentifier>,
+    /// Contracts whose artifact acquisition was deferred while catching
+    /// up via distribution: intermediate versions of a sync window
+    /// are never built — a single acquisition pass runs when the window
+    /// reaches the witness-certified tip. At boot, a missing artifact
+    /// WITH a pending marker is the expected state of a node that
+    /// crashed mid-sync (defer again, no compile, no crash); missing
+    /// WITHOUT the marker keeps the corruption policy (immediate
+    /// anchored heal / crash-fast).
+    acquisition_pending: std::collections::BTreeSet<String>,
 }
 
 impl ContractRegister {
@@ -77,6 +86,14 @@ pub enum ContractRegisterMessage {
         contract_name: String,
         wasm_hash: DigestIdentifier,
     },
+    /// Marks/unmarks a contract whose artifact acquisition was deferred
+    /// during a catch-up sync; cleared by the acquisition pass.
+    SetAcquisitionPending {
+        contract_name: String,
+        pending: bool,
+    },
+    /// Contract names with a deferred acquisition pending.
+    ListPending,
 }
 
 impl Message for ContractRegisterMessage {
@@ -88,6 +105,7 @@ impl Message for ContractRegisterMessage {
                 | Self::DeleteMetadata { .. }
                 | Self::DeleteArtifact { .. }
                 | Self::SetAnchor { .. }
+                | Self::SetAcquisitionPending { .. }
         )
     }
 }
@@ -119,6 +137,10 @@ pub enum ContractRegisterEvent {
     SetAnchor {
         contract_name: String,
         wasm_hash: DigestIdentifier,
+    },
+    SetAcquisitionPending {
+        contract_name: String,
+        pending: bool,
     },
 }
 
@@ -242,6 +264,26 @@ impl Handler<Self> for ContractRegister {
 
                 Ok(ContractRegisterResponse::Ok)
             }
+            ContractRegisterMessage::SetAcquisitionPending {
+                contract_name,
+                pending,
+            } => {
+                self.on_event(
+                    ContractRegisterEvent::SetAcquisitionPending {
+                        contract_name,
+                        pending,
+                    },
+                    ctx,
+                )
+                .await;
+
+                Ok(ContractRegisterResponse::Ok)
+            }
+            ContractRegisterMessage::ListPending => {
+                Ok(ContractRegisterResponse::Contracts(
+                    self.acquisition_pending.iter().cloned().collect(),
+                ))
+            }
         }
     }
 
@@ -299,6 +341,16 @@ impl PersistentActor for ContractRegister {
                 inner
                     .anchors
                     .insert(contract_name.clone(), wasm_hash.clone());
+            }
+            ContractRegisterEvent::SetAcquisitionPending {
+                contract_name,
+                pending,
+            } => {
+                if *pending {
+                    inner.acquisition_pending.insert(contract_name.clone());
+                } else {
+                    inner.acquisition_pending.remove(contract_name);
+                }
             }
         }
 

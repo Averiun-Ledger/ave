@@ -1,9 +1,10 @@
 use ave_actors::{ActorContext, ActorError};
-use ave_common::identity::PublicKey;
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
 
 use crate::model::common::subject::{
-    acquire_subject, create_subject, get_local_subject_sn, update_ledger,
+    acquire_subject, create_subject, get_local_subject_sn,
+    get_subject_path_and_data, update_ledger,
 };
 use crate::model::common::{
     check_subject_creation, crash_system, record_verified_transfer,
@@ -13,6 +14,7 @@ use crate::{
     distribution::worker::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
+    governance::{Governance, GovernanceMessage},
     model::event::Ledger,
 };
 use tracing::{debug, error, warn};
@@ -214,8 +216,16 @@ impl DistriWorker {
                 .unwrap_or(safe_hi_sn);
 
             if !pending_ledger.is_empty() {
-                let update_result =
-                    update_ledger(ctx, &subject_id, pending_ledger).await;
+                let update_result = update_ledger(
+                    ctx,
+                    &subject_id,
+                    pending_ledger,
+                    // Governance catch-up defers artifact acquisition to
+                    // the certified tip; tracker apply never
+                    // compiles.
+                    is_gov,
+                )
+                .await;
 
                 if let Some(lease) = lease.clone()
                     && update_result.is_err()
@@ -262,6 +272,15 @@ impl DistriWorker {
                                 );
                                 return Err(crash_system(ctx, e).await);
                             };
+                        } else if is_gov {
+                            // The catch-up round reached the
+                            // witness-certified tip: run the deferred
+                            // artifact acquisition pass.
+                            self.trigger_deferred_acquisition(
+                                ctx,
+                                &subject_id,
+                            )
+                            .await;
                         }
                     }
                     Err(e) => {
@@ -327,6 +346,11 @@ impl DistriWorker {
                         );
                         return Err(crash_system(ctx, e).await);
                     };
+                } else if is_gov {
+                    // The catch-up round reached the witness-certified
+                    // tip: run the deferred artifact acquisition pass.
+                    self.trigger_deferred_acquisition(ctx, &subject_id)
+                        .await;
                 }
             }
 
@@ -334,6 +358,53 @@ impl DistriWorker {
         }
 
         Ok(())
+    }
+
+    /// A governance catch-up round reached the witness-certified tip:
+    /// notify the governance actor that the deferred artifact
+    /// acquisition pass is due. A missing actor means the
+    /// governance was purged mid-sync: the pass is moot, drop it.
+    async fn trigger_deferred_acquisition(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let path = match get_subject_path_and_data(ctx, subject_id).await {
+            Ok((path, _)) => path,
+            Err(e) => {
+                debug!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Governance actor not found, dropping deferred acquisition trigger"
+                );
+                return;
+            }
+        };
+
+        match ctx.system().get_actor::<Governance>(&path).await {
+            Ok(governance_actor) => {
+                if let Err(e) = governance_actor
+                    .tell(GovernanceMessage::RunDeferredAcquisition)
+                    .await
+                {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to trigger the deferred acquisition pass"
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Governance actor not found, dropping deferred acquisition trigger"
+                );
+            }
+        }
     }
 
     pub(crate) async fn process_last_event_distribution(
@@ -443,8 +514,16 @@ impl DistriWorker {
                 None
             };
 
-            let update_result =
-                update_ledger(ctx, &subject_id, vec![ledger.clone()]).await;
+            let update_result = update_ledger(
+                ctx,
+                &subject_id,
+                vec![ledger.clone()],
+                // A last-event push is live propagation of an event the
+                // network just committed: this node is at the tip,
+                // acquire the artifact now (only catch-up defers it).
+                false,
+            )
+            .await;
 
             if let Some(lease) = lease.clone()
                 && update_result.is_err()
