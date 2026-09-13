@@ -290,7 +290,7 @@ impl Handler<Self> for CompileCoordinator {
                 #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
                     1,
-                    Duration::from_secs(20),
+                    Duration::from_secs(5),
                 ));
                 #[cfg(not(any(test, feature = "test")))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(

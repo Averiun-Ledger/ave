@@ -15,7 +15,7 @@
 //! writes from parallel test binaries can only cause a safe rebuild,
 //! never a bad artifact.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -132,6 +132,15 @@ pub enum ScriptedTransform {
     /// sections), but its bytes and hash diverge per tag — a
     /// deterministic simulation of a non-reproducible compiler.
     CustomSection(String),
+    /// Reject the first compile of each source with an
+    /// `InvalidArgument` error: the requesting node votes a
+    /// compilation failure and caches nothing, so a retry (e.g. after
+    /// a reboot) rebuilds the source and gets the real artifact — a
+    /// transient divergence, unlike the terminal one `CustomSection`
+    /// scripts. (Serving different bytes for the same source would
+    /// trip the client cross-check: disagreement on one artifact is
+    /// treated as tampering, not as a retryable verdict.)
+    InvalidOnce,
 }
 
 /// Shared control surface of a scripted compiler.
@@ -176,6 +185,7 @@ impl ScriptedCompiler {
             toolchain_fingerprint,
             control: Arc::clone(&control),
             cache: Mutex::new(HashMap::new()),
+            invalidated: Mutex::new(HashSet::new()),
         };
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -260,6 +270,9 @@ struct ScriptedCompilerService {
     /// Responses by base64 source: the upstream artifact is fetched once
     /// and the transformed response is served identically afterwards.
     cache: Mutex<HashMap<String, pb::CompileResponse>>,
+    /// Sources whose first build was already rejected
+    /// (`ScriptedTransform::InvalidOnce`).
+    invalidated: Mutex<HashSet<String>>,
 }
 
 impl ScriptedCompilerService {
@@ -348,6 +361,18 @@ impl CompilerService for ScriptedCompilerService {
             return Ok(Response::new(response.clone()));
         }
 
+        // `InvalidOnce`: reject the first build of each source. The
+        // rejection maps to a voted compilation failure (nothing is
+        // cached anywhere), so the retry rebuilds the source and gets
+        // the real artifact below.
+        if matches!(&self.transform, ScriptedTransform::InvalidOnce)
+            && self.invalidated.lock().await.insert(source_b64.clone())
+        {
+            return Err(Status::invalid_argument(
+                "scripted transient contract rejection",
+            ));
+        }
+
         // Upstream: one real build through the embedded compiler (its
         // content-addressed store makes this a cache hit for sources the
         // suite already built).
@@ -364,7 +389,11 @@ impl CompilerService for ScriptedCompilerService {
         })?;
 
         let wasm = match &self.transform {
-            ScriptedTransform::Identity => outcome.wasm,
+            // `InvalidOnce` already returned for the first build of
+            // this source: from here on it serves the real artifact.
+            ScriptedTransform::Identity | ScriptedTransform::InvalidOnce => {
+                outcome.wasm
+            }
             ScriptedTransform::CustomSection(tag) => {
                 append_custom_section(outcome.wasm, tag)
             }

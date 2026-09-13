@@ -132,6 +132,10 @@ pub struct CreateNodeConfig {
     /// by tests that manipulate the on-disk artifacts (permissions,
     /// deletions) to exercise boot-time failures.
     pub contracts_path: Option<PathBuf>,
+    /// Explicit governance sync timing; `None` uses the default test
+    /// values. Needed by tests that wait on idle sync rounds so they do
+    /// not pay the full default interval.
+    pub governance_sync: Option<GovernanceSyncConfig>,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
@@ -160,6 +164,7 @@ pub async fn try_create_node(
         #[cfg(feature = "test")]
         compiler,
         contracts_path,
+        governance_sync,
     } = config;
 
     let keys =
@@ -221,11 +226,11 @@ pub async fn try_create_node(
         tracking_size: 100,
         sync: SyncConfig {
             ledger_batch_size: ledger_batch_size.unwrap_or(100),
-            governance: GovernanceSyncConfig {
+            governance: governance_sync.unwrap_or(GovernanceSyncConfig {
                 interval_secs: 10,
                 sample_size: 3,
                 response_timeout_secs: 5,
-            },
+            }),
             tracker: TrackerSyncConfig {
                 interval_secs: 10,
                 page_size: 10,
