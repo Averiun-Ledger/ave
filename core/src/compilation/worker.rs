@@ -1585,3 +1585,200 @@ impl Handler<Self> for CompileWorker {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+
+    use crate::{
+        Node,
+        helpers::network::test_faults::TestFaultRegistry,
+        node::InitParamsNode,
+        system::tests::create_system,
+    };
+
+    use ave_common::{
+        ValueWrapper,
+        identity::{KeyPair, keys::Ed25519Signer},
+        request::FactRequest,
+    };
+
+    use ave_network::CommandHelper;
+
+    use ave_actors::PersistentActor;
+
+    use std::sync::Mutex;
+
+    use test_log::test;
+    use tokio::{sync::mpsc, time::timeout};
+
+    /// The working ACK (`CompilationRes::Working`) is sent to the
+    /// requester BEFORE the final result, both addressed to the
+    /// requester's compilation coordinator.
+    #[test(tokio::test)]
+    async fn working_ack_precedes_final_result() {
+        let (system, _runner, _dirs) = create_system().await;
+
+        let (command_sender, mut command_receiver) = mpsc::channel(16);
+        let network = Arc::new(NetworkSender::new(
+            command_sender.clone(),
+            Arc::new(Mutex::new(TestFaultRegistry::new(command_sender))),
+        ));
+        system.add_helper("network", network.clone());
+
+        let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let our_key = Arc::new(node_keys.public_key());
+        system
+            .create_root_actor(
+                "node",
+                Node::initial(InitParamsNode {
+                    key_pair: node_keys,
+                    public_key: our_key.clone(),
+                    hash: HashAlgorithm::Blake3,
+                    is_service: true,
+                    only_clear_events: false,
+                    ledger_batch_size: 100,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let requester_keys =
+            KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let requester_key = requester_keys.public_key();
+        let governance_id = DigestIdentifier::default();
+
+        // A fact event that adds or changes no contract: the request is
+        // accepted and answered with a signed invalid-event result —
+        // enough to pin the ACK/result message order.
+        let event_request = EventRequest::Fact(FactRequest {
+            subject_id: governance_id.clone(),
+            payload: ValueWrapper(serde_json::json!({})),
+            viewpoints: BTreeSet::new(),
+        });
+        let signed_event =
+            Signed::new(event_request, &requester_keys).unwrap();
+        let compilation_req = Signed::new(
+            CompilationReq {
+                event_request: signed_event,
+                governance_id: governance_id.clone(),
+                sn: 0,
+                gov_version: 0,
+            },
+            &requester_keys,
+        )
+        .unwrap();
+
+        let worker = CompileWorker {
+            node_key: requester_key.clone(),
+            our_key: our_key.clone(),
+            governance_id: governance_id.clone(),
+            gov_version: 0,
+            issuers: BTreeSet::new(),
+            issuer_any: true,
+            schemas: BTreeMap::new(),
+            evaluators: BTreeMap::new(),
+            serving_blocked: false,
+            serving_cache: HashMap::new(),
+            hash: HashAlgorithm::Blake3,
+            network,
+            stop: true,
+            pending: None,
+        };
+        let worker_ref =
+            system.create_root_actor("worker", worker).await.unwrap();
+
+        worker_ref
+            .tell(CompileWorkerMessage::NetworkCompilation {
+                compilation_req,
+                sender: requester_key.clone(),
+                info: ComunicateInfo {
+                    request_id: "test-request".to_owned(),
+                    version: 3,
+                    receiver: requester_key.clone(),
+                    receiver_actor: String::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        let expected_receiver_actor = format!(
+            "/user/request/{}/compilation/{}",
+            governance_id, our_key
+        );
+
+        // First message: the working ACK, sent before compiling.
+        let command =
+            timeout(Duration::from_secs(5), command_receiver.recv())
+                .await
+                .expect("no working ACK received")
+                .expect("network channel closed");
+        let CommandHelper::SendMessage { message: ack } = command else {
+            panic!("expected an outbound send command");
+        };
+        assert!(
+            matches!(
+                ack.message,
+                ActorMessage::CompilationRes {
+                    res: CompilationRes::Working
+                }
+            ),
+            "the first message to the requester must be the working ACK"
+        );
+        assert_eq!(ack.info.request_id, "test-request");
+        assert_eq!(ack.info.version, 3);
+        assert_eq!(ack.info.receiver, requester_key);
+        assert_eq!(ack.info.receiver_actor, expected_receiver_actor);
+
+        // Second message: the final, signed result.
+        let command =
+            timeout(Duration::from_secs(5), command_receiver.recv())
+                .await
+                .expect("no final result received after the working ACK")
+                .expect("network channel closed");
+        let CommandHelper::SendMessage {
+            message: result_message,
+        } = command
+        else {
+            panic!("expected an outbound send command");
+        };
+        let ActorMessage::CompilationRes {
+            res:
+                CompilationRes::Response {
+                    result,
+                    result_hash,
+                    result_hash_signature,
+                },
+        } = result_message.message
+        else {
+            panic!("the second message must be the final signed result");
+        };
+        assert!(
+            matches!(
+                result,
+                CompilationResult::Error {
+                    error: CompilationError::InvalidEvent(_),
+                    ..
+                }
+            ),
+            "a fact without contracts is a signed invalid-event result"
+        );
+        assert_eq!(result_hash_signature.signer, *our_key);
+        result_hash_signature.verify(&result_hash).unwrap();
+        let recomputed =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &result).unwrap();
+        assert_eq!(recomputed, result_hash);
+        assert_eq!(result_message.info.request_id, "test-request");
+        assert_eq!(
+            result_message.info.receiver_actor,
+            expected_receiver_actor
+        );
+
+        // The ephemeral build worker is done: it stops and sends nothing
+        // else (no unavailability notice: `pending` was cleared).
+        timeout(Duration::from_secs(5), worker_ref.closed())
+            .await
+            .expect("the ephemeral worker did not stop after the result");
+        assert!(command_receiver.try_recv().is_err());
+    }
+}

@@ -225,6 +225,20 @@ impl Handler<Self> for CompileCoordinator {
     ) -> Result<(), ActorError> {
         match msg {
             CompileCoordinatorMessage::EndRetry => {
+                // The retry actor reports cycle completion also on an
+                // explicit `End` — which is exactly how the `Working`
+                // ACK cancels it. That notification is expected: the
+                // result deadline governs the wait from now on.
+                if self.acked {
+                    debug!(
+                        node_key = %self.node_key,
+                        request_id = %self.request_id,
+                        version = self.version,
+                        "Retry ended by working ACK, awaiting result"
+                    );
+                    return Ok(());
+                }
+
                 warn!(
                     node_key = %self.node_key,
                     request_id = %self.request_id,
@@ -494,5 +508,273 @@ impl Handler<Self> for CompileCoordinator {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+
+    use crate::{
+        governance::{data::GovernanceData, model::Quorum},
+        helpers::network::test_faults::TestFaultRegistry,
+        system::tests::create_system,
+    };
+
+    use ave_common::{
+        ValueWrapper,
+        identity::{
+            DigestIdentifier, KeyPair, keys::Ed25519Signer,
+        },
+        request::{EventRequest, FactRequest},
+    };
+
+    use ave_actors::{ActorRef, SystemRef};
+    use ave_network::CommandHelper;
+
+    use std::{
+        collections::{BTreeSet, HashSet},
+        sync::Mutex,
+    };
+
+    use tempfile::TempDir;
+    use test_log::test;
+    use tokio::{
+        sync::mpsc,
+        task::JoinHandle,
+        time::{sleep, timeout},
+    };
+
+    /// A compilation phase actor (root, no request manager) with a
+    /// single remote compiler: creating the phase spawns the coordinator
+    /// child, whose retry cycle sends the request over the network.
+    #[allow(clippy::type_complexity)]
+    async fn setup() -> (
+        SystemRef,
+        JoinHandle<()>,
+        Vec<TempDir>,
+        mpsc::Receiver<CommandHelper<NetworkMessage>>,
+        ActorRef<CompileCoordinator>,
+        ActorPath,
+        ActorPath,
+        DigestIdentifier,
+        u64,
+        PublicKey,
+    ) {
+        let (system, runner, dirs) = create_system().await;
+
+        let (command_sender, mut command_receiver) = mpsc::channel(16);
+        let network = Arc::new(NetworkSender::new(
+            command_sender.clone(),
+            Arc::new(Mutex::new(TestFaultRegistry::new(command_sender))),
+        ));
+
+        let our_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let compiler_keys =
+            KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let compiler_key = compiler_keys.public_key();
+        let governance_id = DigestIdentifier::default();
+
+        let event_request = EventRequest::Fact(FactRequest {
+            subject_id: governance_id.clone(),
+            payload: ValueWrapper(serde_json::json!({})),
+            viewpoints: BTreeSet::new(),
+        });
+        let signed_event = Signed::new(event_request, &our_keys).unwrap();
+        let signed_req = Signed::new(
+            CompilationReq {
+                event_request: signed_event,
+                governance_id,
+                sn: 0,
+                gov_version: 0,
+            },
+            &our_keys,
+        )
+        .unwrap();
+
+        let compilation = system
+            .create_root_actor(
+                "compilation",
+                Compilation::new(
+                    Arc::new(our_keys.public_key()),
+                    signed_req,
+                    Quorum::Majority,
+                    GovernanceData::default(),
+                    HashAlgorithm::Blake3,
+                    network,
+                ),
+            )
+            .await
+            .unwrap();
+
+        let request_id =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &"request-1")
+                .unwrap();
+        let version = 7;
+        compilation
+            .tell(CompilationMessage::Create {
+                request_id: request_id.clone(),
+                version,
+                signers: HashSet::from([compiler_key.clone()]),
+            })
+            .await
+            .unwrap();
+
+        // The first send of the retry cycle confirms that the
+        // coordinator child and its retry actor are up.
+        let command =
+            timeout(Duration::from_secs(5), command_receiver.recv())
+                .await
+                .expect("the compilation request was not sent")
+                .expect("network channel closed");
+        let CommandHelper::SendMessage { message } = command else {
+            panic!("expected an outbound send command");
+        };
+        assert!(
+            matches!(message.message, ActorMessage::CompilationReq { .. }),
+            "the coordinator must send the compilation request"
+        );
+        assert_eq!(message.info.receiver, compiler_key);
+        assert_eq!(message.info.request_id, request_id.to_string());
+        assert_eq!(message.info.version, version);
+
+        let coordinator_path = ActorPath::from(format!(
+            "/user/compilation/{}",
+            compiler_key
+        ));
+        let retry_path =
+            ActorPath::from(format!("{}/retry", coordinator_path));
+        let coordinator = system
+            .get_actor::<CompileCoordinator>(&coordinator_path)
+            .await
+            .unwrap();
+        system
+            .get_actor::<RetryActor<RetryNetwork>>(&retry_path)
+            .await
+            .expect("the retry actor must exist before the ACK");
+
+        (
+            system,
+            runner,
+            dirs,
+            command_receiver,
+            coordinator,
+            coordinator_path,
+            retry_path,
+            request_id,
+            version,
+            compiler_key,
+        )
+    }
+
+    /// The working ACK cancels the request retry and the coordinator
+    /// keeps awaiting the final result under the result deadline: no
+    /// timeout is reported, the ACK is never forwarded to the phase
+    /// actor, and a duplicate ACK is ignored.
+    #[test(tokio::test)]
+    async fn working_ack_cancels_retry_and_is_never_counted() {
+        let (
+            system,
+            runner,
+            _dirs,
+            mut command_receiver,
+            coordinator,
+            coordinator_path,
+            retry_path,
+            request_id,
+            version,
+            compiler_key,
+        ) = setup().await;
+
+        let working = || CompileCoordinatorMessage::NetworkResponse {
+            compilation_res: Box::new(CompilationRes::Working),
+            request_id: request_id.to_string(),
+            version,
+            sender: compiler_key.clone(),
+        };
+
+        coordinator.tell(working()).await.unwrap();
+
+        // The request retry is cancelled: no more resends.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if system
+                    .get_actor::<RetryActor<RetryNetwork>>(&retry_path)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the request retry was not cancelled after the ACK");
+
+        // The coordinator keeps awaiting the final result: it stays
+        // alive and reports no timeout to the phase actor.
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            system
+                .get_actor::<CompileCoordinator>(&coordinator_path)
+                .await
+                .is_ok(),
+            "the coordinator must await the final result after the ACK"
+        );
+        assert!(command_receiver.try_recv().is_err());
+
+        // A duplicate ACK (a request retry was already in flight when
+        // the first one arrived) is ignored: same coordinator, no
+        // resend, no timeout.
+        coordinator.tell(working()).await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+        assert!(
+            system
+                .get_actor::<CompileCoordinator>(&coordinator_path)
+                .await
+                .is_ok(),
+            "a duplicate working ACK must be ignored"
+        );
+        assert!(command_receiver.try_recv().is_err());
+
+        // The ACKs were never forwarded nor counted: the compiler is
+        // still registered, so the result deadline reports its timeout
+        // to the phase actor — which counts it and, with an empty
+        // compiler set, must reboot the request. A parentless phase
+        // actor cannot reboot, so the counted timeout brings the system
+        // down; an uncounted one would not.
+        coordinator
+            .tell(CompileCoordinatorMessage::ResultDeadline)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), coordinator.closed())
+            .await
+            .expect("the coordinator did not stop after the deadline");
+        timeout(Duration::from_secs(15), runner)
+            .await
+            .expect("the phase actor did not count the deadline timeout")
+            .unwrap();
+    }
+
+    /// The result deadline acts as a normal timeout — the same failover
+    /// as an exhausted ACK retry (both arms notify the phase actor with
+    /// `CompilationRes::TimeOut` and stop the coordinator).
+    #[test(tokio::test)]
+    async fn result_deadline_reports_timeout_and_stops() {
+        let (_system, runner, _dirs, _rx, coordinator, ..) =
+            setup().await;
+
+        coordinator
+            .tell(CompileCoordinatorMessage::ResultDeadline)
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(5), coordinator.closed())
+            .await
+            .expect("the coordinator did not stop after the deadline");
+        timeout(Duration::from_secs(15), runner)
+            .await
+            .expect("the phase actor did not receive the timeout")
+            .unwrap();
     }
 }

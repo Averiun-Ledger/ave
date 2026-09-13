@@ -232,7 +232,7 @@ impl CoreMetrics {
             self.contract_fetch_failovers.clone(),
         );
         registry.register(
-            "core_contract_fetch_cycles_exhausted_total",
+            "core_contract_fetch_cycles_exhausted",
             "Fetch cycles that found no peer able to serve (governance update plus timeoff before the next cycle).",
             self.contract_fetch_cycles_exhausted.clone(),
         );
@@ -327,7 +327,7 @@ impl CoreMetrics {
             self.grpc_ack_roundtrip_seconds.clone(),
         );
         registry.register(
-            "core_distribution_failures_total",
+            "core_distribution_failures",
             "Total distribution failures by reason.",
             self.distribution_failures.clone(),
         );
@@ -337,27 +337,27 @@ impl CoreMetrics {
             self.distribution_duration_seconds.clone(),
         );
         registry.register(
-            "core_update_retries_exceeded_total",
+            "core_update_retries_exceeded",
             "Total update processes that exceeded the retry threshold.",
             self.update_retries_exceeded.clone(),
         );
         registry.register(
-            "core_reboot_max_retries_reached_total",
+            "core_reboot_max_retries_reached",
             "Total reboot processes that reached the maximum stability checks.",
             self.reboot_max_retries_reached.clone(),
         );
         registry.register(
-            "core_external_db_critical_errors_total",
+            "core_external_db_critical_errors",
             "Total critical external database errors reported to DBManager.",
             self.external_db_critical_errors.clone(),
         );
         registry.register(
-            "core_governance_version_sync_failures_total",
+            "core_governance_version_sync_failures",
             "Total governance version sync failures by reason.",
             self.governance_version_sync_failures.clone(),
         );
         registry.register(
-            "core_http_server_errors_total",
+            "core_http_server_errors",
             "Total HTTP 5xx server errors.",
             self.http_server_errors.clone(),
         );
@@ -896,6 +896,54 @@ mod tests {
                 "core_sink_lag_max_distance{sink=\"schema-sink\"}"
             ),
             17.0
+        );
+    }
+
+    #[test]
+    fn core_metrics_expose_fetch_failover_series() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        metrics.observe_fetch_failover("corrupt");
+        metrics.observe_fetch_failover("not_served");
+        metrics.observe_fetch_failover("timeout");
+        metrics.observe_fetch_failover("timeout");
+
+        metrics.observe_fetch_cycle_exhausted();
+        metrics.observe_fetch_cycle_exhausted();
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fetch_failovers_total{reason=\"corrupt\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fetch_failovers_total{reason=\"not_served\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fetch_failovers_total{reason=\"timeout\"}"
+            ),
+            2.0
+        );
+        // Exact-line match: the exposed counter name is the alerting
+        // contract, so a rename or a doubled `_total` suffix must break
+        // this test.
+        assert!(
+            text.lines()
+                .any(|line| line == "core_contract_fetch_cycles_exhausted_total 2"),
+            "expected `core_contract_fetch_cycles_exhausted_total 2` in:\n{text}"
         );
     }
 

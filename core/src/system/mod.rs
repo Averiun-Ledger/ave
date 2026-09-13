@@ -398,4 +398,99 @@ pub mod tests {
 
         (sys, handlers, vec_dirs)
     }
+
+    /// A network message cap below the artifact wire budget (artifact
+    /// payload plus envelope headroom) would make artifact responses
+    /// silently undeliverable, so `system()` must reject it up front,
+    /// before touching any database.
+    #[test(tokio::test)]
+    async fn test_system_rejects_message_cap_below_artifact_budget() {
+        let artifact_budget =
+            crate::compilation::artifact::MAX_ARTIFACT_WIRE_BYTES
+                + crate::compilation::artifact::ARTIFACT_ENVELOPE_HEADROOM_BYTES;
+
+        let dir_ave_db =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let dir_ext_db =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let dir_contracts = create_contracts_temp_dir();
+
+        let mut newtork_config = NetworkConfig::new(
+            ave_network::NodeType::Bootstrap,
+            vec![],
+            vec![],
+            vec![],
+        );
+        newtork_config.max_app_message_bytes = artifact_budget - 1;
+
+        let config = Config {
+            keypair_algorithm: KeyPairAlgorithm::Ed25519,
+            hash_algorithm: HashAlgorithm::Blake3,
+            internal_db: AveInternalDBConfig {
+                db: AveInternalDBFeatureConfig::build(
+                    &dir_ave_db.path().to_path_buf(),
+                ),
+                ..Default::default()
+            },
+            external_db: AveExternalDBConfig {
+                db: AveExternalDBFeatureConfig::build(
+                    &dir_ext_db.path().to_path_buf(),
+                ),
+                ..Default::default()
+            },
+            network: newtork_config,
+            contracts_path: dir_contracts.path().to_path_buf(),
+            always_accept: false,
+            tracking_size: 100,
+            safe_mode: false,
+            is_service: true,
+            only_clear_events: false,
+            sync: SyncConfig {
+                governance: GovernanceSyncConfig {
+                    interval_secs: 60,
+                    sample_size: 3,
+                    response_timeout_secs: 30,
+                },
+                tracker: TrackerSyncConfig {
+                    interval_secs: 60,
+                    page_size: 200,
+                    response_timeout_secs: 10,
+                    update_batch_size: 2,
+                    update_timeout_secs: 10,
+                },
+                update: UpdateSyncConfig::default(),
+                reboot: RebootSyncConfig::default(),
+                ledger_batch_size: 100,
+            },
+            spec: None,
+            #[cfg(feature = "test")]
+            compiler: Default::default(),
+        };
+
+        let result = system(
+            config,
+            Vec::new(),
+            "password",
+            CancellationToken::new(),
+            CancellationToken::new(),
+            #[cfg(feature = "prometheus")]
+            None,
+        )
+        .await;
+
+        match result {
+            Err(SystemError::NetworkConfig(message)) => {
+                assert!(
+                    message.contains("below the artifact wire budget"),
+                    "unexpected NetworkConfig message: {message}"
+                );
+            }
+            Err(err) => {
+                panic!("expected SystemError::NetworkConfig, got {err}")
+            }
+            Ok(_) => panic!(
+                "a message cap below the artifact budget must not start"
+            ),
+        }
+    }
 }

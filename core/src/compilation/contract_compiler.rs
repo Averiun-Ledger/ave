@@ -2280,3 +2280,350 @@ impl Handler<Self> for ContractCompiler {
         }
     }
 }
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+
+    use crate::{
+        helpers::network::test_faults::{
+            FaultAction, FaultDirection, FaultMessage, FaultRule,
+            SharedFaultRegistry, TestFaultRegistry,
+        },
+        system::tests::create_system,
+    };
+
+    use ave_common::identity::{KeyPair, keys::Ed25519Signer};
+
+    use ave_actors::{ActorRef, PersistentActor, SystemRef};
+    use ave_network::CommandHelper;
+
+    use std::sync::Mutex;
+
+    use tempfile::TempDir;
+    use test_log::test;
+    use tokio::{
+        sync::mpsc,
+        task::JoinHandle,
+        time::{sleep, timeout},
+    };
+
+    const CONTRACT_NAME: &str = "gov_Example";
+
+    fn test_public_key() -> PublicKey {
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key()
+    }
+
+    async fn recv_outbound(
+        rx: &mut mpsc::Receiver<CommandHelper<NetworkMessage>>,
+    ) -> NetworkMessage {
+        let command = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("expected an outbound network message within 5s")
+            .expect("network channel closed");
+        let CommandHelper::SendMessage { message } = command else {
+            panic!("expected an outbound send command");
+        };
+        message
+    }
+
+    /// A contract compiler with a fetch anchor recorded in the register
+    /// and the network helper wired to a test-owned channel. The
+    /// contract is absent on disk, so the fetch cycle starts probing.
+    #[allow(clippy::type_complexity)]
+    async fn setup_actors() -> (
+        SystemRef,
+        JoinHandle<()>,
+        Vec<TempDir>,
+        TempDir,
+        mpsc::Receiver<CommandHelper<NetworkMessage>>,
+        SharedFaultRegistry,
+        ActorRef<ContractCompiler>,
+    ) {
+        let (system, runner, dirs) = create_system().await;
+
+        let (command_sender, command_receiver) = mpsc::channel(32);
+        let faults: SharedFaultRegistry = Arc::new(Mutex::new(
+            TestFaultRegistry::new(command_sender.clone()),
+        ));
+        let network =
+            Arc::new(NetworkSender::new(command_sender, faults.clone()));
+        system.add_helper("network", network);
+
+        let register = system
+            .create_root_actor(
+                "contract_register",
+                ContractRegister::initial(()),
+            )
+            .await
+            .unwrap();
+        let wasm_hash =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &"anchored wasm")
+                .unwrap();
+        let response = register
+            .ask(ContractRegisterMessage::SetAnchor {
+                contract_name: CONTRACT_NAME.to_owned(),
+                wasm_hash,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ContractRegisterResponse::Ok));
+
+        let compiler = system
+            .create_root_actor(
+                "Example_contract_compiler",
+                ContractCompiler::new(
+                    HashAlgorithm::Blake3,
+                    Arc::new(test_public_key()),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let contracts_dir = tempfile::tempdir().unwrap();
+        (
+            system,
+            runner,
+            dirs,
+            contracts_dir,
+            command_receiver,
+            faults,
+            compiler,
+        )
+    }
+
+    async fn reconcile_fetch(
+        compiler: &ActorRef<ContractCompiler>,
+        compilers: BTreeSet<PublicKey>,
+        contracts_dir: &TempDir,
+    ) {
+        compiler
+            .tell(ContractCompilerMessage::Reconcile {
+                gov_version: 1,
+                compilers,
+                evaluators: BTreeSet::new(),
+                action: ContractCompilerAction::Fetch {
+                    contract: "contract source".to_owned(),
+                    contract_name: CONTRACT_NAME.to_owned(),
+                    initial_value: serde_json::json!({}),
+                    contract_path: contracts_dir
+                        .path()
+                        .join("contracts")
+                        .join(CONTRACT_NAME),
+                    gov_id: DigestIdentifier::default(),
+                    schema_id: SchemaType::Type("Example".to_owned()),
+                },
+            })
+            .await
+            .unwrap();
+    }
+
+    /// After a failed fetch attempt the probe round resumes with the
+    /// SAME nonce: answers arriving before the resumed timeout count,
+    /// and the stale probe timer (cancelled when the fetch started) must
+    /// not close the resumed round early.
+    #[test(tokio::test)]
+    async fn resumed_probe_keeps_nonce_and_outlives_stale_timer() {
+        let p1 = test_public_key();
+        let p2 = test_public_key();
+        let (
+            _system,
+            _runner,
+            _dirs,
+            contracts_dir,
+            mut rx,
+            _faults,
+            compiler,
+        ) = setup_actors().await;
+
+        let start = Instant::now();
+        reconcile_fetch(
+            &compiler,
+            BTreeSet::from([p1.clone(), p2.clone()]),
+            &contracts_dir,
+        )
+        .await;
+
+        // The probe batch reaches both peers with one nonce.
+        let mut probe_nonce = None;
+        let mut probed = BTreeSet::new();
+        for _ in 0..2 {
+            let message = recv_outbound(&mut rx).await;
+            let ActorMessage::ArtifactProbeReq { request_nonce, .. } =
+                message.message
+            else {
+                panic!("expected a probe request");
+            };
+            if let Some(nonce) = probe_nonce {
+                assert_eq!(request_nonce, nonce);
+            } else {
+                probe_nonce = Some(request_nonce);
+            }
+            probed.insert(message.info.receiver);
+        }
+        let probe_nonce = probe_nonce.unwrap();
+        assert_eq!(probed, BTreeSet::from([p1.clone(), p2.clone()]));
+
+        // First answer wins: the fetch starts from p1 with a fresh
+        // nonce.
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: probe_nonce,
+                sender: p1.clone(),
+            })
+            .await
+            .unwrap();
+        let message = recv_outbound(&mut rx).await;
+        let ActorMessage::ArtifactReq {
+            request_nonce: fetch_nonce,
+            ..
+        } = message.message
+        else {
+            panic!("expected an artifact request");
+        };
+        assert_eq!(message.info.receiver, p1);
+        assert_ne!(fetch_nonce, probe_nonce);
+
+        // Fail the attempt right before the original probe timeout: the
+        // round resumes with the same probe nonce.
+        sleep(
+            (PROBE_RESPONSE_TIMEOUT - Duration::from_millis(500))
+                .saturating_sub(start.elapsed()),
+        )
+        .await;
+        compiler
+            .tell(ContractCompilerMessage::ArtifactResponse {
+                result: ArtifactFetchResult::NotServed,
+                request_nonce: fetch_nonce,
+                sender: p1.clone(),
+            })
+            .await
+            .unwrap();
+
+        // An answer carrying the consumed fetch nonce is stale: it must
+        // not start a fetch.
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: fetch_nonce,
+                sender: p2.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(300), rx.recv()).await.is_err(),
+            "a stale probe answer triggered an artifact request"
+        );
+
+        // Outlive the stale probe timer (armed with the batch, cancelled
+        // at the fetch start), then answer before the resumed timeout:
+        // the answer must still count.
+        sleep(
+            (PROBE_RESPONSE_TIMEOUT + Duration::from_millis(700))
+                .saturating_sub(start.elapsed()),
+        )
+        .await;
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: probe_nonce,
+                sender: p2.clone(),
+            })
+            .await
+            .unwrap();
+        let message = recv_outbound(&mut rx).await;
+        assert!(
+            matches!(message.message, ActorMessage::ArtifactReq { .. }),
+            "the answer before the resumed timeout did not start a fetch"
+        );
+        assert_eq!(message.info.receiver, p2);
+    }
+
+    /// An injected `send_command` failure mid probe batch is a local
+    /// infrastructure failure: the node fails loud (`crash_system`),
+    /// never a silent stall with no live timer.
+    #[test(tokio::test)]
+    async fn probe_send_failure_crashes_system() {
+        let p1 = test_public_key();
+        let p2 = test_public_key();
+        let (_system, runner, _dirs, contracts_dir, _rx, faults, compiler) =
+            setup_actors().await;
+        faults.lock().unwrap().install(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::FailSend,
+        });
+
+        reconcile_fetch(&compiler, BTreeSet::from([p1, p2]), &contracts_dir)
+            .await;
+
+        timeout(Duration::from_secs(15), runner)
+            .await
+            .expect("an injected probe send failure must crash the system")
+            .unwrap();
+    }
+
+    /// Same fail-loud policy at the fetch start: an injected
+    /// `send_command` failure of the artifact request crashes the system
+    /// instead of leaving the fetch with no live timer.
+    #[test(tokio::test)]
+    async fn artifact_request_send_failure_crashes_system() {
+        let p1 = test_public_key();
+        let p2 = test_public_key();
+        let (
+            _system,
+            runner,
+            _dirs,
+            contracts_dir,
+            mut rx,
+            faults,
+            compiler,
+        ) = setup_actors().await;
+        faults.lock().unwrap().install(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::FailSend,
+        });
+
+        reconcile_fetch(
+            &compiler,
+            BTreeSet::from([p1.clone(), p2.clone()]),
+            &contracts_dir,
+        )
+        .await;
+
+        // Drain the probe batch, then let p1 serve: the artifact
+        // request send fails.
+        let mut probe_nonce = None;
+        for _ in 0..2 {
+            let message = recv_outbound(&mut rx).await;
+            let ActorMessage::ArtifactProbeReq { request_nonce, .. } =
+                message.message
+            else {
+                panic!("expected a probe request");
+            };
+            probe_nonce = Some(request_nonce);
+        }
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: probe_nonce.unwrap(),
+                sender: p1,
+            })
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(15), runner)
+            .await
+            .expect(
+                "an injected artifact request send failure must crash \
+                 the system",
+            )
+            .unwrap();
+    }
+}

@@ -1770,3 +1770,585 @@ impl Handler<Self> for ValiWorker {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        compilation::response::CompilerResponse,
+        evaluation::response::EvaluatorResponse,
+    };
+    use ave_common::{
+        Namespace, SchemaType,
+        governance::{GovernanceEvent, SchemaAdd, SchemasEvent},
+        identity::{KeyPair, Signature, keys::Ed25519Signer},
+        request::FactRequest,
+    };
+    use std::collections::BTreeMap;
+    use tokio::sync::mpsc;
+
+    fn public_key(signer: &Ed25519Signer) -> PublicKey {
+        KeyPair::Ed25519(signer.clone()).public_key()
+    }
+
+    fn test_worker() -> ValiWorker {
+        let node_key = public_key(&Ed25519Signer::generate().unwrap());
+        let (sender, _receiver) = mpsc::channel(1);
+        #[cfg(feature = "test")]
+        let network = Arc::new(NetworkSender::new(
+            sender.clone(),
+            Arc::new(std::sync::Mutex::new(
+                crate::helpers::network::test_faults::TestFaultRegistry::new(
+                    sender,
+                ),
+            )),
+        ));
+        #[cfg(not(feature = "test"))]
+        let network = Arc::new(NetworkSender::new(sender));
+
+        let empty_roles = || RoleDataRegister {
+            workers: HashSet::new(),
+            quorum: Quorum::Majority,
+        };
+        ValiWorker {
+            node_key: node_key.clone(),
+            our_key: Arc::new(node_key),
+            init_state: None,
+            governance_id: DigestIdentifier::default(),
+            gov_version: 0,
+            sn: 0,
+            hash: HashAlgorithm::Blake3,
+            network,
+            current_roles: CurrentWorkerRoles {
+                evaluation: empty_roles(),
+                compilation: empty_roles(),
+                approval: empty_roles(),
+            },
+            stop: false,
+            pending: None,
+        }
+    }
+
+    /// A governance fact event adding one schema, plus every piece of
+    /// ledger-anchored data the validator rebuilds the phase requests
+    /// from.
+    struct PhaseFixture {
+        worker: ValiWorker,
+        owner: Ed25519Signer,
+        compilers: Vec<Ed25519Signer>,
+        evaluators: Vec<Ed25519Signer>,
+        approvers: Vec<Ed25519Signer>,
+        event_request: Signed<EventRequest>,
+        metadata: Metadata,
+        gov_version: u64,
+        signer: PublicKey,
+        req_subject_data_hash: DigestIdentifier,
+    }
+
+    impl PhaseFixture {
+        fn new() -> Self {
+            let worker = test_worker();
+            let hasher = worker.hash.hasher();
+            let owner = Ed25519Signer::generate().unwrap();
+            let owner_pub = public_key(&owner);
+            let gen_keys = || {
+                vec![
+                    Ed25519Signer::generate().unwrap(),
+                    Ed25519Signer::generate().unwrap(),
+                ]
+            };
+
+            let subject_id =
+                hash_borsh(&*hasher, &b"governance subject".to_vec()).unwrap();
+            let event_request = Signed::new(
+                EventRequest::Fact(FactRequest {
+                    subject_id: subject_id.clone(),
+                    payload: ValueWrapper(
+                        serde_json::to_value(GovernanceEvent {
+                            members: None,
+                            roles: None,
+                            schemas: Some(SchemasEvent {
+                                add: Some(HashSet::from([SchemaAdd {
+                                    id: SchemaType::Type("Example".to_owned()),
+                                    contract: "contract source".to_owned(),
+                                    initial_value: serde_json::json!({
+                                        "one": 0
+                                    }),
+                                    viewpoints: vec![],
+                                }])),
+                                remove: None,
+                                change: None,
+                            }),
+                            policies: None,
+                        })
+                        .unwrap(),
+                    ),
+                    viewpoints: BTreeSet::new(),
+                }),
+                &owner,
+            )
+            .unwrap();
+
+            let metadata = Metadata {
+                name: Some("Gov".to_owned()),
+                description: None,
+                subject_id: subject_id.clone(),
+                governance_id: subject_id.clone(),
+                genesis_gov_version: 0,
+                prev_ledger_event_hash: DigestIdentifier::default(),
+                schema_id: SchemaType::Governance,
+                namespace: Namespace::new(),
+                sn: 0,
+                creator: owner_pub.clone(),
+                owner: owner_pub.clone(),
+                new_owner: None,
+                active: true,
+                properties: GovernanceData::new(owner_pub.clone())
+                    .to_value_wrapper(),
+            };
+
+            let req_subject_data_hash = hash_borsh(
+                &*hasher,
+                &RequestSubjectData {
+                    subject_id: subject_id.clone(),
+                    governance_id: subject_id,
+                    sn: metadata.sn + 1,
+                    namespace: metadata.namespace.clone(),
+                    schema_id: metadata.schema_id.clone(),
+                    gov_version: 0,
+                    signer: owner_pub.clone(),
+                },
+            )
+            .unwrap();
+
+            Self {
+                worker,
+                owner,
+                compilers: gen_keys(),
+                evaluators: gen_keys(),
+                approvers: gen_keys(),
+                event_request,
+                metadata,
+                gov_version: 0,
+                signer: owner_pub,
+                req_subject_data_hash,
+            }
+        }
+
+        fn roles(&self, signers: &[Ed25519Signer]) -> RoleDataRegister {
+            RoleDataRegister {
+                workers: signers.iter().map(public_key).collect(),
+                quorum: Quorum::Majority,
+            }
+        }
+
+        fn tampered_hash(&self) -> DigestIdentifier {
+            hash_borsh(&*self.worker.hash.hasher(), &b"tampered".to_vec())
+                .unwrap()
+        }
+
+        /// Compilation evidence signed by the owner and the compilers
+        /// over the request the validator rebuilds, with the given
+        /// response contracts.
+        fn compilation_with_contracts(
+            &self,
+            contracts: BTreeMap<SchemaType, DigestIdentifier>,
+        ) -> CompilationData {
+            let hasher = self.worker.hash.hasher();
+            let signed_req = Signed::new(
+                CompilationReq {
+                    event_request: self.event_request.clone(),
+                    governance_id: self.metadata.governance_id.clone(),
+                    sn: self.metadata.sn + 1,
+                    gov_version: self.gov_version,
+                },
+                &self.owner,
+            )
+            .unwrap();
+            let compile_req_hash = hash_borsh(&*hasher, &signed_req).unwrap();
+
+            let response = CompilerResponse { contracts };
+            let result = CompilationResult::Ok {
+                response: response.clone(),
+                compile_req_hash: compile_req_hash.clone(),
+                req_subject_data_hash: self.req_subject_data_hash.clone(),
+            };
+            let result_hash = hash_borsh(&*hasher, &result).unwrap();
+            let compilers_signatures = self
+                .compilers
+                .iter()
+                .map(|s| Signature::new(&result_hash, s).unwrap())
+                .collect();
+
+            CompilationData {
+                compile_req_signature: signed_req.signature().clone(),
+                compile_req_hash,
+                compilers_signatures,
+                response: CompilationResponse::Ok { result: response, result_hash },
+            }
+        }
+
+        fn honest_compilation(&self) -> CompilationData {
+            let wasm_hash =
+                hash_borsh(&*self.worker.hash.hasher(), &b"wasm".to_vec())
+                    .unwrap();
+            self.compilation_with_contracts(BTreeMap::from([(
+                SchemaType::Type("Example".to_owned()),
+                wasm_hash,
+            )]))
+        }
+
+        fn check_compilation(
+            &self,
+            compilation: CompilationData,
+        ) -> Result<(), ValidatorError> {
+            self.worker.check_compilation(
+                compilation,
+                self.roles(&self.compilers),
+                &self.event_request,
+                &self.metadata,
+                self.gov_version,
+                self.req_subject_data_hash.clone(),
+                self.signer.clone(),
+            )
+        }
+
+        /// Evaluation evidence signed by the owner and the evaluators
+        /// over the request the validator rebuilds. Returns the evidence
+        /// and the evaluated patch, which feeds the approval request.
+        fn honest_evaluation(&self) -> (EvaluationData, ValueWrapper) {
+            let hasher = self.worker.hash.hasher();
+            let signed_req = Signed::new(
+                EvaluationReq {
+                    event_request: self.event_request.clone(),
+                    governance_id: self.metadata.governance_id.clone(),
+                    data: EvaluateData::GovFact {
+                        state: GovernanceData::try_from(
+                            self.metadata.properties.clone(),
+                        )
+                        .unwrap(),
+                    },
+                    sn: self.metadata.sn + 1,
+                    gov_version: self.gov_version,
+                    namespace: self.metadata.namespace.clone(),
+                    schema_id: self.metadata.schema_id.clone(),
+                    signer: self.signer.clone(),
+                    signer_is_owner: self.signer
+                        == self.event_request.signature().signer,
+                },
+                &self.owner,
+            )
+            .unwrap();
+            let eval_req_hash = hash_borsh(&*hasher, &signed_req).unwrap();
+
+            let req_patch = ValueWrapper(serde_json::json!([
+                { "op": "replace", "path": "/version", "value": 1 }
+            ]));
+            let mut patched = self.metadata.properties.0.clone();
+            let patch_ops =
+                serde_json::from_value::<Patch>(req_patch.0.clone()).unwrap();
+            patch(&mut patched, &patch_ops).unwrap();
+            let properties_hash =
+                hash_borsh(&*hasher, &ValueWrapper(patched)).unwrap();
+
+            let evaluator_response = EvaluatorResponse {
+                patch: req_patch.clone(),
+                properties_hash,
+                appr_required: true,
+            };
+            let result = EvaluationResult::Ok {
+                response: evaluator_response.clone(),
+                eval_req_hash: eval_req_hash.clone(),
+                req_subject_data_hash: self.req_subject_data_hash.clone(),
+            };
+            let result_hash = hash_borsh(&*hasher, &result).unwrap();
+            let evaluators_signatures = self
+                .evaluators
+                .iter()
+                .map(|s| Signature::new(&result_hash, s).unwrap())
+                .collect();
+
+            (
+                EvaluationData {
+                    eval_req_signature: signed_req.signature().clone(),
+                    eval_req_hash,
+                    evaluators_signatures,
+                    response: EvaluationResponse::Ok {
+                        result: evaluator_response,
+                        result_hash,
+                    },
+                },
+                req_patch,
+            )
+        }
+
+        fn check_evaluation(
+            &self,
+            evaluation: EvaluationData,
+        ) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
+        {
+            self.worker.check_evaluation(
+                evaluation,
+                self.roles(&self.evaluators),
+                self.metadata.properties.clone(),
+                &self.event_request,
+                &self.metadata,
+                self.gov_version,
+                self.req_subject_data_hash.clone(),
+                self.signer.clone(),
+            )
+        }
+
+        /// Approval evidence signed by the owner and the approvers over
+        /// the request the validator rebuilds for the given patch.
+        fn honest_approval(&self, patch: ValueWrapper) -> ApprovalData {
+            let hasher = self.worker.hash.hasher();
+            let approval_req = ApprovalReq {
+                subject_id: self.metadata.subject_id.clone(),
+                sn: self.metadata.sn + 1,
+                gov_version: self.gov_version,
+                patch,
+                signer: self.signer.clone(),
+            };
+            let signed_req = Signed::new(approval_req.clone(), &self.owner)
+                .unwrap();
+            // The approval phase hashes the request content, not the
+            // signed envelope (unlike compilation and evaluation).
+            let approval_req_hash =
+                hash_borsh(&*hasher, &approval_req).unwrap();
+            let approvers_agrees_signatures = self
+                .approvers
+                .iter()
+                .map(|s| {
+                    Signed::new(
+                        ApprovalRes::Response {
+                            approval_req_hash: approval_req_hash.clone(),
+                            agrees: true,
+                            req_subject_data_hash: self
+                                .req_subject_data_hash
+                                .clone(),
+                        },
+                        s,
+                    )
+                    .unwrap()
+                    .signature()
+                    .clone()
+                })
+                .collect();
+
+            ApprovalData {
+                approval_req_signature: signed_req.signature().clone(),
+                approval_req_hash,
+                approvers_agrees_signatures,
+                approvers_disagrees_signatures: vec![],
+                approvers_timeout: vec![],
+                approved: true,
+            }
+        }
+
+        fn check_approval(
+            &self,
+            approval: ApprovalData,
+            patch: ValueWrapper,
+        ) -> Result<(), ValidatorError> {
+            self.worker.check_approval(
+                approval,
+                self.roles(&self.approvers),
+                &self.metadata,
+                self.gov_version,
+                patch,
+                self.req_subject_data_hash.clone(),
+                self.signer.clone(),
+            )
+        }
+    }
+
+    /// Validators rebuild the compilation request from ledger-anchored
+    /// data, verify the stored request signature over the rebuild and
+    /// recompute the stored request hash; an Ok response must cover
+    /// exactly the schemas the event sends through the phase.
+    #[test]
+    fn compilation_request_evidence_is_rebuilt_and_verified() {
+        let fixture = PhaseFixture::new();
+
+        // Honest evidence, reconstructed byte-for-byte, is accepted.
+        assert!(
+            fixture.check_compilation(fixture.honest_compilation()).is_ok()
+        );
+
+        // The stored request signature does not verify over the rebuilt
+        // request (it signs a request with a different governance
+        // version, from the same signer).
+        let mut tampered = fixture.honest_compilation();
+        tampered.compile_req_signature = Signed::new(
+            CompilationReq {
+                event_request: fixture.event_request.clone(),
+                governance_id: fixture.metadata.governance_id.clone(),
+                sn: fixture.metadata.sn + 1,
+                gov_version: fixture.gov_version + 1,
+            },
+            &fixture.owner,
+        )
+        .unwrap()
+        .signature()
+        .clone();
+        assert!(matches!(
+            fixture.check_compilation(tampered),
+            Err(ValidatorError::InvalidSignature {
+                data: "compilation request"
+            })
+        ));
+
+        // The stored request hash does not reproduce the rebuild.
+        let mut tampered = fixture.honest_compilation();
+        tampered.compile_req_hash = fixture.tampered_hash();
+        assert!(matches!(
+            fixture.check_compilation(tampered),
+            Err(ValidatorError::InvalidData {
+                value: "compile request hash"
+            })
+        ));
+
+        // An Ok response covering one schema fewer than the payload
+        // sends through the phase is rejected.
+        let fewer = fixture.compilation_with_contracts(BTreeMap::new());
+        assert!(matches!(
+            fixture.check_compilation(fewer),
+            Err(ValidatorError::InvalidData {
+                value: "compilation contracts"
+            })
+        ));
+
+        // And so is one covering one schema more.
+        let extra_wasm =
+            hash_borsh(&*fixture.worker.hash.hasher(), &b"wasm2".to_vec())
+                .unwrap();
+        let wasm_hash =
+            hash_borsh(&*fixture.worker.hash.hasher(), &b"wasm".to_vec())
+                .unwrap();
+        let more = fixture.compilation_with_contracts(BTreeMap::from([
+            (SchemaType::Type("Example".to_owned()), wasm_hash),
+            (SchemaType::Type("Other".to_owned()), extra_wasm),
+        ]));
+        assert!(matches!(
+            fixture.check_compilation(more),
+            Err(ValidatorError::InvalidData {
+                value: "compilation contracts"
+            })
+        ));
+    }
+
+    /// The evaluation and approval requests get the same treatment: the
+    /// validator rebuilds them from ledger-anchored data (the approval
+    /// patch comes from the verified evaluation evidence), verifies the
+    /// stored signatures over the rebuilds and recomputes the stored
+    /// hashes.
+    #[test]
+    fn evaluation_and_approval_request_evidence_is_rebuilt_and_verified() {
+        let fixture = PhaseFixture::new();
+
+        // Honest evaluation evidence, reconstructed byte-for-byte, is
+        // accepted and yields the patch the approval request carries.
+        let (evaluation, patch) = fixture.honest_evaluation();
+        let (appr_required, req_patch, _) =
+            fixture.check_evaluation(evaluation.clone()).unwrap();
+        assert!(appr_required);
+        assert_eq!(req_patch, Some(patch.clone()));
+
+        // The stored evaluation request signature does not verify over
+        // the rebuilt request.
+        let mut tampered = evaluation.clone();
+        tampered.eval_req_signature = Signed::new(
+            EvaluationReq {
+                event_request: fixture.event_request.clone(),
+                governance_id: fixture.metadata.governance_id.clone(),
+                data: EvaluateData::GovFact {
+                    state: GovernanceData::try_from(
+                        fixture.metadata.properties.clone(),
+                    )
+                    .unwrap(),
+                },
+                sn: fixture.metadata.sn + 1,
+                gov_version: fixture.gov_version + 1,
+                namespace: fixture.metadata.namespace.clone(),
+                schema_id: fixture.metadata.schema_id.clone(),
+                signer: fixture.signer.clone(),
+                signer_is_owner: true,
+            },
+            &fixture.owner,
+        )
+        .unwrap()
+        .signature()
+        .clone();
+        assert!(matches!(
+            fixture.check_evaluation(tampered),
+            Err(ValidatorError::InvalidSignature {
+                data: "evaluation request"
+            })
+        ));
+
+        // The stored evaluation request hash does not reproduce the
+        // rebuild.
+        let mut tampered = evaluation;
+        tampered.eval_req_hash = fixture.tampered_hash();
+        assert!(matches!(
+            fixture.check_evaluation(tampered),
+            Err(ValidatorError::InvalidData {
+                value: "eval request hash"
+            })
+        ));
+
+        // Honest approval evidence over the evaluated patch is accepted.
+        let approval = fixture.honest_approval(patch.clone());
+        assert!(
+            fixture.check_approval(approval.clone(), patch.clone()).is_ok()
+        );
+
+        // The stored approval request signature does not verify over the
+        // rebuilt request.
+        let mut tampered = approval.clone();
+        tampered.approval_req_signature = Signed::new(
+            ApprovalReq {
+                subject_id: fixture.metadata.subject_id.clone(),
+                sn: fixture.metadata.sn + 1,
+                gov_version: fixture.gov_version + 1,
+                patch: patch.clone(),
+                signer: fixture.signer.clone(),
+            },
+            &fixture.owner,
+        )
+        .unwrap()
+        .signature()
+        .clone();
+        assert!(matches!(
+            fixture.check_approval(tampered, patch.clone()),
+            Err(ValidatorError::InvalidSignature {
+                data: "approval request"
+            })
+        ));
+
+        // The stored approval request hash does not reproduce the
+        // rebuild.
+        let mut tampered = approval.clone();
+        tampered.approval_req_hash = fixture.tampered_hash();
+        assert!(matches!(
+            fixture.check_approval(tampered, patch.clone()),
+            Err(ValidatorError::InvalidData {
+                value: "approval request hash"
+            })
+        ));
+
+        // An approval patch that does not match the verified evaluation
+        // evidence rebuilds a different request, so the stored signature
+        // no longer verifies.
+        let wrong_patch = ValueWrapper(serde_json::json!([
+            { "op": "replace", "path": "/version", "value": 2 }
+        ]));
+        assert!(matches!(
+            fixture.check_approval(approval, wrong_patch),
+            Err(ValidatorError::InvalidSignature {
+                data: "approval request"
+            })
+        ));
+    }
+}

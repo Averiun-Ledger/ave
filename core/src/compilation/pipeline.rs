@@ -907,4 +907,82 @@ mod tests {
         .expect("absent entry must be a miss, not an error");
         assert!(result.is_none(), "unknown toolchain key must be a miss");
     }
+
+    /// Pins for the contract payload wire format: base64 carrying a plain
+    /// or zstd-compressed source, sniffed by magic number and bounded at
+    /// [`MAX_CONTRACT_SOURCE_BYTES`] once decoded. The sniffing and the
+    /// bound are consensus determinism — any drift between nodes breaks
+    /// the compilation quorum.
+    #[test]
+    fn decode_contract_source_format_and_bounds() {
+        // Plain roundtrip.
+        let plain = b"fn contract() { /* logic */ }".to_vec();
+        let encoded = BASE64_STANDARD.encode(&plain);
+        let decoded =
+            decode_contract_source(&encoded).expect("plain source must decode");
+        assert_eq!(decoded, plain);
+
+        // zstd roundtrip: the magic number selects decompression.
+        let compressed =
+            zstd::bulk::compress(&plain, 3).expect("compression must succeed");
+        let encoded = BASE64_STANDARD.encode(&compressed);
+        let decoded =
+            decode_contract_source(&encoded).expect("zstd source must decode");
+        assert_eq!(decoded, plain);
+
+        // Truncated base64 is a payload error, never a build error.
+        let truncated = &encoded[..encoded.len() - 1];
+        let err = decode_contract_source(truncated)
+            .expect_err("truncated base64 must fail");
+        assert!(
+            matches!(err, CompilerError::Base64DecodeFailed { .. }),
+            "truncated base64 must fail with Base64DecodeFailed, got {err}"
+        );
+
+        // zstd magic followed by a corrupt payload is a decompression
+        // failure, not a base64 one.
+        let mut corrupt = ZSTD_MAGIC.to_vec();
+        corrupt.extend_from_slice(&[0u8; 16]);
+        let encoded = BASE64_STANDARD.encode(&corrupt);
+        let err = decode_contract_source(&encoded)
+            .expect_err("corrupt zstd payload must fail");
+        assert!(
+            matches!(err, CompilerError::SourceDecompressionFailed { .. }),
+            "corrupt zstd payload must fail with SourceDecompressionFailed, \
+             got {err}"
+        );
+
+        // Zip-bomb: compresses far under the limit but expands past it;
+        // the bounded decompressor must refuse it.
+        let bomb = vec![b'x'; MAX_CONTRACT_SOURCE_BYTES + 1];
+        let compressed =
+            zstd::bulk::compress(&bomb, 3).expect("compression must succeed");
+        assert!(
+            compressed.len() <= MAX_CONTRACT_SOURCE_BYTES,
+            "test premise: the bomb must compress under the limit"
+        );
+        let encoded = BASE64_STANDARD.encode(&compressed);
+        let err =
+            decode_contract_source(&encoded).expect_err("zip-bomb must fail");
+        assert!(
+            matches!(err, CompilerError::SourceDecompressionFailed { .. }),
+            "zip-bomb must fail with SourceDecompressionFailed, got {err}"
+        );
+
+        // A plain source past the limit is rejected by size.
+        let oversized = vec![b'x'; MAX_CONTRACT_SOURCE_BYTES + 1];
+        let encoded = BASE64_STANDARD.encode(&oversized);
+        let err = decode_contract_source(&encoded)
+            .expect_err("oversized plain source must fail");
+        assert!(
+            matches!(
+                err,
+                CompilerError::ContractSourceTooLarge { size, max }
+                if size == MAX_CONTRACT_SOURCE_BYTES + 1
+                    && max == MAX_CONTRACT_SOURCE_BYTES
+            ),
+            "oversized plain source must fail with ContractSourceTooLarge, \
+             got {err}"
+        );
+    }
 }
