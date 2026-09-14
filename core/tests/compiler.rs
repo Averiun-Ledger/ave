@@ -14962,6 +14962,15 @@ fn unique_contract(base64_source: &str) -> String {
     BASE64_STANDARD.encode(format!("{source}\n// test nonce: {nonce}"))
 }
 
+// Variante comprimida de un contrato de prueba: base64(zstd(fuente)).
+// La descompresión es transparente al consenso (cada nodo decodifica el
+// payload antes de compilar), así que el artefacto resultante debe ser
+// byte a byte idéntico al de la misma fuente en plano.
+fn compressed_contract(base64_source: &str) -> String {
+    let source = BASE64_STANDARD.decode(base64_source).unwrap();
+    BASE64_STANDARD.encode(zstd::bulk::compress(&source, 3).unwrap())
+}
+
 // Espera acotada a que la residencia del módulo de un contrato en
 // memoria (`test_has_contract_module`, el helper `contracts`) alcance el
 // estado esperado.
@@ -15009,6 +15018,35 @@ fn artifact_dir_exists(
     artifact_name: &str,
 ) -> bool {
     contracts_path.join("contracts").join(artifact_name).exists()
+}
+
+// Borra de la base de datos local del nodo (con el nodo APAGADO) las
+// filas del ContractRegister de una gobernanza: las anclas de
+// compilación y la metadata de artefactos que persiste son una
+// proyección reconstruible del ledger, así que el arranque debe
+// re-derivarlas. Las tablas son compartidas por todos los registers del
+// nodo y las filas de cada gobernanza se distinguen por `prefix` (el
+// identificador de la gobernanza). Los valores van en claro (el store
+// del register no cifra), así que basta una sqlite estándar.
+fn wipe_contract_register_tables(db_path: &std::path::Path, gov_id: &str) {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let mut wiped = 0usize;
+    for table in [
+        "contract_register_events",
+        "contract_register_states",
+        "contract_register_metadata",
+    ] {
+        wiped += conn
+            .execute(
+                &format!("DELETE FROM {table} WHERE prefix = ?1"),
+                rusqlite::params![gov_id],
+            )
+            .unwrap();
+    }
+    assert!(
+        wiped > 0,
+        "el register debía tener filas persistidas antes del borrado"
+    );
 }
 
 #[test(tokio::test)]
@@ -18004,4 +18042,2799 @@ async fn test_slow_compile_working_ack_no_failover_no_duplicate() {
         .await;
 
     node_running(&node2.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Alta de dos schemas en el mismo evento con la MISMA fuente en los dos
+// formatos admitidos: "Plain" la recibe en plano (base64) y "Packed"
+// comprimida (base64(zstd(fuente))). La descompresión es transparente
+// al consenso: ambos payloads recorren staging y promoción de verdad y
+// producen artefactos byte a byte idénticos en todos los nodos. Pines:
+// la request commitea, los bytes del artefacto oficial de Plain y
+// Packed coinciden en el Owner y en el evaluador (que compila ambos
+// payloads con su propio pool), y los dos schemas crean subjects y
+// evalúan facts — el quorum de evaluación exige el voto de los dos
+// evaluadores, así que AveNode2 también evalúa con el artefacto que
+// compiló desde el payload comprimido.
+async fn test_schema_add_compressed_contract_byte_identical() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    // SN 1: un único evento da de alta los dos schemas (misma fuente,
+    // plana y comprimida) con AveNode2 como evaluador de ambos.
+    let schema_roles = |schema_id: &str| {
+        json!({
+            "schema_id": schema_id,
+            "add": {
+                "evaluator": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    },
+                    {
+                        "name": "AveNode2",
+                        "namespace": []
+                    }
+                ],
+                "validator": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "witness": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "creator": [
+                    {
+                        "name": "Owner",
+                        "namespace": [],
+                        "quantity": 10
+                    }
+                ],
+                "issuer": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ]
+            }
+        })
+    };
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Plain",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "Packed",
+                    "contract": compressed_contract(EXAMPLE_CONTRACT),
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                schema_roles("Plain"),
+                schema_roles("Packed")
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Mismo wasm en el Owner para los dos formatos: la compresión no
+    // cambia ni un byte del artefacto.
+    let plain_name = format!("{governance_id}_Plain");
+    let packed_name = format!("{governance_id}_Packed");
+    let plain_bytes =
+        wait_artifact_bytes(node1_contracts.path(), &plain_name).await;
+    let packed_bytes =
+        wait_artifact_bytes(node1_contracts.path(), &packed_name).await;
+    assert_eq!(
+        plain_bytes, packed_bytes,
+        "the compressed format must produce a byte-identical artifact"
+    );
+
+    // AveNode2 compiló ambos payloads con su pool y promocionó los
+    // mismos bytes que el Owner.
+    wait_artifact_bytes_eq(node2_contracts.path(), &plain_name, &plain_bytes)
+        .await;
+    wait_artifact_bytes_eq(node2_contracts.path(), &packed_name, &plain_bytes)
+        .await;
+
+    // Ambos schemas crean subjects y evalúan facts (quorum Majority de
+    // evaluación: votan Owner y AveNode2).
+    for (schema_id, value) in [("Plain", 11), ("Packed", 22)] {
+        let (subject_id, ..) = create_subject(
+            &node1.api,
+            governance_id.clone(),
+            schema_id,
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact(
+            &node1.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": value}}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.properties,
+            json!({"one": value, "two": 0, "three": 0})
+        );
+    }
+
+    node_running(&node2.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Divergencia terminal entre compilers: el Owner compila los bytes
+// reales (pool embebido) y AveNode2/AveNode3 compilan la misma fuente
+// con sus scripted (`CustomSection` con tags distintos), así que los
+// tres votan Ok con tres wasm_hash distintos que nunca coinciden en un
+// único hash y la fase de compilación reporta Reboot(Diff) en cada
+// intento. (El Owner no puede perder el rol compiler: es un rol básico
+// protegido de la gobernanza — quitarlo haría el evento inválido.)
+// La política de compilación se fija al 100 % porque el coordinator
+// pregunta a un subconjunto aleatorio del tamaño del quórum: con
+// Majority de 3 solo compilarían 2 y los contadores de los scripted
+// no serían deterministas. El schedule de Diff es infinito
+// por diseño ([10, 20, 30, 60] s y luego 60 s): la request queda
+// rebootando para siempre y, al serializarse los eventos de gobernanza
+// de un mismo owner, la gobernanza queda bloqueada — un fallo
+// controlado y accionable, no un crash. Pines: la request alcanza
+// RebootDiff, el SN de la gobernanza no avanza, ningún nodo promociona
+// el artefacto oficial del schema (nadie evalúa con un artefacto no
+// anclado) y los votos divergentes quedan cacheados: tras cubrir el
+// primer reintento (10 s) cada scripted sigue habiendo recibido
+// exactamente UN compile — los reboots no recompilan. El test termina
+// con la request rebootando en background, por diseño.
+async fn test_compiler_terminal_divergence_reboot_diff_wedged() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+    let node3_contracts = tempfile::tempdir().unwrap();
+
+    // Mismo transform con tags distintos: wasm válido y equivalente en
+    // comportamiento, pero con bytes (y hash) divergentes por nodo.
+    let scripted_a =
+        ScriptedCompiler::start(ScriptedTransform::CustomSection("a".to_owned()));
+    let scripted_b =
+        ScriptedCompiler::start(ScriptedTransform::CustomSection("b".to_owned()));
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        compiler: Some(scripted_a.node_config()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let (node3, _node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node3_contracts.path().to_path_buf()),
+        compiler: Some(scripted_b.node_config()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
+
+    // SN 1: AveNode2 y AveNode3 miembros y además compilers de la
+    // gobernanza. El Owner conserva su rol compiler (protegido), así
+    // que la fase de compilación reunirá tres votos Ok con tres hashes
+    // distintos — la divergencia terminal es la misma.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "compiler": ["AveNode2", "AveNode3"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    for node in [&node2.api, &node3.api] {
+        node.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(node, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    }
+
+    // SN 2: la política de compilación pasa al 100 % para que el
+    // coordinator pregunte siempre a los tres compilers (ver el
+    // comentario de cabecera).
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "compile": {
+                        "percentage": 100
+                    }
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    for node in [&node2.api, &node3.api] {
+        node.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(node, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+    }
+
+    // SN 3 (async): alta del schema Example. Los tres compilers votan
+    // Ok con wasm_hash distintos → Reboot(Diff), y la divergencia es
+    // terminal: cada reintento reproduce los mismos votos. Fuente única
+    // por ejecución (ver `unique_contract`): los contadores del
+    // scripted son el pin del test.
+    let example_contract = unique_contract(EXAMPLE_CONTRACT);
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": example_contract,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    let request_id =
+        emit_fact(&node1.api, governance_id.clone(), json, false)
+            .await
+            .unwrap();
+
+    wait_request_state(
+        &node1.api,
+        request_id,
+        Some(RequestState::RebootDiff {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Cubre el primer reintento del schedule de Diff (10 s): con los
+    // votos cacheados el retry vuelve a Reboot(Diff) sin recompilar.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    // La gobernanza queda bloqueada en el SN previo al alta del schema:
+    // la divergencia terminal impide commitear el evento y los eventos
+    // del mismo owner se serializan tras él.
+    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(gov_state.sn, 2);
+
+    // Nadie promociona el artefacto oficial del schema: sin acuerdo de
+    // compilación no hay artefacto anclado y ningún nodo evalúa con él.
+    let artifact_name = format!("{governance_id}_Example");
+    assert!(!artifact_dir_exists(node1_contracts.path(), &artifact_name));
+    assert!(!artifact_dir_exists(node2_contracts.path(), &artifact_name));
+    assert!(!artifact_dir_exists(node3_contracts.path(), &artifact_name));
+
+    // Los votos divergentes quedan cacheados: el reintento de los 10 s
+    // no ha generado ningún compile nuevo en ninguno de los scripted.
+    assert_eq!(scripted_a.compiles_received(), 1);
+    assert_eq!(scripted_b.compiles_received(), 1);
+}
+
+#[test(tokio::test)]
+// El barrido de artefactos del arranque limpia el ROOT del directorio
+// de contratos: los restos `{gov}_{schema}_temp_promote` y
+// `{gov}_{schema}_temp_build_*` (directorios temporales de una promoción
+// o un build interrumpidos) no son entradas permitidas y se borran,
+// mientras que el artefacto oficial — que vive en
+// `contracts/{gov}_{schema}/` — queda intacto. Pines: tras el reinicio
+// ambos directorios basura han desaparecido, los bytes del artefacto
+// oficial son exactamente los de antes del reinicio y el nodo evalúa
+// facts con normalidad (carga el módulo desde el artefacto en disco).
+async fn test_boot_sweep_removes_temp_promote_and_build_leftovers() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
+
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // SN 1: schema Example con sus roles. El artefacto oficial queda
+    // promovido en `contracts/{gov}_Example/`.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let artifact_name = format!("{governance_id}_Example");
+    let official_bytes =
+        wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
+
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Restos de una promoción y un build interrumpidos, en el ROOT del
+    // directorio de contratos (el barrido solo recorre esa raíz; los
+    // artefactos oficiales están un nivel más abajo, en `contracts/`).
+    let junk_promote = node1_contracts
+        .path()
+        .join(format!("{governance_id}_Example_temp_promote"));
+    let junk_build = node1_contracts
+        .path()
+        .join(format!("{governance_id}_Example_temp_build_999"));
+    fs::create_dir_all(&junk_promote).unwrap();
+    fs::write(junk_promote.join("contract.wasm"), b"junk").unwrap();
+    fs::create_dir_all(&junk_build).unwrap();
+    fs::write(junk_build.join("contract.wasm"), b"junk").unwrap();
+
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        keys: Some(node1.keys.clone()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // El barrido corre durante el arranque de la gobernanza: ambos
+    // restos desaparecen.
+    for _ in 0..100 {
+        if !junk_promote.exists() && !junk_build.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        !junk_promote.exists(),
+        "the boot sweep must remove the temp_promote leftover"
+    );
+    assert!(
+        !junk_build.exists(),
+        "the boot sweep must remove the temp_build leftover"
+    );
+
+    // El artefacto oficial queda intacto, byte a byte.
+    wait_artifact_bytes_eq(
+        node1_contracts.path(),
+        &artifact_name,
+        &official_bytes,
+    )
+    .await;
+
+    // Y el nodo queda operativo: recupera la gobernanza en su SN y
+    // evalúa un fact cargando el módulo desde el artefacto en disco.
+    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(gov_state.sn, 1);
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 7}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 7, "two": 0, "three": 0}));
+}
+
+#[test(tokio::test)]
+// Ledger mixto plano→comprimido con reboot: el schema nace con la v1 en
+// plano (base64) y el cambio de contrato trae la v2 comprimida
+// (base64(zstd(fuente))). El Owner compila ambas; AveNode2 arranca con
+// el pool de compilación muerto y NUNCA recompila: obtiene la v1 y la
+// v2 por fetch (verificadas contra el ancla del ledger) y evalúa con
+// ellas. Tras un reinicio con el pool aún muerto recupera artefacto y
+// ancla del ledger mixto desde disco y sigue evaluando — con el pool
+// muerto cualquier recompilación fallaría, así que un fact commiteado
+// post-reinicio prueba que no recompiló. Pines: los bytes de la v2 en
+// AveNode2 son idénticos a los del Owner, un fact que la v1 rechaza
+// (ModThree=50) commitea con el visto bueno de ambos evaluadores y,
+// tras el reinicio, el nodo recupera su estado y otro fact commitea.
+async fn test_fetch_mixed_ledger_plain_to_compressed_with_reboot() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // AveNode2 con el pool de compilación muerto desde el arranque:
+    // nunca podrá compilar, todo artefacto le llega por fetch.
+    let (mut node2, mut node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    // SN 1: schema Example con la v1 en plano; AveNode2 evaluador y
+    // testigo del schema.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con el pool muerto, la v1 llega a AveNode2 por fetch (los mismos
+    // bytes que compiló el Owner).
+    let artifact_name = format!("{governance_id}_Example");
+    let node1_v1 =
+        wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
+    wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v1)
+        .await;
+
+    // SN 2: cambio de contrato a la v2 COMPRIMIDA. El Owner la compila
+    // (la descompresión es transparente) y AveNode2 registra el ancla
+    // nueva y arranca el fetch al aplicar el evento.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_contract": compressed_contract(EXAMPLE_CONTRACT_V2)
+            }]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let node1_v2 =
+        wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
+    assert_ne!(node1_v2, node1_v1);
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // El fetch trae a AveNode2 los bytes de la v2 compilada desde el
+    // payload comprimido, idénticos a los del Owner.
+    wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v2)
+        .await;
+
+    // Un fact que la v1 rechazaría (ModThree=50) commitea: ambos
+    // evaluadores votan con el módulo v2.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    get_subject(&node2.api, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModThree": {"data": 50}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 0, "two": 0, "three": 50}));
+
+    // Esperar a que AveNode2 aplique el evento antes de apagarlo:
+    // reiniciar un nodo desincronizado degrada todo lo posterior.
+    get_subject(&node2.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Reinicio de AveNode2 conservando contratos y con el pool muerto:
+    // el arranque carga el artefacto v2 desde disco.
+    let keys = node2.keys.clone();
+    let local_db = node2_dirs[0].path().to_path_buf();
+    let ext_db = node2_dirs[1].path().to_path_buf();
+
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let (node2, mut node2_dirs_new) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node2_dirs.append(&mut node2_dirs_new);
+    node_running(&node2.api).await.unwrap();
+
+    // Recupera artefacto y ancla del ledger mixto desde disco, sin
+    // recompilar (con el pool muerto, un intento de build fallaría).
+    let gov_state = get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(gov_state.sn, 2);
+
+    // Otro fact commitea con el visto bueno de AveNode2: evalúa con la
+    // v2 cargada del artefacto en disco tras el reinicio.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModThree": {"data": 60}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 0, "two": 0, "three": 60}));
+
+    get_subject(&node2.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    node_running(&node2.api).await.unwrap();
+}
+
+
+#[test(tokio::test)]
+// Un servidor plan B que sirve SIEMPRE bytes corruptos (fault
+// `CorruptWasm` outbound sin límite: el wasm viaja corrupto pero el
+// zstd es válido, así que el receptor lo detecta por hash contra el
+// ancla) deja al fetcher ciclando para siempre: cada ciclo sondea,
+// descarga, descarta por hash y quema al peer, agota el ciclo y entra
+// en timeoff. Como el plan A (Owner) tiene el directorio oculto y no
+// sirve, no hay ninguna fuente sana. Pines: tras varios ciclos el
+// requester no ha persistido NADA (los bytes que no casan con el ancla
+// se rechazan sin tocar disco), la observabilidad del fetch muestra
+// ciclos agotados y descargas repetidas, la gobernanza sigue operativa
+// para el resto de schemas (un fact de otro schema commitea) y ambos
+// nodos siguen respondiendo — no hay fuga observable de ciclos que
+// tumbe al nodo. El test termina con el fetch ciclando en background y
+// el fault instalado, por diseño.
+async fn test_fetch_always_corrupt_plan_b_server_cycles_without_persisting() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+    let node3_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let (node3, _node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node3_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+
+    let node3_pk = PublicKey::from_str(node3.api.public_key()).unwrap();
+
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
+
+    // SN 1: dos schemas. Example lo evalúan AveNode2 y AveNode3 (el
+    // Owner NO es evaluador: el plan B de AveNode3 es exactamente
+    // {AveNode2} y el plan A es {Owner}); Other lo evalúa solo el
+    // Owner — es el testigo de que la gobernanza sigue operativa
+    // mientras el fetch de Example cicla.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "Other",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode3",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                },
+                {
+                    "schema_id": "Other",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // AveNode2 aplica SN 1 y fetchea la v1 (la servirá como plan B).
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let artifact_name = format!("{governance_id}_Example");
+    wait_artifact_bytes(node2_contracts.path(), &artifact_name).await;
+
+    // SN 2: evento ajeno (alta de miembro sin roles). El fetch de
+    // AveNode2 calentó la caché de serving del Owner con los bytes
+    // sanos (TTL 300 s); aplicar este evento bloquea el serving durante
+    // el apply y la vacía — sin esto el Owner seguiría sirviendo desde
+    // caché con el directorio oculto.
+    let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode4",
+                    "key": key
+                }
+            ]
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // AveNode2 aplica SN 2: si se quedara atrasado su gate de serving
+    // respondería NotServed a los probes de AveNode3. El contrato no
+    // cambia: conserva el artefacto sin refetch (skip guard).
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // El plan A no puede servir: caché vacía (SN 2) y directorio oculto
+    // → serve None, sin rellenar la caché. El artefacto de AveNode2 en
+    // disco está ÍNTEGRO: la corrupción se inyecta en la red, en cada
+    // respuesta de artefacto hacia AveNode3, sin límite de ocurrencias.
+    let node1_dir = node1_contracts
+        .path()
+        .join("contracts")
+        .join(&artifact_name);
+    let node1_hidden = node1_dir.with_extension("bak");
+    fs::rename(&node1_dir, &node1_hidden).unwrap();
+
+    node2
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: Some(node3_pk),
+            remaining: None,
+            action: FaultAction::CorruptWasm,
+        })
+        .await
+        .unwrap();
+
+    // AveNode3 sincroniza hasta la punta: arranca el fetch de la v1 con
+    // la única fuente disponible sirviendo bytes corruptos en cada
+    // ciclo.
+    node3
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node3.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Varias rondas de probe→descarga→descarte→timeoff (probes y
+    // transferencias son instantáneos en memoria y el timeoff base es
+    // 1 s).
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    // Nada se persiste: todo byte que no casa con el ancla se rechaza.
+    assert!(
+        !artifact_dir_exists(node3_contracts.path(), &artifact_name),
+        "las transferencias corruptas se rechazan siempre: nada persiste"
+    );
+
+    // El fetch sigue ciclando: ciclos agotados y descargas repetidas
+    // (una por ciclo, cada una rechazada por hash).
+    let obs = wait_fetch_obs(&node3.api, &artifact_name, |obs| {
+        obs.cycles_exhausted >= 1 && obs.downloads_started >= 2
+    })
+    .await;
+    assert!(obs.cycles_exhausted >= 1);
+    assert!(obs.downloads_started >= 2);
+
+    // La gobernanza sigue operativa para el resto de schemas: un fact
+    // de Other commitea con su evaluador (el Owner).
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Other", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+
+    // Ni el servidor corrupto ni el requester estancado se degradan.
+    node_running(&node2.api).await.unwrap();
+    node_running(&node3.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Heal de un compiler con el pool muerto: la verificación pre-serve
+// detecta que el artefacto oficial de AveNode2 en disco no casa con el
+// ancla registrada (alguien lo corrompió), lo descarta y programa el
+// heal — un compiler se cura RECOMPILANDO contra el ancla del ledger.
+// Con el pool muerto el heal falla por infraestructura y reintenta con
+// backoff sin rendirse; mientras tanto el servidor responde NotServed y
+// la gobernanza sigue operativa. Al reiniciar con el pool vivo
+// (compilador embebido: el config sin endpoints lo inyecta) la
+// recuperación de arranque recompila anclado, el fetcher completa por
+// fin la descarga con bytes verificados y un fact commitea con su voto.
+// Pines: el artefacto descartado desaparece del disco de AveNode2, el
+// fetcher no persiste nada durante la ventana, un evento ajeno de
+// gobernanza commitea en plena ventana, el nodo herido no se cae, y
+// tras el reboot con pool vivo los bytes curados son exactamente los
+// anclados (compilación determinista).
+async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+    let node2_local = tempfile::tempdir().unwrap();
+    let node2_ext = tempfile::tempdir().unwrap();
+    let node3_contracts = tempfile::tempdir().unwrap();
+    let node3_local = tempfile::tempdir().unwrap();
+    let node3_ext = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let (node3, _node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node3_contracts.path().to_path_buf()),
+        local_db: Some(node3_local.path().to_path_buf()),
+        ext_db: Some(node3_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
+
+    // SN 1: AveNode2 compiler de la gobernanza (Owner y AveNode2
+    // compilarán el schema).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 2: alta del schema. AveNode3 evalúa con el Owner (quórum de 2).
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode3",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode3",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let artifact_name = format!("{governance_id}_Example");
+    let node1_v1 =
+        wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
+
+    // AveNode2 promociona su build al aplicar; AveNode3 fetchea la v1.
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v1)
+        .await;
+
+    node3
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node3.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    wait_artifact_bytes_eq(node3_contracts.path(), &artifact_name, &node1_v1)
+        .await;
+
+    // SN 3: evento ajeno para vaciar las cachés de serving que los
+    // fetches anteriores pudieron calentar (se vacían al aplicar).
+    let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode4",
+                    "key": key
+                }
+            ]
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    for node in [&node2.api, &node3.api] {
+        node.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(node, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+    }
+
+    // AveNode2 reinicia con el pool de compilación MUERTO: el artefacto
+    // está íntegro en disco, así que el arranque no necesita compilar.
+    let (mut node2, _node2_dirs) = (node2, _node2_dirs);
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    // Se corrompe el wasm oficial de AveNode2 en disco con el nodo vivo
+    // (su caché de serving está vacía: no ha servido desde el SN 3).
+    // El plan A del Owner queda oculto para que AveNode2 sea la única
+    // fuente posible del refetch de AveNode3.
+    let node2_wasm = node2_contracts
+        .path()
+        .join("contracts")
+        .join(&artifact_name)
+        .join("contract.wasm");
+    fs::write(&node2_wasm, b"corrupted served artifact bytes").unwrap();
+
+    let node1_dir = node1_contracts
+        .path()
+        .join("contracts")
+        .join(&artifact_name);
+    let node1_hidden = node1_dir.with_extension("bak");
+    fs::rename(&node1_dir, &node1_hidden).unwrap();
+
+    // AveNode3 pierde su artefacto y reinicia: la recovery de arranque
+    // del evaluador refetchea. Al pedir a AveNode2, la verificación
+    // pre-serve de AveNode2 detecta su propia corrupción: descarta el
+    // artefacto y programa el heal (recompilar anclado), que con el
+    // pool muerto falla y reintenta con backoff sin rendirse.
+    let (mut node3, _node3_dirs) = (node3, _node3_dirs);
+    node3.token.cancel();
+    join_all(node3.handler.iter_mut()).await;
+
+    fs::remove_dir_all(
+        node3_contracts
+            .path()
+            .join("contracts")
+            .join(&artifact_name),
+    )
+    .unwrap();
+
+    let (node3, _node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node3.keys.clone()),
+        local_db: Some(node3_local.path().to_path_buf()),
+        ext_db: Some(node3_ext.path().to_path_buf()),
+        contracts_path: Some(node3_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+
+    // Ventana de reintentos del heal (base 1 s en test): el artefacto
+    // corrupto fue descartado y nada sano lo repone mientras el pool
+    // siga muerto.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert!(
+        !artifact_dir_exists(node2_contracts.path(), &artifact_name),
+        "la verificación pre-serve descarta el artefacto corrupto"
+    );
+    assert!(
+        !artifact_dir_exists(node3_contracts.path(), &artifact_name),
+        "el fetcher no persiste nada mientras nadie sirve bytes anclados"
+    );
+    node_running(&node2.api).await.unwrap();
+
+    // La gobernanza sigue operativa con el heal reintentando: un evento
+    // ajeno commitea y ambos nodos lo aplican (quedan en la versión que
+    // sus gates de serving exigirán tras la cura).
+    let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode5",
+                    "key": key
+                }
+            ]
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    for node in [&node2.api, &node3.api] {
+        node.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(node, governance_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+    }
+
+    // Reboot de AveNode2 con el pool vivo (sin config de compiler: el
+    // compilador embebido se inyecta por defecto). La recuperación de
+    // arranque recompila anclado el artefacto ausente.
+    let (mut node2, _node2_dirs) = (node2, _node2_dirs);
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    // Cura completa: los bytes recompilados son exactamente los
+    // anclados.
+    let healed =
+        wait_artifact_bytes(node2_contracts.path(), &artifact_name).await;
+    assert_eq!(
+        healed, node1_v1,
+        "la recompilación anclada reproduce los bytes originales"
+    );
+
+    // AveNode3 completa el fetch desde el AveNode2 curado (el Owner
+    // sigue oculto: AveNode2 es la única fuente) con bytes verificados
+    // contra el ancla.
+    wait_artifact_bytes_eq(node3_contracts.path(), &artifact_name, &node1_v1)
+        .await;
+
+    // El Owner vuelve a servir y un fact commitea con el quórum de los
+    // dos evaluadores: AveNode3 evalúa con el artefacto refetcheado.
+    fs::rename(&node1_hidden, &node1_dir).unwrap();
+
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 5}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 5, "two": 0, "three": 0}));
+
+    node_running(&node2.api).await.unwrap();
+    node_running(&node3.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Self-heal de un evaluador por la vía FETCH: la verificación pre-serve
+// detecta que el artefacto oficial de AveNode2 en disco no casa con el
+// ancla (lo sirve como plan B a AveNode3), lo descarta y reprovisiona —
+// un evaluador se cura REFETCHEANDO de una fuente sana, no compilando.
+// El descarte evicta también el módulo en memoria: el nodo no responde
+// por unos bytes que ya no verifican contra el ancla, así que durante
+// la ventana de heal (Owner sin servir) AveNode2 NO evalúa y su
+// heal-fetch cicla. Al restaurar el serving del Owner, el heal-fetch
+// completa con bytes anclados, AveNode2 recupera el módulo y vuelve a
+// servir, y AveNode3 completa su fetch. Pines: el artefacto corrupto
+// desaparece del disco de AveNode2 (detección al servir), el módulo
+// evictado durante la ventana, los bytes curados son los anclados y un
+// fact commitea con los tres evaluadores ya sanos.
+async fn test_evaluator_serve_corruption_self_heals_by_fetch() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+    let node3_contracts = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let (node3, _node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node3_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
+
+    // SN 1: schema Example. Evaluadores iniciales: Owner y AveNode2
+    // (AveNode3 se añadirá como evaluador más tarde, forzando su fetch
+    // y el plan B de AveNode2).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 10
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // AveNode2 fetchea la v1 sana; AveNode3 se sincroniza (es miembro,
+    // aún sin rol de evaluador: no fetchea).
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let artifact_name = format!("{governance_id}_Example");
+    let node1_v1 =
+        wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
+    wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v1)
+        .await;
+
+    node3
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node3.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Subject de Example: baseline operativa con los dos evaluadores.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 1, "two": 0, "three": 0}));
+
+    // SN 2: evento ajeno para vaciar las cachés de serving que los
+    // fetches anteriores calentaron (se vacían al aplicar).
+    let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode4",
+                    "key": key
+                }
+            ]
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    for node in [&node2.api, &node3.api] {
+        node.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(node, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+    }
+
+    // Se corrompe el wasm oficial de AveNode2 (su caché de serving está
+    // vacía desde el SN 2: el próximo serve leerá de disco) y el plan A
+    // del Owner queda oculto: AveNode2 será la única fuente posible del
+    // fetch de AveNode3, hasta que se detecte la corrupción.
+    let node2_wasm = node2_contracts
+        .path()
+        .join("contracts")
+        .join(&artifact_name)
+        .join("contract.wasm");
+    fs::write(&node2_wasm, b"corrupted served artifact bytes").unwrap();
+
+    let node1_dir = node1_contracts
+        .path()
+        .join("contracts")
+        .join(&artifact_name);
+    let node1_hidden = node1_dir.with_extension("bak");
+    fs::rename(&node1_dir, &node1_hidden).unwrap();
+
+    // SN 3: AveNode3 gana el rol de evaluador. Al aplicar necesita la
+    // v1: plan A NotServed (oculto) y plan B AveNode2, cuya verificación
+    // pre-serve detecta su propia corrupción → descarta el artefacto y
+    // su heal (es evaluador: FETCH) queda ciclando mientras el Owner
+    // siga oculto.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "AveNode3",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    node3
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node3.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // Ventana de heal: el artefacto corrupto fue descartado (detección
+    // al servir) y nada sano lo repone mientras el Owner no sirva.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert!(
+        !artifact_dir_exists(node2_contracts.path(), &artifact_name),
+        "la verificación pre-serve descarta el artefacto corrupto"
+    );
+    assert!(
+        !artifact_dir_exists(node3_contracts.path(), &artifact_name),
+        "el fetcher no persiste nada mientras nadie sirve bytes anclados"
+    );
+
+    // El descarte evicta también el módulo en memoria: durante el heal
+    // AveNode2 no evalúa (no responde por bytes que ya no verifican
+    // contra el ancla) y su heal-fetch cicla mientras el Owner no sirva.
+    assert!(
+        !node2.api.test_has_contract_module(&artifact_name).await,
+        "el módulo se evicta con el descarte: no se evalúa durante el heal"
+    );
+    assert!(
+        node2
+            .api
+            .test_fetch_obs(&artifact_name)
+            .await
+            .is_some_and(|obs| obs.cycles_exhausted >= 1),
+        "el heal por fetch está ciclando mientras el Owner no sirve"
+    );
+
+    // El Owner vuelve a servir: el heal-fetch de AveNode2 completa con
+    // bytes anclados y AveNode2 vuelve a servir.
+    fs::rename(&node1_hidden, &node1_dir).unwrap();
+
+    let healed =
+        wait_artifact_bytes(node2_contracts.path(), &artifact_name).await;
+    assert_eq!(
+        healed, node1_v1,
+        "el self-heal del evaluador repone los bytes anclados"
+    );
+    wait_module_resident(&node2.api, &artifact_name, true).await;
+
+    // AveNode3 completa su fetch (plan A o plan B ya sanos) y carga el
+    // módulo.
+    wait_artifact_bytes_eq(node3_contracts.path(), &artifact_name, &node1_v1)
+        .await;
+    wait_module_resident(&node3.api, &artifact_name, true).await;
+
+    // Y evalúa: un fact commitea con los tres evaluadores al día.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+
+    node_running(&node2.api).await.unwrap();
+    node_running(&node3.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// DropSchema con el fetch del contrato EN VUELO: AveNode2 acaba de
+// ganar el rol de evaluador de "Doomed" y está ciclando su fetch (la
+// única fuente, el Owner, no sirve) cuando el evento que elimina el
+// schema commitea. Al aplicarlo, el fetch se cancela y no se reanuda
+// para un schema muerto: restaurar el serving NO hace aparecer ningún
+// artefacto, no queda staging huérfano y la recovery de arranque no
+// intenta resucitarlo. Pines: el fetch estaba ciclando antes del drop
+// (observabilidad), tras aplicar el drop el schema desaparece de las
+// propiedades de la gobernanza y no aparece artefacto ni resto en disco
+// — ni entonces ni tras un reinicio con el serving restaurado — y la
+// gobernanza sigue commiteando (un schema vivo evalúa facts antes y
+// después del reinicio).
+async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node2_contracts = tempfile::tempdir().unwrap();
+    let node2_local = tempfile::tempdir().unwrap();
+    let node2_ext = tempfile::tempdir().unwrap();
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    // SN 1: dos schemas. "Doomed" lo evalúa solo el Owner (AveNode2
+    // ganará el rol justo antes del drop, sin haber fetcheado nunca);
+    // "Other" lo evalúan Owner y AveNode2 — es el schema vivo que sigue
+    // commiteando tras el drop.
+    let schema_roles = |evaluators: serde_json::Value| {
+        json!({
+            "add": {
+                "evaluator": evaluators,
+                "validator": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "witness": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ],
+                "creator": [
+                    {
+                        "name": "Owner",
+                        "namespace": [],
+                        "quantity": 10
+                    }
+                ],
+                "issuer": [
+                    {
+                        "name": "Owner",
+                        "namespace": []
+                    }
+                ]
+            }
+        })
+    };
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Doomed",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "Other",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Doomed",
+                    "add": schema_roles(json!([
+                        {
+                            "name": "Owner",
+                            "namespace": []
+                        }
+                    ]))["add"]
+                },
+                {
+                    "schema_id": "Other",
+                    "add": schema_roles(json!([
+                        {
+                            "name": "Owner",
+                            "namespace": []
+                        },
+                        {
+                            "name": "AveNode2",
+                            "namespace": []
+                        }
+                    ]))["add"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // AveNode2 aplica SN 1: fetchea "Other" (es evaluador) pero no
+    // "Doomed".
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let other_name = format!("{governance_id}_Other");
+    wait_artifact_bytes(node2_contracts.path(), &other_name).await;
+
+    // Subject del schema vivo: baseline operativa.
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Other", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 1, "two": 0, "three": 0}));
+
+    // El Owner deja de servir "Doomed" (directorio oculto; su caché de
+    // serving de ese contrato está vacía: nadie lo ha fetcheado nunca).
+    let doomed_name = format!("{governance_id}_Doomed");
+    let node1_doomed = node1_contracts
+        .path()
+        .join("contracts")
+        .join(&doomed_name);
+    let node1_doomed_hidden = node1_doomed.with_extension("bak");
+    fs::rename(&node1_doomed, &node1_doomed_hidden).unwrap();
+
+    // SN 2: AveNode2 gana el rol de evaluador de "Doomed". Al aplicarlo
+    // arranca el fetch del contrato, que cicla: la única fuente (el
+    // Owner, como compiler y como evaluador) no sirve.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Doomed",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(&node1.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // El fetch de "Doomed" está en vuelo y ciclando (cada ciclo agota
+    // los candidatos: nadie sirve).
+    wait_fetch_obs(&node2.api, &doomed_name, |obs| {
+        obs.cycles_exhausted >= 1
+    })
+    .await;
+    assert!(!artifact_dir_exists(node2_contracts.path(), &doomed_name));
+
+    // SN 3: se elimina el schema con el fetch en vuelo.
+    let json = json!({
+        "schemas": {
+            "remove": ["Doomed"]
+        }
+    });
+
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&node1.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(state.properties);
+    assert!(
+        !gov.schemas
+            .contains_key(&SchemaType::Type("Doomed".to_owned())),
+        "el schema eliminado desaparece de la gobernanza"
+    );
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // El serving del Owner vuelve: si el fetch no se hubiera cancelado,
+    // el siguiente ciclo persistiría el artefacto. No aparece nada.
+    fs::rename(&node1_doomed_hidden, &node1_doomed).unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let doomed_leftovers = |root: &std::path::Path| -> Vec<String> {
+        let mut names = vec![];
+        for dir in [root.to_path_buf(), root.join("contracts")] {
+            if let Ok(entries) = fs::read_dir(dir) {
+                names.extend(entries.flatten().map(|e| {
+                    e.file_name().to_string_lossy().into_owned()
+                }));
+            }
+        }
+        names
+            .into_iter()
+            .filter(|name| name.contains("Doomed"))
+            .collect()
+    };
+    assert!(
+        doomed_leftovers(node2_contracts.path()).is_empty(),
+        "el fetch cancelado no deja artefacto ni staging huérfano"
+    );
+
+    // La gobernanza sigue commiteando: un fact del schema vivo commitea
+    // con el quórum de sus dos evaluadores.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 2, "two": 0, "three": 0}));
+
+    // Reinicio de AveNode2: la recovery no intenta resucitar el schema
+    // eliminado — sin artefacto, sin restos en disco y nodo operativo.
+    let (mut node2, _node2_dirs) = (node2, _node2_dirs);
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let (node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        keys: Some(node2.keys.clone()),
+        local_db: Some(node2_local.path().to_path_buf()),
+        ext_db: Some(node2_ext.path().to_path_buf()),
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let gov_state = get_subject(&node2.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(gov_state.sn, 3);
+    assert!(
+        doomed_leftovers(node2_contracts.path()).is_empty(),
+        "la recovery de arranque no resucita el schema eliminado"
+    );
+
+    // Y el nodo sigue evaluando el schema vivo tras el reinicio.
+    emit_fact(
+        &node1.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1.api, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+
+    node_running(&node2.api).await.unwrap();
+}
+
+
+#[test(tokio::test)]
+// Las anclas de compilación y la metadata de artefactos que persiste el
+// ContractRegister son una proyección reconstruible del ledger: el test
+// las borra directamente de la base de datos local con el nodo apagado
+// (borrado selectivo por gobernanza) y verifica que el arranque se
+// recupera solo. Tres schemas con contratos commiteados a distinta
+// altura (Alpha en SN 1 con cambio de contrato en SN 8, Beta en SN 4 y
+// Gamma en SN 6, con eventos ajenos intercalados hasta SN 9) dejan
+// anclas de distinta edad; con lotes de ledger de 4 la re-derivación
+// del arranque recorre varios lotes hacia atrás buscando la evidencia
+// de compilación de cada contrato. Pines: el nodo arranca, la
+// gobernanza conserva los tres schemas, los artefactos en disco quedan
+// byte a byte idénticos (el arranque los verifica contra el ancla
+// re-derivada y re-registra la metadata sin tocar los bytes) y un fact
+// por schema commitea. Que el arranque no lance builds del pool no es
+// asertable desde aquí: el pool embebido de tests no expone su contador
+// a través de la Api del nodo; el pin observable es artefacto idéntico
+// y evaluación correcta.
+async fn test_boot_anchor_rederivation_after_register_wipe() {
+    let node1_contracts = tempfile::tempdir().unwrap();
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
+
+    // Lotes de ledger pequeños: la re-derivación de anclas del arranque
+    // recorre el ledger hacia atrás en lotes de este tamaño y con el SN
+    // final del test debe cruzar varios.
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        ledger_batch_size: Some(4),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![]).await;
+
+    // Fact de alta de un schema con el Owner en todos los roles, y fact
+    // de evento ajeno barato (alta de miembro con clave generada).
+    let schema_fact = |schema_id: &str, contract: &str| {
+        json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": schema_id,
+                        "contract": contract,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": schema_id,
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": 10
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        })
+    };
+    let member_fact = |name: &str| {
+        json!({
+            "members": {
+                "add": [
+                    {
+                        "name": name,
+                        "key": KeyPair::Ed25519(
+                            Ed25519Signer::generate().unwrap()
+                        )
+                        .public_key()
+                        .to_string()
+                    }
+                ]
+            }
+        })
+    };
+
+    // SN 1: schema Alpha con la v1 del contrato de ejemplo.
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        schema_fact("Alpha", EXAMPLE_CONTRACT),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&node1.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let alpha_name = format!("{governance_id}_Alpha");
+    let alpha_v1 = wait_artifact_bytes(node1_contracts.path(), &alpha_name).await;
+
+    // SN 2 y 3: eventos ajenos a los contratos.
+    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra1"), true)
+        .await
+        .unwrap();
+    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra2"), true)
+        .await
+        .unwrap();
+    get_subject(&node1.api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // SN 4: schema Beta con la v2.
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        schema_fact("Beta", EXAMPLE_CONTRACT_V2),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&node1.api, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let beta_name = format!("{governance_id}_Beta");
+    let beta_bytes =
+        wait_artifact_bytes(node1_contracts.path(), &beta_name).await;
+
+    // SN 5: otro evento ajeno.
+    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra3"), true)
+        .await
+        .unwrap();
+
+    // SN 6: schema Gamma, otra vez con la v1 (misma fuente que Alpha:
+    // el artefacto debe ser idéntico).
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        schema_fact("Gamma", EXAMPLE_CONTRACT),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&node1.api, governance_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    let gamma_name = format!("{governance_id}_Gamma");
+    let gamma_bytes =
+        wait_artifact_bytes(node1_contracts.path(), &gamma_name).await;
+    assert_eq!(
+        gamma_bytes, alpha_v1,
+        "misma fuente de contrato, mismo artefacto"
+    );
+
+    // SN 7: otro evento ajeno.
+    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra4"), true)
+        .await
+        .unwrap();
+
+    // SN 8: cambio de contrato de Alpha a la v2 — una ancla reciente
+    // sobre el schema más viejo. La promoción reemplaza el artefacto
+    // oficial: se espera a que los bytes cambien.
+    let json = json!({
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Alpha",
+                    "new_contract": EXAMPLE_CONTRACT_V2
+                }
+            ]
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let alpha_dir = node1_contracts.path().join("contracts").join(&alpha_name);
+    let mut alpha_v2 = alpha_v1.clone();
+    for _ in 0..100 {
+        if alpha_dir.join("contract.cwasm").exists()
+            && let Ok(bytes) = fs::read(alpha_dir.join("contract.wasm"))
+            && bytes != alpha_v1
+        {
+            alpha_v2 = bytes;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_ne!(
+        alpha_v2, alpha_v1,
+        "el cambio de contrato debe reemplazar el artefacto de Alpha"
+    );
+    assert_eq!(
+        alpha_v2, beta_bytes,
+        "Alpha con la v2 debe tener el mismo artefacto que Beta"
+    );
+
+    // SN 9: último evento ajeno; el ledger queda con anclas en SN 4, 6
+    // y 8, a distinta profundidad desde la punta.
+    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra5"), true)
+        .await
+        .unwrap();
+    get_subject(&node1.api, governance_id.clone(), Some(9), true)
+        .await
+        .unwrap();
+
+    // Apagado limpio y borrado selectivo de las filas del
+    // ContractRegister de esta gobernanza en la base de datos local.
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    wipe_contract_register_tables(
+        &node1_local.path().join("database.db"),
+        &governance_id.to_string(),
+    );
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        keys: Some(node1.keys.clone()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        ledger_batch_size: Some(4),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // La gobernanza arranca en su SN con los tres schemas intactos.
+    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(9), true)
+        .await
+        .unwrap();
+    let gov = governance_properties(gov_state.properties);
+    for schema_id in ["Alpha", "Beta", "Gamma"] {
+        assert!(
+            gov.schemas
+                .contains_key(&SchemaType::Type(schema_id.to_owned())),
+            "el schema {schema_id} debe seguir en la gobernanza"
+        );
+    }
+
+    // Los artefactos en disco sobreviven byte a byte: el arranque
+    // re-deriva las anclas del ledger, verifica los bytes contra ellas
+    // y re-registra la metadata sin tocar el artefacto.
+    wait_artifact_bytes_eq(node1_contracts.path(), &alpha_name, &alpha_v2)
+        .await;
+    wait_artifact_bytes_eq(node1_contracts.path(), &beta_name, &beta_bytes)
+        .await;
+    wait_artifact_bytes_eq(node1_contracts.path(), &gamma_name, &gamma_bytes)
+        .await;
+
+    // Y los tres schemas evalúan con los artefactos re-anclados: un
+    // subject y un fact commiteado por schema.
+    for schema_id in ["Alpha", "Beta", "Gamma"] {
+        let (subject_id, ..) = create_subject(
+            &node1.api,
+            governance_id.clone(),
+            schema_id,
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact(
+            &node1.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": 5}}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let state = get_subject(&node1.api, subject_id, Some(1), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.properties,
+            json!({"one": 5, "two": 0, "three": 0})
+        );
+    }
+
+    node_running(&node1.api).await.unwrap();
 }

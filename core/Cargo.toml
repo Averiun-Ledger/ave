@@ -69,6 +69,8 @@ axum-server = { workspace = true }
 rcgen = "0.14"
 tokio-rustls = "0.26"
 aws-lc-rs = { version = "1", features = ["ring-io"] }
+zstd = "0.13"
+rusqlite = "0.40"
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus", "toolchain"]

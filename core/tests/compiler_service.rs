@@ -13,6 +13,7 @@ use ave_common::compiler::pb::compiler_service_client::CompilerServiceClient;
 use ave_common::identity::{DigestIdentifier, HashAlgorithm};
 use ave_core::compilation::client::CompilerClient;
 use ave_core::compilation::error::CompilerError;
+use ave_core::compilation::pipeline;
 use ave_core::compilation::service::CompilerServer;
 use ave_core::compilation::service_config::ServiceConfig;
 use base64::Engine as Base64Engine;
@@ -494,4 +495,90 @@ async fn compile_artifact_store_corruption_rebuilds() {
     );
     assert_eq!(rebuilt.wasm, baseline.wasm);
     assert_eq!(rebuilt.wasm_hash, baseline.wasm_hash);
+}
+
+/// Same minimal contract with a different field: a fixed source used by
+/// the parity test below (kept apart from the other fixtures so their
+/// cache/corruption assertions never see this entry).
+const CONTRACT_D: &str = r#"
+use serde::{Serialize, Deserialize};
+use ave_contract_sdk as sdk;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct State {
+    pub four: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+enum StateEvent {
+    ModFour { data: u32 },
+}
+
+#[unsafe(no_mangle)]
+pub unsafe fn main_function(
+    state_ptr: i32,
+    init_state_ptr: i32,
+    event_ptr: i32,
+    is_owner: i32,
+) -> u32 {
+    sdk::execute_contract(
+        state_ptr,
+        init_state_ptr,
+        event_ptr,
+        is_owner,
+        contract_logic,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe fn init_check_function(state_ptr: i32) -> u32 {
+    sdk::check_init_data(state_ptr, init_logic)
+}
+
+fn init_logic(
+    _state: &State,
+    contract_result: &mut sdk::ContractInitCheck,
+) {
+    contract_result.success = true;
+}
+
+fn contract_logic(
+    context: &sdk::Context<StateEvent>,
+    contract_result: &mut sdk::ContractResult<State>,
+) {
+    let StateEvent::ModFour { data } = context.event;
+    contract_result.state.four = data;
+}
+"#;
+
+/// Pool/local build parity: the same source compiled through the gRPC
+/// server and through a direct in-process `pipeline::build_wasm` call
+/// produces byte-identical wasm — both paths run the same pipeline with
+/// the same manifest and toolchain, so the served artifact must match a
+/// local build exactly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn compile_parity_with_local_build() {
+    let server = shared_server().await;
+    let client = client_for(&server.endpoint);
+    let source = source_b64(CONTRACT_D);
+
+    let remote = client
+        .compile(&source)
+        .await
+        .expect("remote compile should succeed");
+
+    // Same layout the service uses for its build jobs
+    // (<root>/contracts/<key>): the pipeline derives the contracts root
+    // (and the absent vendor directory) from it identically.
+    let root = tempfile::tempdir().expect("failed to create build tempdir");
+    let build_dir = root.path().join("contracts").join("parity");
+    let local = pipeline::build_wasm(&source, &build_dir)
+        .await
+        .expect("local build should succeed");
+
+    assert_eq!(
+        remote.wasm, local,
+        "the pooled build and the local build must be byte-identical"
+    );
 }
