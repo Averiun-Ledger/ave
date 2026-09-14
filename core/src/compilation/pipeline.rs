@@ -180,10 +180,20 @@ fn build_output_wasm_path(contract_path: &Path) -> PathBuf {
         .join(ARTIFACT_WASM)
 }
 
-fn cargo_config(target_dir: &Path, vendor_dir: Option<&Path>) -> String {
+fn cargo_config(
+    target_dir: &Path,
+    vendor_dir: Option<&Path>,
+    cargo_home: &Path,
+    rust_src: &Path,
+    rustc_commit: &str,
+) -> String {
     let mut config =
         ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
-    config = config.replace("{target_dir}", &target_dir.to_string_lossy());
+    config = config
+        .replace("{target_dir}", &target_dir.to_string_lossy())
+        .replace("{cargo_home}", &cargo_home.to_string_lossy())
+        .replace("{rust_src}", &rust_src.to_string_lossy())
+        .replace("{rustc_commit}", rustc_commit);
 
     if let Some(vendor_dir) = vendor_dir {
         config.push_str(&format!(
@@ -292,10 +302,14 @@ async fn prepare_contract_project(
         }
     })?;
 
+    let (rust_src, rustc_commit) = rustc_sysroot_rust_src().await?;
     let vendor_dir = contracts_root.join(VENDOR_DIR);
     let cargo_config = cargo_config(
         Path::new(BUILD_TARGET_DIR),
         vendor_dir.exists().then(vendor_dir_for_contract).as_deref(),
+        &contracts_root.join(SHARED_CARGO_HOME_DIR),
+        &rust_src,
+        &rustc_commit,
     );
     let cargo_config_path = cargo_config_path(contract_path);
     fs::write(&cargo_config_path, cargo_config)
@@ -550,6 +564,59 @@ pub fn hash_bytes(
     })
 }
 
+/// Sysroot rust-src path and commit hash of the active rustc. With the
+/// rust-src component installed, panic locations in std/core/alloc embed
+/// the absolute sysroot path instead of the canonical /rustc/<commit>
+/// one, breaking byte-reproducibility across machines; the generated
+/// build config remaps it back to the canonical form.
+async fn rustc_sysroot_rust_src() -> Result<(PathBuf, String), CompilerError> {
+    let output = Command::new("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .await
+        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
+            details: e.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(CompilerError::ToolchainFingerprintFailed {
+            details: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
+    }
+    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+
+    let output = Command::new("rustc")
+        .arg("--version")
+        .arg("--verbose")
+        .output()
+        .await
+        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
+            details: e.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(CompilerError::ToolchainFingerprintFailed {
+            details: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let commit = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .map(str::to_owned)
+        .ok_or_else(|| CompilerError::ToolchainFingerprintFailed {
+            details: "rustc -vV output has no commit-hash".to_owned(),
+        })?;
+
+    Ok((
+        PathBuf::from(sysroot)
+            .join("lib")
+            .join("rustlib")
+            .join("src")
+            .join("rust"),
+        commit,
+    ))
+}
+
 pub async fn toolchain_fingerprint(
     hash: HashAlgorithm,
 ) -> Result<DigestIdentifier, CompilerError> {
@@ -568,7 +635,14 @@ pub async fn toolchain_fingerprint(
         });
     }
 
-    let fingerprint_input = String::from_utf8_lossy(&output.stdout).to_string();
+    // The build configuration (rustflags and friends) shapes the artifact
+    // bytes as much as the rustc version itself, so the raw template is
+    // part of the fingerprint: a flag change is a toolchain change.
+    let fingerprint_input = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG
+    );
     hash_borsh(&*hash.hasher(), &fingerprint_input).map_err(|e| {
         CompilerError::SerializationError {
             context: "toolchain fingerprint",

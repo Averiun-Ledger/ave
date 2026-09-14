@@ -582,3 +582,56 @@ async fn compile_parity_with_local_build() {
         "the pooled build and the local build must be byte-identical"
     );
 }
+
+/// Root independence: the same source built through
+/// `pipeline::build_wasm` under two different contracts roots (the
+/// contracts path is configurable per node) produces byte-identical
+/// wasm, and no machine-absolute path leaks into the artifact — neither
+/// the roots themselves nor the toolchain sysroot (rust-src component);
+/// only canonical `/cargo-home/...` and `/rustc/<commit>/...` paths may
+/// be embedded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn local_build_is_byte_identical_across_contract_roots() {
+    let source = source_b64(CONTRACT_D);
+
+    let root_a = tempfile::tempdir().expect("failed to create tempdir A");
+    let root_b = tempfile::tempdir().expect("failed to create tempdir B");
+    let build_a = root_a.path().join("contracts").join("parity");
+    let build_b = root_b.path().join("contracts").join("parity");
+
+    let wasm_a = pipeline::build_wasm(&source, &build_a)
+        .await
+        .expect("build under root A should succeed");
+    let wasm_b = pipeline::build_wasm(&source, &build_b)
+        .await
+        .expect("build under root B should succeed");
+
+    assert_eq!(
+        wasm_a, wasm_b,
+        "the contracts root must not shape the artifact bytes"
+    );
+
+    let sysroot = std::process::Command::new("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .expect("rustc --print sysroot should run");
+    let mut forbidden: Vec<Vec<u8>> = [root_a.path(), root_b.path()]
+        .into_iter()
+        .map(|p| p.to_string_lossy().as_bytes().to_vec())
+        .collect();
+    forbidden.push(
+        String::from_utf8_lossy(&sysroot.stdout)
+            .trim()
+            .as_bytes()
+            .to_vec(),
+    );
+    for needle in forbidden {
+        assert!(
+            !wasm_a.windows(needle.len()).any(|w| w == needle),
+            "the artifact embeds {}",
+            String::from_utf8_lossy(&needle)
+        );
+    }
+}
