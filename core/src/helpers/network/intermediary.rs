@@ -1,8 +1,5 @@
 use crate::{
-    approval::{
-        light::{ApprLight, ApprLightMessage},
-        persist::{ApprPersist, ApprPersistMessage},
-    },
+    approval::persist::{ApprPersist, ApprPersistMessage},
     compilation::{
         coordinator::{CompileCoordinator, CompileCoordinatorMessage},
         worker::{CompileWorker, CompileWorkerMessage},
@@ -25,6 +22,7 @@ use crate::{
     },
     update::updater::{Updater, UpdaterMessage},
     validation::{
+        Validation, ValidationMessage,
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
         schema::{ValidationSchema, ValidationSchemaMessage},
         worker::{ValiWorker, ValiWorkerMessage},
@@ -556,7 +554,7 @@ impl Intermediary {
                                 })?;
                         }
                     }
-                    ActorMessage::ApprovalReq { req } => {
+                    ActorMessage::ApprovalReq { req, asker_actor } => {
                         let actor = system
                             .get_actor::<ApprPersist>(&path)
                             .await
@@ -569,6 +567,7 @@ impl Intermediary {
                                 approval_req: req,
                                 info: message.info,
                                 sender: sender.clone(),
+                                asker_actor,
                             })
                             .await
                             .map_err(|e| {
@@ -695,14 +694,104 @@ impl Intermediary {
                     }
                     ActorMessage::ApprovalRes { res } => {
                         let actor = system
-                            .get_actor::<ApprLight>(&path)
+                            .get_actor::<ValiWorker>(&path)
                             .await
                             .map_err(|_| IntermediaryError::ActorNotFound {
                                 path: path.to_string(),
                             })?;
                         actor
-                            .tell(ApprLightMessage::NetworkResponse {
-                                approval_res: *res,
+                            .tell(ValiWorkerMessage::ApprovalResponse {
+                                approval_res: res,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalVoteReport { res } => {
+                        let actor = system
+                            .get_actor::<Validation>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ValidationMessage::VoteReport {
+                                vote: res,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalStatusReq {
+                        approval_req_hash,
+                    } => {
+                        let actor = system
+                            .get_actor::<ValiWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ValiWorkerMessage::ApprovalStatusReq {
+                                approval_req_hash,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalStatusRes {
+                        approval_req_hash,
+                        votes,
+                    } => {
+                        let actor = system
+                            .get_actor::<Validation>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ValidationMessage::StatusRes {
+                                approval_req_hash,
+                                votes,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::TallyProposal { approval_data } => {
+                        let actor = system
+                            .get_actor::<ValiWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ValiWorkerMessage::TallyProposal {
+                                approval_data: Box::new(approval_data),
                                 request_id: message.info.request_id,
                                 version: message.info.version,
                                 sender: sender.clone(),

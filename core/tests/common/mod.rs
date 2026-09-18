@@ -22,8 +22,8 @@ use ave_common::{
 use ave_core::{
     Api,
     config::{
-        AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, Config,
+        ApprovalConfig, AveExternalDBConfig, AveExternalDBFeatureConfig,
+        AveInternalDBConfig, AveInternalDBFeatureConfig, Config,
         GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry, SyncConfig,
         TrackerSyncConfig, UpdateSyncConfig,
     },
@@ -136,6 +136,10 @@ pub struct CreateNodeConfig {
     /// values. Needed by tests that wait on idle sync rounds so they do
     /// not pay the full default interval.
     pub governance_sync: Option<GovernanceSyncConfig>,
+    /// Explicit approval timing; `None` uses the default test values
+    /// (long window, fast early probes). Needed by tests that exercise
+    /// the approval deadline: they set a short window explicitly.
+    pub approval: Option<ApprovalConfig>,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
@@ -165,6 +169,7 @@ pub async fn try_create_node(
         compiler,
         contracts_path,
         governance_sync,
+        approval,
     } = config;
 
     let keys =
@@ -223,6 +228,7 @@ pub async fn try_create_node(
         contracts_path,
         safe_mode,
         always_accept,
+        approval: approval.unwrap_or_default(),
         tracking_size: 100,
         sync: SyncConfig {
             ledger_batch_size: ledger_batch_size.unwrap_or(100),

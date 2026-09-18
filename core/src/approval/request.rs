@@ -1,6 +1,6 @@
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, PublicKey},
+    identity::{DigestIdentifier, PublicKey, TimeStamp},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -28,4 +28,11 @@ pub struct ApprovalReq {
     pub patch: ValueWrapper,
 
     pub signer: PublicKey,
+    /// When the owner issued the request. Together with `deadline` it
+    /// fixes the approval window for every node, so validator churn can
+    /// never restart it.
+    pub issued_at: TimeStamp,
+    /// Approvers that have not voted by this instant are counted as
+    /// absent. Must be at least `issued_at + MIN_APPROVAL_WINDOW`.
+    pub deadline: TimeStamp,
 }

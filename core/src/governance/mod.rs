@@ -3,7 +3,7 @@
 
 use crate::{
     approval::{
-        persist::{ApprPersist, InitApprPersist},
+        persist::{ApprPersist, ApprPersistMessage, InitApprPersist},
         types::VotationType,
     },
     auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
@@ -672,6 +672,7 @@ impl Governance {
             subject_id: self.subject_metadata.subject_id.clone(),
             pass_votation,
             helpers: (*hash, network.clone()),
+            validators: self.current_validator_set(),
         };
 
         ctx.create_child("approver", ApprPersist::initial(init_approver))
@@ -701,6 +702,12 @@ impl Governance {
                     .to_owned(),
             }),
         }
+    }
+
+    /// Current validator set of this governance, for the approver
+    /// worker gate.
+    fn current_validator_set(&self) -> HashSet<PublicKey> {
+        self.properties.governance_validators()
     }
 
     async fn refresh_version_sync(
@@ -2278,28 +2285,67 @@ impl Governance {
                 .await?;
         }
 
-        if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
+        let validator = ctx.get_child::<ValiWorker>("validator").await.ok();
+        let approver = ctx.get_child::<ApprPersist>("approver").await.ok();
+
+        if validator.is_some() || approver.is_some() {
             let current_roles = self
                 .current_validation_roles(ctx, SchemaType::Governance)
                 .await?;
-            validator
-                .tell(ValiWorkerMessage::UpdateCurrentRoles {
-                    gov_version: self.properties.version,
-                    current_roles: crate::validation::worker::CurrentWorkerRoles {
-                        approval: current_roles.approval,
-                        compilation: current_roles.compilation,
-                        evaluation: crate::governance::role_register::RoleDataRegister {
-                            workers: current_roles
-                                .schema
-                                .evaluation
-                                .iter()
-                                .map(|role| role.key.clone())
-                                .collect(),
-                            quorum: current_roles.schema.evaluation_quorum,
-                        },
-                    },
-                })
-                .await?;
+
+            if let Some(validator) = validator {
+                validator
+                    .tell(ValiWorkerMessage::UpdateCurrentRoles {
+                        gov_version: self.properties.version,
+                        current_roles:
+                            crate::validation::worker::CurrentWorkerRoles {
+                                approval: current_roles.approval.clone(),
+                                compilation: current_roles
+                                    .compilation
+                                    .clone(),
+                                evaluation:
+                                    crate::governance::role_register::RoleDataRegister {
+                                        workers: current_roles
+                                            .schema
+                                            .evaluation
+                                            .iter()
+                                            .map(|role| role.key.clone())
+                                            .collect(),
+                                        quorum: current_roles
+                                            .schema
+                                            .evaluation_quorum
+                                            .clone(),
+                                    },
+                                validation:
+                                    crate::governance::role_register::RoleDataRegister {
+                                        workers: current_roles
+                                            .schema
+                                            .validation
+                                            .iter()
+                                            .map(|role| role.key.clone())
+                                            .collect(),
+                                        quorum: current_roles
+                                            .schema
+                                            .validation_quorum
+                                            .clone(),
+                                    },
+                            },
+                    })
+                    .await?;
+            }
+
+            if let Some(approver) = approver {
+                approver
+                    .tell(ApprPersistMessage::Update {
+                        validators: current_roles
+                            .schema
+                            .validation
+                            .iter()
+                            .map(|role| role.key.clone())
+                            .collect(),
+                    })
+                    .await?;
+            }
         }
 
         Ok(())
@@ -2680,9 +2726,20 @@ impl Governance {
                                 .collect(),
                             quorum: current_roles.schema.evaluation_quorum,
                         },
+                    validation:
+                        crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .validation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.validation_quorum,
+                        },
                 },
                 stop: false,
                 pending: None,
+                approvals: std::collections::HashMap::new(),
             };
             ctx.create_child("validator", validator).await?;
         }
@@ -2747,6 +2804,7 @@ impl Governance {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 pass_votation,
                 helpers: (*hash, network.clone()),
+                validators: self.current_validator_set(),
             };
 
             ctx.create_child("approver", ApprPersist::initial(init_approver))
@@ -2809,9 +2867,19 @@ impl Governance {
                                 .collect(),
                             quorum: current_roles.schema.evaluation_quorum,
                         },
+                        validation: crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .validation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.validation_quorum,
+                        },
                     },
                     stop: false,
                     pending: None,
+                    approvals: std::collections::HashMap::new(),
                 };
                 ctx.create_child("validator", validator).await?;
             }
@@ -2920,6 +2988,7 @@ impl Governance {
                     subject_id: self.subject_metadata.subject_id.clone(),
                     pass_votation,
                     helpers: (*hash, network.clone()),
+                    validators: self.current_validator_set(),
                 };
 
                 ctx.create_child(
@@ -3006,6 +3075,7 @@ impl Governance {
             subject_id: self.subject_metadata.subject_id.clone(),
             pass_votation,
             helpers: (*hash, network.clone()),
+            validators: self.current_validator_set(),
         };
 
         ctx.create_child("approver", ApprPersist::initial(init_approver))
@@ -3855,6 +3925,15 @@ impl Governance {
             let last_data = LastData {
                 gov_version: last_ledger.gov_version,
                 vali_data: last_ledger.protocols.get_validation_data(),
+                approval_data_hash: last_ledger
+                    .protocols
+                    .approval_data_hash(hash)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Can not create approval data hash: {}",
+                            e
+                        ),
+                    })?,
             };
 
             let last_event_is_ok = match Self::verify_new_ledger_event(

@@ -11,7 +11,7 @@ use crate::{
     compilation::{request::CompilationReq, response::CompilationRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     governance::witnesses_register::CurrentWitnessSubject,
-    model::event::Ledger,
+    model::event::{ApprovalData, Ledger},
     update::UpdateWitnessOffer,
     validation::{request::ValidationReq, response::ValidationRes},
 };
@@ -38,9 +38,30 @@ pub enum ActorMessage {
     },
     ApprovalReq {
         req: Signed<ApprovalReq>,
+        /// Actor path the asking validator listens on for the vote.
+        asker_actor: String,
     },
     ApprovalRes {
         res: Box<Signed<ApprovalRes>>,
+    },
+    /// A validator pushes a newly observed approver vote to the
+    /// requester.
+    ApprovalVoteReport {
+        res: Box<Signed<ApprovalRes>>,
+    },
+    /// The requester asks a validator for the votes observed so far
+    /// (keepalive).
+    ApprovalStatusReq {
+        approval_req_hash: DigestIdentifier,
+    },
+    /// A validator answers the keepalive ask with its votes.
+    ApprovalStatusRes {
+        approval_req_hash: DigestIdentifier,
+        votes: Vec<Signed<ApprovalRes>>,
+    },
+    /// The requester proposes the canonical tally for signature.
+    TallyProposal {
+        approval_data: ApprovalData,
     },
     DistributionLastEventReq {
         ledger: Box<Ledger>,

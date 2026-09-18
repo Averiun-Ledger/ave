@@ -921,8 +921,11 @@ async fn test_gov_compile_staging_swept_on_approval_abort() {
     node2.token.cancel();
     join_all(node2.handler.iter_mut()).await;
 
-    // La compile y la evaluación sí completan: el staging queda
-    // escrito y la fase de aprobación se queda en vuelo.
+    // Compile and evaluation do complete: the staging is written to
+    // disk and the approval stays pending inside the validation phase.
+    // The request must not be awaited to a terminal state: with the
+    // approval unreachable it would abort on its own once the approval
+    // deadline lapses, and the sweep would already have run.
     let json = json!({
         "schemas": {
             "add": [
@@ -939,13 +942,22 @@ async fn test_gov_compile_staging_swept_on_approval_abort() {
         }
     });
 
-    let request_id = emit_fact(&node1.api, governance_id.clone(), json, true)
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, false)
         .await
         .unwrap();
+
+    // Wait until the staging dir exists on disk (polling, like the
+    // helpers).
+    for _ in 0..100 {
+        if !staging_dirs().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
     assert_eq!(staging_dirs().len(), 1);
 
-    // Abort manual con la fase de aprobación en vuelo y el staging ya
-    // escrito: el barrido también aplica.
+    // Manual abort with the approval still pending and the staging
+    // already written: the sweep applies as well.
     node1
         .api
         .manual_request_abort(governance_id.clone())

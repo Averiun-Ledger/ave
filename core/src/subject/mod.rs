@@ -8,17 +8,23 @@ use std::{
 };
 
 use crate::{
+    approval::{
+        request::ApprovalReq,
+        verify::{
+            ApprovalVerification, rebuild_approval_req, verify_approval_data,
+        },
+    },
     governance::{
         Governance,
         data::GovernanceData,
-        model::Quorum,
+        model::{ProtocolTypes, Quorum},
         role_register::{RoleDataRegister, SearchRole},
     },
     model::{
         common::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
-        event::{Ledger, LedgerSeal, Protocols, ValidationMetadata},
+        event::{ApprovalData, Ledger, LedgerSeal, Protocols, ValidationMetadata},
         sink::SubjectSinkEvent,
     },
     node::register::{Register, RegisterMessage},
@@ -983,6 +989,95 @@ where
         Ok(())
     }
 
+    /// Rebuilds the approval request anchored in the event under
+    /// verification and checks the tally evidence against the approver
+    /// set of the pre-event governance. Returns the signed approval
+    /// request that becomes part of the actual protocols.
+    fn verify_approval_evidence(
+        hash: &HashAlgorithm,
+        appr: &ApprovalData,
+        subject_metadata: &Metadata,
+        sn: u64,
+        gov_version: u64,
+        patch: &ValueWrapper,
+        signer: &PublicKey,
+    ) -> Result<Signed<ApprovalReq>, SubjectError> {
+        let approval_req = Signed::from_parts(
+            rebuild_approval_req(
+                appr,
+                &subject_metadata.subject_id,
+                sn,
+                gov_version,
+                patch,
+                signer,
+            ),
+            appr.approval_req_signature.clone(),
+        );
+
+        let governance_data =
+            GovernanceData::try_from(subject_metadata.properties.clone())
+                .map_err(|e| SubjectError::GovernanceDataConversionFailed {
+                    details: e.to_string(),
+                })?;
+
+        let (workers, quorum) = governance_data
+            .get_quorum_and_signers(
+                ProtocolTypes::Approval,
+                &SchemaType::Governance,
+                Namespace::new(),
+            )
+            .map_err(|e| SubjectError::SignatureVerificationFailed {
+                context: format!("approval approvers: {}", e),
+            })?;
+        let approvers = RoleDataRegister { workers, quorum };
+
+        let (workers, quorum) = governance_data
+            .get_quorum_and_signers(
+                ProtocolTypes::Validation,
+                &SchemaType::Governance,
+                Namespace::new(),
+            )
+            .map_err(|e| SubjectError::SignatureVerificationFailed {
+                context: format!("approval validators: {}", e),
+            })?;
+        let validators = RoleDataRegister { workers, quorum };
+
+        let req_subject_data_hash = hash_borsh(
+            &*hash.hasher(),
+            &RequestSubjectData {
+                subject_id: subject_metadata.subject_id.clone(),
+                governance_id: subject_metadata.governance_id.clone(),
+                namespace: Namespace::new(),
+                schema_id: SchemaType::Governance,
+                sn,
+                gov_version,
+                signer: signer.clone(),
+            },
+        )
+        .map_err(|e| SubjectError::HashCreationFailed {
+            details: e.to_string(),
+        })?;
+
+        verify_approval_data(ApprovalVerification {
+            hash,
+            approval: appr,
+            approvers: &approvers,
+            validators: &validators,
+            req_subject_data_hash: &req_subject_data_hash,
+            subject_id: &subject_metadata.subject_id,
+            sn,
+            gov_version,
+            patch,
+            signer,
+            now: TimeStamp::now(),
+        })
+        .map_err(|e| SubjectError::SignatureVerificationFailed {
+            context: format!("approval evidence: {}", e),
+        })?;
+
+        Ok(approval_req)
+    }
+
     async fn verify_new_ledger_event(
         ctx: &mut ActorContext<Self>,
         args: VerifyNewLedgerEvent<'_>,
@@ -1167,6 +1262,16 @@ where
                     (Some(compilation), Some(evaluation)) => {
                         if let Some(eval) = evaluation.evaluator_response_ok() {
                             if let Some(appr) = approval {
+                                let approval_req = Self::verify_approval_evidence(
+                                    hash,
+                                    appr,
+                                    &subject_metadata,
+                                    new_ledger_event.sn,
+                                    new_ledger_event.gov_version,
+                                    &eval.patch,
+                                    &event_request.signature().signer,
+                                )?;
+
                                 if appr.approved {
                                     Self::apply_patch_verify(
                                         &mut modified_subject_metadata
@@ -1178,7 +1283,7 @@ where
                                 ActualProtocols::CompileEvalApprove {
                                     compile_data: compilation.as_ref().clone(),
                                     eval_data: evaluation.clone(),
-                                    approval_data: appr.clone(),
+                                    approval_req,
                                 }
                             } else {
                                 return Err(
@@ -1199,6 +1304,16 @@ where
                     (None, Some(evaluation)) => {
                         if let Some(eval) = evaluation.evaluator_response_ok() {
                             if let Some(appr) = approval {
+                                let approval_req = Self::verify_approval_evidence(
+                                    hash,
+                                    appr,
+                                    &subject_metadata,
+                                    new_ledger_event.sn,
+                                    new_ledger_event.gov_version,
+                                    &eval.patch,
+                                    &event_request.signature().signer,
+                                )?;
+
                                 if appr.approved {
                                     Self::apply_patch_verify(
                                         &mut modified_subject_metadata
@@ -1209,7 +1324,7 @@ where
 
                                 ActualProtocols::EvalApprove {
                                     eval_data: evaluation.clone(),
-                                    approval_data: appr.clone(),
+                                    approval_req,
                                 }
                             } else {
                                 return Err(
@@ -1453,7 +1568,7 @@ where
         }
 
         if modified_subject_metadata.schema_id.is_gov()
-            && new_actual_protocols.is_success()
+            && new_ledger_event.protocols.is_success()
         {
             let mut gov_data = serde_json::from_value::<GovernanceData>(
                 modified_subject_metadata.properties.0,
@@ -1635,12 +1750,20 @@ where
             }
         };
 
+        let approval_data_hash = new_ledger_event
+            .protocols
+            .approval_data_hash(hash)
+            .map_err(|e| SubjectError::HashCreationFailed {
+                details: e.to_string(),
+            })?;
+
         let validation_res = ValidationRes::Response {
             vali_req_hash: validation.validation_req_hash.clone(),
             modified_metadata_without_propierties_hash: meta_wo_props_hash,
             propierties_hash,
             event_request_hash,
             viewpoints_hash,
+            approval_data_hash,
         };
 
         let role_data = get_validation_roles_register(

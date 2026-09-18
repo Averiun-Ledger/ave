@@ -69,6 +69,8 @@ pub struct Config {
     pub only_clear_events: bool,
     /// Sync protocol configuration.
     pub sync: SyncConfig,
+    /// Approval collection configuration.
+    pub approval: ApprovalConfig,
     /// Compiler pool the node delegates contract builds to — TEST
     /// BUILDS ONLY: production nodes compile in-process (`toolchain`
     /// feature). The field exists so tests can point at the embedded
@@ -95,6 +97,7 @@ impl Default for Config {
             is_service: false,
             only_clear_events: false,
             sync: Default::default(),
+            approval: Default::default(),
             #[cfg(feature = "test")]
             compiler: Default::default(),
             spec: None,
@@ -175,6 +178,12 @@ impl Config {
             .validate()
             .map_err(|e| Error::InvalidConfiguration {
                 component: "node.sync".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.approval
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "node.approval".to_string(),
                 reason: e.to_string(),
             })?;
 
@@ -362,6 +371,115 @@ fn default_reboot_timeout_retry_schedule_secs() -> Vec<u64> {
 #[cfg(not(any(test, feature = "test")))]
 fn default_reboot_timeout_retry_schedule_secs() -> Vec<u64> {
     vec![30, 60, 120, 300]
+}
+
+/// Approval collection configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct ApprovalConfig {
+    /// Minimum window, in seconds, between request issuance and its
+    /// approval deadline. Must equal the sum of `probe_schedule_secs`.
+    pub min_window_secs: u64,
+    /// Backoff schedule, in seconds, for vote probes sent to approvers
+    /// that have not voted yet.
+    pub probe_schedule_secs: Vec<u64>,
+    /// Seconds between keepalive rounds while waiting for votes.
+    pub keepalive_secs: u64,
+    /// Grace window, in seconds, added to the deadline before a tally is
+    /// considered expired.
+    pub tally_epsilon_secs: u64,
+}
+
+impl Default for ApprovalConfig {
+    fn default() -> Self {
+        Self {
+            min_window_secs: default_approval_min_window_secs(),
+            probe_schedule_secs: default_approval_probe_schedule_secs(),
+            keepalive_secs: default_approval_keepalive_secs(),
+            tally_epsilon_secs: default_approval_tally_epsilon_secs(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_min_window_secs() -> u64 {
+    300
+}
+
+#[cfg(not(any(test, feature = "test")))]
+fn default_approval_min_window_secs() -> u64 {
+    100_800
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_probe_schedule_secs() -> Vec<u64> {
+    // Early rounds are fast so votes are collected quickly; the window is
+    // long so a parked approval never closes on its own mid-test (the old
+    // approval retries were hours, effectively never firing in tests).
+    vec![1, 2, 4, 293]
+}
+
+#[cfg(not(any(test, feature = "test")))]
+fn default_approval_probe_schedule_secs() -> Vec<u64> {
+    vec![14_400, 28_800, 57_600]
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_keepalive_secs() -> u64 {
+    1
+}
+
+#[cfg(not(any(test, feature = "test")))]
+fn default_approval_keepalive_secs() -> u64 {
+    3_600
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_tally_epsilon_secs() -> u64 {
+    2
+}
+
+#[cfg(not(any(test, feature = "test")))]
+fn default_approval_tally_epsilon_secs() -> u64 {
+    60
+}
+
+impl ApprovalConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.min_window_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.min_window_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        validate_positive_vec(
+            "approval.probe_schedule_secs",
+            &self.probe_schedule_secs,
+        )?;
+        if self.probe_schedule_secs.iter().sum::<u64>()
+            != self.min_window_secs
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.probe_schedule_secs".to_string(),
+                reason: "must sum exactly approval.min_window_secs"
+                    .to_string(),
+            });
+        }
+        if self.keepalive_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.keepalive_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.tally_epsilon_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.tally_epsilon_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

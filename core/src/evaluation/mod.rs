@@ -857,6 +857,36 @@ pub mod tests {
         }
     }
 
+    /// Waits until the approver has registered the request as pending
+    /// (manual voting). The approval request now reaches the approver
+    /// from a collecting validator, asynchronously, so the test polls
+    /// instead of assuming a requester-side approval phase.
+    pub async fn wait_pending_approval(
+        request_actor: &ActorRef<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let started = tokio::time::Instant::now();
+        loop {
+            if let Ok(RequestHandlerResponse::Approval(Some(..))) =
+                request_actor
+                    .ask(RequestHandlerMessage::GetApproval {
+                        subject_id: subject_id.clone(),
+                        state: Some(ApprovalState::Pending),
+                    })
+                    .await
+            {
+                return;
+            }
+            if started.elapsed() >= Duration::from_secs(10) {
+                panic!(
+                    "approval request not registered as pending in time for {}",
+                    subject_id
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     async fn get_sink_events(
         node_actor: &ActorRef<Node>,
         subject_id: &DigestIdentifier,
@@ -988,9 +1018,11 @@ pub mod tests {
             &node_actor,
             &request_actor,
             &tracking,
-            true,
+            false,
         )
         .await;
+
+        wait_pending_approval(&request_actor, &subject_id).await;
 
         let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
             .ask(RequestHandlerMessage::GetApproval {
@@ -1665,9 +1697,11 @@ pub mod tests {
             &node_actor,
             &request_actor,
             &tracking,
-            true,
+            false,
         )
         .await;
+
+        wait_pending_approval(&request_actor, &subject_id).await;
 
         let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
             .ask(RequestHandlerMessage::GetApproval {

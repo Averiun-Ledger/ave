@@ -936,6 +936,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         compiler: None,
         contracts_path: None,
         governance_sync: None,
+        approval: None,
     }
 }
 

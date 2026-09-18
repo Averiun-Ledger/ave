@@ -1463,7 +1463,7 @@ async fn test_governance_fail_approve() {
     .await
     .unwrap();
 
-    let state = get_subject(node1, governance_id.clone(), None, true)
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());

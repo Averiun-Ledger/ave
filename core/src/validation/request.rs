@@ -1,7 +1,6 @@
 use crate::{
-    model::event::{
-        ApprovalData, CompilationData, EvaluationData, ValidationData,
-    },
+    approval::request::ApprovalReq,
+    model::event::{CompilationData, EvaluationData, ValidationData},
     subject::Metadata,
 };
 
@@ -130,6 +129,9 @@ impl ValidationReq {
 pub struct LastData {
     pub vali_data: ValidationData,
     pub gov_version: u64,
+    /// Hash of the approval tally of the previous event, present when that
+    /// event went through approval.
+    pub approval_data_hash: Option<DigestIdentifier>,
 }
 
 #[derive(
@@ -142,7 +144,7 @@ pub enum ActualProtocols {
     },
     EvalApprove {
         eval_data: EvaluationData,
-        approval_data: ApprovalData,
+        approval_req: Signed<ApprovalReq>,
     },
     /// The governance fact touched contracts and the compilation phase
     /// rejected them: the event commits as failed without evaluation.
@@ -154,25 +156,33 @@ pub enum ActualProtocols {
         compile_data: CompilationData,
         eval_data: EvaluationData,
     },
-    /// Compilation and evaluation succeeded and the event was approved.
+    /// Compilation and evaluation succeeded and approval is required.
     CompileEvalApprove {
         compile_data: CompilationData,
         eval_data: EvaluationData,
-        approval_data: ApprovalData,
+        approval_req: Signed<ApprovalReq>,
     },
 }
 
 impl ActualProtocols {
-    pub const fn is_success(&self) -> bool {
+    /// `approved` is the outcome of the approval collection, only consulted
+    /// for the approve variants: at request time it is unknown and the
+    /// caller must not rely on this method for them.
+    pub const fn is_success(&self, approved: bool) -> bool {
         match &self {
             Self::None => true,
             Self::Eval { eval_data } => eval_data.is_ok(),
-            Self::EvalApprove { approval_data, .. } => approval_data.approved,
+            Self::EvalApprove { .. } => approved,
             Self::Compile { .. } | Self::CompileEval { .. } => false,
-            Self::CompileEvalApprove { approval_data, .. } => {
-                approval_data.approved
-            }
+            Self::CompileEvalApprove { .. } => approved,
         }
+    }
+
+    pub const fn needs_approval(&self) -> bool {
+        matches!(
+            self,
+            Self::EvalApprove { .. } | Self::CompileEvalApprove { .. }
+        )
     }
 
     pub const fn check_protocols(

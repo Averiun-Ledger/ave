@@ -24,11 +24,18 @@ pub enum ValidationRes {
         propierties_hash: DigestIdentifier,
         event_request_hash: DigestIdentifier,
         viewpoints_hash: DigestIdentifier,
+        /// Hash of the approval evidence the validator collected and
+        /// attested. `Some` only for requests that required approval.
+        approval_data_hash: Option<DigestIdentifier>,
     },
     Create {
         vali_req_hash: DigestIdentifier,
         subject_metadata: Box<Metadata>,
     },
+    /// The validator verified the request and is collecting the approval
+    /// votes (governance facts only): the final `Response` arrives when
+    /// the collection closes. Not a verdict.
+    Working,
     Abort(String),
     TimeOut,
     Reboot,

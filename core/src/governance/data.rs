@@ -937,6 +937,21 @@ impl GovernanceData {
         (issuers, self.roles_gov.issuer.any)
     }
 
+    /// Public keys of the members holding the validator role at
+    /// governance level. Derived from the governance state itself, so it
+    /// is available before the role register is populated.
+    pub fn governance_validators(&self) -> HashSet<PublicKey> {
+        let mut validators = HashSet::new();
+
+        for name in self.roles_gov.validator.iter() {
+            if let Some(key) = self.members.get(name) {
+                validators.insert(key.clone());
+            }
+        }
+
+        validators
+    }
+
     pub fn schema_issuers_namespace(
         &self,
         schema_namespaces: BTreeMap<SchemaType, Vec<Namespace>>,

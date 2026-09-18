@@ -2437,6 +2437,44 @@ impl Api {
         let obs = obs.lock().unwrap();
         obs.get(contract_name).cloned()
     }
+
+    /// Full ledger event of a governance at `sn`, exposing the anchored
+    /// phase evidence (evaluation, approval and validation data) for
+    /// test assertions.
+    pub async fn test_get_ledger_event(
+        &self,
+        subject_id: DigestIdentifier,
+        sn: u64,
+    ) -> Result<crate::model::event::Ledger, Error> {
+        let actor: ActorRef<crate::governance::Governance> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{subject_id}"
+            )))
+            .await?;
+        let response = actor
+            .ask(crate::governance::GovernanceMessage::GetLedger {
+                lo_sn: sn.checked_sub(1),
+                hi_sn: sn,
+            })
+            .await?;
+        match response {
+            crate::governance::GovernanceResponse::Ledger {
+                ledger, ..
+            } => ledger
+                .into_iter()
+                .find(|event| event.sn == sn)
+                .ok_or(Error::EventNotFound {
+                    subject: subject_id.to_string(),
+                    sn,
+                }),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "governance".to_owned(),
+                expected: "Ledger".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]

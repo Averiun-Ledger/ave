@@ -5,8 +5,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     config::{
-        Config, GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry,
-        TrackerSyncConfig, UpdateSyncConfig,
+        ApprovalConfig, Config, GovernanceSyncConfig, RebootSyncConfig,
+        SinkConfigEntry, TrackerSyncConfig, UpdateSyncConfig,
     },
     db::Database,
     external_db::DBManager,
@@ -41,6 +41,7 @@ pub struct ConfigHelper {
     pub sync_tracker: TrackerSyncConfig,
     pub sync_update: UpdateSyncConfig,
     pub sync_reboot: RebootSyncConfig,
+    pub approval: ApprovalConfig,
     /// Sink configuration entries read from the bridge configuration. Each
     /// entry pairs a [`SinkTarget`] with the list of servers that deliver
     /// events for that target.
@@ -60,6 +61,7 @@ impl ConfigHelper {
             sync_tracker: config.sync.tracker,
             sync_update: config.sync.update,
             sync_reboot: config.sync.reboot,
+            approval: config.approval,
             sinks,
         }
     }
@@ -105,12 +107,9 @@ pub async fn system(
     };
 
     // Create de actor system.
-    // `system` is only mutated when the prometheus or test features add
-    // helpers to it, hence the conditional allow.
-    #[cfg_attr(
-        not(any(feature = "test", feature = "prometheus")),
-        allow(unused_mut)
-    )]
+    // `system` is only mutated when the prometheus feature registers
+    // metrics into it, hence the conditional allow.
+    #[cfg_attr(not(feature = "prometheus"), allow(unused_mut))]
     let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
@@ -376,6 +375,7 @@ pub mod tests {
                 reboot: RebootSyncConfig::default(),
                 ledger_batch_size: 100,
             },
+            approval: Default::default(),
             spec: None,
             #[cfg(feature = "test")]
             compiler: Default::default(),
@@ -462,6 +462,7 @@ pub mod tests {
                 reboot: RebootSyncConfig::default(),
                 ledger_batch_size: 100,
             },
+            approval: Default::default(),
             spec: None,
             #[cfg(feature = "test")]
             compiler: Default::default(),

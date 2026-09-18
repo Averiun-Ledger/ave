@@ -3,8 +3,6 @@
 
 use std::collections::BTreeSet;
 
-use super::network::TimeOut;
-
 use crate::{
     compilation::response::{CompilationError, CompilerResponse},
     evaluation::response::{EvaluatorError, EvaluatorResponse},
@@ -148,9 +146,23 @@ impl EvaluationData {
 pub struct ApprovalData {
     pub approval_req_signature: Signature,
     pub approval_req_hash: DigestIdentifier,
+    /// Anchored from the signed `ApprovalReq` so the request can be
+    /// rebuilt exactly during verification.
+    pub issued_at: TimeStamp,
+    pub deadline: TimeStamp,
     pub approvers_agrees_signatures: Vec<Signature>,
     pub approvers_disagrees_signatures: Vec<Signature>,
-    pub approvers_timeout: Vec<TimeOut>,
+    /// Approvers that signed both an accept and a reject for the same
+    /// request: excluded from both tallies and counted as absent. The
+    /// pair of signatures is the portable evidence of the misbehavior.
+    pub double_votes: Vec<(Signature, Signature)>,
+    /// Approvers that never answered before the deadline, each with the
+    /// validator-signed timeout attestations (signed `ApprovalRes::TimeOut`)
+    /// that prove the absence instead of leaving it implicit. Sorted by
+    /// approver key, then by validator key. Empty in early closures. An
+    /// approver present here must NOT appear in any of the vote lists
+    /// (a late answer wins over the timeout attestation).
+    pub approvers_timeouts: Vec<(PublicKey, Vec<Signature>)>,
     pub approved: bool,
 }
 
@@ -585,6 +597,23 @@ impl Protocols {
         }
     }
 
+    /// Hash of the approval tally carried by this event, present only for
+    /// approved governance facts that went through approval.
+    pub fn approval_data_hash(
+        &self,
+        hash: &HashAlgorithm,
+    ) -> Result<Option<DigestIdentifier>, ProtocolsError> {
+        match self {
+            Self::GovFact {
+                approval: Some(approval),
+                ..
+            } => hash_borsh(&*hash.hasher(), approval)
+                .map(Some)
+                .map_err(|e| ProtocolsError::HashingFailed(e.to_string())),
+            _ => Ok(None),
+        }
+    }
+
     pub fn is_success(&self) -> bool {
         match self {
             Self::Create { .. } => true,
@@ -605,6 +634,7 @@ impl Protocols {
         is_gov: bool,
         event_request: Signed<EventRequest>,
         actual_protocols: ActualProtocols,
+        approval_data: Option<ApprovalData>,
         validation: ValidationData,
     ) -> Result<Self, ProtocolsError> {
         let event_request_type =
@@ -618,6 +648,13 @@ impl Protocols {
                 })
             }
             (EventRequestType::Fact, true) => {
+                if actual_protocols.needs_approval() != approval_data.is_some()
+                {
+                    return Err(ProtocolsError::InvalidActualProtocols {
+                        expected: "approval data iff approval variant",
+                        got: "approval data mismatch",
+                    });
+                }
                 let (compilation, evaluation, approval) = match actual_protocols
                 {
                     ActualProtocols::Eval { eval_data } => {
@@ -625,10 +662,15 @@ impl Protocols {
                             check_eval_approval(eval_data, None)?;
                         (None, evaluation, approval)
                     }
-                    ActualProtocols::EvalApprove {
-                        eval_data,
-                        approval_data,
-                    } => {
+                    ActualProtocols::EvalApprove { eval_data, .. } => {
+                        let Some(approval_data) = approval_data else {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "approval data for EvalApprove",
+                                    got: "no approval data",
+                                },
+                            );
+                        };
                         let (evaluation, approval) = check_eval_approval(
                             eval_data,
                             Some(approval_data),
@@ -665,7 +707,7 @@ impl Protocols {
                     ActualProtocols::CompileEvalApprove {
                         compile_data,
                         eval_data,
-                        approval_data,
+                        ..
                     } => {
                         if !compile_data.is_ok() {
                             return Err(
@@ -675,6 +717,15 @@ impl Protocols {
                                 },
                             );
                         }
+                        let Some(approval_data) = approval_data else {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected:
+                                        "approval data for CompileEvalApprove",
+                                    got: "no approval data",
+                                },
+                            );
+                        };
                         let (evaluation, approval) = check_eval_approval(
                             eval_data,
                             Some(approval_data),

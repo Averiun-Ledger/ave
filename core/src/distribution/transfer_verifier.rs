@@ -93,6 +93,8 @@ impl TransferVerifier {
             propierties_hash: propierties_hash.clone(),
             event_request_hash: event_request_hash.clone(),
             viewpoints_hash: viewpoints_hash.clone(),
+            // Transfers never carry an approval requirement.
+            approval_data_hash: None,
         };
 
         for signature in validation.validators_signatures.iter() {

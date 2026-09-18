@@ -748,6 +748,15 @@ impl Tracker {
             let last_data = LastData {
                 gov_version: last_ledger.gov_version,
                 vali_data: last_ledger.protocols.get_validation_data(),
+                approval_data_hash: last_ledger
+                    .protocols
+                    .approval_data_hash(hash)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Can not create approval data hash: {}",
+                            e
+                        ),
+                    })?,
             };
 
             let last_gov_version = last_data.gov_version;
