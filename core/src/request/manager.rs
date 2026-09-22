@@ -813,7 +813,9 @@ impl RequestManager {
             issued_at: now,
             deadline: ave_common::identity::TimeStamp::from_nanos(
                 now.as_nanos().saturating_add(
-                    approval_config.min_window_secs * 1_000_000_000,
+                    approval_config
+                        .min_window_secs
+                        .saturating_mul(1_000_000_000),
                 ),
             ),
         };
@@ -2232,12 +2234,23 @@ impl RequestManager {
         self.stops_childs(ctx).await?;
 
         // The approvers' pending state for this request is dropped when
-        // an in-validation request with approval is aborted.
-        if let RequestManagerState::Validation { request, .. } = &self.state
-            && let ValidationReq::Event { actual_protocols, .. } =
-                request.content()
-            && actual_protocols.needs_approval()
-        {
+        // an in-validation request with approval is aborted. An abort
+        // that hits a reboot must drop it too: the reboot follows a
+        // validation that never closed, so a local pending vote may
+        // still be around. The reboot state does not carry the
+        // validation request, but the call is local and a no-op without
+        // a pending vote, and one request per subject is live at a time,
+        // so any pending vote belongs to the aborted request.
+        let drop_pending = match &self.state {
+            RequestManagerState::Validation { request, .. } => matches!(
+                request.content(),
+                ValidationReq::Event { actual_protocols, .. }
+                if actual_protocols.needs_approval()
+            ),
+            RequestManagerState::Reboot => true,
+            _ => false,
+        };
+        if drop_pending {
             let _ = make_obsolete(ctx, &self.subject_id).await;
         }
 
@@ -3218,14 +3231,11 @@ impl Handler<Self> for RequestManager {
                         }
                     };
 
-                    // The approvers' pending state for this request is
-                    // obsolete once the validation closed.
-                    if let ValidationReq::Event { actual_protocols, .. } =
-                        val_req.as_ref()
-                        && actual_protocols.needs_approval()
-                    {
-                        let _ = make_obsolete(ctx, &self.subject_id).await;
-                    }
+                    let had_approval = matches!(
+                        val_req.as_ref(),
+                        ValidationReq::Event { actual_protocols, .. }
+                        if actual_protocols.needs_approval()
+                    );
 
                     if let Err(e) = self.stops_childs(ctx).await {
                         error!(
@@ -3278,6 +3288,14 @@ impl Handler<Self> for RequestManager {
                         self.match_error(ctx, e).await;
                         return Ok(());
                     };
+
+                    // The event committed: the approvers' pending state
+                    // for this request is obsolete now. Sweeping it
+                    // earlier could drop live votes for a request whose
+                    // ledger build or commit then failed.
+                    if had_approval {
+                        let _ = make_obsolete(ctx, &self.subject_id).await;
+                    }
 
                     match self
                         .build_distribution(

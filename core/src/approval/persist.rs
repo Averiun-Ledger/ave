@@ -655,6 +655,10 @@ impl Handler<Self> for ApprPersist {
                         }
                     };
 
+                    // Denials are answered before the validator gate on
+                    // purpose: they signal a version mismatch, and a
+                    // stale or newer asker may legitimately be absent
+                    // from the current validator set.
                     if let Some(response) = deny_response {
                         if let Err(e) = self
                             .send_signed_response(
@@ -686,6 +690,21 @@ impl Handler<Self> for ApprPersist {
                             msg_type = "NetworkRequest",
                             sender = %sender,
                             "Approval request from a non-validator"
+                        );
+                        return Ok(ApprPersistResponse::Ok);
+                    }
+
+                    // Replay guard: with the governance version matched,
+                    // a live approval request always targets the next
+                    // event of the subject; an older sequence is a
+                    // replay of a committed or superseded request and
+                    // must not overwrite the persisted state.
+                    if approval_req.content().sn <= metadata.sn {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            sn = approval_req.content().sn,
+                            subject_sn = metadata.sn,
+                            "Approval request for an already committed sequence"
                         );
                         return Ok(ApprPersistResponse::Ok);
                     }

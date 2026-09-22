@@ -35,6 +35,11 @@ pub enum ValidationRes {
     /// The validator verified the request and is collecting the approval
     /// votes (governance facts only): the final `Response` arrives when
     /// the collection closes. Not a verdict.
+    ///
+    /// Inserted mid-enum as a deliberate hard wire break: the ordinals
+    /// of `Abort`/`TimeOut`/`Reboot`/`Unavailable` shifted with it, so
+    /// mixed-version networks can not exchange this message. Future
+    /// variants must keep the append-at-end convention below.
     Working,
     Abort(String),
     TimeOut,

@@ -341,6 +341,10 @@ impl Validation {
             return true;
         }
         if let Some(approval) = &mut self.approval {
+            // Any answer is proof of liveness: leaving the validator in
+            // status_pending would drain it as dead at the next
+            // keepalive tick and trigger a spurious replacement.
+            approval.status_pending.remove(&validator);
             return approval.working.remove(&validator);
         }
         false
@@ -1595,9 +1599,18 @@ impl Handler<Self> for Validation {
                     return Ok(());
                 }
 
+                // Reports are accepted from any validator still in
+                // play (asked, collecting, or in reserve): a pushed
+                // vote can overtake the Working acknowledgement.
+                // Authenticity comes from the vote signatures, not
+                // from this gate.
+                let reporter_in_play =
+                    self.current_validators.contains(&sender)
+                        || self.pending_validators.contains(&sender);
                 let mut changed = false;
                 if let Some(approval) = &mut self.approval
-                    && approval.working.contains(&sender)
+                    && (reporter_in_play
+                        || approval.working.contains(&sender))
                 {
                     // A pushed vote is proof of liveness too: it answers
                     // any open keepalive round for this validator.
@@ -1644,11 +1657,16 @@ impl Handler<Self> for Validation {
                     return Ok(());
                 }
 
+                // Same gate as VoteReport: any validator still in play.
+                let reporter_in_play =
+                    self.current_validators.contains(&sender)
+                        || self.pending_validators.contains(&sender);
                 let mut changed = false;
                 if let Some(approval) = &mut self.approval {
                     approval.status_pending.remove(&sender);
                     if approval_req_hash == approval.approval_req_hash
-                        && approval.working.contains(&sender)
+                        && (reporter_in_play
+                            || approval.working.contains(&sender))
                     {
                         for vote in votes {
                             match vote.verify() {
