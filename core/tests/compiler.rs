@@ -28,12 +28,13 @@ use ave_common::{
         response::{EvalResDB, RequestEventDB},
     },
     identity::{
-        PublicKey,
+        DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh,
         keys::{Ed25519Signer, KeyPair},
     },
     response::RequestState,
 };
 use ave_core::auth::AuthWitness;
+use ave_core::Api;
 use ave_core::compilation::artifact::{ArtifactFetchResult, ArtifactProbeResult};
 use ave_core::compilation::contract_compiler::FetchObs;
 use ave_core::config::{CompilerNodeConfig, GovernanceSyncConfig};
@@ -434,6 +435,32 @@ async fn test_gov_compile_request_aborted_manually() {
         .unwrap();
     assert_eq!(state.sn, 1);
 }
+// Espera ACOTADA al estado de una request: los helpers comunes son
+// bucles sin límite y una regresión de liveness se escondería como un
+// cuelgue infinito bajo carga; el test debe FALLAR mostrando el estado
+// en el que la request quedó atascada.
+async fn wait_request_state_bounded(
+    api: &Api,
+    request_id: DigestIdentifier,
+    attempts: u32,
+    want: &dyn Fn(&RequestState) -> bool,
+    what: &str,
+) -> RequestState {
+    let mut last = None;
+    for _ in 0..attempts {
+        if let Ok(state) = api.get_request_state(request_id.clone()).await {
+            if want(&state.state) {
+                return state.state;
+            }
+            last = Some(state.state);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!(
+        "timeout waiting for request {request_id} to reach {what}; last state: {last:?}"
+    );
+}
+
 #[test(tokio::test)]
 // Una request abortada a mitad de la fase compile nunca commitea: el
 // abort barre su staging y reemitir el mismo cambio recompila y
@@ -570,18 +597,14 @@ async fn test_gov_compile_abort_sweeps_staging_and_reemit_commits() {
         .await
         .unwrap();
 
-    wait_request_state(
+    wait_request_state_bounded(
         &node1.api,
         request_id,
-        Some(RequestState::Abort {
-            subject_id: String::default(),
-            who: String::default(),
-            sn: None,
-            error: String::default(),
-        }),
+        100,
+        &|state| matches!(state, RequestState::Abort { .. }),
+        "Abort",
     )
-    .await
-    .unwrap();
+    .await;
 
     // El abort barrió el staging: la request nunca va a commitear.
     assert!(staging_dirs().is_empty());
@@ -606,9 +629,20 @@ async fn test_gov_compile_abort_sweeps_staging_and_reemit_commits() {
     .await;
     node_running(&node2.api).await.unwrap();
 
-    emit_fact(&node1.api, governance_id.clone(), json, true)
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, false)
         .await
         .unwrap();
+
+    // El quórum de compile puede necesitar ciclos de reboot bajo carga
+    // (cada RebootTimeOut espera el schedule): acotado pero generoso.
+    wait_request_state_bounded(
+        &node1.api,
+        request_id,
+        400,
+        &|state| matches!(state, RequestState::Finish),
+        "Finish",
+    )
+    .await;
 
     let state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
         .await
@@ -14677,6 +14711,35 @@ async fn wait_compiles_received(scripted: &ScriptedCompiler, expected: u64) {
     );
 }
 
+// Volcado del log de compiles del scripted compiler con los sources
+// conocidos etiquetados: diagnóstico para los pins de "exactamente un
+// build" de la adquisición diferida cuando fallan bajo carga.
+fn scripted_compile_log(scripted: &ScriptedCompiler) -> String {
+    let labels: [(&str, &str); 3] = [
+        ("v1", EXAMPLE_CONTRACT),
+        ("v2", EXAMPLE_CONTRACT_V2),
+        ("v3", FUEL_EXHAUSTING_CONTRACT),
+    ];
+    scripted
+        .compiles_log()
+        .iter()
+        .map(|(elapsed, source_hash)| {
+            let label = labels
+                .iter()
+                .find(|(_, source)| {
+                    hash_borsh(
+                        &*HashAlgorithm::Blake3.hasher(),
+                        &source.to_string(),
+                    )
+                    .is_ok_and(|hash| hash.to_string() == *source_hash)
+                })
+                .map_or("unknown", |(name, _)| name);
+            format!("+{elapsed:?} {label}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // Variante única por ejecución de un contrato de prueba. La caché
 // global de builds (/tmp/ave-contract-artifacts) se comparte entre
 // tests y persiste entre ejecuciones: un hit serviría el artefacto
@@ -14993,7 +15056,8 @@ async fn test_deferred_acquisition_builds_only_final_contract_version() {
     assert_eq!(
         scripted.compiles_received(),
         1,
-        "deferred acquisition must build only the final contract version"
+        "deferred acquisition must build only the final contract version; compiles: {}",
+        scripted_compile_log(&scripted)
     );
 
     // Reinicio: los marcadores quedaron limpios y el artefacto está en
@@ -15314,7 +15378,8 @@ async fn test_deferred_acquisition_crash_mid_sync_recovers_final_only() {
     assert_eq!(
         scripted.compiles_received(),
         1,
-        "after a mid-sync crash only the final contract version is built"
+        "after a mid-sync crash only the final contract version is built; compiles: {}",
+        scripted_compile_log(&scripted)
     );
 
     // La red sigue funcional: un fact commitea contra la versión final.
@@ -15574,7 +15639,8 @@ async fn test_deferred_acquisition_idle_sync_round_at_tip() {
     assert_eq!(
         scripted.compiles_received(),
         1,
-        "the idle sync round must fire exactly one acquisition pass"
+        "the idle sync round must fire exactly one acquisition pass; compiles: {}",
+        scripted_compile_log(&scripted)
     );
 
     // Segundo reinicio aislado: marcadores limpios y artefacto en disco

@@ -60,6 +60,7 @@ pub struct GovernanceVersionSync {
     governance_peers: HashSet<PublicKey>,
     pending_peers: HashSet<PublicKey>,
     update_target: Option<UpdateTarget>,
+    has_boot_nodes: bool,
     round_open: bool,
     pending_timeout: Option<TimerKey>,
 }
@@ -73,6 +74,7 @@ impl GovernanceVersionSync {
         sample_size: usize,
         tick_interval: Duration,
         response_timeout: Duration,
+        has_boot_nodes: bool,
     ) -> Self {
         Self {
             governance_id,
@@ -85,6 +87,7 @@ impl GovernanceVersionSync {
             governance_peers: HashSet::new(),
             pending_peers: HashSet::new(),
             update_target: None,
+            has_boot_nodes,
             round_open: false,
             pending_timeout: None,
         }
@@ -143,12 +146,17 @@ impl GovernanceVersionSync {
     async fn trigger_update_if_needed(
         &self,
         ctx: &ActorContext<Self>,
+        notify_idle: bool,
     ) -> Result<(), ActorError> {
         let Some(UpdateTarget { peer, .. }) = self.update_target.clone()
         else {
-            // No peer is ahead: this node is at the tip — deferred
-            // artifact acquisitions are due if any are pending.
-            self.notify_idle_round(ctx).await;
+            if notify_idle {
+                // The round proved this node is at the tip: either every
+                // selected peer answered and none is ahead, or the node
+                // is verifiably alone on the network. Deferred artifact
+                // acquisitions are due if any are pending.
+                self.notify_idle_round(ctx).await;
+            }
             return Ok(());
         };
 
@@ -288,9 +296,14 @@ impl GovernanceVersionSync {
         let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
-            // Nobody to compare against: nothing newer is reachable —
-            // treat it as an idle round for deferred acquisitions.
-            self.notify_idle_round(ctx).await;
+            // Nobody to compare against. Only a node with no configured
+            // boot nodes may treat this as an idle round: it is
+            // verifiably alone, so nothing newer is reachable. With
+            // configured peers the empty set proves nothing (discovery
+            // may be incomplete) and must never count as idle.
+            if !self.has_boot_nodes {
+                self.notify_idle_round(ctx).await;
+            }
             self.schedule_tick(ctx)?;
             return Ok(());
         }
@@ -411,8 +424,16 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
+                    // An expired round means at least one selected peer
+                    // never answered. Silence only counts as an idle
+                    // round on a node with no configured boot nodes:
+                    // verifiably alone, nobody can be ahead. With
+                    // configured peers a silent peer may still be ahead
+                    // (partition, slow discovery), so the round may only
+                    // fire an already known update target.
+                    let notify_idle = !self.has_boot_nodes;
                     if let Err(error) =
-                        self.trigger_update_if_needed(ctx).await
+                        self.trigger_update_if_needed(ctx, notify_idle).await
                     {
                         if let Some(metrics) = try_core_metrics() {
                             metrics.observe_governance_version_sync_failure(
@@ -432,7 +453,7 @@ impl Handler<Self> for GovernanceVersionSync {
                     self.cancel_timeout(ctx);
                     self.round_open = false;
                     if let Err(error) =
-                        self.trigger_update_if_needed(ctx).await
+                        self.trigger_update_if_needed(ctx, true).await
                     {
                         if let Some(metrics) = try_core_metrics() {
                             metrics.observe_governance_version_sync_failure(

@@ -1840,17 +1840,31 @@ async fn test_events_query_quantity_cap_is_enforced() {
         );
     }
 
-    // The cap itself is accepted on every endpoint.
+    // The cap itself is accepted on every endpoint. The events
+    // projection in the external database is written asynchronously
+    // once the request finishes, so the read polls until it lands,
+    // like every downstream-state helper does.
     for path in [
         format!("/subjects/{governance_id}/events?quantity=1000"),
         format!("/subjects/{governance_id}/events-first-last?quantity=1000"),
         format!("/subjects/{governance_id}/aborts?quantity=1000"),
     ] {
-        let (status, body) =
-            make_request(&client, &server.url(&path), "GET", None, None).await;
+        let mut last_body = Value::Null;
+        let mut success = false;
+        for _ in 0..40 {
+            let (status, body) =
+                make_request(&client, &server.url(&path), "GET", None, None)
+                    .await;
+            if status.is_success() {
+                success = true;
+                break;
+            }
+            last_body = body;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         assert!(
-            status.is_success(),
-            "the cap itself must be accepted on {path}: {body}"
+            success,
+            "the cap itself must be accepted on {path}: {last_body}"
         );
     }
 }

@@ -346,6 +346,76 @@ impl Validation {
         false
     }
 
+    /// Drops a validator that can no longer serve the request (silent
+    /// for a whole keepalive round, timed out, or its local worker is
+    /// gone) and pulls a replacement from the pending pool. With an
+    /// approval collection in flight the answered validators stay in
+    /// the working set, so the round-exhaustion checks elsewhere never
+    /// fire: if the remaining validators cannot reach the validation
+    /// quorum even if all of them sign, the request reboots instead of
+    /// waiting forever.
+    async fn drop_and_replace_validator(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        validator: PublicKey,
+    ) -> Result<(), ActorError> {
+        if self.closed {
+            return Ok(());
+        }
+
+        self.check_validator(validator.clone());
+        if let Some(approval) = &mut self.approval {
+            approval.status_pending.remove(&validator);
+        }
+        Self::observe_approval_event("validator_replaced");
+
+        let replacement = self.pending_validators.iter().next().cloned();
+        if let Some(replacement) = replacement {
+            self.pending_validators.remove(&replacement);
+            self.current_validators.insert(replacement.clone());
+            if let Err(e) =
+                self.create_validators(ctx, replacement.clone()).await
+            {
+                error!(
+                    error = %e,
+                    signer = %replacement,
+                    "Failed to create replacement validator"
+                );
+                self.current_validators.remove(&replacement);
+            }
+        }
+
+        if self.approval.is_some() {
+            let threshold = self.quorum.get_signers(
+                self.validators_quantity,
+                self.validators_quantity,
+            );
+            let reachable = self.validators_response.len()
+                + self.awaiting_count()
+                + self.pending_validators.len();
+            if (reachable as u32) < threshold {
+                let governance_id = self
+                    .request
+                    .content()
+                    .get_governance_id()
+                    .map_err(|e| ActorError::FunctionalCritical {
+                        description: format!("Cannot get governance id: {}", e),
+                    })?;
+                Self::observe_event("reboot");
+                send_reboot_to_req(
+                    ctx,
+                    self.request_id.clone(),
+                    governance_id,
+                    RebootType::TimeOut,
+                )
+                .await?;
+                self.closed = true;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Validators still expected to answer: the ones that have not
     /// acknowledged yet plus the ones collecting votes.
     fn awaiting_count(&self) -> usize {
@@ -490,9 +560,11 @@ impl Validation {
 
     /// Sends the proposed tally to one working validator: a tell to the
     /// local child worker when this node is the validator, a network
-    /// message to its governance validator worker otherwise.
+    /// message to its governance validator worker otherwise. A local
+    /// child that is gone is dropped and replaced like an unresponsive
+    /// validator — a recoverable condition that must never crash.
     async fn send_tally_proposal(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         validator: PublicKey,
     ) -> Result<(), ActorError> {
@@ -504,17 +576,30 @@ impl Validation {
         };
 
         if validator == *self.our_key {
-            let child = ctx
+            let send = match ctx
                 .get_child::<ValiWorker>(&format!("{}", validator))
-                .await?;
-            child
-                .tell(ValiWorkerMessage::TallyProposal {
-                    approval_data: Box::new(tally),
-                    request_id: self.request_id.to_string(),
-                    version: self.version,
-                    sender: (*self.our_key).clone(),
-                })
-                .await?;
+                .await
+            {
+                Ok(child) => {
+                    child
+                        .tell(ValiWorkerMessage::TallyProposal {
+                            approval_data: Box::new(tally),
+                            request_id: self.request_id.to_string(),
+                            version: self.version,
+                            sender: (*self.our_key).clone(),
+                        })
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = send {
+                warn!(
+                    error = %e,
+                    validator = %validator,
+                    "Local validator worker gone, replacing it"
+                );
+                self.drop_and_replace_validator(ctx, validator).await?;
+            }
         } else {
             let governance_id = self
                 .request
@@ -547,9 +632,11 @@ impl Validation {
         Ok(())
     }
 
-    /// Sends a keepalive status ask to one working validator.
+    /// Sends a keepalive status ask to one working validator. A local
+    /// child that is gone is dropped and replaced like an unresponsive
+    /// validator — a recoverable condition that must never crash.
     async fn send_status_req(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         validator: PublicKey,
     ) -> Result<(), ActorError> {
@@ -559,17 +646,30 @@ impl Validation {
         let approval_req_hash = approval.approval_req_hash.clone();
 
         if validator == *self.our_key {
-            let child = ctx
+            let send = match ctx
                 .get_child::<ValiWorker>(&format!("{}", validator))
-                .await?;
-            child
-                .tell(ValiWorkerMessage::ApprovalStatusReq {
-                    approval_req_hash,
-                    request_id: self.request_id.to_string(),
-                    version: self.version,
-                    sender: (*self.our_key).clone(),
-                })
-                .await?;
+                .await
+            {
+                Ok(child) => {
+                    child
+                        .tell(ValiWorkerMessage::ApprovalStatusReq {
+                            approval_req_hash,
+                            request_id: self.request_id.to_string(),
+                            version: self.version,
+                            sender: (*self.our_key).clone(),
+                        })
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = send {
+                warn!(
+                    error = %e,
+                    validator = %validator,
+                    "Local validator worker gone, replacing it"
+                );
+                self.drop_and_replace_validator(ctx, validator).await?;
+            }
         } else {
             let governance_id = self
                 .request
@@ -1107,16 +1207,27 @@ impl Handler<Self> for Validation {
                                     });
                                 }
 
-                                // With approval the final response must
-                                // attest the tally this node proposed;
-                                // without approval it must carry none.
-                                let expected_hash = self
-                                    .approval
-                                    .as_ref()
-                                    .and_then(|approval| {
+                                // Without approval the final response
+                                // must carry no approval hash; with
+                                // approval it must attest the tally
+                                // already proposed — a final response
+                                // before the proposal can only come
+                                // from a misbehaving validator, and
+                                // accepting it would poison the quorum
+                                // with a signature over another package.
+                                let tally_hash =
+                                    self.approval.as_ref().map(|approval| {
                                         approval.tally_hash.clone()
                                     });
-                                if approval_data_hash != expected_hash {
+                                let hash_matches = match tally_hash {
+                                    None => approval_data_hash.is_none(),
+                                    Some(None) => false,
+                                    Some(Some(expected)) => {
+                                        approval_data_hash.as_ref()
+                                            == Some(&expected)
+                                    }
+                                };
+                                if !hash_matches {
                                     warn!(
                                         msg_type = "Response",
                                         sender = %sender,
@@ -1151,6 +1262,30 @@ impl Handler<Self> for Validation {
                             }
                             ValidationRes::TimeOut => {
                                 Self::observe_event("timeout");
+                                // With an approval collection in flight
+                                // the phase outlives the first answer:
+                                // the answered validators sit in the
+                                // working set, so the round-exhaustion
+                                // check below never fires and the
+                                // replacement must happen right away —
+                                // this validator's attestations may be
+                                // needed to close the collection.
+                                if self.approval.is_some()
+                                    && let Err(e) = self
+                                        .drop_and_replace_validator(
+                                            ctx,
+                                            sender.clone(),
+                                        )
+                                        .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        sender = %sender,
+                                        "Failed to replace timed-out validator"
+                                    );
+                                    return Err(crash_system(ctx, e).await);
+                                }
                             }
                             // Same handling as a timeout — the validator
                             // is dropped from the current set and replaced
@@ -1158,6 +1293,22 @@ impl Handler<Self> for Validation {
                             // immediate: no coordinator timeout wait.
                             ValidationRes::Unavailable => {
                                 Self::observe_event("unavailable");
+                                if self.approval.is_some()
+                                    && let Err(e) = self
+                                        .drop_and_replace_validator(
+                                            ctx,
+                                            sender.clone(),
+                                        )
+                                        .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        sender = %sender,
+                                        "Failed to replace unavailable validator"
+                                    );
+                                    return Err(crash_system(ctx, e).await);
+                                }
                             }
                             ValidationRes::Abort(error) => {
                                 Self::observe_event("abort");
@@ -1207,6 +1358,12 @@ impl Handler<Self> for Validation {
                                 return Ok(());
                             }
                         };
+
+                        // The timeout/unavailable arms may have rebooted
+                        // the request while replacing the validator.
+                        if self.closed {
+                            return Ok(());
+                        }
 
                         if self.quorum.check_quorum(
                             self.validators_quantity,
@@ -1555,31 +1712,27 @@ impl Handler<Self> for Validation {
                     .unwrap_or_default();
 
                 for validator in dead {
-                    Self::observe_approval_event("validator_replaced");
                     debug!(
                         msg_type = "KeepaliveTick",
                         validator = %validator,
                         "Unresponsive validator dropped"
                     );
-
-                    let replacement =
-                        self.pending_validators.iter().next().cloned();
-                    if let Some(replacement) = replacement {
-                        self.pending_validators.remove(&replacement);
-                        self.current_validators.insert(replacement.clone());
-                        if let Err(e) = self
-                            .create_validators(ctx, replacement.clone())
-                            .await
-                        {
-                            error!(
-                                msg_type = "KeepaliveTick",
-                                error = %e,
-                                signer = %replacement,
-                                "Failed to create replacement validator"
-                            );
-                            self.current_validators.remove(&replacement);
-                        }
+                    if let Err(e) =
+                        self.drop_and_replace_validator(ctx, validator).await
+                    {
+                        error!(
+                            msg_type = "KeepaliveTick",
+                            error = %e,
+                            "Failed to replace unresponsive validator"
+                        );
+                        return Err(crash_system(ctx, e).await);
                     }
+                }
+
+                // A drop may have rebooted the request: nothing left to
+                // do in this phase.
+                if self.closed {
+                    return Ok(());
                 }
 
                 // Nobody left to answer and nothing in reserve.

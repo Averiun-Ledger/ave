@@ -343,6 +343,22 @@ impl Handler<Self> for ValiCoordinator {
                         validation_res.content(),
                         ValidationRes::Working
                     ) {
+                        // A validator only acknowledges requests with an
+                        // approval requirement, which always carry the
+                        // deadline. A Working for any other request is
+                        // misbehaviour: drop the validator like a timeout
+                        // instead of cancelling the retry, which would
+                        // leave the slot without any recovery path.
+                        let Some(deadline) = self.approval_deadline else {
+                            warn!(
+                                msg_type = "NetworkResponse",
+                                sender = %sender,
+                                "Working ACK without approval deadline"
+                            );
+                            self.timeout_and_stop(ctx, "Working").await;
+                            return Ok(());
+                        };
+
                         if self.acked {
                             // A duplicate ACK (a request retry was
                             // already in flight when the first one
@@ -394,18 +410,6 @@ impl Handler<Self> for ValiCoordinator {
                                 );
                             }
                         }
-
-                        let Some(deadline) = self.approval_deadline else {
-                            // A validator only acknowledges requests with
-                            // an approval requirement, which always carry
-                            // the deadline.
-                            warn!(
-                                msg_type = "NetworkResponse",
-                                sender = %sender,
-                                "Working ACK without approval deadline"
-                            );
-                            return Ok(());
-                        };
 
                         let epsilon_secs = ctx
                             .system()

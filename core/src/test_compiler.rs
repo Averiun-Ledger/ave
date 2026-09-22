@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ave_common::compiler::pb;
 use ave_common::compiler::pb::compiler_service_server::{
@@ -148,6 +148,9 @@ pub enum ScriptedTransform {
 struct ScriptedControl {
     /// Compile requests received so far.
     compiles_received: AtomicU64,
+    /// Per-request log: (reception instant, source hash), for tests that
+    /// need to diagnose duplicate or unexpected compiles.
+    compiles_log: std::sync::Mutex<Vec<(Instant, String)>>,
     /// While set, compile responses block until `release`.
     held: AtomicBool,
     /// Wakes held compile handlers on release.
@@ -161,6 +164,7 @@ pub struct ScriptedCompiler {
     endpoint: String,
     public_key: String,
     control: Arc<ScriptedControl>,
+    started: Instant,
 }
 
 impl ScriptedCompiler {
@@ -220,6 +224,7 @@ impl ScriptedCompiler {
             endpoint: format!("http://{addr}"),
             public_key,
             control,
+            started: Instant::now(),
         }
     }
 
@@ -247,6 +252,23 @@ impl ScriptedCompiler {
     /// duplicate requests are sent while a compile is held.
     pub fn compiles_received(&self) -> u64 {
         self.control.compiles_received.load(Ordering::SeqCst)
+    }
+
+    /// Per-request compile log as (elapsed since start, source hash):
+    /// the diagnostic companion of `compiles_received` for failures
+    /// that need to know WHICH sources were built and when.
+    pub fn compiles_log(&self) -> Vec<(Duration, String)> {
+        let started = self.started;
+        let log = self
+            .control
+            .compiles_log
+            .lock()
+            .expect("scripted compile log lock");
+        log.iter()
+            .map(|(at, source_hash)| {
+                (at.saturating_duration_since(started), source_hash.clone())
+            })
+            .collect()
     }
 
     /// Holds every compile response until `release` is called.
@@ -344,7 +366,21 @@ impl CompilerService for ScriptedCompilerService {
             return Err(Status::unauthenticated("invalid API key"));
         }
 
+        let source_b64 = request.into_inner().source_b64;
         self.control.compiles_received.fetch_add(1, Ordering::SeqCst);
+        let log_source_hash =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &source_b64.clone())
+                .map_err(|e| {
+                    Status::internal(format!(
+                        "failed to hash contract source: {e}"
+                    ))
+                })?
+                .to_string();
+        self.control
+            .compiles_log
+            .lock()
+            .expect("scripted compile log lock")
+            .push((Instant::now(), log_source_hash));
 
         // Gate: while held, wait for release. The notified future is
         // created before re-checking the flag so no wakeup is missed.
@@ -356,7 +392,6 @@ impl CompilerService for ScriptedCompilerService {
             notified.await;
         }
 
-        let source_b64 = request.into_inner().source_b64;
         if let Some(response) = self.cache.lock().await.get(&source_b64) {
             return Ok(Response::new(response.clone()));
         }

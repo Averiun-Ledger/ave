@@ -42,6 +42,10 @@ pub struct ConfigHelper {
     pub sync_update: UpdateSyncConfig,
     pub sync_reboot: RebootSyncConfig,
     pub approval: ApprovalConfig,
+    /// The node has statically configured boot nodes: when false and no
+    /// sync peer is ever discovered, the node is verifiably alone on the
+    /// network (not merely partitioned or slow to discover).
+    pub has_boot_nodes: bool,
     /// Sink configuration entries read from the bridge configuration. Each
     /// entry pairs a [`SinkTarget`] with the list of servers that deliver
     /// events for that target.
@@ -50,6 +54,7 @@ pub struct ConfigHelper {
 
 impl ConfigHelper {
     pub fn from_config(config: Config, sinks: Vec<SinkConfigEntry>) -> Self {
+        let has_boot_nodes = !config.network.boot_nodes.is_empty();
         Self {
             contracts_path: config.contracts_path,
             always_accept: config.always_accept,
@@ -62,6 +67,7 @@ impl ConfigHelper {
             sync_update: config.sync.update,
             sync_reboot: config.sync.reboot,
             approval: config.approval,
+            has_boot_nodes,
             sinks,
         }
     }

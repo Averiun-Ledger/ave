@@ -118,7 +118,8 @@ pub struct ValiWorker {
     pub pending: Option<PendingValidation>,
     /// Approval vote collections in flight, keyed by approval request
     /// hash. Volatile by design: superseded by a newer request of the
-    /// same subject and expired shortly after the deadline.
+    /// same subject and, in the shared role worker, expired shortly
+    /// after the deadline.
     pub approvals: HashMap<DigestIdentifier, ApprovalCollection>,
 }
 
@@ -190,6 +191,71 @@ pub struct ApprovalCollection {
     /// Guard so the deadline tick signs the timeouts only once.
     pub timeouts_signed: bool,
     pub material: ResponseMaterial,
+}
+
+/// Outcome of merging an approver vote into an approval collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VoteMerge {
+    New,
+    Duplicate,
+    Double,
+    /// The signer already has a conflicting pair recorded: it stays
+    /// excluded and the vote is discarded.
+    Excluded,
+}
+
+impl ApprovalCollection {
+    /// Merges an approver vote into the collection. The caller has
+    /// already checked that the signer is the sender, belongs to the
+    /// approver set and that the subject data hash matches. An approver
+    /// with a conflicting pair already recorded stays excluded: without
+    /// this guard a third vote would re-enter the tally and grow
+    /// `double_votes` without bound.
+    fn merge_vote(
+        &mut self,
+        vote: Signed<ApprovalRes>,
+        agrees: bool,
+    ) -> VoteMerge {
+        let signer = vote.signature().signer.clone();
+        if self
+            .double_votes
+            .iter()
+            .any(|(accept, _)| accept.signature().signer == signer)
+        {
+            return VoteMerge::Excluded;
+        }
+
+        if let Some(previous) = self.votes.get(&signer) {
+            let previous_agrees = matches!(
+                previous.content(),
+                ApprovalRes::Response { agrees: true, .. }
+            );
+            if previous_agrees == agrees {
+                return VoteMerge::Duplicate;
+            }
+            let Some(previous) = self.votes.remove(&signer) else {
+                return VoteMerge::Duplicate;
+            };
+            // Conflicting votes: the approver is excluded from both
+            // tallies and counted as absent; the pair is the evidence.
+            let (accept, reject) = if agrees {
+                (vote, previous)
+            } else {
+                (previous, vote)
+            };
+            self.double_votes.push((accept, reject));
+            // The answer wins over any timeout attestation this
+            // validator signed for the approver.
+            self.timeouts.remove(&signer);
+            VoteMerge::Double
+        } else {
+            self.votes.insert(signer.clone(), vote);
+            // The answer wins over any timeout attestation this
+            // validator signed for the approver.
+            self.timeouts.remove(&signer);
+            VoteMerge::New
+        }
+    }
 }
 
 /// Outcome of processing a validation request.
@@ -634,10 +700,11 @@ impl ValiWorker {
 
     /// Registers a collection, discarding any older collection of the
     /// same subject (supersede), sends the first probe round, arms the
-    /// deadline tick (timeout attestations) and the absolute TTL
-    /// (`deadline + 2 * keepalive`). A duplicate request for a collection
-    /// already in flight (requester recovery) keeps the votes gathered so
-    /// far: its probes, deadline tick and TTL are already running.
+    /// deadline tick (timeout attestations) and, only for the shared
+    /// role worker, the absolute TTL (`deadline + 2 * keepalive`). A
+    /// duplicate request for a collection already in flight (requester
+    /// recovery) keeps the votes gathered so far: its probes, deadline
+    /// tick and TTL are already running.
     async fn start_collection(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -666,15 +733,24 @@ impl ValiWorker {
             },
         )?;
 
-        let config = Self::approval_config(ctx)?;
-        let ttl_nanos = deadline
-            .as_nanos()
-            .saturating_sub(TimeStamp::now().as_nanos())
-            .saturating_add(2 * config.keepalive_secs * 1_000_000_000);
-        ctx.schedule_once(
-            Duration::from_nanos(ttl_nanos),
-            ValiWorkerMessage::ExpireCollection { approval_req_hash },
-        )?;
+        // The absolute TTL bounds collections of the shared role worker,
+        // whose requester may be gone. The ephemeral per-request worker
+        // (a child of the request's Validation actor) is bounded by its
+        // parent instead: the requester may still need this collection
+        // past the TTL (e.g. waiting on attestations from a replacement
+        // that only starts at the deadline plus grace), and stopping
+        // early would cut the tally signature it is waiting for.
+        if !self.stop {
+            let config = Self::approval_config(ctx)?;
+            let ttl_nanos = deadline
+                .as_nanos()
+                .saturating_sub(TimeStamp::now().as_nanos())
+                .saturating_add(2 * config.keepalive_secs * 1_000_000_000);
+            ctx.schedule_once(
+                Duration::from_nanos(ttl_nanos),
+                ValiWorkerMessage::ExpireCollection { approval_req_hash },
+            )?;
+        }
 
         Ok(())
     }
@@ -2208,7 +2284,8 @@ pub enum ValiWorkerMessage {
     /// Self-scheduled deadline of a collection: sign and push the timeout
     /// attestations for the approvers that never answered.
     ApprovalDeadline { approval_req_hash: DigestIdentifier },
-    /// Self-scheduled absolute TTL of a collection.
+    /// Self-scheduled absolute TTL of a collection (shared role worker
+    /// only; the ephemeral per-request worker is bounded by its parent).
     ExpireCollection { approval_req_hash: DigestIdentifier },
 }
 
@@ -2669,12 +2746,6 @@ impl Handler<Self> for ValiWorker {
                     return Ok(());
                 };
 
-                enum VoteMerge {
-                    New,
-                    Duplicate,
-                    Double,
-                }
-
                 let merge = {
                     let Some(collection) =
                         self.approvals.get_mut(&approval_req_hash)
@@ -2691,6 +2762,15 @@ impl Handler<Self> for ValiWorker {
                     if request_id != collection.request_id
                         || version != collection.version
                     {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            received_request_id = %request_id,
+                            expected_request_id = %collection.request_id,
+                            received_version = version,
+                            expected_version = collection.version,
+                            "Vote with a stale request id or version"
+                        );
                         return Ok(());
                     }
 
@@ -2716,45 +2796,18 @@ impl Handler<Self> for ValiWorker {
                         return Ok(());
                     }
 
-                    if let Some(previous) = collection.votes.get(&sender) {
-                        let previous_agrees = matches!(
-                            previous.content(),
-                            ApprovalRes::Response { agrees: true, .. }
-                        );
-                        if previous_agrees == agrees {
-                            VoteMerge::Duplicate
-                        } else if let Some(previous) =
-                            collection.votes.remove(&sender)
-                        {
-                            // Conflicting votes: the approver is excluded
-                            // from both tallies and counted as absent; the
-                            // pair is the evidence.
-                            let (accept, reject) = if agrees {
-                                (*approval_res.clone(), previous)
-                            } else {
-                                (previous, *approval_res.clone())
-                            };
-                            collection.double_votes.push((accept, reject));
-                            // The answer wins over any timeout attestation
-                            // this validator signed for the approver.
-                            collection.timeouts.remove(&sender);
-                            VoteMerge::Double
-                        } else {
-                            VoteMerge::Duplicate
-                        }
-                    } else {
-                        collection
-                            .votes
-                            .insert(sender.clone(), *approval_res.clone());
-                        // The answer wins over any timeout attestation this
-                        // validator signed for the approver.
-                        collection.timeouts.remove(&sender);
-                        VoteMerge::New
-                    }
+                    collection.merge_vote(*approval_res.clone(), agrees)
                 };
 
                 match merge {
                     VoteMerge::Duplicate => {}
+                    VoteMerge::Excluded => {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "Vote from an approver already excluded for double voting"
+                        );
+                    }
                     VoteMerge::New | VoteMerge::Double => {
                         if matches!(merge, VoteMerge::Double) {
                             Self::observe_approval_event(
@@ -2880,6 +2933,9 @@ impl Handler<Self> for ValiWorker {
                 }
             }
             ValiWorkerMessage::ExpireCollection { approval_req_hash } => {
+                // Only scheduled by the shared role worker (see
+                // `start_collection`); the ephemeral per-request worker
+                // is stopped by its parent Validation actor.
                 if let Some(collection) =
                     self.approvals.remove(&approval_req_hash)
                 {
@@ -2897,10 +2953,6 @@ impl Handler<Self> for ValiWorker {
                         })
                     {
                         self.pending = None;
-                    }
-
-                    if self.stop {
-                        ctx.stop(None).await;
                     }
                 }
             }
@@ -3596,5 +3648,105 @@ mod tests {
                 value: "approval issued_at"
             })
         ));
+    }
+
+    /// A double voter stays excluded: once the conflicting pair is
+    /// recorded, any further vote from the same signer is discarded and
+    /// the evidence does not grow. The rest of the approvers are
+    /// unaffected.
+    #[test]
+    fn double_voter_revote_stays_excluded() {
+        let fixture = PhaseFixture::new();
+        let hasher = fixture.worker.hash.hasher();
+        let approver = fixture.approvers[0].clone();
+
+        let issued_at = TimeStamp::now();
+        let approval_req = ApprovalReq {
+            subject_id: fixture.metadata.subject_id.clone(),
+            sn: fixture.metadata.sn + 1,
+            gov_version: fixture.gov_version,
+            patch: ValueWrapper(serde_json::json!([
+                { "op": "replace", "path": "/version", "value": 1 }
+            ])),
+            signer: fixture.signer.clone(),
+            issued_at,
+            deadline: TimeStamp::from_nanos(
+                issued_at.as_nanos() + 7_000_000_000,
+            ),
+        };
+        let approval_req_hash = hash_borsh(&*hasher, &approval_req).unwrap();
+        let signed_req = Signed::new(approval_req, &fixture.owner).unwrap();
+
+        let mut collection = ApprovalCollection {
+            requester: fixture.signer.clone(),
+            request_id: "request".to_owned(),
+            version: 0,
+            owner_route: OwnerRoute::Local,
+            subject_id: fixture.metadata.subject_id.clone(),
+            governance_id: fixture.metadata.governance_id.clone(),
+            gov_version: fixture.gov_version,
+            approval_req: signed_req,
+            approval_req_hash: approval_req_hash.clone(),
+            approvers: fixture.roles(&fixture.approvers),
+            req_subject_data_hash: fixture.req_subject_data_hash.clone(),
+            votes: HashMap::new(),
+            double_votes: Vec::new(),
+            timeouts: HashMap::new(),
+            timeouts_signed: false,
+            material: ResponseMaterial {
+                vali_req_hash: fixture.tampered_hash(),
+                event_request: fixture.event_request.clone(),
+                metadata: fixture.metadata.clone(),
+                properties: None,
+                ledger_hash: fixture.tampered_hash(),
+            },
+        };
+
+        let vote = |signer: &Ed25519Signer, agrees: bool| {
+            Signed::new(
+                ApprovalRes::Response {
+                    approval_req_hash: approval_req_hash.clone(),
+                    agrees,
+                    req_subject_data_hash: fixture
+                        .req_subject_data_hash
+                        .clone(),
+                },
+                signer,
+            )
+            .unwrap()
+        };
+
+        // accept -> reject: the conflicting pair excludes the approver.
+        assert_eq!(
+            collection.merge_vote(vote(&approver, true), true),
+            VoteMerge::New
+        );
+        assert_eq!(
+            collection.merge_vote(vote(&approver, false), false),
+            VoteMerge::Double
+        );
+        assert!(collection.votes.is_empty());
+        assert_eq!(collection.double_votes.len(), 1);
+
+        // Any further vote from the same signer is discarded: the
+        // exclusion is permanent and the evidence stays bounded.
+        assert_eq!(
+            collection.merge_vote(vote(&approver, true), true),
+            VoteMerge::Excluded
+        );
+        assert_eq!(
+            collection.merge_vote(vote(&approver, false), false),
+            VoteMerge::Excluded
+        );
+        assert!(collection.votes.is_empty());
+        assert_eq!(collection.double_votes.len(), 1);
+
+        // The rest of the approvers are unaffected by the exclusion.
+        let other = fixture.approvers[1].clone();
+        assert_eq!(
+            collection.merge_vote(vote(&other, true), true),
+            VoteMerge::New
+        );
+        assert!(collection.votes.contains_key(&public_key(&other)));
     }
 }

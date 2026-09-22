@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use ave_common::{
@@ -388,6 +389,15 @@ pub async fn build_wasm(
     load_compiled_wasm(contract_path).await
 }
 
+/// Unique suffix per atomic write: two writers can persist the same
+/// artifact concurrently (two compile children building the same source
+/// into the same staging directory). A fixed `.tmp` sibling makes one
+/// writer's rename steal the other's temp file, and the loser's ENOENT
+/// is a spurious local-fatal write error that crashes the node. The
+/// content is identical either way — same source, same toolchain — so
+/// the last rename simply wins.
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Atomic file write: write to a temp sibling, fsync it, rename over
 /// the target and fsync the directory. A crash or power cut leaves
 /// either the old bytes or the new ones, never a truncated file.
@@ -397,7 +407,11 @@ async fn write_file_atomic(
     bytes: &[u8],
 ) -> Result<(), CompilerError> {
     let target = dir.join(file_name);
-    let tmp = dir.join(format!("{file_name}.tmp"));
+    let tmp = dir.join(format!(
+        "{file_name}.tmp.{}.{}",
+        std::process::id(),
+        ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     let result = async {
         let mut file = fs::File::create(&tmp).await?;
         file.write_all(bytes).await?;

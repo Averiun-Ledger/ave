@@ -205,6 +205,19 @@ impl TestFaultRegistry {
         self.held.len()
     }
 
+    /// Clones of the outbound messages currently held, so a test can
+    /// inspect what the node tried to send and craft a signed answer
+    /// to it.
+    pub fn held_outbound_messages(&self) -> Vec<NetworkMessage> {
+        self.held
+            .iter()
+            .filter_map(|held| match held {
+                HeldMessage::Outbound { message } => Some(message.clone()),
+                HeldMessage::Inbound { .. } => None,
+            })
+            .collect()
+    }
+
     /// Finds the first live rule matching the traffic and consumes one
     /// of its occurrences.
     fn take_matching(

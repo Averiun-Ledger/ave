@@ -5084,6 +5084,7 @@ impl Actor for Governance {
                         config.sync_governance.sample_size,
                         version_sync_tick_interval,
                         version_sync_response_timeout,
+                        config.has_boot_nodes,
                     ),
                 )
                 .await?;

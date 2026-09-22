@@ -2359,6 +2359,17 @@ impl Api {
         Ok(count)
     }
 
+    /// Outbound messages currently held by fault rules, so the test can
+    /// craft a signed answer to what the node tried to send.
+    pub async fn test_held_outbound(
+        &self,
+    ) -> Result<Vec<NetworkMessage>, Error> {
+        let faults = self.test_faults()?;
+        #[allow(clippy::unwrap_used)]
+        let messages = faults.lock().unwrap().held_outbound_messages();
+        Ok(messages)
+    }
+
     /// Delivers every held message through the node's normal flow and
     /// removes the hold rules. Returns how many messages were
     /// delivered.
@@ -2377,6 +2388,37 @@ impl Api {
             let _ = control.send(command).await;
         }
         Ok(count)
+    }
+
+    /// Tells a test-crafted approval vote directly to a validator
+    /// worker's mailbox, bypassing the network: once this returns the
+    /// message is queued, so anything the worker receives afterwards
+    /// is processed after it. Fails if the worker does not exist.
+    pub async fn test_tell_approval_vote(
+        &self,
+        worker_actor: &str,
+        vote: Signed<crate::approval::response::ApprovalRes>,
+        request_id: &str,
+        version: u64,
+        from: PublicKey,
+    ) -> Result<(), Error> {
+        let worker = self
+            .system
+            .get_actor::<crate::validation::worker::ValiWorker>(
+                &ActorPath::from(worker_actor),
+            )
+            .await?;
+        worker
+            .tell(
+                crate::validation::worker::ValiWorkerMessage::ApprovalResponse {
+                    approval_res: Box::new(vote),
+                    request_id: request_id.to_owned(),
+                    version,
+                    sender: from,
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// Delivers a test-crafted message to this node as if it came from
