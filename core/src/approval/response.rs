@@ -37,3 +37,27 @@ pub enum ApprovalRes {
         who: PublicKey,
     },
 }
+
+/// Acknowledgement of an approval collection request (validator →
+/// requester). Flow control only — it is not evidence, so it is not
+/// signed: the coordinator gates it on the transport sender.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub enum ApprovalCollectAck {
+    /// Static checks passed: the validator opened the collection.
+    Accepted,
+    /// The validator is behind the request's governance version and can
+    /// not serve it: the requester replaces it from the pending pool.
+    Unavailable,
+    /// The requester is behind the validator's governance version: it
+    /// must sync its governance and reboot the request.
+    Reboot,
+}

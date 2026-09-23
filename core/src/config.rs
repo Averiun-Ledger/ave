@@ -386,9 +386,6 @@ pub struct ApprovalConfig {
     pub probe_schedule_secs: Vec<u64>,
     /// Seconds between keepalive rounds while waiting for votes.
     pub keepalive_secs: u64,
-    /// Grace window, in seconds, added to the deadline before a tally is
-    /// considered expired.
-    pub tally_epsilon_secs: u64,
 }
 
 impl Default for ApprovalConfig {
@@ -397,7 +394,6 @@ impl Default for ApprovalConfig {
             min_window_secs: default_approval_min_window_secs(),
             probe_schedule_secs: default_approval_probe_schedule_secs(),
             keepalive_secs: default_approval_keepalive_secs(),
-            tally_epsilon_secs: default_approval_tally_epsilon_secs(),
         }
     }
 }
@@ -435,16 +431,6 @@ fn default_approval_keepalive_secs() -> u64 {
     3_600
 }
 
-#[cfg(any(test, feature = "test"))]
-fn default_approval_tally_epsilon_secs() -> u64 {
-    2
-}
-
-#[cfg(not(any(test, feature = "test")))]
-fn default_approval_tally_epsilon_secs() -> u64 {
-    60
-}
-
 impl ApprovalConfig {
     pub fn validate(&self) -> Result<(), Error> {
         if self.min_window_secs == 0 {
@@ -469,12 +455,6 @@ impl ApprovalConfig {
         if self.keepalive_secs == 0 {
             return Err(Error::InvalidConfiguration {
                 component: "approval.keepalive_secs".to_string(),
-                reason: "must be greater than zero".to_string(),
-            });
-        }
-        if self.tally_epsilon_secs == 0 {
-            return Err(Error::InvalidConfiguration {
-                component: "approval.tally_epsilon_secs".to_string(),
                 reason: "must be greater than zero".to_string(),
             });
         }

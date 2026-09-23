@@ -436,6 +436,18 @@ impl Handler<Self> for ApprPersist {
             ApprPersistMessage::Update { validators } => {
                 self.validators = validators;
 
+                // A governance change obsoletes a still-pending vote:
+                // it was cast against the previous role set.
+                if self.state == Some(ApprovalState::Pending) {
+                    self.on_event(
+                        ApprPersistEvent::ChangeState {
+                            state: ApprovalState::Obsolete,
+                        },
+                        ctx,
+                    )
+                    .await;
+                }
+
                 debug!(
                     msg_type = "Update",
                     subject_id = %self.subject_id,
@@ -707,6 +719,36 @@ impl Handler<Self> for ApprPersist {
                             "Approval request for an already committed sequence"
                         );
                         return Ok(ApprPersistResponse::Ok);
+                    }
+
+                    // Freshness guard: a delayed request older than the
+                    // persisted one (earlier issued_at, then older
+                    // version, then request id as the tie-breaker) must
+                    // never overwrite the newer state.
+                    if !self.request_id.is_empty() {
+                        let incoming = (
+                            approval_req.content().issued_at.as_nanos(),
+                            info.version,
+                            info.request_id.as_str(),
+                        );
+                        let stored = (
+                            self.request.as_ref().map_or(0, |request| {
+                                request.content().issued_at.as_nanos()
+                            }),
+                            self.version,
+                            self.request_id.as_str(),
+                        );
+                        if incoming <= stored {
+                            warn!(
+                                msg_type = "NetworkRequest",
+                                stored_request_id = %self.request_id,
+                                stored_version = self.version,
+                                incoming_request_id = %info.request_id,
+                                incoming_version = info.version,
+                                "Stale approval request ignored"
+                            );
+                            return Ok(ApprPersistResponse::Ok);
+                        }
                     }
 
                     let state =

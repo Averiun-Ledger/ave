@@ -264,54 +264,44 @@ impl Evaluation {
         hash_borsh(&*self.hash.hasher(), &self.request)
     }
 
-    fn ensure_eval_req_hash(
-        &self,
-        eval_req_hash: DigestIdentifier,
-    ) -> Result<(), ActorError> {
-        if eval_req_hash != self.evaluation_request_hash {
+    /// Stores an evaluator response. A response that does not bind to
+    /// this request (request-hash mismatch) is dropped: the responder
+    /// was already removed from the current set, and the
+    /// round-exhaustion logic replaces it or reboots the request.
+    fn store_response_result(
+        &mut self,
+        result: response::EvaluationResult,
+        result_hash: DigestIdentifier,
+        result_hash_signature: Signature,
+    ) {
+        let eval_req_hash = match &result {
+            response::EvaluationResult::Ok {
+                eval_req_hash, ..
+            }
+            | response::EvaluationResult::Error {
+                eval_req_hash, ..
+            } => eval_req_hash,
+        };
+        if *eval_req_hash != self.evaluation_request_hash {
             error!(
                 msg_type = "Response",
                 expected_hash = %self.evaluation_request_hash,
                 received_hash = %eval_req_hash,
                 "Invalid evaluation request hash"
             );
-            return Err(ActorError::Functional {
-                description:
-                    "Evaluation Response, Invalid evaluation request hash"
-                        .to_owned(),
-            });
+            return;
         }
 
-        Ok(())
-    }
-
-    fn store_response_result(
-        &mut self,
-        result: response::EvaluationResult,
-        result_hash: DigestIdentifier,
-        result_hash_signature: Signature,
-    ) -> Result<(), ActorError> {
         match result {
-            response::EvaluationResult::Ok {
-                response,
-                eval_req_hash,
-                ..
-            } => {
-                self.ensure_eval_req_hash(eval_req_hash)?;
+            response::EvaluationResult::Ok { response, .. } => {
                 self.evaluators_response.push((response, result_hash));
             }
-            response::EvaluationResult::Error {
-                error,
-                eval_req_hash,
-                ..
-            } => {
-                self.ensure_eval_req_hash(eval_req_hash)?;
+            response::EvaluationResult::Error { error, .. } => {
                 self.errors.push((error, result_hash));
             }
         }
 
         self.evaluators_signatures.push(result_hash_signature);
-        Ok(())
     }
 }
 
@@ -463,7 +453,7 @@ impl Handler<Self> for Evaluation {
                                     result,
                                     result_hash,
                                     result_hash_signature,
-                                )?;
+                                );
                             }
                             EvaluationRes::TimeOut => {
                                 Self::observe_event("timeout");

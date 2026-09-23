@@ -1,5 +1,9 @@
 use crate::{
-    approval::persist::{ApprPersist, ApprPersistMessage},
+    approval::{
+        Approval, ApprovalMessage,
+        coordinator::{ApprCoordinator, ApprCoordinatorMessage},
+        persist::{ApprPersist, ApprPersistMessage},
+    },
     compilation::{
         coordinator::{CompileCoordinator, CompileCoordinatorMessage},
         worker::{CompileWorker, CompileWorkerMessage},
@@ -22,7 +26,6 @@ use crate::{
     },
     update::updater::{Updater, UpdaterMessage},
     validation::{
-        Validation, ValidationMessage,
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
         schema::{ValidationSchema, ValidationSchemaMessage},
         worker::{ValiWorker, ValiWorkerMessage},
@@ -716,13 +719,13 @@ impl Intermediary {
                     }
                     ActorMessage::ApprovalVoteReport { res } => {
                         let actor = system
-                            .get_actor::<Validation>(&path)
+                            .get_actor::<Approval>(&path)
                             .await
                             .map_err(|_| IntermediaryError::ActorNotFound {
                                 path: path.to_string(),
                             })?;
                         actor
-                            .tell(ValidationMessage::VoteReport {
+                            .tell(ApprovalMessage::VoteReport {
                                 vote: res,
                                 sender: sender.clone(),
                             })
@@ -763,13 +766,13 @@ impl Intermediary {
                         votes,
                     } => {
                         let actor = system
-                            .get_actor::<Validation>(&path)
+                            .get_actor::<Approval>(&path)
                             .await
                             .map_err(|_| IntermediaryError::ActorNotFound {
                                 path: path.to_string(),
                             })?;
                         actor
-                            .tell(ValidationMessage::StatusRes {
+                            .tell(ApprovalMessage::StatusRes {
                                 approval_req_hash,
                                 votes,
                                 sender: sender.clone(),
@@ -782,7 +785,7 @@ impl Intermediary {
                                 }
                             })?;
                     }
-                    ActorMessage::TallyProposal { approval_data } => {
+                    ActorMessage::ApprovalCollectReq { req } => {
                         let actor = system
                             .get_actor::<ValiWorker>(&path)
                             .await
@@ -790,8 +793,33 @@ impl Intermediary {
                                 path: path.to_string(),
                             })?;
                         actor
-                            .tell(ValiWorkerMessage::TallyProposal {
-                                approval_data: Box::new(approval_data),
+                            .tell(ValiWorkerMessage::NetworkApprovalCollect {
+                                approval_req: Box::new(req),
+                                sender: sender.clone(),
+                                info: message.info,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalCollectAck {
+                        approval_req_hash,
+                        ack,
+                    } => {
+                        let actor = system
+                            .get_actor::<ApprCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ApprCoordinatorMessage::NetworkAck {
+                                approval_req_hash,
+                                ack,
                                 request_id: message.info.request_id,
                                 version: message.info.version,
                                 sender: sender.clone(),

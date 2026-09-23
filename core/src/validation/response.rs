@@ -24,23 +24,15 @@ pub enum ValidationRes {
         propierties_hash: DigestIdentifier,
         event_request_hash: DigestIdentifier,
         viewpoints_hash: DigestIdentifier,
-        /// Hash of the approval evidence the validator collected and
-        /// attested. `Some` only for requests that required approval.
+        /// Hash of the approval evidence the validator verified inside
+        /// the validation request. `Some` only for requests that
+        /// required approval.
         approval_data_hash: Option<DigestIdentifier>,
     },
     Create {
         vali_req_hash: DigestIdentifier,
         subject_metadata: Box<Metadata>,
     },
-    /// The validator verified the request and is collecting the approval
-    /// votes (governance facts only): the final `Response` arrives when
-    /// the collection closes. Not a verdict.
-    ///
-    /// Inserted mid-enum as a deliberate hard wire break: the ordinals
-    /// of `Abort`/`TimeOut`/`Reboot`/`Unavailable` shifted with it, so
-    /// mixed-version networks can not exchange this message. Future
-    /// variants must keep the append-at-end convention below.
-    Working,
     Abort(String),
     TimeOut,
     Reboot,

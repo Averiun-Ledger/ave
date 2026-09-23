@@ -20,6 +20,7 @@ use tokio::fs;
 use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
+use crate::approval::{Approval, ApprovalMessage};
 use crate::compilation::{payload_contract_sources, schemas_to_compile};
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
@@ -836,7 +837,7 @@ impl RequestManager {
         ctx: &mut ActorContext<Self>,
         compile: Option<CompileEvidence>,
         eval: Option<(EvaluationReq, EvaluationData)>,
-        appro_data: Option<Signed<ApprovalReq>>,
+        appro_data: Option<ApprovalData>,
     ) -> Result<
         (
             Signed<ValidationReq>,
@@ -931,7 +932,7 @@ impl RequestManager {
         ctx: &mut ActorContext<Self>,
         compile: Option<CompileEvidence>,
         eval: Option<(EvaluationReq, EvaluationData)>,
-        appro_data: Option<Signed<ApprovalReq>>,
+        appro_data: Option<ApprovalData>,
     ) -> Result<
         (
             ValidationReq,
@@ -1049,12 +1050,12 @@ impl RequestManager {
                 (
                     Some((_, compile_data)),
                     Some((eval_req, eval_data)),
-                    Some(approval_req),
+                    Some(approval_data),
                 ) => (
                     ActualProtocols::CompileEvalApprove {
                         compile_data,
                         eval_data,
-                        approval_req,
+                        approval_data,
                     },
                     eval_req.gov_version,
                     Some(eval_req.sn),
@@ -1076,10 +1077,10 @@ impl RequestManager {
                     compile_req.gov_version,
                     Some(compile_req.sn),
                 ),
-                (None, Some((eval_req, eval_data)), Some(approval_req)) => (
+                (None, Some((eval_req, eval_data)), Some(approval_data)) => (
                     ActualProtocols::EvalApprove {
                         eval_data,
-                        approval_req,
+                        approval_data,
                     },
                     eval_req.gov_version,
                     Some(eval_req.sn),
@@ -1241,6 +1242,54 @@ impl RequestManager {
         }
     }
 
+    async fn run_approval(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        signed_approval_req: Signed<ApprovalReq>,
+        approvers: RoleDataRegister,
+        signers: HashSet<PublicKey>,
+        quorum: Quorum,
+    ) -> Result<(), RequestManagerError> {
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(RequestManagerError::HelpersNotInitialized);
+        };
+
+        self.start_phase_metrics("approval");
+        info!("Init approval {}", self.id);
+        let child = ctx
+            .create_child(
+                "approval",
+                Approval::new(
+                    self.our_key.clone(),
+                    signed_approval_req,
+                    approvers,
+                    quorum,
+                    hash,
+                    network,
+                ),
+            )
+            .await?;
+
+        child
+            .tell(ApprovalMessage::Create {
+                request_id: self.id.clone(),
+                version: self.version,
+                signers,
+            })
+            .await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Approval,
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+
     async fn run_validation(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -1252,16 +1301,6 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         let Some((hash, network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
-        };
-
-        // While the validators collect the approval votes the request
-        // stays in the approval state; it flips to validation when the
-        // collection closes and the tally is proposed for signature.
-        let state = match request.content() {
-            ValidationReq::Event {
-                actual_protocols, ..
-            } if actual_protocols.needs_approval() => RequestState::Approval,
-            _ => RequestState::Validation,
         };
 
         self.start_phase_metrics("validation");
@@ -1293,7 +1332,7 @@ impl RequestManager {
             ctx,
             RequestTrackingMessage::UpdateState {
                 request_id: self.id.clone(),
-                state,
+                state: RequestState::Validation,
             },
         )
         .await?;
@@ -2204,6 +2243,13 @@ impl RequestManager {
                     actor.ask_stop().await?;
                 };
             }
+            RequestManagerState::Approval { .. } => {
+                if let Ok(actor) =
+                    ctx.get_child::<Approval>("approval").await
+                {
+                    actor.ask_stop().await?;
+                };
+            }
             RequestManagerState::Validation { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Validation>("validation").await
@@ -2234,14 +2280,15 @@ impl RequestManager {
         self.stops_childs(ctx).await?;
 
         // The approvers' pending state for this request is dropped when
-        // an in-validation request with approval is aborted. An abort
+        // an in-flight request with approval is aborted. An abort
         // that hits a reboot must drop it too: the reboot follows a
-        // validation that never closed, so a local pending vote may
+        // phase that never closed, so a local pending vote may
         // still be around. The reboot state does not carry the
         // validation request, but the call is local and a no-op without
         // a pending vote, and one request per subject is live at a time,
         // so any pending vote belongs to the aborted request.
         let drop_pending = match &self.state {
+            RequestManagerState::Approval { .. } => true,
             RequestManagerState::Validation { request, .. } => matches!(
                 request.content(),
                 ValidationReq::Event { actual_protocols, .. }
@@ -2348,11 +2395,11 @@ pub enum RequestManagerMessage {
         /// request required approval.
         approval_data: Option<ApprovalData>,
     },
-    /// The approval collection closed and the tally was proposed to the
-    /// validators for their final signature: the request leaves the
-    /// approval state and enters validation.
+    /// The approval phase closed: the request leaves the approval state
+    /// and enters validation with the closed approval evidence.
     ApprovalClosed {
         request_id: DigestIdentifier,
+        approval_data: Box<ApprovalData>,
     },
     FinishRequest {
         request_id: DigestIdentifier,
@@ -2635,6 +2682,7 @@ impl Handler<Self> for RequestManager {
                     | RequestManagerState::Starting
                     | RequestManagerState::Compilation
                     | RequestManagerState::Evaluation { .. }
+                    | RequestManagerState::Approval { .. }
                     | RequestManagerState::Validation { .. } => {
                         if let Err(e) = self
                             .abort_request(
@@ -2759,6 +2807,35 @@ impl Handler<Self> for RequestManager {
                             self.match_error(ctx, e).await;
                             return Ok(());
                         }
+                    }
+
+                    RequestManagerState::Approval {
+                        signed_approval_req,
+                        approvers,
+                        signers,
+                        quorum,
+                        ..
+                    } => {
+                        if let Err(e) = self
+                            .run_approval(
+                                ctx,
+                                signed_approval_req,
+                                approvers,
+                                signers,
+                                quorum,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Approval",
+                                error = %e,
+                                "Failed to run approval"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        };
                     }
 
                     RequestManagerState::Validation {
@@ -3058,38 +3135,38 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    let (compile, eval, appro_data) = if let Some(
-                        evaluator_res,
-                    ) = eval_res.evaluator_response_ok()
+                    if let Some(evaluator_res) = eval_res
+                        .evaluator_response_ok()
                         && evaluator_res.appr_required
                     {
                         debug!(
                             msg_type = "EvaluationRes",
                             request_id = %self.id,
-                            "Approval required, the validators will collect it"
+                            "Approval required, starting the approval phase"
                         );
 
-                        let (approvers, _) = match get_quorum_and_signers(
-                            ctx,
-                            &self.subject_id,
-                            ProtocolTypes::Approval,
-                            SchemaType::Governance,
-                            Namespace::new(),
-                        )
-                        .await
-                        {
-                            Ok(data) => data,
-                            Err(e) => {
-                                error!(
-                                    msg_type = "EvaluationRes",
-                                    request_id = %self.id,
-                                    error = %e,
-                                    "Failed to get approvers"
-                                );
-                                self.match_error(ctx, e.into()).await;
-                                return Ok(());
-                            }
-                        };
+                        let (approvers, approvers_quorum) =
+                            match get_quorum_and_signers(
+                                ctx,
+                                &self.subject_id,
+                                ProtocolTypes::Approval,
+                                SchemaType::Governance,
+                                Namespace::new(),
+                            )
+                            .await
+                            {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "EvaluationRes",
+                                        request_id = %self.id,
+                                        error = %e,
+                                        "Failed to get approvers"
+                                    );
+                                    self.match_error(ctx, e.into()).await;
+                                    return Ok(());
+                                }
+                            };
 
                         if approvers.is_empty() {
                             warn!(
@@ -3115,7 +3192,7 @@ impl Handler<Self> for RequestManager {
                             return Ok(());
                         }
 
-                        match self
+                        let signed_approval_req = match self
                             .build_request_appro(
                                 ctx,
                                 (*eval_req).clone(),
@@ -3123,11 +3200,7 @@ impl Handler<Self> for RequestManager {
                             )
                             .await
                         {
-                            Ok(signed_approval_req) => (
-                                compile.map(|compile| *compile),
-                                Some((*eval_req, eval_res)),
-                                Some(signed_approval_req),
-                            ),
+                            Ok(signed_approval_req) => signed_approval_req,
                             Err(e) => {
                                 error!(
                                     msg_type = "EvaluationRes",
@@ -3138,19 +3211,110 @@ impl Handler<Self> for RequestManager {
                                 self.match_error(ctx, e).await;
                                 return Ok(());
                             }
-                        }
-                    } else {
-                        debug!(
-                            msg_type = "EvaluationRes",
-                            request_id = %self.id,
-                            "Approval not required, proceeding to validation phase"
-                        );
-                        (
-                            compile.map(|compile| *compile),
-                            Some((*eval_req, eval_res)),
-                            None,
+                        };
+
+                        let (signers, quorum) = match get_quorum_and_signers(
+                            ctx,
+                            &self.subject_id,
+                            ProtocolTypes::Validation,
+                            SchemaType::Governance,
+                            Namespace::new(),
                         )
-                    };
+                        .await
+                        {
+                            Ok(data) => data,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "EvaluationRes",
+                                    request_id = %self.id,
+                                    error = %e,
+                                    "Failed to get validators"
+                                );
+                                self.match_error(ctx, e.into()).await;
+                                return Ok(());
+                            }
+                        };
+
+                        if signers.is_empty() {
+                            warn!(
+                                request_id = %self.id,
+                                schema_id = %SchemaType::Governance,
+                                "No validators available for schema"
+                            );
+
+                            self.match_error(
+                                ctx,
+                                RequestManagerError::NoValidatorsAvailable {
+                                    schema_id: SchemaType::Governance
+                                        .to_string(),
+                                    governance_id: self
+                                        .governance_id
+                                        .clone()
+                                        .unwrap_or_else(|| {
+                                            self.subject_id.clone()
+                                        }),
+                                },
+                            )
+                            .await;
+                            return Ok(());
+                        }
+
+                        let approvers = RoleDataRegister {
+                            workers: approvers,
+                            quorum: approvers_quorum,
+                        };
+
+                        self.on_event(
+                            RequestManagerEvent::UpdateState {
+                                state: Box::new(
+                                    RequestManagerState::Approval {
+                                        signed_approval_req:
+                                            signed_approval_req.clone(),
+                                        compile: compile.clone(),
+                                        eval: Box::new((
+                                            (*eval_req).clone(),
+                                            eval_res.clone(),
+                                        )),
+                                        signers: signers.clone(),
+                                        quorum: quorum.clone(),
+                                        approvers: approvers.clone(),
+                                    },
+                                ),
+                            },
+                            ctx,
+                        )
+                        .await;
+
+                        if let Err(e) = self
+                            .run_approval(
+                                ctx,
+                                signed_approval_req,
+                                approvers,
+                                signers,
+                                quorum,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "EvaluationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to run approval"
+                            );
+                            self.match_error(ctx, e).await;
+                        }
+                        return Ok(());
+                    }
+
+                    debug!(
+                        msg_type = "EvaluationRes",
+                        request_id = %self.id,
+                        "Approval not required, proceeding to validation phase"
+                    );
+                    let (compile, eval) = (
+                        compile.map(|compile| *compile),
+                        Some((*eval_req, eval_res)),
+                    );
 
                     let (
                         request,
@@ -3159,7 +3323,7 @@ impl Handler<Self> for RequestManager {
                         init_state,
                         current_request_roles,
                     ) = match self
-                        .build_validation_req(ctx, compile, eval, appro_data)
+                        .build_validation_req(ctx, compile, eval, None)
                         .await
                     {
                         Ok(data) => data,
@@ -3332,23 +3496,93 @@ impl Handler<Self> for RequestManager {
                     };
                 }
             }
-            RequestManagerMessage::ApprovalClosed { request_id } => {
+            RequestManagerMessage::ApprovalClosed {
+                request_id,
+                approval_data,
+            } => {
                 if request_id == self.id {
                     debug!(
                         msg_type = "ApprovalClosed",
                         request_id = %self.id,
                         version = self.version,
-                        "Approval collection closed, entering validation"
+                        "Approval phase closed, entering validation"
                     );
 
-                    send_to_tracking(
-                        ctx,
-                        RequestTrackingMessage::UpdateState {
-                            request_id: self.id.clone(),
-                            state: RequestState::Validation,
-                        },
-                    )
-                    .await?;
+                    let RequestManagerState::Approval {
+                        compile, eval, ..
+                    } = self.state.clone()
+                    else {
+                        // Benign race: the request already left the
+                        // approval phase (reboot, abort...) while this
+                        // notice was in flight.
+                        warn!(
+                            msg_type = "ApprovalClosed",
+                            request_id = %self.id,
+                            state = ?self.state,
+                            "Late approval close ignored: the request is no longer in the approval phase"
+                        );
+                        return Ok(());
+                    };
+
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "ApprovalClosed",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
+
+                    let (
+                        request,
+                        quorum,
+                        signers,
+                        init_state,
+                        current_request_roles,
+                    ) = match self
+                        .build_validation_req(
+                            ctx,
+                            compile.map(|compile| *compile),
+                            Some(*eval),
+                            Some(*approval_data),
+                        )
+                        .await
+                    {
+                        Ok(data) => data,
+                        Err(e) => {
+                            error!(
+                                msg_type = "ApprovalClosed",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to build validation request"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        }
+                    };
+
+                    if let Err(e) = self
+                        .run_validation(
+                            ctx,
+                            request,
+                            quorum,
+                            signers,
+                            init_state,
+                            current_request_roles,
+                        )
+                        .await
+                    {
+                        error!(
+                            msg_type = "ApprovalClosed",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to run validation"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
                 }
             }
             RequestManagerMessage::FinishRequest { request_id } => {

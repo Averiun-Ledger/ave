@@ -1,11 +1,12 @@
 //! Shared verification of approval evidence.
 //!
 //! The same rules are checked by validators accepting an approval
-//! request, validators signing a tally proposal, and nodes applying a
-//! committed governance event: the approval request is rebuilt from
-//! anchored data, every vote signature is verified against it, double
-//! votes are excluded from both tallies, and the outcome must follow the
-//! quorum rules of the approver set.
+//! request, validators verifying the closed evidence inside a
+//! validation request, and nodes applying a committed governance
+//! event: the approval request is rebuilt from anchored data, every
+//! vote signature is verified against it, double votes are excluded
+//! from both tallies, and the outcome must follow the quorum rules of
+//! the approver set.
 
 use std::{
     collections::{HashMap, HashSet},

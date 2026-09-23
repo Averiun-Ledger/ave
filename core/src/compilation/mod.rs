@@ -415,54 +415,44 @@ impl Compilation {
         hash_borsh(&*self.hash.hasher(), &self.request)
     }
 
-    fn ensure_compile_req_hash(
-        &self,
-        compile_req_hash: DigestIdentifier,
-    ) -> Result<(), ActorError> {
-        if compile_req_hash != self.compilation_request_hash {
+    /// Stores a compiler response. A response that does not bind to
+    /// this request (request-hash mismatch) is dropped: the responder
+    /// was already removed from the current set, and the
+    /// round-exhaustion logic replaces it or reboots the request.
+    fn store_response_result(
+        &mut self,
+        result: response::CompilationResult,
+        result_hash: DigestIdentifier,
+        result_hash_signature: Signature,
+    ) {
+        let compile_req_hash = match &result {
+            response::CompilationResult::Ok {
+                compile_req_hash, ..
+            }
+            | response::CompilationResult::Error {
+                compile_req_hash, ..
+            } => compile_req_hash,
+        };
+        if *compile_req_hash != self.compilation_request_hash {
             error!(
                 msg_type = "Response",
                 expected_hash = %self.compilation_request_hash,
                 received_hash = %compile_req_hash,
                 "Invalid compilation request hash"
             );
-            return Err(ActorError::Functional {
-                description:
-                    "Compilation Response, Invalid compilation request hash"
-                        .to_owned(),
-            });
+            return;
         }
 
-        Ok(())
-    }
-
-    fn store_response_result(
-        &mut self,
-        result: response::CompilationResult,
-        result_hash: DigestIdentifier,
-        result_hash_signature: Signature,
-    ) -> Result<(), ActorError> {
         match result {
-            response::CompilationResult::Ok {
-                response,
-                compile_req_hash,
-                ..
-            } => {
-                self.ensure_compile_req_hash(compile_req_hash)?;
+            response::CompilationResult::Ok { response, .. } => {
                 self.compilers_response.push((response, result_hash));
             }
-            response::CompilationResult::Error {
-                error,
-                compile_req_hash,
-                ..
-            } => {
-                self.ensure_compile_req_hash(compile_req_hash)?;
+            response::CompilationResult::Error { error, .. } => {
                 self.errors.push((error, result_hash));
             }
         }
 
         self.compilers_signatures.push(result_hash_signature);
-        Ok(())
     }
 }
 
@@ -613,7 +603,7 @@ impl Handler<Self> for Compilation {
                                     result,
                                     result_hash,
                                     result_hash_signature,
-                                )?;
+                                );
                             }
                             CompilationRes::TimeOut => {
                                 Self::observe_event("timeout");

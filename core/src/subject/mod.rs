@@ -8,12 +8,7 @@ use std::{
 };
 
 use crate::{
-    approval::{
-        request::ApprovalReq,
-        verify::{
-            ApprovalVerification, rebuild_approval_req, verify_approval_data,
-        },
-    },
+    approval::verify::{ApprovalVerification, verify_approval_data},
     governance::{
         Governance,
         data::GovernanceData,
@@ -991,8 +986,7 @@ where
 
     /// Rebuilds the approval request anchored in the event under
     /// verification and checks the tally evidence against the approver
-    /// set of the pre-event governance. Returns the signed approval
-    /// request that becomes part of the actual protocols.
+    /// set of the pre-event governance.
     fn verify_approval_evidence(
         hash: &HashAlgorithm,
         appr: &ApprovalData,
@@ -1001,19 +995,7 @@ where
         gov_version: u64,
         patch: &ValueWrapper,
         signer: &PublicKey,
-    ) -> Result<Signed<ApprovalReq>, SubjectError> {
-        let approval_req = Signed::from_parts(
-            rebuild_approval_req(
-                appr,
-                &subject_metadata.subject_id,
-                sn,
-                gov_version,
-                patch,
-                signer,
-            ),
-            appr.approval_req_signature.clone(),
-        );
-
+    ) -> Result<(), SubjectError> {
         let governance_data =
             GovernanceData::try_from(subject_metadata.properties.clone())
                 .map_err(|e| SubjectError::GovernanceDataConversionFailed {
@@ -1075,7 +1057,7 @@ where
             context: format!("approval evidence: {}", e),
         })?;
 
-        Ok(approval_req)
+        Ok(())
     }
 
     async fn verify_new_ledger_event(
@@ -1262,7 +1244,7 @@ where
                     (Some(compilation), Some(evaluation)) => {
                         if let Some(eval) = evaluation.evaluator_response_ok() {
                             if let Some(appr) = approval {
-                                let approval_req = Self::verify_approval_evidence(
+                                Self::verify_approval_evidence(
                                     hash,
                                     appr,
                                     &subject_metadata,
@@ -1283,7 +1265,7 @@ where
                                 ActualProtocols::CompileEvalApprove {
                                     compile_data: compilation.as_ref().clone(),
                                     eval_data: evaluation.clone(),
-                                    approval_req,
+                                    approval_data: appr.clone(),
                                 }
                             } else {
                                 return Err(
@@ -1304,7 +1286,7 @@ where
                     (None, Some(evaluation)) => {
                         if let Some(eval) = evaluation.evaluator_response_ok() {
                             if let Some(appr) = approval {
-                                let approval_req = Self::verify_approval_evidence(
+                                Self::verify_approval_evidence(
                                     hash,
                                     appr,
                                     &subject_metadata,
@@ -1324,7 +1306,7 @@ where
 
                                 ActualProtocols::EvalApprove {
                                     eval_data: evaluation.clone(),
-                                    approval_req,
+                                    approval_data: appr.clone(),
                                 }
                             } else {
                                 return Err(

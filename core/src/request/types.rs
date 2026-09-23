@@ -1,9 +1,11 @@
 use std::{collections::HashSet, fmt::Display};
 
 use crate::{
+    approval::request::ApprovalReq,
     compilation::request::CompilationReq,
-    governance::model::Quorum,
-    model::event::{CompilationData, Ledger},
+    evaluation::request::EvaluationReq,
+    governance::{model::Quorum, role_register::RoleDataRegister},
+    model::event::{CompilationData, EvaluationData, Ledger},
     validation::{request::ValidationReq, worker::CurrentRequestRoles},
 };
 
@@ -44,6 +46,19 @@ pub enum RequestManagerState {
     Evaluation {
         compile: Option<Box<CompileEvidence>>,
     },
+    /// The evaluation required approval: the approval phase runs with
+    /// the signed approval request and the validation role set that
+    /// will collect the approver votes. Everything needed to build the
+    /// validation request at the close is kept here so a restart can
+    /// resume the phase.
+    Approval {
+        signed_approval_req: Signed<ApprovalReq>,
+        compile: Option<Box<CompileEvidence>>,
+        eval: Box<(EvaluationReq, EvaluationData)>,
+        signers: HashSet<PublicKey>,
+        quorum: Quorum,
+        approvers: RoleDataRegister,
+    },
     Validation {
         request: Box<Signed<ValidationReq>>,
         quorum: Quorum,
@@ -70,6 +85,7 @@ impl Display for RequestManagerState {
             Self::Starting => write!(f, "Starting"),
             Self::Compilation => write!(f, "Compilation"),
             Self::Evaluation { .. } => write!(f, "Evaluation"),
+            Self::Approval { .. } => write!(f, "Approval"),
             Self::Validation { .. } => write!(f, "Validation"),
             Self::UpdateSubject { .. } => {
                 write!(f, "UpdateSubject")

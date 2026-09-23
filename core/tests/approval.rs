@@ -1,7 +1,9 @@
-//! Integration tests for the approval phase of governance events:
-//! validators collect the approvers' votes, the requester proposes the
-//! canonical tally and the event commits (approved or rejected) with the
-//! approval evidence anchored in the ledger.
+//! Integration tests for the approval phase of governance events: a
+//! random set of validators collects the approvers' votes, the requester
+//! closes the phase building the canonical approval evidence and the
+//! validation phase runs afterwards with that evidence inside the
+//! validation request, so the event commits (approved or rejected) with
+//! the approval evidence anchored in the ledger.
 
 use std::{
     collections::HashSet,
@@ -34,7 +36,10 @@ use ave_core::{
     },
     model::event::{ApprovalData, Protocols},
     subject::RequestSubjectData,
-    validation::{request::ValidationReq, response::ValidationRes},
+    validation::{
+        request::{ActualProtocols, ValidationReq},
+        response::ValidationRes,
+    },
 };
 
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
@@ -101,13 +106,12 @@ async fn owner_and_two_approvers(
 }
 
 /// Short approval window for deadline-driven tests: 7 s window probed
-/// at 1/2/4 s, 1 s keepalive, 2 s tally grace.
+/// at 1/2/4 s, 1 s keepalive.
 fn short_window_approval() -> ApprovalConfig {
     ApprovalConfig {
         min_window_secs: 7,
         probe_schedule_secs: vec![1, 2, 4],
         keepalive_secs: 1,
-        tally_epsilon_secs: 2,
     }
 }
 
@@ -440,14 +444,17 @@ fn assert_approval_outcome(
 }
 
 #[test(tokio::test)]
-// Happy path: every approver auto-accepts, the validators collect the
-// votes and the event commits with its approval evidence, no manual
-// intervention and no deadline wait.
+// Happy path: every approver auto-accepts, the approval phase closes on
+// its own and the validation phase starts right after with the closed
+// approval evidence inside the validation request — pinned by holding
+// the request itself and inspecting it. No manual intervention and no
+// deadline wait.
 async fn test_approval_auto_commit_evidence() {
     let (nodes, _dirs) = owner_and_two_approvers(true, true).await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
+    let approver_1_pk = PublicKey::from_str(approver_1.public_key()).unwrap();
 
     let governance_id = create_and_authorize_governance(
         owner,
@@ -455,17 +462,79 @@ async fn test_approval_auto_commit_evidence() {
     )
     .await;
 
-    let json = two_approvers_setup(approver_1, approver_2);
+    // Approver1 doubles as a validator with a fixed quorum of 2, so the
+    // validation request always crosses the network.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 },
+                    "validate": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Approver1", "Approver2"],
+                    "approver": ["Approver1", "Approver2"],
+                    "validator": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Approver1",
+                    "key": approver_1.public_key()
+                },
+                {
+                    "name": "Approver2",
+                    "key": approver_2.public_key()
+                }
+            ]
+        }
+    });
     emit_fact(owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
+    // Hold the validation request headed to Approver1: once it is held
+    // the approval phase is already closed and the evidence must travel
+    // inside the request.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ValidationReq,
+            peer: Some(approver_1_pk.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+
     // Approvers = {Owner, Approver1, Approver2}, quorum fixed 2: all
-    // three auto-accept, the tally commits on its own.
+    // three auto-accept, the approval closes on its own.
     let json = add_fake_member("AveNode1");
     emit_fact(owner, governance_id.clone(), json, true)
         .await
         .unwrap();
+
+    let signed_req = wait_held_validation_req(owner, &approver_1_pk).await;
+    let ValidationReq::Event { actual_protocols, .. } = signed_req.content()
+    else {
+        panic!("a governance fact must produce an event validation request");
+    };
+    let ActualProtocols::EvalApprove { approval_data, .. } =
+        actual_protocols.as_ref()
+    else {
+        panic!("the validation request must carry the approval evidence");
+    };
+    assert!(approval_data.approved);
+    // The phase closes the instant the quorum (fixed 2) is reached, so
+    // a third vote already in flight may not make it into the evidence.
+    assert!(approval_data.approvers_agrees_signatures.len() >= 2);
+    owner.test_release_held().await.unwrap();
 
     let state = get_subject(owner, governance_id.clone(), Some(2), true)
         .await
@@ -634,7 +703,7 @@ async fn test_approval_rejection_commits_event() {
 
 #[test(tokio::test)]
 // Early rejection: once the remaining approvers cannot reach quorum the
-// tally closes immediately, without waiting for the approval window
+// approval closes immediately, without waiting for the approval window
 // (300 s in tests): a commit well under that proves the early exit.
 async fn test_approval_early_rejection_no_deadline_wait() {
     let (nodes, _dirs) = owner_and_two_approvers(true, false).await;
@@ -664,7 +733,7 @@ async fn test_approval_early_rejection_no_deadline_wait() {
     .unwrap();
 
     // Owner auto-accepts (1 agree); two rejects make the quorum
-    // unreachable (3 - 2 = 1 < 2) and close the tally at once.
+    // unreachable (3 - 2 = 1 < 2) and close the approval at once.
     emit_approve(
         approver_1,
         governance_id.clone(),
@@ -828,7 +897,7 @@ async fn test_approval_non_gov_facts_unaffected() {
 #[test(tokio::test)]
 // The owner is the only approver while a second node is also a
 // validator: both validators collect the owner's vote over the network
-// like any other approver, and the tally commits.
+// like any other approver, and the event commits.
 async fn test_approval_owner_is_approver_remote_validator() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -867,8 +936,8 @@ async fn test_approval_owner_is_approver_remote_validator() {
         .unwrap();
 
     // Validators = {Owner, Validator1} (majority = 2), approver =
-    // {Owner}: the owner votes as an approver and both validators must
-    // collect that vote and sign the tally.
+    // {Owner}: the owner votes as an approver and both validators
+    // collect that vote during the approval phase.
     let json = add_fake_member("AveNode1");
     emit_fact(owner, governance_id.clone(), json, true)
         .await
@@ -894,7 +963,8 @@ async fn test_approval_owner_is_approver_remote_validator() {
 
 #[test]
 // The approval evidence committed in governance events round-trips
-// through borsh and serde; the previous timeout-based format no longer
+// through borsh and serde, both standalone and inside the validation
+// request that carries it; the previous timeout-based format no longer
 // deserializes.
 fn approval_data_serialization_roundtrip() {
     let signer = Ed25519Signer::generate().unwrap();
@@ -945,14 +1015,48 @@ fn approval_data_serialization_roundtrip() {
     assert!(
         borsh::from_slice::<ApprovalData>(&bytes[..bytes.len() - 1]).is_err()
     );
+
+    // The evidence travels inside the validation request: the approve
+    // protocol variants carry the closed `ApprovalData`, which must
+    // round-trip byte-exact as part of them.
+    let protocols = ActualProtocols::EvalApprove {
+        eval_data: ave_core::model::event::EvaluationData {
+            eval_req_signature: mk_sig(b"eval request"),
+            eval_req_hash: ave_common::identity::hash_borsh(
+                &*ave_common::identity::HashAlgorithm::Blake3.hasher(),
+                &b"eval request".to_vec(),
+            )
+            .unwrap(),
+            evaluators_signatures: vec![mk_sig(b"eval")],
+            response: ave_core::model::event::EvaluationResponse::Error {
+                result: ave_core::evaluation::response::EvaluatorError::InternalError(
+                    "boom".to_owned(),
+                ),
+                result_hash: ave_common::identity::hash_borsh(
+                    &*ave_common::identity::HashAlgorithm::Blake3.hasher(),
+                    &b"eval error".to_vec(),
+                )
+                .unwrap(),
+            },
+        },
+        approval_data: data,
+    };
+    let bytes = borsh::to_vec(&protocols).unwrap();
+    let back: ActualProtocols = borsh::from_slice(&bytes).unwrap();
+    assert_eq!(borsh::to_vec(&back).unwrap(), bytes);
+    let json = serde_json::to_value(&protocols).unwrap();
+    let back: ActualProtocols = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&back).unwrap(), json);
 }
 
 
 #[test(tokio::test)]
-// Approver offline: its absence is attested at the deadline and the
-// event commits accepted once the absent count reaches quorum. The
-// window is 7 s, so a commit well under 90 s and over 6 s pins the
-// deadline-driven close (2 agrees of quorum 3 can never close early).
+// Approver offline: its absence is attested at the deadline by the
+// approval validators and the event commits accepted once the absent
+// count reaches quorum. The window is 7 s, so a commit well under 90 s
+// and over 6 s pins the deadline-driven close (2 agrees of quorum 3 can
+// never close early). The validation phase afterwards verifies the
+// attestations data-only, with its own fresh validator draw.
 async fn test_approval_offline_approver_absent_at_deadline() {
     let short = short_window_approval();
     let mut nodes = vec![TestNode::bootstrap().await];
@@ -968,14 +1072,15 @@ async fn test_approval_offline_approver_absent_at_deadline() {
         .public_key()
         .to_string();
 
-    // Approvers = {Owner, Approver1, Ghost}, quorum fixed 3.
+    // Approvers = {Owner, Approver1, Ghost}, quorum fixed 3. Validators =
+    // {Owner, Approver1} fixed 2: both collect the votes during the
+    // approval phase and both attest the ghost's timeout.
     let json = json!({
         "policies": {
             "governance": {
                 "change": {
-                    "approve": {
-                        "fixed": 3
-                    }
+                    "approve": { "fixed": 3 },
+                    "validate": { "fixed": 2 }
                 }
             }
         },
@@ -983,7 +1088,8 @@ async fn test_approval_offline_approver_absent_at_deadline() {
             "governance": {
                 "add": {
                     "witness": ["Approver1"],
-                    "approver": ["Approver1", "Ghost"]
+                    "approver": ["Approver1", "Ghost"],
+                    "validator": ["Approver1"]
                 }
             }
         },
@@ -1029,8 +1135,9 @@ async fn test_approval_offline_approver_absent_at_deadline() {
     assert_approval_outcome(&events, 2, Some(true));
 
     // Evidence pin: the ghost never voted, so its absence is attested by
-    // the validator set (the owner node) — the timeout entry carries the
-    // validator-signed attestations, and no vote appears for the ghost.
+    // the approval collectors (the owner and Approver1) — the timeout
+    // entry carries one validator-signed attestation per collector, and
+    // no vote appears for the ghost.
     let ghost_pk = PublicKey::from_str(&ghost).unwrap();
     let ledger_event = owner
         .test_get_ledger_event(governance_id.clone(), 2)
@@ -1038,6 +1145,7 @@ async fn test_approval_offline_approver_absent_at_deadline() {
         .unwrap();
     let Protocols::GovFact {
         approval: Some(approval),
+        validation,
         ..
     } = ledger_event.protocols
     else {
@@ -1056,14 +1164,22 @@ async fn test_approval_offline_approver_absent_at_deadline() {
         .iter()
         .find(|(who, _)| *who == ghost_pk)
         .expect("the ghost absence must be attested by validators");
-    assert_eq!(attestations.len(), 1);
-    assert_eq!(attestations[0].signer, nodes[1].public_key());
+    let attesters: HashSet<PublicKey> = attestations
+        .iter()
+        .map(|signature| signature.signer.clone())
+        .collect();
+    assert_eq!(
+        attesters,
+        HashSet::from([nodes[1].public_key(), nodes[2].public_key()])
+    );
+    assert_eq!(validation.validators_signatures.len(), 2);
 }
 
 #[test(tokio::test)]
 // Deadline tick with zero votes: nothing can close the collection before
 // the deadline (no quorum, no early rejection), so the commit around the
-// 7 s mark pins the timer firing at the deadline itself.
+// 7 s mark pins the timer firing at the deadline itself. The approval
+// phase closes there and only then does the validation phase run.
 async fn test_approval_deadline_tick_closes_without_votes() {
     let short = short_window_approval();
     let mut nodes = vec![TestNode::bootstrap().await];
@@ -1133,13 +1249,49 @@ async fn test_approval_deadline_tick_closes_without_votes() {
         .await
         .unwrap();
     assert_approval_outcome(&events, 2, Some(true));
+
+    // Evidence pin: nobody voted, so both absences carry their timeout
+    // attestation signed by the only validator (the owner itself).
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert!(approval.approvers_agrees_signatures.is_empty());
+    assert_eq!(
+        approval
+            .approvers_timeouts
+            .iter()
+            .map(|(who, _)| who.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            nodes[1].public_key(),
+            PublicKey::from_str(&ghost).unwrap()
+        ])
+    );
+    assert!(
+        approval
+            .approvers_timeouts
+            .iter()
+            .all(|(_, attestations)| {
+                attestations.len() == 1
+                    && attestations[0].signer == nodes[1].public_key()
+            })
+    );
 }
 
 #[test(tokio::test)]
 // Validator restart mid-collection: the validator is killed right after
 // emission (before its ACK) and restarted a few seconds later; the
-// requester retries delivery, the validator re-asks the approvers (their
-// votes are persisted and resent), signs the tally and the event
+// requester retries the collection delivery, the validator re-asks the
+// approvers (their votes are persisted and resent) and the event
 // commits. Validators = {Owner, Validator1} with quorum fixed 2, so the
 // selection is deterministic.
 async fn test_approval_validator_restart_mid_collection() {
@@ -1307,11 +1459,12 @@ async fn test_approval_validator_crash_replaced_from_pool() {
 #[test(tokio::test)]
 // Replacement after the deadline expired: nobody votes, so the
 // collection closes at the 7 s deadline by absent attestation; the
-// crashed validator is dropped at the deadline plus grace and its
-// replacement receives the ready tally with the acknowledgement and
-// signs it without collecting anything. Selection of two of the three
-// validators is random, so the replacement path runs only when
-// Validator1 was selected; the commit is deterministic either way.
+// crashed validator is dropped once its delivery retry runs out and its
+// replacement re-asks the approvers once and, with the deadline already
+// lapsed, signs and pushes its own timeout attestation immediately,
+// completing the accounting. Selection of two of the three validators is
+// random, so the replacement path runs only when Validator1 was
+// selected; the commit is deterministic either way.
 async fn test_approval_replacement_after_deadline_immediate_close() {
     let short = short_window_approval();
     let mut nodes = vec![TestNode::bootstrap().await];
@@ -1385,80 +1538,6 @@ async fn test_approval_replacement_after_deadline_immediate_close() {
         elapsed >= Duration::from_secs(6),
         "collection can only close at the deadline, took {elapsed:?}"
     );
-
-    let events = get_events(&owner, governance_id.clone(), 3, true)
-        .await
-        .unwrap();
-    assert_approval_outcome(&events, 2, Some(true));
-}
-
-#[test(tokio::test)]
-// Tally proposed but the selected validator is down: the approvers
-// auto-accept so the tally exists early; the crashed validator times out
-// at the deadline plus grace and its replacement receives the tally with
-// the working acknowledgement and signs it without having collected any
-// vote. Same random-selection caveat as the pool test above.
-async fn test_approval_tally_signed_by_replacement_without_collecting() {
-    let short = short_window_approval();
-    let mut nodes = vec![TestNode::bootstrap().await];
-    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
-    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
-    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
-    nodes.push(TestNode::addressable(&nodes, true, Some(short)).await);
-    let owner = nodes[1].api().clone();
-    let approver = nodes[4].api().clone();
-
-    let governance_id = create_and_authorize_governance(
-        &owner,
-        vec![nodes[2].api(), nodes[3].api(), &approver],
-    )
-    .await;
-
-    let json = json!({
-        "policies": {
-            "governance": {
-                "change": {
-                    "approve": { "fixed": 2 },
-                    "validate": { "fixed": 2 }
-                }
-            }
-        },
-        "roles": {
-            "governance": {
-                "add": {
-                    "witness": ["Validator1", "Validator2", "Approver1"],
-                    "validator": ["Validator1", "Validator2"],
-                    "approver": ["Approver1"]
-                }
-            }
-        },
-        "members": {
-            "add": [
-                {
-                    "name": "Validator1",
-                    "key": nodes[2].api().public_key()
-                },
-                {
-                    "name": "Validator2",
-                    "key": nodes[3].api().public_key()
-                },
-                {
-                    "name": "Approver1",
-                    "key": approver.public_key()
-                }
-            ]
-        }
-    });
-    emit_fact(&owner, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode1"), false)
-        .await
-        .unwrap();
-    nodes[2].kill().await;
-
-    wait_subject_sn(&owner, governance_id.clone(), 2, 180).await;
 
     let events = get_events(&owner, governance_id.clone(), 3, true)
         .await
@@ -1824,15 +1903,15 @@ async fn test_approval_validator_state_expires_after_ttl() {
 }
 
 #[test(tokio::test)]
-// Untallied observation: the validator receives a vote (injected) after
-// the requester already proposed the tally without it. The validator
-// signs anyway: tally verification is data-only (vote signatures,
-// quorum, deadline), no local cross-check. The pushed report does not
-// amend the tally either: the first proposal is immutable. The
-// event commits in the first round, with no timeout+reboot cycle, and
-// the committed approval evidence contains exactly the votes reported
-// before the close.
-async fn test_approval_untallied_observation_signed_data_only() {
+// Late vote after the close: the approval phase closes early with the
+// auto-accept votes and the validation request is held before reaching
+// the remote validator; a vote injected into the validator afterwards
+// finds no collection (purged at the close) and is discarded, and the
+// event commits in the first validation round with exactly the votes the
+// requester closed with. A manual approver answering its pending
+// approval entity once the request is over is likewise a no-op, and the
+// next request proceeds normally.
+async fn test_approval_late_vote_after_close_ignored() {
     let mut nodes = vec![TestNode::bootstrap().await];
     nodes.push(TestNode::addressable(&nodes, true, None).await);
     nodes.push(TestNode::addressable(&nodes, true, None).await);
@@ -1888,14 +1967,16 @@ async fn test_approval_untallied_observation_signed_data_only() {
         .await
         .unwrap();
 
-    // Hold the first tally proposal headed to Validator1.
-    nodes[2]
-        .api()
+    // Hold the validation request headed to Validator1: once it is held
+    // the approval phase is already closed at the owner while Validator1
+    // still keeps its collection (the purge rides on that same held
+    // validation request).
+    owner
         .test_install_fault(FaultRule {
-            direction: FaultDirection::Inbound,
-            message: FaultMessage::TallyProposal,
-            peer: Some(owner_pk.clone()),
-            remaining: Some(1),
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ValidationReq,
+            peer: Some(val1_pk.clone()),
+            remaining: None,
             action: FaultAction::Hold,
         })
         .await
@@ -1910,21 +1991,15 @@ async fn test_approval_untallied_observation_signed_data_only() {
     .await
     .unwrap();
 
-    // Owner and Approver1 auto-accept: the requester closes the tally
-    // {Owner, Approver1} and its own worker signs it; the proposal to
-    // Validator1 is held. Wait until the proposal is actually held: at
-    // that point the tally is already closed, so the vote injected
-    // below always lands after the first proposal.
-    let mut tries = 0;
-    while nodes[2].api().test_held_count().await.unwrap() == 0 {
-        tries += 1;
-        assert!(tries < 100, "tally proposal was never held");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    wait_held_validation_req(&owner, &val1_pk).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Validator1 additionally observes an Approver2 vote. The vote must
-    // echo the request manager version tracked for the request (the
-    // collection gates on it), not the governance version.
+    // Approver2's vote reaches Validator1 after the close: the
+    // collection is still alive there, so the vote is merged and pushed
+    // to the owner, whose approval phase is already closed and discards
+    // every vote report. The vote echoes the request manager version
+    // tracked for the request (the collection gated on it), not the
+    // governance version.
     let (req, _) = nodes[4]
         .api()
         .get_approval(governance_id.clone(), None)
@@ -1948,13 +2023,13 @@ async fn test_approval_untallied_observation_signed_data_only() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // The proposal arrives: Validator1 verifies the tally data-only and
-    // signs, despite the extra vote it received. No reboot is involved:
-    // the whole flow must finish well under a timeout+backoff cycle.
+    // The validation request flows: Validator1 verifies the closed
+    // evidence data-only and signs. No reboot is involved: the whole
+    // flow must finish well under a timeout+backoff cycle.
     let released = Instant::now();
-    nodes[2].api().test_release_held().await.unwrap();
+    owner.test_release_held().await.unwrap();
 
     wait_subject_sn(&owner, governance_id.clone(), 2, 60).await;
     assert!(
@@ -1968,10 +2043,11 @@ async fn test_approval_untallied_observation_signed_data_only() {
         .unwrap();
     assert_approval_outcome(&events, 2, Some(true));
 
-    // Content pin: the committed tally is exactly the first proposal —
-    // owner and Approver1 as agrees, Approver2 absent, no double votes —
-    // and the full validator quorum signed that same package. The
-    // post-proposal vote never entered the ledger.
+    // Content pin: the committed evidence is exactly what the requester
+    // closed with — owner and Approver1 as agrees, Approver2 absent, no
+    // double votes, no timeout attestations (early closure) — and the
+    // full validator quorum signed that same package. The post-close
+    // vote never entered the ledger.
     let ledger_event = owner
         .test_get_ledger_event(governance_id.clone(), 2)
         .await
@@ -2001,6 +2077,31 @@ async fn test_approval_untallied_observation_signed_data_only() {
     );
     assert!(approval.approved);
     assert_eq!(validation.validators_signatures.len(), 2);
+
+    // Approver2 answers its still-pending approval entity once the
+    // request is over: depending on the local cleanup timing this is a
+    // no-op or an error; either way the network ignores the late vote.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let _ = nodes[4]
+        .api()
+        .approve(governance_id.clone(), ApprovalStateRes::Accepted)
+        .await;
+
+    // The next request runs its approval round unaffected.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode2"),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_subject_sn(&owner, governance_id.clone(), 3, 90).await;
+
+    let events = get_events(&owner, governance_id.clone(), 4, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 3, Some(true));
 }
 
 #[test(tokio::test)]
@@ -2050,9 +2151,9 @@ async fn test_approval_double_vote_excluded() {
     .unwrap();
 
     // Approver1 accepts legitimately, then a reject signed with the same
-    // key goes straight into the mailbox of the ephemeral worker that
-    // holds the owner's collection for this request: the pair is a
-    // double vote and Approver1 is excluded from the count.
+    // key goes straight into the mailbox of the ephemeral approval-phase
+    // worker that holds the owner's collection for this request: the
+    // pair is a double vote and Approver1 is excluded from the count.
     tokio::time::sleep(Duration::from_secs(2)).await;
     emit_approve(
         nodes[2].api(),
@@ -2079,7 +2180,7 @@ async fn test_approval_double_vote_excluded() {
         .version;
     tell_vote_to_worker(
         &owner,
-        &format!("/user/request/{governance_id}/validation/{owner_pk}"),
+        &format!("/user/request/{governance_id}/approval/{owner_pk}"),
         vote,
         &request_id,
         version,
@@ -2251,72 +2352,11 @@ async fn test_approval_stale_approver_unavailable_then_votes() {
 }
 
 #[test(tokio::test)]
-// Late vote: the manual approver answers after the request already
-// committed; the vote is ignored (the collection is closed) and the
-// next request proceeds normally.
-async fn test_approval_late_vote_after_close_ignored() {
-    let mut nodes = vec![TestNode::bootstrap().await];
-    nodes.push(TestNode::addressable(&nodes, true, None).await);
-    nodes.push(TestNode::addressable(&nodes, true, None).await);
-    nodes.push(TestNode::addressable(&nodes, false, None).await);
-    let owner = nodes[1].api().clone();
-
-    let governance_id = create_and_authorize_governance(
-        &owner,
-        vec![nodes[2].api(), nodes[3].api()],
-    )
-    .await;
-
-    let json = two_approvers_setup(nodes[2].api(), nodes[3].api());
-    emit_fact(&owner, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    // Owner and Approver1 auto-accept: the event commits without
-    // Approver2 (manual, silent).
-    emit_fact(
-        &owner,
-        governance_id.clone(),
-        add_fake_member("AveNode1"),
-        false,
-    )
-    .await
-    .unwrap();
-    wait_subject_sn(&owner, governance_id.clone(), 2, 90).await;
-
-    // Approver2 answers its still-pending approval entity once the
-    // request is over: depending on the local cleanup timing this is a
-    // no-op or an error; either way the network ignores the late vote.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let _ = nodes[3]
-        .api()
-        .approve(governance_id.clone(), ApprovalStateRes::Accepted)
-        .await;
-
-    // The next request runs its approval round unaffected.
-    emit_fact(
-        &owner,
-        governance_id.clone(),
-        add_fake_member("AveNode2"),
-        false,
-    )
-    .await
-    .unwrap();
-    wait_subject_sn(&owner, governance_id.clone(), 3, 90).await;
-
-    let events = get_events(&owner, governance_id.clone(), 4, true)
-        .await
-        .unwrap();
-    assert_approval_outcome(&events, 2, Some(true));
-    assert_approval_outcome(&events, 3, Some(true));
-}
-
-#[test(tokio::test)]
 // Double vote with partial observation: the reject is injected only
 // into the requester's worker while the remote validator observes just
-// the legitimate accept. The tally anchors the double-vote pair, which
-// accounts for the vote the remote validator saw, so both validators
-// sign and the event commits.
+// the legitimate accept. The closed evidence anchors the double-vote
+// pair, which accounts for the vote the remote validator saw, so the
+// validation verifies data-only and the event commits.
 async fn test_approval_double_vote_partial_observation() {
     let mut nodes = vec![TestNode::bootstrap().await];
     nodes.push(TestNode::addressable(&nodes, true, None).await);
@@ -2417,9 +2457,9 @@ async fn test_approval_double_vote_partial_observation() {
     .unwrap();
 
     // A reject signed by Approver1 goes straight into the mailbox of
-    // the requester's ephemeral worker (the one holding its collection
-    // for this request): it is queued before the held accept is
-    // released, so the worker always merges the reject first.
+    // the requester's ephemeral approval-phase worker (the one holding
+    // its collection for this request): it is queued before the held
+    // accept is released, so the worker always merges the reject first.
     let (req, _) = nodes[3]
         .api()
         .get_approval(governance_id.clone(), None)
@@ -2436,7 +2476,7 @@ async fn test_approval_double_vote_partial_observation() {
         .version;
     tell_vote_to_worker(
         &owner,
-        &format!("/user/request/{governance_id}/validation/{owner_pk}"),
+        &format!("/user/request/{governance_id}/approval/{owner_pk}"),
         vote,
         &request_id,
         version,
@@ -2449,8 +2489,9 @@ async fn test_approval_double_vote_partial_observation() {
     // accept.
     nodes[3].api().test_release_held().await.unwrap();
 
-    // Approver2 completes the quorum: the tally carries the double-vote
-    // pair, which covers Validator1's observation of the accept.
+    // Approver2 completes the quorum: the closed evidence carries the
+    // double-vote pair, which covers Validator1's observation of the
+    // accept.
     emit_approve(
         nodes[4].api(),
         governance_id.clone(),
@@ -2471,10 +2512,10 @@ async fn test_approval_double_vote_partial_observation() {
     // Evidence pin: Approver1 is excluded — the quorum is {Owner,
     // Approver2}, not {Owner, Approver1} — the double-vote pair is
     // anchored as the proof, no timeout attestations exist (early
-    // closure) and both validators signed that same package: Validator1
-    // co-signed a tally that excludes the accept it observed, covered
-    // by the pair. If the injected reject never landed, the tally would
-    // close at {Owner, Approver1} with no double votes.
+    // closure) and the validation quorum attested that same package: the
+    // pair covers the accept the remote validator observed. If the
+    // injected reject never landed, the approval would close at {Owner,
+    // Approver1} with no double votes.
     let ledger_event = owner
         .test_get_ledger_event(governance_id.clone(), 2)
         .await
@@ -2512,8 +2553,8 @@ async fn test_approval_double_vote_partial_observation() {
 #[test(tokio::test)]
 // Recovery re-survey: the requester restarts with the votes already
 // cast at the remaining validator; the status exchange right after the
-// working acknowledgement delivers them and the tally closes at once,
-// long before the 300 s window would.
+// collection acknowledgement delivers them and the approval closes at
+// once, long before the 300 s window would.
 async fn test_approval_owner_recovery_resurvey() {
     let mut nodes = vec![TestNode::bootstrap().await];
     nodes.push(TestNode::addressable(&nodes, false, None).await);
@@ -3307,7 +3348,6 @@ async fn test_approval_answer_wins_over_timeout() {
         min_window_secs: 7,
         probe_schedule_secs: vec![1, 2, 4],
         keepalive_secs: 3600,
-        tally_epsilon_secs: 5,
     };
     let mut nodes = vec![TestNode::bootstrap().await];
     nodes.push(TestNode::addressable(&nodes, true, Some(config.clone())).await);
@@ -3498,13 +3538,13 @@ async fn wait_held_count(node: &Api, n: usize, secs: u64) {
 }
 
 #[test(tokio::test)]
-// A final validation response is only valid once the requester has
-// proposed the approval tally: a byzantine validator (a key the test
-// owns, with no node behind it) signs a final response with no approval
-// hash before any tally exists. The requester must drop it — accepting
-// it would validate the event on a signature over a package nobody
-// produced — and the event never commits.
-async fn test_validation_pretally_response_rejected() {
+// A final validation response must attest the approval evidence carried
+// by the request: a byzantine validator (a key the test owns, with no
+// node behind it) signs a final response with no approval hash for a
+// request that went through the approval phase. The requester must drop
+// it — accepting it would validate the event on a signature over a
+// package nobody produced — and the event never commits.
+async fn test_validation_response_missing_approval_hash_rejected() {
     let nodes = vec![TestNode::bootstrap().await];
     let owner = nodes[0].api().clone();
     let owner_pk = nodes[0].public_key();
@@ -3574,9 +3614,9 @@ async fn test_validation_pretally_response_rejected() {
     let hasher = HashAlgorithm::Blake3.hasher();
     let vali_req_hash = hash_borsh(&*hasher, &signed_req).unwrap();
 
-    // The forgery: the final response for the right request but with no
-    // approval data, signed by the fake validator before any tally was
-    // proposed, delivered as if it came from the network.
+    // The forgery: the final response for the right request but without
+    // the approval hash, although the held request carries the closed
+    // approval evidence, delivered as if it came from the network.
     let forgery = Signed::new(
         ValidationRes::Response {
             vali_req_hash,
@@ -3605,12 +3645,17 @@ async fn test_validation_pretally_response_rejected() {
         &fake,
     )
     .unwrap();
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
     owner
         .test_inject_inbound(
             NetworkMessage {
                 info: ComunicateInfo {
                     request_id: request_id.to_string(),
-                    version: 1,
+                    version,
                     receiver: owner_pk,
                     receiver_actor: format!(
                         "/user/request/{governance_id}/validation/{fake_pk}"
@@ -3623,31 +3668,31 @@ async fn test_validation_pretally_response_rejected() {
         .await
         .unwrap();
 
-    // The gate drops the premature response: the fake validator never
-    // answers for real, so the fixed quorum of 2 is unreachable and the
-    // event never commits (the requester drops it and reboots the phase
-    // once the pool runs out). Without the gate the forged response
-    // counted as the fake's signature and, together with the owner's
-    // honest one, reached quorum: the event committed within seconds.
+    // The gate drops the response: the fake validator never answers for
+    // real, so the fixed quorum of 2 is unreachable and the event never
+    // commits (the requester drops it and reboots the phase once the
+    // pool runs out). Without the gate the forged response counted as
+    // the fake's signature and, together with the owner's honest one,
+    // reached quorum: the event committed within seconds.
     tokio::time::sleep(Duration::from_secs(10)).await;
     let state = get_subject(&owner, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert_eq!(
         state.sn, 1,
-        "the forged pre-tally response must not validate the event"
+        "a response without the approval hash must not validate the event"
     );
 }
 
 #[test(tokio::test)]
-// A Working acknowledgement only makes sense for requests with an
-// approval requirement: it arms the collection deadline in place of the
-// final response. A validator that ACKs a no-approval request is
-// misbehaving; the requester must treat it as a timeout (drop the
-// validator, and when nobody else can answer, reboot the phase) instead
-// of cancelling the retry and hanging forever waiting for a final
-// response that never comes.
-async fn test_validation_working_without_approval_times_out() {
+// A final validation response for a request without an approval
+// requirement must carry no approval hash: a byzantine validator (a key
+// the test owns, with no node behind it) answers with a well-formed
+// response except for an unexpected approval data hash. The requester
+// must drop it — accepting it would validate the event on a response
+// that attests evidence that does not exist — so the validator never
+// answers for real, the phase reboots and a fresh request goes out.
+async fn test_validation_unexpected_approval_hash_rejected() {
     let nodes = vec![TestNode::bootstrap().await];
     let owner = nodes[0].api().clone();
     let owner_pk = nodes[0].public_key();
@@ -3768,18 +3813,56 @@ async fn test_validation_working_without_approval_times_out() {
     .await
     .unwrap();
 
-    // The coordinator exists once the validation request is held.
-    wait_held_count(&owner, 1, 30).await;
+    // The coordinator exists once the validation request is held; the
+    // held request gives the exact hash the answer must echo.
+    let signed_req = wait_held_validation_req(&owner, &fake_pk).await;
+    let hasher = HashAlgorithm::Blake3.hasher();
+    let vali_req_hash = hash_borsh(&*hasher, &signed_req).unwrap();
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
 
-    // The fake validator ACKs with Working although this request has no
-    // approval requirement: misbehaviour, treated as a timeout.
-    let forgery = Signed::new(ValidationRes::Working, &fake).unwrap();
+    // The forgery: a final response for the right request but carrying
+    // an approval data hash although this request has no approval
+    // requirement, delivered as if it came from the network.
+    let forgery = Signed::new(
+        ValidationRes::Response {
+            vali_req_hash,
+            modified_metadata_without_propierties_hash: hash_borsh(
+                &*hasher,
+                &b"fake metadata".to_vec(),
+            )
+            .unwrap(),
+            propierties_hash: hash_borsh(
+                &*hasher,
+                &b"fake properties".to_vec(),
+            )
+            .unwrap(),
+            event_request_hash: hash_borsh(
+                &*hasher,
+                &b"fake request".to_vec(),
+            )
+            .unwrap(),
+            viewpoints_hash: hash_borsh(
+                &*hasher,
+                &b"fake viewpoints".to_vec(),
+            )
+            .unwrap(),
+            approval_data_hash: Some(
+                hash_borsh(&*hasher, &b"fake approval".to_vec()).unwrap(),
+            ),
+        },
+        &fake,
+    )
+    .unwrap();
     owner
         .test_inject_inbound(
             NetworkMessage {
                 info: ComunicateInfo {
                     request_id: request_id.to_string(),
-                    version: 2,
+                    version,
                     receiver: owner_pk,
                     receiver_actor: format!(
                         "/user/request/{subject_id}/validation/{fake_pk}"
@@ -3792,9 +3875,10 @@ async fn test_validation_working_without_approval_times_out() {
         .await
         .unwrap();
 
-    // The phase reboots and a fresh validation request is sent (and
-    // held). Before the fix the retry was cancelled and the phase hung
-    // forever, so no second request ever appeared.
+    // The gate drops the forged response: the fake validator never
+    // answers for real, the phase reboots and a fresh validation request
+    // is sent (and held). Without the gate the forged response, as the
+    // only validator's answer, would validate the event on its own.
     wait_held_count(&owner, 2, 60).await;
 
     let state = get_subject(&owner, subject_id.clone(), Some(0), true)
@@ -3802,6 +3886,835 @@ async fn test_validation_working_without_approval_times_out() {
         .unwrap();
     assert_eq!(
         state.sn, 0,
-        "a Working ACK for a no-approval request must not validate it"
+        "a response attesting a phantom approval must not validate the event"
     );
+}
+
+#[test(tokio::test)]
+// Fresh validation set: the approval phase draws its collectors at
+// random (observed on the wire below) and the validation phase draws a
+// NEW independent set from the same role. Either set may overlap the
+// other — verification is data-only — so the event commits with
+// whatever validators the second draw picked.
+async fn test_approval_validation_uses_fresh_random_set() {
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    let owner = nodes[1].api().clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api(), nodes[3].api(), nodes[4].api()],
+    )
+    .await;
+
+    // Validators = {Owner, Validator1, Validator2} fixed 2, approvers =
+    // {Owner, Approver1} fixed 2: everyone auto-accepts.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 },
+                    "validate": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Validator1", "Validator2", "Approver1"],
+                    "validator": ["Validator1", "Validator2"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Validator1",
+                    "key": nodes[2].api().public_key()
+                },
+                {
+                    "name": "Validator2",
+                    "key": nodes[3].api().public_key()
+                },
+                {
+                    "name": "Approver1",
+                    "key": nodes[4].api().public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let role: HashSet<PublicKey> = [
+        nodes[1].public_key(),
+        nodes[2].public_key(),
+        nodes[3].public_key(),
+    ]
+    .into_iter()
+    .collect();
+
+    // Watch the approval collectors on the wire: the draw is two of the
+    // three role members, and a local draw (the owner collecting its own
+    // request) never crosses the network, so one or two requests are
+    // held.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalCollectReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    wait_held_count(&owner, 1, 30).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let collectors: HashSet<PublicKey> = owner
+        .test_held_outbound()
+        .await
+        .unwrap()
+        .iter()
+        .map(|message| message.info.receiver.clone())
+        .collect();
+    owner.test_release_held().await.unwrap();
+
+    wait_subject_sn(&owner, governance_id.clone(), 2, 90).await;
+
+    // The observed collectors are a subset of the validation role.
+    assert!(!collectors.is_empty());
+    assert!(collectors.is_subset(&role));
+
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+
+    // The validation was signed by a full quorum drawn from the role —
+    // its own fresh selection, not necessarily the collectors above —
+    // over the closed approval evidence.
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        validation,
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert_eq!(validation.validators_signatures.len(), 2);
+    assert!(
+        validation
+            .validators_signatures
+            .iter()
+            .all(|signature| role.contains(&signature.signer))
+    );
+}
+
+#[test(tokio::test)]
+// Collector reuse purge: the same validator collects the approval votes
+// and then validates the request — receiving the closed evidence inside
+// the validation request purges its collection. A conflicting vote
+// injected afterwards is discarded instead of producing a vote report.
+async fn test_approval_close_lost_leaves_no_residue() {
+    let short = short_window_approval();
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(short)).await);
+    let owner = nodes[1].api().clone();
+    let val1_pk = nodes[2].public_key();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api(), nodes[3].api()],
+    )
+    .await;
+
+    // Validators = {Owner, Validator1} (majority 2), approvers = {Owner,
+    // Approver1} fixed 2: everyone auto-accepts, so the approval closes
+    // early.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Validator1", "Approver1"],
+                    "validator": ["Validator1"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Validator1",
+                    "key": nodes[2].api().public_key()
+                },
+                {
+                    "name": "Approver1",
+                    "key": nodes[3].api().public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Capture the approval request and the request manager version for
+    // the probe below.
+    let mut probe_req = None;
+    for _ in 0..50 {
+        if let Some((req, _)) = nodes[3]
+            .api()
+            .get_approval(governance_id.clone(), None)
+            .await
+            .unwrap()
+        {
+            probe_req = Some(req);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let probe_req = probe_req.expect("approver never received the request");
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
+
+    // The purged collection blocks nothing: the event commits early,
+    // long before the 7 s window.
+    let start = Instant::now();
+    wait_subject_sn(&owner, governance_id.clone(), 2, 90).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(6),
+        "early close expected, took {:?}",
+        start.elapsed()
+    );
+
+    // Validator1 applies the commit too.
+    wait_subject_sn(nodes[2].api(), governance_id.clone(), 2, 30).await;
+
+    // Probe the validator: a conflicting vote for the closed request,
+    // with any report it could push held at the source. A live
+    // collection would merge the double vote and report it; nothing held
+    // means the stale collection left no residue.
+    nodes[2]
+        .api()
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalVoteReport,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    let vote = craft_vote(&probe_req, &governance_id, &nodes[3].data.keys, false);
+    inject_vote(
+        nodes[2].api(),
+        &val1_pk,
+        &governance_id,
+        vote,
+        &request_id,
+        version,
+        &nodes[3].public_key(),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        nodes[2].api().test_held_count().await.unwrap(),
+        0,
+        "a purged collection must not report votes"
+    );
+}
+
+#[test(tokio::test)]
+// Governance commit purge: a first request parks in Approval and is
+// aborted, leaving volatile state around; a second request commits, and
+// the commit obsoletes every leftover — the validators keep no
+// collection of the aborted request (an injected vote produces no
+// report) and the approver that never voted finds its pending state
+// obsolete.
+async fn test_approval_governance_commit_purges_stale_state() {
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, false, None).await);
+    nodes.push(TestNode::addressable(&nodes, false, None).await);
+    let owner = nodes[1].api().clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![
+            nodes[2].api(),
+            nodes[3].api(),
+            nodes[4].api(),
+            nodes[5].api(),
+        ],
+    )
+    .await;
+
+    // Validators = {Owner, Validator1, Validator2} fixed 2, approvers =
+    // {Owner, Approver1, Approver2} fixed 2. Both approvers are manual.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 },
+                    "validate": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Validator1",
+                        "Validator2",
+                        "Approver1",
+                        "Approver2"
+                    ],
+                    "validator": ["Validator1", "Validator2"],
+                    "approver": ["Approver1", "Approver2"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Validator1",
+                    "key": nodes[2].api().public_key()
+                },
+                {
+                    "name": "Validator2",
+                    "key": nodes[3].api().public_key()
+                },
+                {
+                    "name": "Approver1",
+                    "key": nodes[4].api().public_key()
+                },
+                {
+                    "name": "Approver2",
+                    "key": nodes[5].api().public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // The owner auto-accepts (1 < 2): the first request parks in
+    // Approval with collections open and both approvers pending.
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_request_state(
+        &owner,
+        request_id.clone(),
+        Some(RequestState::Approval),
+    )
+    .await
+    .unwrap();
+
+    // Capture the aborted request's approval data for the probe below.
+    let mut probe_req = None;
+    for _ in 0..50 {
+        if let Some((req, _)) = nodes[4]
+            .api()
+            .get_approval(governance_id.clone(), None)
+            .await
+            .unwrap()
+        {
+            probe_req = Some(req);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let probe_req = probe_req.expect("approver never received the request");
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
+
+    owner.manual_request_abort(governance_id.clone()).await.unwrap();
+    wait_abort_recorded(&owner, governance_id.clone(), request_id.clone()).await;
+    let aborted_id = request_id;
+
+    // The second request parks in Approval too; wait until Approver2 is
+    // pending for it, then Approver1 completes the quorum.
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode2"),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_request_state(
+        &owner,
+        request_id.clone(),
+        Some(RequestState::Approval),
+    )
+    .await
+    .unwrap();
+    let mut pending = None;
+    for _ in 0..50 {
+        pending = nodes[5]
+            .api()
+            .get_approval(governance_id.clone(), Some(ApprovalState::Pending))
+            .await
+            .unwrap();
+        if pending.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(pending.is_some(), "approver2 never went pending");
+
+    emit_approve(
+        nodes[4].api(),
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        false,
+    )
+    .await
+    .unwrap();
+    wait_subject_sn(&owner, governance_id.clone(), 2, 90).await;
+
+    // Approver pin: the commit obsoleted Approver2's pending vote.
+    let mut obsolete = false;
+    for _ in 0..50 {
+        if nodes[5]
+            .api()
+            .get_approval(governance_id.clone(), Some(ApprovalState::Pending))
+            .await
+            .unwrap()
+            .is_none()
+        {
+            obsolete = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(obsolete, "the commit must obsolete the pending vote");
+
+    // Validator pin: no collection of the aborted request survives —
+    // a conflicting vote injected into either remote validator produces
+    // no vote report (reports are held at the source to observe them).
+    // Wait for both validators to apply the commit first: the governance
+    // version bump is what purges their stale collections.
+    for validator in [2, 3] {
+        wait_subject_sn(nodes[validator].api(), governance_id.clone(), 2, 30)
+            .await;
+    }
+    for validator in [2, 3] {
+        nodes[validator]
+            .api()
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message: FaultMessage::ApprovalVoteReport,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Hold,
+            })
+            .await
+            .unwrap();
+        let vote = craft_vote(
+            &probe_req,
+            &governance_id,
+            &nodes[4].data.keys,
+            false,
+        );
+        inject_vote(
+            nodes[validator].api(),
+            &nodes[validator].public_key(),
+            &governance_id,
+            vote,
+            &aborted_id,
+            version,
+            &nodes[4].public_key(),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    for validator in [2, 3] {
+        assert_eq!(
+            nodes[validator].api().test_held_count().await.unwrap(),
+            0,
+            "a purged collection must not report votes"
+        );
+    }
+}
+
+#[test(tokio::test)]
+// Evidence delivery with message loss: the approval evidence travels
+// inside the validation request, whose delivery has the phase
+// coordinator's retry — the first request to the remote validator is
+// dropped, the retry delivers it and the event commits without waiting
+// for any deadline.
+async fn test_approval_evidence_delivery_retried() {
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    nodes.push(TestNode::addressable(&nodes, true, None).await);
+    let owner = nodes[1].api().clone();
+    let val1_pk = nodes[2].public_key();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api(), nodes[3].api()],
+    )
+    .await;
+
+    // Validators = {Owner, Validator1} (majority 2), approvers = {Owner,
+    // Approver1} fixed 2: everyone auto-accepts, so the approval closes
+    // early and only the validation delivery is exercised.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Validator1", "Approver1"],
+                    "validator": ["Validator1"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Validator1",
+                    "key": nodes[2].api().public_key()
+                },
+                {
+                    "name": "Approver1",
+                    "key": nodes[3].api().public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // The first validation request to Validator1 is lost; the
+    // coordinator retry (10 s in tests) re-sends it.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ValidationReq,
+            peer: Some(val1_pk),
+            remaining: Some(1),
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+
+    let start = Instant::now();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    wait_subject_sn(&owner, governance_id.clone(), 2, 90).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(8) && elapsed < Duration::from_secs(90),
+        "the retry-driven commit lands around the 10 s retry, took {elapsed:?}"
+    );
+
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+}
+
+#[test(tokio::test)]
+// A delayed approval collection request (older issued_at than the live
+// one, same request id, different hash) arriving at a validator that
+// already holds the live collection for the same subject must not
+// supplant it: the stale request is rejected with an Unavailable ack
+// that the requester ignores (its hash is not the delivered request's),
+// the live collection keeps answering the owner's status asks and the
+// request commits without any reboot.
+async fn test_approval_stale_collect_does_not_supplant_live_collection() {
+    // Long keepalive: the only status traffic is the one this test
+    // drives, so held answers can be attributed to the live collection.
+    let config = ApprovalConfig {
+        min_window_secs: 300,
+        probe_schedule_secs: vec![1, 2, 4, 293],
+        keepalive_secs: 300,
+    };
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, Some(config.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(config.clone())).await);
+    // Manual approver: the collection stays open until the test votes.
+    nodes.push(TestNode::addressable(&nodes, false, Some(config)).await);
+    let owner = nodes[1].api().clone();
+    let val1_pk = nodes[2].public_key();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api(), nodes[3].api()],
+    )
+    .await;
+
+    // Validators = {Owner, Validator1} (majority 2), approvers = {Owner,
+    // Approver1} fixed 2. The owner auto-accepts; Approver1 is manual,
+    // so the approval stays open until the test casts its vote.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Validator1", "Approver1"],
+                    "validator": ["Validator1"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Validator1",
+                    "key": nodes[2].api().public_key()
+                },
+                {
+                    "name": "Approver1",
+                    "key": nodes[3].api().public_key()
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Hold the live collection request so its delivery order against
+    // the stale one is fully controlled.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalCollectReq,
+            peer: Some(val1_pk.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_held_count(&owner, 1, 10).await;
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
+    assert_eq!(version, 0);
+
+    // Hold only the first ack (the live Accepted): the coordinator
+    // stays alive waiting for it, so the stale rejection below reaches
+    // a live coordinator and must be ignored there too.
+    nodes[2]
+        .api()
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalCollectAck,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+
+    // The live collection opens at Validator1.
+    owner.test_release_held().await.unwrap();
+
+    // Wait for the live request to reach the manual approver (the probe
+    // round proves the collection is open) and take its content to
+    // craft the stale one.
+    let mut live_req = None;
+    for _ in 0..50 {
+        if let Some((req, _)) = nodes[3]
+            .api()
+            .get_approval(governance_id.clone(), None)
+            .await
+            .unwrap()
+        {
+            live_req = Some(req);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let live_req = live_req.expect("approver never received the request");
+    let live_hash =
+        hash_borsh(&*HashAlgorithm::Blake3.hasher(), &live_req).unwrap();
+
+    // A delayed duplicate of the same request with an older issued_at:
+    // strictly older by the (issued_at, version, request id) order and
+    // a different hash. Signed by the owner, so it passes the static
+    // checks and reaches the freshness guard.
+    let mut stale_req = live_req.clone();
+    stale_req.issued_at = TimeStamp::from_nanos(
+        live_req.issued_at.as_nanos().saturating_sub(1),
+    );
+    let stale_signed = Signed::new(stale_req, &nodes[1].data.keys).unwrap();
+    nodes[2]
+        .api()
+        .test_inject_inbound(
+            NetworkMessage {
+                info: ComunicateInfo {
+                    request_id: request_id.to_string(),
+                    version,
+                    receiver: val1_pk.clone(),
+                    receiver_actor: format!(
+                        "/user/node/subject_manager/{governance_id}/validator"
+                    ),
+                },
+                message: ActorMessage::ApprovalCollectReq {
+                    req: stale_signed,
+                },
+            },
+            &nodes[1].public_key(),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // The stale request was rejected without touching anything: its
+    // Unavailable ack carries the stale hash, so the live coordinator
+    // ignores it — no validator replacement, no reboot.
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
+    assert_eq!(
+        version, 0,
+        "the stale collect must not replace the validator nor reboot"
+    );
+
+    // The live collection still answers the owner's status asks: a
+    // supplanting stale collection would make this ask fall through.
+    nodes[2]
+        .api()
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalStatusRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    nodes[2]
+        .api()
+        .test_inject_inbound(
+            NetworkMessage {
+                info: ComunicateInfo {
+                    request_id: request_id.to_string(),
+                    version,
+                    receiver: val1_pk.clone(),
+                    receiver_actor: format!(
+                        "/user/node/subject_manager/{governance_id}/validator"
+                    ),
+                },
+                message: ActorMessage::ApprovalStatusReq {
+                    approval_req_hash: live_hash,
+                },
+            },
+            &nodes[1].public_key(),
+        )
+        .await
+        .unwrap();
+    wait_held_count(nodes[2].api(), 1, 10).await;
+    nodes[2].api().test_release_held().await.unwrap();
+
+    // Approver1 votes: the approval closes with the live collection and
+    // the event commits approved.
+    emit_approve(
+        nodes[3].api(),
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    wait_subject_sn(&owner, governance_id.clone(), 2, 60).await;
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
 }

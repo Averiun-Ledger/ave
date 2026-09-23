@@ -37,7 +37,8 @@ pub enum FaultMessage {
     ApprovalVoteReport,
     ApprovalStatusReq,
     ApprovalStatusRes,
-    TallyProposal,
+    ApprovalCollectReq,
+    ApprovalCollectAck,
     DistributionLastEventReq,
     DistributionLastEventRes,
     DistributionLedgerReq,
@@ -74,7 +75,12 @@ pub(crate) fn classify(message: &ActorMessage) -> FaultMessage {
         ActorMessage::ApprovalStatusRes { .. } => {
             FaultMessage::ApprovalStatusRes
         }
-        ActorMessage::TallyProposal { .. } => FaultMessage::TallyProposal,
+        ActorMessage::ApprovalCollectReq { .. } => {
+            FaultMessage::ApprovalCollectReq
+        }
+        ActorMessage::ApprovalCollectAck { .. } => {
+            FaultMessage::ApprovalCollectAck
+        }
         ActorMessage::DistributionLastEventReq { .. } => {
             FaultMessage::DistributionLastEventReq
         }

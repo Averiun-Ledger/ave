@@ -1,6 +1,5 @@
 use crate::{
-    approval::request::ApprovalReq,
-    model::event::{CompilationData, EvaluationData, ValidationData},
+    model::event::{ApprovalData, CompilationData, EvaluationData, ValidationData},
     subject::Metadata,
 };
 
@@ -144,7 +143,7 @@ pub enum ActualProtocols {
     },
     EvalApprove {
         eval_data: EvaluationData,
-        approval_req: Signed<ApprovalReq>,
+        approval_data: ApprovalData,
     },
     /// The governance fact touched contracts and the compilation phase
     /// rejected them: the event commits as failed without evaluation.
@@ -156,11 +155,11 @@ pub enum ActualProtocols {
         compile_data: CompilationData,
         eval_data: EvaluationData,
     },
-    /// Compilation and evaluation succeeded and approval is required.
+    /// Compilation and evaluation succeeded and the approval closed.
     CompileEvalApprove {
         compile_data: CompilationData,
         eval_data: EvaluationData,
-        approval_req: Signed<ApprovalReq>,
+        approval_data: ApprovalData,
     },
 }
 
