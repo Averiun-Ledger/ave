@@ -1,6 +1,6 @@
-use std::collections::{BTreeSet, HashSet, VecDeque};
 #[cfg(feature = "test")]
 use std::collections::HashMap;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,10 +22,10 @@ use ave_network::ComunicateInfo;
 use super::error::CompilerError;
 use super::pipeline;
 use super::support::{
-    CompilerResponse, CompilerSupport, HEAL_RETRY_BASE_MS,
-    HEAL_RETRY_MAX_MS, SERVING_CACHE_TTL, ServedArtifact,
-    ServingCacheEntry, is_compiler_infra_error,
-    is_local_fatal_compiler_error, is_retryable_compiler_recovery_error,
+    CompilerResponse, CompilerSupport, HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS,
+    SERVING_CACHE_TTL, ServedArtifact, ServingCacheEntry,
+    is_compiler_infra_error, is_local_fatal_compiler_error,
+    is_retryable_compiler_recovery_error,
 };
 use crate::compilation::artifact::{
     ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
@@ -231,8 +231,7 @@ pub struct FetchObs {
 /// Handle of the per-node fetch observability registry (feature
 /// `test`), keyed by contract name.
 #[cfg(feature = "test")]
-pub type SharedFetchObs =
-    Arc<std::sync::Mutex<HashMap<String, FetchObs>>>;
+pub type SharedFetchObs = Arc<std::sync::Mutex<HashMap<String, FetchObs>>>;
 
 impl ContractCompiler {
     pub fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
@@ -284,9 +283,8 @@ impl ContractCompiler {
         contract_name: &str,
         update: impl FnOnce(&mut FetchObs),
     ) {
-        let Some(obs) = ctx
-            .system()
-            .get_helper::<SharedFetchObs>("test_fetch_obs")
+        let Some(obs) =
+            ctx.system().get_helper::<SharedFetchObs>("test_fetch_obs")
         else {
             return;
         };
@@ -550,8 +548,7 @@ impl ContractCompiler {
         }
 
         let delay = busy_retry_delay(round.busy_attempts + 1);
-        let Some(nonce) = self.fetch.as_ref().map(|fetch| fetch.nonce)
-        else {
+        let Some(nonce) = self.fetch.as_ref().map(|fetch| fetch.nonce) else {
             return Ok(());
         };
         // One live timer per fetch: cancel the probe round's timeout
@@ -755,7 +752,9 @@ impl ContractCompiler {
         }
 
         let FetchPhase::Fetch {
-            round, peer, probe_nonce,
+            round,
+            peer,
+            probe_nonce,
         } = &mut fetch.phase
         else {
             return Ok(());
@@ -807,7 +806,8 @@ impl ContractCompiler {
             Ok(governance) => governance,
             Err(e) => return Err(crash_system(ctx, e).await),
         };
-        if let Err(e) = governance.tell(GovernanceMessage::TriggerGovUpdate).await
+        if let Err(e) =
+            governance.tell(GovernanceMessage::TriggerGovUpdate).await
         {
             return Err(crash_system(ctx, e).await);
         }
@@ -959,22 +959,19 @@ impl ContractCompiler {
                         .map(|()| CompilerResponse::Ok);
                 }
             };
-        let engine_fingerprint = match contract_runtime
-            .engine_fingerprint(self.hash)
-        {
-            Ok(engine_fingerprint) => engine_fingerprint,
-            Err(e) => {
-                return self
-                    .fetch_failed(
-                        ctx,
-                        pipeline::map_runtime_error_to_compiler_error(
-                            e,
-                        ),
-                    )
-                    .await
-                    .map(|()| CompilerResponse::Ok);
-            }
-        };
+        let engine_fingerprint =
+            match contract_runtime.engine_fingerprint(self.hash) {
+                Ok(engine_fingerprint) => engine_fingerprint,
+                Err(e) => {
+                    return self
+                        .fetch_failed(
+                            ctx,
+                            pipeline::map_runtime_error_to_compiler_error(e),
+                        )
+                        .await
+                        .map(|()| CompilerResponse::Ok);
+                }
+            };
 
         match CompilerSupport::load_registered_artifact(
             self.hash,
@@ -992,8 +989,7 @@ impl ContractCompiler {
         .await
         {
             Ok(Some((module, metadata, _))) => {
-                let contracts =
-                    CompilerSupport::contracts_helper(ctx).await?;
+                let contracts = CompilerSupport::contracts_helper(ctx).await?;
                 contracts
                     .write()
                     .await
@@ -1084,9 +1080,7 @@ impl ContractCompiler {
                 if self.provision.is_some()
                     && let Err(e) = ctx.schedule_once(
                         Duration::ZERO,
-                        ContractCompilerMessage::HealArtifact {
-                            attempts: 1,
-                        },
+                        ContractCompilerMessage::HealArtifact { attempts: 1 },
                     )
                 {
                     return Err(crash_system(ctx, e).await);
@@ -1417,8 +1411,8 @@ impl Handler<Self> for ContractCompiler {
                 evaluators,
                 action,
             } => {
-                let whitelists_changed =
-                    self.compilers != compilers || self.evaluators != evaluators;
+                let whitelists_changed = self.compilers != compilers
+                    || self.evaluators != evaluators;
                 self.gov_version = gov_version;
                 self.compilers = compilers;
                 self.evaluators = evaluators;
@@ -1444,12 +1438,14 @@ impl Handler<Self> for ContractCompiler {
                                         error = %e,
                                         "Failed to hash contract"
                                     );
-                                    return Err(ActorError::FunctionalCritical {
-                                        description: format!(
-                                            "Can not hash contract: {}",
-                                            e
-                                        ),
-                                    });
+                                    return Err(
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not hash contract: {}",
+                                                e
+                                            ),
+                                        },
+                                    );
                                 }
                             };
 
@@ -1515,7 +1511,8 @@ impl Handler<Self> for ContractCompiler {
 
                             {
                                 let contracts =
-                                    CompilerSupport::contracts_helper(ctx).await?;
+                                    CompilerSupport::contracts_helper(ctx)
+                                        .await?;
                                 let mut contracts = contracts.write().await;
                                 contracts.insert(contract_name.clone(), module);
                             }
@@ -1562,12 +1559,14 @@ impl Handler<Self> for ContractCompiler {
                                         error = %e,
                                         "Failed to hash contract"
                                     );
-                                    return Err(ActorError::FunctionalCritical {
-                                        description: format!(
-                                            "Can not hash contract: {}",
-                                            e
-                                        ),
-                                    });
+                                    return Err(
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not hash contract: {}",
+                                                e
+                                            ),
+                                        },
+                                    );
                                 }
                             };
 
@@ -1597,7 +1596,9 @@ impl Handler<Self> for ContractCompiler {
                                 && self.fetch.as_ref().is_some_and(|fetch| {
                                     match &fetch.phase {
                                         FetchPhase::Fetch {
-                                            round, peer, ..
+                                            round,
+                                            peer,
+                                            ..
                                         } => {
                                             let live = if round.plan_b {
                                                 &self.evaluators
@@ -1784,8 +1785,7 @@ impl Handler<Self> for ContractCompiler {
                             return Ok(CompilerResponse::Ok);
                         }
                         let contract_hash =
-                            match hash_borsh(&*self.hash.hasher(), &contract)
-                            {
+                            match hash_borsh(&*self.hash.hasher(), &contract) {
                                 Ok(hash) => hash,
                                 Err(e) => {
                                     error!(
@@ -2011,8 +2011,7 @@ impl Handler<Self> for ContractCompiler {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        match self.serve_artifact(ctx, &contract_name).await?
-                        {
+                        match self.serve_artifact(ctx, &contract_name).await? {
                             Some(artifact) => {
                                 ArtifactFetchResult::Artifact(artifact)
                             }
@@ -2432,15 +2431,8 @@ mod tests {
     async fn resumed_probe_keeps_nonce_and_outlives_stale_timer() {
         let p1 = test_public_key();
         let p2 = test_public_key();
-        let (
-            _system,
-            _runner,
-            _dirs,
-            contracts_dir,
-            mut rx,
-            _faults,
-            compiler,
-        ) = setup_actors().await;
+        let (_system, _runner, _dirs, contracts_dir, mut rx, _faults, compiler) =
+            setup_actors().await;
 
         let start = Instant::now();
         reconcile_fetch(
@@ -2518,7 +2510,9 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            timeout(Duration::from_millis(300), rx.recv()).await.is_err(),
+            timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .is_err(),
             "a stale probe answer triggered an artifact request"
         );
 
@@ -2579,15 +2573,8 @@ mod tests {
     async fn artifact_request_send_failure_crashes_system() {
         let p1 = test_public_key();
         let p2 = test_public_key();
-        let (
-            _system,
-            runner,
-            _dirs,
-            contracts_dir,
-            mut rx,
-            faults,
-            compiler,
-        ) = setup_actors().await;
+        let (_system, runner, _dirs, contracts_dir, mut rx, faults, compiler) =
+            setup_actors().await;
         faults.lock().unwrap().install(FaultRule {
             direction: FaultDirection::Outbound,
             message: FaultMessage::ArtifactReq,

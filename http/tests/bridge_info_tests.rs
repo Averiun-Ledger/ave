@@ -609,9 +609,7 @@ async fn test_subject_access_endpoints_deserialization() {
     let public_key: HashSet<String> = serde_json::from_value(body).unwrap();
     assert_eq!(
         public_key,
-        HashSet::from_iter([
-            MEMBER_PUBLIC_KEY.to_string()
-        ])
+        HashSet::from_iter([MEMBER_PUBLIC_KEY.to_string()])
     );
 
     let (status, _body) = make_request(

@@ -942,7 +942,8 @@ mod tests {
         // this test.
         assert!(
             text.lines()
-                .any(|line| line == "core_contract_fetch_cycles_exhausted_total 2"),
+                .any(|line| line
+                    == "core_contract_fetch_cycles_exhausted_total 2"),
             "expected `core_contract_fetch_cycles_exhausted_total 2` in:\n{text}"
         );
     }

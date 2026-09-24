@@ -13,10 +13,9 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    EXAMPLE_CONTRACT,
-    CreateNodeConfig, PORT_COUNTER, create_and_authorize_governance,
-    create_node, create_subject, emit_fact, emit_transfer, get_subject,
-    node_running, wait_request,
+    CreateNodeConfig, EXAMPLE_CONTRACT, PORT_COUNTER,
+    create_and_authorize_governance, create_node, create_subject, emit_fact,
+    emit_transfer, get_subject, node_running, wait_request,
 };
 
 /// Helper: configura una gobernanza con schema "Example1", miembro "node1" y

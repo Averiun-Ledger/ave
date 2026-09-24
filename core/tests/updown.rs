@@ -6,10 +6,9 @@ use ave_common::identity::{KeyPair, PublicKey};
 use ave_common::response::RequestState;
 use ave_core::auth::AuthWitness;
 use common::{
-    EXAMPLE_CONTRACT,
-    create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_confirm, emit_fact, emit_reject, emit_transfer,
-    get_subject,
+    EXAMPLE_CONTRACT, create_and_authorize_governance,
+    create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
+    emit_reject, emit_transfer, get_subject,
 };
 
 use ave_network::{NodeType, RoutingNode};

@@ -20,8 +20,7 @@ use ave_actors::{
 use tracing::{Span, debug, error, info_span, warn};
 
 use super::{
-    Validation, ValidationMessage,
-    request::ValidationReq,
+    Validation, ValidationMessage, request::ValidationReq,
     response::ValidationRes,
 };
 

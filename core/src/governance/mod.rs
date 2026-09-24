@@ -1021,7 +1021,10 @@ impl Governance {
     /// artifacts are dropped).
     fn compile_evidence_of(
         events: &[Ledger],
-    ) -> (BTreeMap<SchemaType, DigestIdentifier>, Vec<(SchemaType, String)>) {
+    ) -> (
+        BTreeMap<SchemaType, DigestIdentifier>,
+        Vec<(SchemaType, String)>,
+    ) {
         let mut evidence_contracts = BTreeMap::new();
         let mut failed_sources = Vec::new();
 
@@ -1197,8 +1200,7 @@ impl Governance {
             if official_path.exists() {
                 // Stale backup from an interrupted promotion.
                 let _ = fs::remove_dir_all(&backup_path).await;
-                if let Err(e) = fs::rename(&official_path, &backup_path).await
-                {
+                if let Err(e) = fs::rename(&official_path, &backup_path).await {
                     return Err(crash_system(
                         ctx,
                         ActorError::FunctionalCritical {
@@ -1714,7 +1716,9 @@ impl Governance {
                 .await
                 {
                     Ok(recovered) => break Ok(recovered),
-                    Err(error) if is_retryable_compiler_recovery_error(&error) => {
+                    Err(error)
+                        if is_retryable_compiler_recovery_error(&error) =>
+                    {
                         let Some(delay) = delays.next() else {
                             break Err(error);
                         };
@@ -1878,8 +1882,7 @@ impl Governance {
                             .map(|schema_id| {
                                 format!(
                                     "{}_{}",
-                                    self.subject_metadata.subject_id,
-                                    schema_id
+                                    self.subject_metadata.subject_id, schema_id
                                 )
                             })
                             .collect(),
@@ -2141,7 +2144,10 @@ impl Governance {
             .ask(ContractRegisterMessage::ListPending)
             .await
             .map_err(|e| ActorError::Functional {
-                description: format!("Can not list deferred acquisitions: {}", e),
+                description: format!(
+                    "Can not list deferred acquisitions: {}",
+                    e
+                ),
             })? {
             ContractRegisterResponse::Contracts(names) => Ok(names),
             _ => Err(ActorError::UnexpectedResponse {
@@ -2183,16 +2189,14 @@ impl Governance {
             .properties
             .schemas(ProtocolTypes::Evaluation, &self.our_key);
 
-        let mut recover_schemas: BTreeMap<SchemaType, Schema> =
-            BTreeMap::new();
+        let mut recover_schemas: BTreeMap<SchemaType, Schema> = BTreeMap::new();
         let mut fetch_schemas: BTreeMap<SchemaType, Schema> = BTreeMap::new();
 
         for contract_name in &pending {
-            let schema_entry = self.properties.schemas.iter().find(
-                |(schema_id, _)| {
+            let schema_entry =
+                self.properties.schemas.iter().find(|(schema_id, _)| {
                     format!("{}_{}", subject_id, schema_id) == *contract_name
-                },
-            );
+                });
 
             let Some((schema_id, schema)) = schema_entry else {
                 // The schema left the governance mid-window: nothing to
@@ -2226,10 +2230,7 @@ impl Governance {
             let mut current: HashMap<SchemaType, Schema> = HashMap::new();
             for (schema_id, schema) in fetch_schemas {
                 let actor_name = format!("{}_contract_compiler", schema_id);
-                if ctx
-                    .get_child::<ContractCompiler>(&actor_name)
-                    .await
-                    .is_ok()
+                if ctx.get_child::<ContractCompiler>(&actor_name).await.is_ok()
                 {
                     current.insert(schema_id, schema);
                 } else {
@@ -2546,8 +2547,7 @@ impl Governance {
                     ),
                 }
             })? {
-                let file_name =
-                    entry.file_name().to_string_lossy().to_string();
+                let file_name = entry.file_name().to_string_lossy().to_string();
                 if file_name.starts_with(&prefix) {
                     let path = entry.path();
                     fs::remove_dir_all(&path).await.map_err(|e| {
@@ -2605,7 +2605,8 @@ impl Governance {
             // is repaired here, before any artifact recovery reads them.
             self.recover_missing_compile_anchors(ctx).await?;
 
-            self.sweep_contract_artifacts(ctx, &artifact_schemas).await?;
+            self.sweep_contract_artifacts(ctx, &artifact_schemas)
+                .await?;
 
             // Schemas with a deferred acquisition pending (the
             // node crashed mid-catch-up) are NOT acquired here —
@@ -2629,14 +2630,13 @@ impl Governance {
                 // The standing compiler must not serve until every official
                 // artifact has been validated against its ledger anchor.
                 self.set_artifact_serving_blocked(ctx, true).await;
-                let to_recover: BTreeMap<SchemaType, Schema> =
-                    artifact_schemas
-                        .iter()
-                        .filter(|(schema_id, _)| not_pending(schema_id))
-                        .map(|(schema_id, schema)| {
-                            (schema_id.clone(), schema.clone())
-                        })
-                        .collect();
+                let to_recover: BTreeMap<SchemaType, Schema> = artifact_schemas
+                    .iter()
+                    .filter(|(schema_id, _)| not_pending(schema_id))
+                    .map(|(schema_id, schema)| {
+                        (schema_id.clone(), schema.clone())
+                    })
+                    .collect();
                 self.recover_compiler_artifacts(ctx, &to_recover, hash)
                     .await?;
             }
@@ -3110,7 +3110,8 @@ impl Governance {
         actor.ask_stop().await?;
 
         if !self.is_compiler()
-            && let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await
+            && let Ok(compiler) =
+                ctx.get_child::<CompileWorker>("compiler").await
         {
             compiler.ask_stop().await?;
         }
@@ -3233,11 +3234,7 @@ impl Governance {
                 };
                 let terminal_error = Self::ask_compile_with_retries(id, || {
                     let reconcile = reconcile.clone();
-                    async {
-                        compiler
-                            .ask(reconcile)
-                            .await
-                    }
+                    async { compiler.ask(reconcile).await }
                 })
                 .await?;
 
@@ -3391,15 +3388,12 @@ impl Governance {
                         contract_path: contract_path.clone(),
                     },
                 };
-                let terminal_error = Self::ask_compile_with_retries(&id, || {
-                    let reconcile = reconcile.clone();
-                    async {
-                        actor
-                            .ask(reconcile)
-                            .await
-                    }
-                })
-                .await?;
+                let terminal_error =
+                    Self::ask_compile_with_retries(&id, || {
+                        let reconcile = reconcile.clone();
+                        async { actor.ask(reconcile).await }
+                    })
+                    .await?;
 
                 if let Some(error) = terminal_error {
                     // Fatal local problems (disk, register, helpers,

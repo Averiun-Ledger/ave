@@ -11,10 +11,10 @@ use crate::{
             ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
             ArtifactTransferError,
         },
-        request::CompilationReq,
-        resolve_compile_targets,
         error::CompilerError,
         pipeline,
+        request::CompilationReq,
+        resolve_compile_targets,
         support::{
             CompilerSupport, HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS,
             SERVING_CACHE_TTL, ServedArtifact, ServingCacheEntry,
@@ -24,8 +24,7 @@ use crate::{
     },
     governance::{
         contract_register::{
-            ContractRegister, ContractRegisterMessage,
-            ContractRegisterResponse,
+            ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
         },
         model::Schema,
     },
@@ -1105,17 +1104,18 @@ impl Handler<Self> for CompileWorker {
                 };
 
                 if let Some(gate_res) = gate {
-                    let message = ActorMessage::CompilationRes { res: gate_res };
-                    if let Err(e) = self.network.send_command(
-                        ave_network::CommandHelper::SendMessage {
+                    let message =
+                        ActorMessage::CompilationRes { res: gate_res };
+                    if let Err(e) = self
+                        .network
+                        .send_command(ave_network::CommandHelper::SendMessage {
                             delivery: delivery_of(&message),
                             message: NetworkMessage {
                                 info: new_info,
                                 message,
                             },
-                        },
-                    )
-                    .await
+                        })
+                        .await
                     {
                         error!(
                             msg_type = "NetworkRequest",
@@ -1139,24 +1139,20 @@ impl Handler<Self> for CompileWorker {
                 // still in flight or was lost) finds the child already
                 // working: re-ACK instead of duplicating the build.
                 let child_name = format!("{}", info.request_id);
-                if ctx
-                    .get_child::<CompileWorker>(&child_name)
-                    .await
-                    .is_ok()
-                {
+                if ctx.get_child::<CompileWorker>(&child_name).await.is_ok() {
                     let message = ActorMessage::CompilationRes {
                         res: CompilationRes::Working,
                     };
-                    if let Err(e) = self.network.send_command(
-                        ave_network::CommandHelper::SendMessage {
+                    if let Err(e) = self
+                        .network
+                        .send_command(ave_network::CommandHelper::SendMessage {
                             delivery: delivery_of(&message),
                             message: NetworkMessage {
                                 info: new_info,
                                 message,
                             },
-                        },
-                    )
-                    .await
+                        })
+                        .await
                     {
                         error!(
                             msg_type = "NetworkRequest",
@@ -1278,29 +1274,26 @@ impl Handler<Self> for CompileWorker {
                     return Err(crash_system(ctx, e).await);
                 };
 
-                let compilation = match self.create_res(ctx, &compilation_req)
-                    .await
-                {
-                    Ok(compilation) => compilation,
-                    Err(e) => {
-                        error!(
-                            msg_type = "NetworkCompilation",
-                            error = %e,
-                            "Internal error during compilation"
-                        );
-                        return Err(crash_system(
-                            ctx,
-                            ActorError::FunctionalCritical {
-                                description: e.to_string(),
-                            },
-                        )
-                        .await);
-                    }
-                };
+                let compilation =
+                    match self.create_res(ctx, &compilation_req).await {
+                        Ok(compilation) => compilation,
+                        Err(e) => {
+                            error!(
+                                msg_type = "NetworkCompilation",
+                                error = %e,
+                                "Internal error during compilation"
+                            );
+                            return Err(crash_system(
+                                ctx,
+                                ActorError::FunctionalCritical {
+                                    description: e.to_string(),
+                                },
+                            )
+                            .await);
+                        }
+                    };
 
-                let message = ActorMessage::CompilationRes {
-                    res: compilation,
-                };
+                let message = ActorMessage::CompilationRes { res: compilation };
                 if let Err(e) = self
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
@@ -1463,8 +1456,7 @@ impl Handler<Self> for CompileWorker {
                 schema_id,
                 attempts,
             } => {
-                let Some(schema) = self.schemas.get(&schema_id).cloned()
-                else {
+                let Some(schema) = self.schemas.get(&schema_id).cloned() else {
                     // The schema left the governance meanwhile: nothing
                     // to heal.
                     return Ok(());
@@ -1516,16 +1508,11 @@ impl Handler<Self> for CompileWorker {
                         // a compiler that does not evaluate this schema
                         // only needed the module for the recovery init
                         // check — it serves raw bytes from disk.
-                        if self
-                            .evaluators
-                            .get(&schema_id)
-                            .is_some_and(|evaluators| {
-                                evaluators.contains(&*self.our_key)
-                            })
-                        {
+                        if self.evaluators.get(&schema_id).is_some_and(
+                            |evaluators| evaluators.contains(&*self.our_key),
+                        ) {
                             let contracts =
-                                CompilerSupport::contracts_helper(ctx)
-                                    .await?;
+                                CompilerSupport::contracts_helper(ctx).await?;
                             contracts
                                 .write()
                                 .await
@@ -1539,9 +1526,7 @@ impl Handler<Self> for CompileWorker {
                     }
                     Err(error)
                         if is_compiler_infra_error(&error)
-                            || is_retryable_compiler_recovery_error(
-                                &error,
-                            ) =>
+                            || is_retryable_compiler_recovery_error(&error) =>
                     {
                         let delay = retry_delay_ms(
                             HEAL_RETRY_BASE_MS,
@@ -1598,10 +1583,8 @@ mod tests {
     use super::*;
 
     use crate::{
-        Node,
-        helpers::network::test_faults::TestFaultRegistry,
-        node::InitParamsNode,
-        system::tests::create_system,
+        Node, helpers::network::test_faults::TestFaultRegistry,
+        node::InitParamsNode, system::tests::create_system,
     };
 
     use ave_common::{
@@ -1663,8 +1646,7 @@ mod tests {
             payload: ValueWrapper(serde_json::json!({})),
             viewpoints: BTreeSet::new(),
         });
-        let signed_event =
-            Signed::new(event_request, &requester_keys).unwrap();
+        let signed_event = Signed::new(event_request, &requester_keys).unwrap();
         let compilation_req = Signed::new(
             CompilationReq {
                 event_request: signed_event,
@@ -1709,17 +1691,14 @@ mod tests {
             .await
             .unwrap();
 
-        let expected_receiver_actor = format!(
-            "/user/request/{}/compilation/{}",
-            governance_id, our_key
-        );
+        let expected_receiver_actor =
+            format!("/user/request/{}/compilation/{}", governance_id, our_key);
 
         // First message: the working ACK, sent before compiling.
-        let command =
-            timeout(Duration::from_secs(5), command_receiver.recv())
-                .await
-                .expect("no working ACK received")
-                .expect("network channel closed");
+        let command = timeout(Duration::from_secs(5), command_receiver.recv())
+            .await
+            .expect("no working ACK received")
+            .expect("network channel closed");
         let CommandHelper::SendMessage { message: ack, .. } = command else {
             panic!("expected an outbound send command");
         };
@@ -1738,11 +1717,10 @@ mod tests {
         assert_eq!(ack.info.receiver_actor, expected_receiver_actor);
 
         // Second message: the final, signed result.
-        let command =
-            timeout(Duration::from_secs(5), command_receiver.recv())
-                .await
-                .expect("no final result received after the working ACK")
-                .expect("network channel closed");
+        let command = timeout(Duration::from_secs(5), command_receiver.recv())
+            .await
+            .expect("no final result received after the working ACK")
+            .expect("network channel closed");
         let CommandHelper::SendMessage {
             message: result_message,
             ..
@@ -1777,10 +1755,7 @@ mod tests {
             hash_borsh(&*HashAlgorithm::Blake3.hasher(), &result).unwrap();
         assert_eq!(recomputed, result_hash);
         assert_eq!(result_message.info.request_id, "test-request");
-        assert_eq!(
-            result_message.info.receiver_actor,
-            expected_receiver_actor
-        );
+        assert_eq!(result_message.info.receiver_actor, expected_receiver_actor);
 
         // The ephemeral build worker is done: it stops and sends nothing
         // else (no unavailability notice: `pending` was cleared).

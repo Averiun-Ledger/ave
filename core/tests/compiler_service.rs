@@ -419,17 +419,18 @@ fn contract_logic(
 
 /// Names of the entries currently in the shared server's artifact store.
 fn artifact_entries(server: &SharedServer) -> Vec<String> {
-    let mut entries: Vec<String> = std::fs::read_dir(
-        server._root.path().join("artifacts"),
-    )
-    .expect("artifacts dir must exist")
-    .filter_map(|entry| {
-        let entry = entry.expect("entry must be readable");
-        entry.file_type().ok()?.is_dir().then(|| {
-            entry.file_name().to_string_lossy().into_owned()
-        })
-    })
-    .collect();
+    let mut entries: Vec<String> =
+        std::fs::read_dir(server._root.path().join("artifacts"))
+            .expect("artifacts dir must exist")
+            .filter_map(|entry| {
+                let entry = entry.expect("entry must be readable");
+                entry
+                    .file_type()
+                    .ok()?
+                    .is_dir()
+                    .then(|| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect();
     entries.sort();
     entries
 }
@@ -456,11 +457,7 @@ async fn compile_artifact_store_corruption_rebuilds() {
         .into_iter()
         .find(|entry| !before_entries.contains(entry))
         .expect("the compile must create a new artifact store entry");
-    let entry_path = server
-        ._root
-        .path()
-        .join("artifacts")
-        .join(&entry_dir);
+    let entry_path = server._root.path().join("artifacts").join(&entry_dir);
 
     // Corrupt the wasm bytes: the hash check must drop the entry and the
     // compile must rebuild it, serving the same good artifact.

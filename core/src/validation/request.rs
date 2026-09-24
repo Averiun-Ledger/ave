@@ -1,5 +1,7 @@
 use crate::{
-    model::event::{ApprovalData, CompilationData, EvaluationData, ValidationData},
+    model::event::{
+        ApprovalData, CompilationData, EvaluationData, ValidationData,
+    },
     subject::Metadata,
 };
 

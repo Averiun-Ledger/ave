@@ -148,8 +148,7 @@ impl GovernanceVersionSync {
         ctx: &ActorContext<Self>,
         notify_idle: bool,
     ) -> Result<(), ActorError> {
-        let Some(UpdateTarget { peer, .. }) = self.update_target.clone()
-        else {
+        let Some(UpdateTarget { peer, .. }) = self.update_target.clone() else {
             if notify_idle {
                 // The round proved this node is at the tip: either every
                 // selected peer answered and none is ahead, or the node

@@ -75,7 +75,9 @@ const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 /// Decodes a governance-event contract payload into source bytes: base64,
 /// then bounded zstd decompression when the decoded payload carries the
 /// zstd magic number. Deterministic and identical on every node.
-pub fn decode_contract_source(contract: &str) -> Result<Vec<u8>, CompilerError> {
+pub fn decode_contract_source(
+    contract: &str,
+) -> Result<Vec<u8>, CompilerError> {
     let decoded = BASE64_STANDARD.decode(contract).map_err(|e| {
         CompilerError::Base64DecodeFailed {
             details: e.to_string(),
@@ -346,9 +348,9 @@ pub async fn load_artifact_precompiled(
     contract_path: &Path,
 ) -> Result<Vec<u8>, CompilerError> {
     let precompiled_path = artifact_precompiled_path(contract_path);
-    fs::read(&precompiled_path)
-        .await
-        .map_err(|e| CompilerError::file_read(precompiled_path.to_string_lossy(), e))
+    fs::read(&precompiled_path).await.map_err(|e| {
+        CompilerError::file_read(precompiled_path.to_string_lossy(), e)
+    })
 }
 
 #[cfg(feature = "test")]
@@ -356,9 +358,9 @@ async fn load_artifact_precompiled_from(
     base_path: &Path,
 ) -> Result<Vec<u8>, CompilerError> {
     let precompiled_path = artifact_precompiled_path_in(base_path);
-    fs::read(&precompiled_path)
-        .await
-        .map_err(|e| CompilerError::file_read(precompiled_path.to_string_lossy(), e))
+    fs::read(&precompiled_path).await.map_err(|e| {
+        CompilerError::file_read(precompiled_path.to_string_lossy(), e)
+    })
 }
 
 async fn load_compiled_wasm(
@@ -507,9 +509,9 @@ async fn load_global_cache_metadata(
     cache_dir: &Path,
 ) -> Result<ContractArtifactRecord, CompilerError> {
     let metadata_path = global_cache_metadata_path(cache_dir);
-    let metadata_bytes = fs::read(&metadata_path)
-        .await
-        .map_err(|e| CompilerError::file_read(metadata_path.to_string_lossy(), e))?;
+    let metadata_bytes = fs::read(&metadata_path).await.map_err(|e| {
+        CompilerError::file_read(metadata_path.to_string_lossy(), e)
+    })?;
 
     ContractArtifactRecord::try_from_slice(&metadata_bytes).map_err(|e| {
         CompilerError::SerializationError {
@@ -894,10 +896,18 @@ mod tests {
     ) {
         let hash = HashAlgorithm::Blake3;
         let digest = |label: &str| {
-            hash_borsh(&*hash.hasher(), &format!("global-cache-test-{tag}-{label}"))
-                .expect("hashing a static label must succeed")
+            hash_borsh(
+                &*hash.hasher(),
+                &format!("global-cache-test-{tag}-{label}"),
+            )
+            .expect("hashing a static label must succeed")
         };
-        (digest("contract"), digest("manifest"), digest("engine"), digest("toolchain"))
+        (
+            digest("contract"),
+            digest("manifest"),
+            digest("engine"),
+            digest("toolchain"),
+        )
     }
 
     /// Corrupt or missing global cache entries must be a clean miss

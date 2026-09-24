@@ -105,9 +105,7 @@ impl ApprCoordinator {
     /// Stops a retry child; a missing child is fine (it stops with its
     /// parent anyway).
     async fn end_retry(&self, ctx: &mut ActorContext<Self>, name: &str) {
-        if let Ok(retry) = ctx
-            .get_child::<RetryActor<RetryNetwork>>(name)
-            .await
+        if let Ok(retry) = ctx.get_child::<RetryActor<RetryNetwork>>(name).await
             && let Err(e) = retry.tell(RetryMessage::End).await
         {
             warn!(

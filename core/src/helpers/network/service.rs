@@ -6,9 +6,9 @@ use ave_network::CommandHelper as Command;
 use tokio::sync::mpsc::Sender;
 use tracing::error;
 
+use super::NetworkMessage;
 #[cfg(feature = "test")]
 use super::test_faults::{OutboundVerdict, SharedFaultRegistry};
-use super::NetworkMessage;
 
 /// The Helper service.
 #[derive(Debug, Clone)]
@@ -54,17 +54,14 @@ impl NetworkSender {
                 // Test infrastructure: the lock is never held across an
                 // await and poisoning only means the test panicked.
                 #[allow(clippy::unwrap_used)]
-                let verdict = self
-                    .faults
-                    .lock()
-                    .unwrap()
-                    .check_outbound(&mut message);
+                let verdict =
+                    self.faults.lock().unwrap().check_outbound(&mut message);
                 match verdict {
                     OutboundVerdict::Pass => {
                         Command::SendMessage { message, delivery }
                     }
                     OutboundVerdict::Drop | OutboundVerdict::Held => {
-                        return Ok(())
+                        return Ok(());
                     }
                     OutboundVerdict::FailSend => {
                         return Err(ActorError::Functional {

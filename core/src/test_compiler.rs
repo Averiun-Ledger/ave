@@ -74,9 +74,10 @@ async fn embedded_compiler_endpoint() -> String {
                 key_path: root.join("identity.der"),
                 ..crate::compilation::service_config::ServiceConfig::default()
             };
-            let server = crate::compilation::service::CompilerServer::new(config)
-                .await
-                .expect("embedded compiler should start");
+            let server =
+                crate::compilation::service::CompilerServer::new(config)
+                    .await
+                    .expect("embedded compiler should start");
             let listener = std::net::TcpListener::bind("127.0.0.1:0")
                 .expect("Can not bind compiler port");
             let addr =
@@ -367,7 +368,9 @@ impl CompilerService for ScriptedCompilerService {
         }
 
         let source_b64 = request.into_inner().source_b64;
-        self.control.compiles_received.fetch_add(1, Ordering::SeqCst);
+        self.control
+            .compiles_received
+            .fetch_add(1, Ordering::SeqCst);
         let log_source_hash =
             hash_borsh(&*HashAlgorithm::Blake3.hasher(), &source_b64.clone())
                 .map_err(|e| {
@@ -434,10 +437,7 @@ impl CompilerService for ScriptedCompilerService {
             }
         };
         let response = self.build_response(&source_b64, wasm)?;
-        self.cache
-            .lock()
-            .await
-            .insert(source_b64, response.clone());
+        self.cache.lock().await.insert(source_b64, response.clone());
         Ok(Response::new(response))
     }
 }

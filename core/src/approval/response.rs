@@ -39,9 +39,7 @@ pub enum ApprovalRes {
     /// Signed by the approver: it was pinged for a vote on this request
     /// but never received the full approval request, so it asks the
     /// validator for it. Flow control only, never evidence.
-    NeedFull {
-        approval_req_hash: DigestIdentifier,
-    },
+    NeedFull { approval_req_hash: DigestIdentifier },
 }
 
 /// Acknowledgement of an approval collection request (validator →

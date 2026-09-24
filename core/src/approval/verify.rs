@@ -35,8 +35,7 @@ pub const CLOCK_SKEW: Duration = Duration::from_secs(60);
 
 fn now_plus_skew(now: TimeStamp) -> TimeStamp {
     TimeStamp::from_nanos(
-        now.as_nanos()
-            .saturating_add(CLOCK_SKEW.as_nanos() as u64),
+        now.as_nanos().saturating_add(CLOCK_SKEW.as_nanos() as u64),
     )
 }
 
@@ -666,10 +665,7 @@ mod tests {
             Some(true)
         );
         // Waiting: 1 agree, 0 disagrees, deadline not reached.
-        assert_eq!(
-            terminal_outcome(&set, 1, 0, 0, 0, deadline, before),
-            None
-        );
+        assert_eq!(terminal_outcome(&set, 1, 0, 0, 0, deadline, before), None);
         // Early rejection: 2 disagrees leave 1 possible vote < quorum.
         assert_eq!(
             terminal_outcome(&set, 0, 2, 0, 0, deadline, before),
@@ -710,10 +706,7 @@ mod tests {
             Some(true)
         );
         // Same votes before the deadline keep waiting (5 - 2 = 3 >= 3).
-        assert_eq!(
-            terminal_outcome(&five, 1, 1, 1, 0, deadline, before),
-            None
-        );
+        assert_eq!(terminal_outcome(&five, 1, 1, 1, 0, deadline, before), None);
     }
 
     /// Items 2 and 3: the canonical tally excludes double voters with
@@ -755,10 +748,7 @@ mod tests {
         );
         assert!(tally.approvers_disagrees_signatures.is_empty());
         assert_eq!(tally.double_votes.len(), 1);
-        assert_eq!(
-            tally.double_votes[0].0.signer,
-            key(&fixture.approvers[1])
-        );
+        assert_eq!(tally.double_votes[0].0.signer, key(&fixture.approvers[1]));
 
         // Deterministic: rebuilding from a differently ordered map yields
         // the same hash.
@@ -826,10 +816,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tally_to.approvers_timeouts.len(), 1);
-        assert_eq!(
-            tally_to.approvers_timeouts[0].0,
-            key(&timeout_approver)
-        );
+        assert_eq!(tally_to.approvers_timeouts[0].0, key(&timeout_approver));
         let attesters: Vec<_> = tally_to.approvers_timeouts[0]
             .1
             .iter()
@@ -913,8 +900,7 @@ mod tests {
         // Tampered request hash.
         let mut tampered = honest.clone();
         tampered.approval_req_hash =
-            hash_borsh(&*fixture.hash.hasher(), &b"tampered".to_vec())
-                .unwrap();
+            hash_borsh(&*fixture.hash.hasher(), &b"tampered".to_vec()).unwrap();
         assert!(matches!(
             fixture.verify(&tampered, TimeStamp::now()),
             Err(ValidatorError::InvalidData { .. })
@@ -1002,7 +988,8 @@ mod tests {
             .cloned()
             .chain(std::iter::once(bad_vote.signature().clone()))
             .collect();
-        forged.approvers_agrees_signatures
+        forged
+            .approvers_agrees_signatures
             .sort_by(|a, b| a.signer.cmp(&b.signer));
         assert!(matches!(
             fixture.verify(&forged, TimeStamp::now()),
@@ -1013,12 +1000,11 @@ mod tests {
         // signs a request with an invalid window, so the whole evidence
         // is rebuilt with deadline == issued_at.
         let zero_window = ApprovalFixture::new(0);
-        let zero_votes: HashMap<PublicKey, Signed<ApprovalRes>> =
-            zero_window
-                .approvers
-                .iter()
-                .map(|a| (key(a), zero_window.vote(a, true)))
-                .collect();
+        let zero_votes: HashMap<PublicKey, Signed<ApprovalRes>> = zero_window
+            .approvers
+            .iter()
+            .map(|a| (key(a), zero_window.vote(a, true)))
+            .collect();
         let zero_tally = build_canonical_tally(
             &zero_window.hash,
             &zero_window.signed_req(),
@@ -1047,11 +1033,10 @@ mod tests {
 
         let accept = fixture.vote(&fixture.approvers[1], true);
         let reject = fixture.vote(&fixture.approvers[1], false);
-        let votes: HashMap<PublicKey, Signed<ApprovalRes>> =
-            HashMap::from([(
-                key(&fixture.approvers[0]),
-                fixture.vote(&fixture.approvers[0], true),
-            )]);
+        let votes: HashMap<PublicKey, Signed<ApprovalRes>> = HashMap::from([(
+            key(&fixture.approvers[0]),
+            fixture.vote(&fixture.approvers[0], true),
+        )]);
         let timeouts = fixture.attested_timeouts(&fixture.approvers[2]);
 
         let tally = build_canonical_tally(
@@ -1103,11 +1088,10 @@ mod tests {
 
         // 1 agree of 3 (quorum 2), approver[1] silent. At the deadline
         // the tally needs the silent approver attested to be approved.
-        let votes: HashMap<PublicKey, Signed<ApprovalRes>> =
-            HashMap::from([(
-                key(&fixture.approvers[0]),
-                fixture.vote(&fixture.approvers[0], true),
-            )]);
+        let votes: HashMap<PublicKey, Signed<ApprovalRes>> = HashMap::from([(
+            key(&fixture.approvers[0]),
+            fixture.vote(&fixture.approvers[0], true),
+        )]);
 
         // Censorship: the silent approver has no vote, no double-vote
         // pair and no timeout — incomplete accounting.
@@ -1145,7 +1129,10 @@ mod tests {
         let weak_timeouts: HashMap<PublicKey, Vec<Signed<ApprovalRes>>> =
             HashMap::from([(
                 key(&fixture.approvers[1]),
-                vec![fixture.timeout(&fixture.validators[0], &fixture.approvers[1])],
+                vec![
+                    fixture
+                        .timeout(&fixture.validators[0], &fixture.approvers[1]),
+                ],
             )]);
         let weak = build_canonical_tally(
             &fixture.hash,
@@ -1167,7 +1154,8 @@ mod tests {
             HashMap::from([(
                 key(&fixture.approvers[1]),
                 vec![
-                    fixture.timeout(&fixture.validators[0], &fixture.approvers[1]),
+                    fixture
+                        .timeout(&fixture.validators[0], &fixture.approvers[1]),
                     fixture.timeout(&outsider, &fixture.approvers[1]),
                 ],
             )]);
@@ -1186,7 +1174,8 @@ mod tests {
         ));
 
         // Timeout signed over a different request hash.
-        let mut forged_timeouts = fixture.attested_timeouts(&fixture.approvers[1]);
+        let mut forged_timeouts =
+            fixture.attested_timeouts(&fixture.approvers[1]);
         let forged_sig = Signed::new(
             ApprovalRes::TimeOut {
                 approval_req_hash: hash_borsh(
@@ -1233,17 +1222,16 @@ mod tests {
             true,
         )
         .unwrap();
-        overlap.approvers_timeouts =
-            fixture
-                .attested_timeouts(&fixture.approvers[1])
-                .into_iter()
-                .map(|(who, signed)| {
-                    let mut sigs: Vec<Signature> =
-                        signed.iter().map(|s| s.signature().clone()).collect();
-                    sigs.sort_by(|a, b| a.signer.cmp(&b.signer));
-                    (who, sigs)
-                })
-                .collect();
+        overlap.approvers_timeouts = fixture
+            .attested_timeouts(&fixture.approvers[1])
+            .into_iter()
+            .map(|(who, signed)| {
+                let mut sigs: Vec<Signature> =
+                    signed.iter().map(|s| s.signature().clone()).collect();
+                sigs.sort_by(|a, b| a.signer.cmp(&b.signer));
+                (who, sigs)
+            })
+            .collect();
         assert!(matches!(
             fixture.verify(&overlap, fixture.deadline),
             Err(ValidatorError::InvalidData { .. })

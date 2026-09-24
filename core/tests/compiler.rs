@@ -33,9 +33,11 @@ use ave_common::{
     },
     response::RequestState,
 };
-use ave_core::auth::AuthWitness;
 use ave_core::Api;
-use ave_core::compilation::artifact::{ArtifactFetchResult, ArtifactProbeResult};
+use ave_core::auth::AuthWitness;
+use ave_core::compilation::artifact::{
+    ArtifactFetchResult, ArtifactProbeResult,
+};
 use ave_core::compilation::contract_compiler::FetchObs;
 use ave_core::config::{CompilerNodeConfig, GovernanceSyncConfig};
 use ave_core::governance::data::GovernanceData;
@@ -51,13 +53,12 @@ use ave_core::test_compiler::{ScriptedCompiler, ScriptedTransform};
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use common::{
-    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig,
-    CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2,
-    FUEL_EXHAUSTING_CONTRACT, INVALID_EXAMPLE_CONTRACT, PORT_COUNTER,
-    assert_governance_properties_eq, create_and_authorize_governance,
-    create_node, create_nodes_and_connections, create_subject,
-    emit_approve, emit_fact, get_abort_request, get_events, get_subject,
-    governance_properties, node_running, try_create_node,
+    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig, CreateNodesAndConnectionsConfig,
+    EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, FUEL_EXHAUSTING_CONTRACT,
+    INVALID_EXAMPLE_CONTRACT, PORT_COUNTER, assert_governance_properties_eq,
+    create_and_authorize_governance, create_node, create_nodes_and_connections,
+    create_subject, emit_approve, emit_fact, get_abort_request, get_events,
+    get_subject, governance_properties, node_running, try_create_node,
     wait_artifact_bytes, wait_artifact_bytes_eq, wait_request_state,
 };
 use futures::future::join_all;
@@ -2573,7 +2574,8 @@ async fn test_gov_compiler_unavailable_quorum_holds() {
 
     // Tercer nodo cuyo compilador apunta a un endpoint muerto: toda
     // compilación falla con `CompilersUnavailable`.
-    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);    let (node3, mut node3_dirs) = create_node(CreateNodeConfig {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node3, mut node3_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
         listen_address: format!("/memory/{}", port),
         peers: vec![RoutingNode {
@@ -5461,7 +5463,10 @@ async fn test_fetch_anchor_survives_role_loss_and_regain() {
     // El artefacto local desaparece del disco (el ancla sigue en el
     // registro).
     fs::remove_dir_all(
-        node2_contracts.path().join("contracts").join(&artifact_name),
+        node2_contracts
+            .path()
+            .join("contracts")
+            .join(&artifact_name),
     )
     .unwrap();
 
@@ -5719,15 +5724,10 @@ async fn test_fetch_role_regain_local_first_no_network() {
     // Subject de AveNode3 (es quien emite el fact final con el Owner
     // caído: los facts de tracker solo los emite el dueño del subject)
     // y un fact v1: todos evalúan.
-    let (subject_id, ..) = create_subject(
-        &node3.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, ..) =
+        create_subject(&node3.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     get_subject(&node2.api, subject_id.clone(), Some(0), true)
         .await
@@ -6100,7 +6100,10 @@ async fn test_gov_compile_quorum_percentage() {
         .unwrap();
 
     for node in &compiler_nodes {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(1), true)
             .await
             .unwrap();
@@ -6129,7 +6132,10 @@ async fn test_gov_compile_quorum_percentage() {
         .unwrap();
 
     for node in &compiler_nodes {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(2), true)
             .await
             .unwrap();
@@ -6651,14 +6657,8 @@ async fn test_fetch_unavailable_until_server_returns() {
     // fetch lee los bytes buenos de disco).
     let foo_name = format!("{governance_id}_Foo");
     let bar_name = format!("{governance_id}_Bar");
-    let foo_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&foo_name);
-    let bar_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&bar_name);
+    let foo_dir = node1_contracts.path().join("contracts").join(&foo_name);
+    let bar_dir = node1_contracts.path().join("contracts").join(&bar_name);
     let foo_bytes = fs::read(foo_dir.join("contract.wasm")).unwrap();
     let bar_bytes = fs::read(bar_dir.join("contract.wasm")).unwrap();
     let foo_hidden = foo_dir.with_extension("bak");
@@ -6755,10 +6755,8 @@ async fn test_fetch_unavailable_until_server_returns() {
     fs::rename(&foo_hidden, &foo_dir).unwrap();
     fs::rename(&bar_hidden, &bar_dir).unwrap();
 
-    wait_artifact_bytes_eq(node2_contracts.path(), &foo_name, &foo_bytes)
-        .await;
-    wait_artifact_bytes_eq(node2_contracts.path(), &bar_name, &bar_bytes)
-        .await;
+    wait_artifact_bytes_eq(node2_contracts.path(), &foo_name, &foo_bytes).await;
+    wait_artifact_bytes_eq(node2_contracts.path(), &bar_name, &bar_bytes).await;
 
     // La request rebootada evalúa Foo y commitea.
     let state = get_subject(&node1.api, foo_subject.clone(), Some(1), true)
@@ -7395,15 +7393,10 @@ async fn test_dual_role_serves_plan_a_and_b() {
     // AveNode2 evalúa con la v2 fetcheada: un fact solo válido con la
     // v2 (ModThree=50) commitea con los votos del Owner y AveNode2
     // (quórum 2 de 3; AveNode4 está desactualizado y no hace falta).
-    let (subject_id, ..) = create_subject(
-        &node1.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, ..) =
+        create_subject(&node1.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     get_subject(&node2.api, subject_id.clone(), Some(0), true)
         .await
@@ -9789,9 +9782,7 @@ async fn test_staging_swept_after_post_compile_rejection() {
         !fs::read_dir(node1_contracts.path())
             .map(|entries| {
                 entries.filter_map(|e| e.ok()).any(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .contains("_temp_staging_")
+                    e.file_name().to_string_lossy().contains("_temp_staging_")
                 })
             })
             .unwrap_or(false),
@@ -9812,7 +9803,10 @@ async fn test_staging_swept_after_post_compile_rejection() {
         .unwrap();
     let gov = governance_properties(state.properties);
     assert_eq!(gov.version, 0);
-    assert!(!gov.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        !gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     // Una request posterior del mismo tipo compila de cero y commitea
     // con normalidad: el staging del evento fallido no le es visible.
@@ -9899,7 +9893,10 @@ async fn test_staging_swept_after_post_compile_rejection() {
         .unwrap();
     let gov = governance_properties(state.properties);
     assert_eq!(gov.version, 1);
-    assert!(gov.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        gov.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     // El artefacto oficial aparece (promoción en el commit) y evalúa.
     wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
@@ -10236,9 +10233,11 @@ async fn test_fetch_server_goes_silent_on_role_loss() {
     .await;
     node_running(&node3.api).await.unwrap();
 
-    let governance_id =
-        create_and_authorize_governance(&node1.api, vec![&node2.api, &node3.api])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
 
     // SN 1: schema Example v1; AveNode2 evaluador, AveNode3 solo miembro.
     let json = json!({
@@ -11369,11 +11368,7 @@ async fn test_fetch_burst_concurrent_evaluators_single_server() {
     node_running(&node1.api).await.unwrap();
 
     let mut extra_nodes = Vec::new();
-    for contracts in [
-        &node2_contracts,
-        &node3_contracts,
-        &node4_contracts,
-    ] {
+    for contracts in [&node2_contracts, &node3_contracts, &node4_contracts] {
         let (node, _dirs) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!(
@@ -11467,7 +11462,10 @@ async fn test_fetch_burst_concurrent_evaluators_single_server() {
         .unwrap();
 
     for node in [node2, node3, node4] {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(1), true)
             .await
             .unwrap();
@@ -11845,9 +11843,11 @@ async fn test_fetch_failover_from_outdated_server() {
 
     // Ni AveNode2 ni AveNode3 son testigos del gov en los roles: solo
     // sincronizan por update_subject manual (control de versiones).
-    let governance_id =
-        create_and_authorize_governance(&node1.api, vec![&node2.api, &node3.api])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
 
     // SN 1: schema Example v1; ambos evaluadores fetchean la v1.
     let json = json!({
@@ -11935,7 +11935,10 @@ async fn test_fetch_failover_from_outdated_server() {
         .unwrap();
 
     for node in [&node2, &node3] {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(1), true)
             .await
             .unwrap();
@@ -13413,9 +13416,11 @@ async fn test_plan_b_corrupt_transfer_rejected_then_retry_succeeds() {
     .await;
     node_running(&node3.api).await.unwrap();
 
-    let governance_id =
-        create_and_authorize_governance(&node1.api, vec![&node2.api, &node3.api])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &node1.api,
+        vec![&node2.api, &node3.api],
+    )
+    .await;
 
     // SN 1: schema Example v1. Evaluadores: AveNode2 y AveNode3 (Owner
     // NO es evaluador de schema → el plan B de AveNode3 es exactamente
@@ -13736,8 +13741,7 @@ async fn test_schema_add_with_dead_pool_parks_and_recovers() {
     // aborta la gobernanza.
     let mut parked = false;
     for _ in 0..200 {
-        if let Ok(state) =
-            node1.api.get_request_state(request_id.clone()).await
+        if let Ok(state) = node1.api.get_request_state(request_id.clone()).await
             && matches!(
                 state.state,
                 RequestState::Reboot | RequestState::RebootTimeOut { .. }
@@ -14811,7 +14815,10 @@ fn artifact_dir_exists(
     contracts_path: &std::path::Path,
     artifact_name: &str,
 ) -> bool {
-    contracts_path.join("contracts").join(artifact_name).exists()
+    contracts_path
+        .join("contracts")
+        .join(artifact_name)
+        .exists()
 }
 
 // Borra de la base de datos local del nodo (con el nodo APAGADO) las
@@ -15934,7 +15941,11 @@ async fn test_pure_compiler_no_resident_module_disk_load_on_role_gain() {
     // reintenta por diseño y lo recupera en el siguiente ciclo. El
     // pin que importa (una sola descarga, bytes anclados) es exacto;
     // el conteo tolera ese único retry.
-    assert!(obs.probes_sent <= 4, "one retry at most, got {}", obs.probes_sent);
+    assert!(
+        obs.probes_sent <= 4,
+        "one retry at most, got {}",
+        obs.probes_sent
+    );
     assert_eq!(obs.downloads_started, 1);
     node3.api.test_clear_faults().await.unwrap();
 
@@ -15944,8 +15955,7 @@ async fn test_pure_compiler_no_resident_module_disk_load_on_role_gain() {
     // Todo el tráfico de artefactos HACIA AveNode2 dropeado: cualquier
     // intento de fetch se estancaría. La carga del módulo al ganar el
     // rol evaluator debe ser local-first (cero red).
-    for message in [FaultMessage::ArtifactProbeRes, FaultMessage::ArtifactRes]
-    {
+    for message in [FaultMessage::ArtifactProbeRes, FaultMessage::ArtifactRes] {
         node2
             .api
             .test_install_fault(FaultRule {
@@ -17577,10 +17587,9 @@ async fn test_compiler_disagreement_reboot_diff() {
         }
     });
 
-    let request_id =
-        emit_fact(&node1.api, governance_id.clone(), json, false)
-            .await
-            .unwrap();
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
 
     wait_request_state(
         &node1.api,
@@ -17597,9 +17606,10 @@ async fn test_compiler_disagreement_reboot_diff() {
     // primera entrada del schedule) recompila y AveNode2 sirve el
     // artefacto real — acuerdo, commit del evento y exactamente UN
     // build por ciclo (sin duplicados).
-    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node1.api, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 2);
     assert_eq!(scripted.compiles_received(), 2);
 
@@ -17616,8 +17626,12 @@ async fn test_compiler_disagreement_reboot_diff() {
     get_subject(&node2.api, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_artifact)
-        .await;
+    wait_artifact_bytes_eq(
+        node2_contracts.path(),
+        &artifact_name,
+        &node1_artifact,
+    )
+    .await;
 
     // La gobernanza no se cuelga: un evento sin fase compile commitea.
     let json = json!({
@@ -17640,9 +17654,10 @@ async fn test_compiler_disagreement_reboot_diff() {
         .await
         .unwrap();
 
-    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(3), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node1.api, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 3);
 
     node_running(&node1.api).await.unwrap();
@@ -18079,10 +18094,12 @@ async fn test_compiler_terminal_divergence_reboot_diff_wedged() {
 
     // Mismo transform con tags distintos: wasm válido y equivalente en
     // comportamiento, pero con bytes (y hash) divergentes por nodo.
-    let scripted_a =
-        ScriptedCompiler::start(ScriptedTransform::CustomSection("a".to_owned()));
-    let scripted_b =
-        ScriptedCompiler::start(ScriptedTransform::CustomSection("b".to_owned()));
+    let scripted_a = ScriptedCompiler::start(ScriptedTransform::CustomSection(
+        "a".to_owned(),
+    ));
+    let scripted_b = ScriptedCompiler::start(ScriptedTransform::CustomSection(
+        "b".to_owned(),
+    ));
 
     let (node1, _node1_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
@@ -18272,10 +18289,9 @@ async fn test_compiler_terminal_divergence_reboot_diff_wedged() {
         }
     });
 
-    let request_id =
-        emit_fact(&node1.api, governance_id.clone(), json, false)
-            .await
-            .unwrap();
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
 
     wait_request_state(
         &node1.api,
@@ -18295,9 +18311,10 @@ async fn test_compiler_terminal_divergence_reboot_diff_wedged() {
     // La gobernanza queda bloqueada en el SN previo al alta del schema:
     // la divergencia terminal impide commitear el evento y los eventos
     // del mismo owner se serializan tras él.
-    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(2), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node1.api, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 2);
 
     // Nadie promociona el artefacto oficial del schema: sin acuerdo de
@@ -18481,9 +18498,10 @@ async fn test_boot_sweep_removes_temp_promote_and_build_leftovers() {
 
     // Y el nodo queda operativo: recupera la gobernanza en su SN y
     // evalúa un fact cargando el módulo desde el artefacto en disco.
-    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node1.api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 1);
 
     emit_fact(
@@ -18761,9 +18779,10 @@ async fn test_fetch_mixed_ledger_plain_to_compressed_with_reboot() {
 
     // Recupera artefacto y ancla del ledger mixto desde disco, sin
     // recompilar (con el pool muerto, un intento de build fallaría).
-    let gov_state = get_subject(&node2.api, governance_id.clone(), Some(2), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node2.api, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 2);
 
     // Otro fact commitea con el visto bueno de AveNode2: evalúa con la
@@ -18788,7 +18807,6 @@ async fn test_fetch_mixed_ledger_plain_to_compressed_with_reboot() {
 
     node_running(&node2.api).await.unwrap();
 }
-
 
 #[test(tokio::test)]
 // Un servidor plan B que sirve SIEMPRE bytes corruptos (fault
@@ -20139,10 +20157,8 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
     // El Owner deja de servir "Doomed" (directorio oculto; su caché de
     // serving de ese contrato está vacía: nadie lo ha fetcheado nunca).
     let doomed_name = format!("{governance_id}_Doomed");
-    let node1_doomed = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&doomed_name);
+    let node1_doomed =
+        node1_contracts.path().join("contracts").join(&doomed_name);
     let node1_doomed_hidden = node1_doomed.with_extension("bak");
     fs::rename(&node1_doomed, &node1_doomed_hidden).unwrap();
 
@@ -20186,10 +20202,8 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
 
     // El fetch de "Doomed" está en vuelo y ciclando (cada ciclo agota
     // los candidatos: nadie sirve).
-    wait_fetch_obs(&node2.api, &doomed_name, |obs| {
-        obs.cycles_exhausted >= 1
-    })
-    .await;
+    wait_fetch_obs(&node2.api, &doomed_name, |obs| obs.cycles_exhausted >= 1)
+        .await;
     assert!(!artifact_dir_exists(node2_contracts.path(), &doomed_name));
 
     // SN 3: se elimina el schema con el fetch en vuelo.
@@ -20231,9 +20245,11 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
         let mut names = vec![];
         for dir in [root.to_path_buf(), root.join("contracts")] {
             if let Ok(entries) = fs::read_dir(dir) {
-                names.extend(entries.flatten().map(|e| {
-                    e.file_name().to_string_lossy().into_owned()
-                }));
+                names.extend(
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned()),
+                );
             }
         }
         names
@@ -20288,9 +20304,10 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
     .await;
     node_running(&node2.api).await.unwrap();
 
-    let gov_state = get_subject(&node2.api, governance_id.clone(), Some(3), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node2.api, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 3);
     assert!(
         doomed_leftovers(node2_contracts.path()).is_empty(),
@@ -20314,7 +20331,6 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
 
     node_running(&node2.api).await.unwrap();
 }
-
 
 #[test(tokio::test)]
 // Las anclas de compilación y la metadata de artefactos que persiste el
@@ -20450,15 +20466,26 @@ async fn test_boot_anchor_rederivation_after_register_wipe() {
         .await
         .unwrap();
     let alpha_name = format!("{governance_id}_Alpha");
-    let alpha_v1 = wait_artifact_bytes(node1_contracts.path(), &alpha_name).await;
+    let alpha_v1 =
+        wait_artifact_bytes(node1_contracts.path(), &alpha_name).await;
 
     // SN 2 y 3: eventos ajenos a los contratos.
-    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra1"), true)
-        .await
-        .unwrap();
-    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra2"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        member_fact("Extra1"),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        member_fact("Extra2"),
+        true,
+    )
+    .await
+    .unwrap();
     get_subject(&node1.api, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
@@ -20480,9 +20507,14 @@ async fn test_boot_anchor_rederivation_after_register_wipe() {
         wait_artifact_bytes(node1_contracts.path(), &beta_name).await;
 
     // SN 5: otro evento ajeno.
-    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra3"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        member_fact("Extra3"),
+        true,
+    )
+    .await
+    .unwrap();
 
     // SN 6: schema Gamma, otra vez con la v1 (misma fuente que Alpha:
     // el artefacto debe ser idéntico).
@@ -20506,9 +20538,14 @@ async fn test_boot_anchor_rederivation_after_register_wipe() {
     );
 
     // SN 7: otro evento ajeno.
-    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra4"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        member_fact("Extra4"),
+        true,
+    )
+    .await
+    .unwrap();
 
     // SN 8: cambio de contrato de Alpha a la v2 — una ancla reciente
     // sobre el schema más viejo. La promoción reemplaza el artefacto
@@ -20550,9 +20587,14 @@ async fn test_boot_anchor_rederivation_after_register_wipe() {
 
     // SN 9: último evento ajeno; el ledger queda con anclas en SN 4, 6
     // y 8, a distinta profundidad desde la punta.
-    emit_fact(&node1.api, governance_id.clone(), member_fact("Extra5"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &node1.api,
+        governance_id.clone(),
+        member_fact("Extra5"),
+        true,
+    )
+    .await
+    .unwrap();
     get_subject(&node1.api, governance_id.clone(), Some(9), true)
         .await
         .unwrap();
@@ -20585,9 +20627,10 @@ async fn test_boot_anchor_rederivation_after_register_wipe() {
     node_running(&node1.api).await.unwrap();
 
     // La gobernanza arranca en su SN con los tres schemas intactos.
-    let gov_state = get_subject(&node1.api, governance_id.clone(), Some(9), true)
-        .await
-        .unwrap();
+    let gov_state =
+        get_subject(&node1.api, governance_id.clone(), Some(9), true)
+            .await
+            .unwrap();
     let gov = governance_properties(gov_state.properties);
     for schema_id in ["Alpha", "Beta", "Gamma"] {
         assert!(
@@ -20632,15 +20675,11 @@ async fn test_boot_anchor_rederivation_after_register_wipe() {
         let state = get_subject(&node1.api, subject_id, Some(1), true)
             .await
             .unwrap();
-        assert_eq!(
-            state.properties,
-            json!({"one": 5, "two": 0, "three": 0})
-        );
+        assert_eq!(state.properties, json!({"one": 5, "two": 0, "three": 0}));
     }
 
     node_running(&node1.api).await.unwrap();
 }
-
 
 #[test(tokio::test)]
 // Muerte de un peer a mitad de descarga: el primer `CanServe`
@@ -21255,7 +21294,6 @@ async fn test_fetch_corrupt_compressed_fails_over_without_persisting() {
     node_running(&node3.api).await.unwrap();
 }
 
-
 #[test(tokio::test)]
 // Batching de probes de 3 con todos los servidores mudos: cuatro
 // compilers (Owner + AveNode2/3/4) sirven el MISMO artefacto y un
@@ -21374,7 +21412,10 @@ async fn test_fetch_dead_probe_batches_exhaust_cycle_then_complete() {
         .unwrap();
 
     for node in [node2, node3, node4] {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(1), true)
             .await
             .unwrap();
@@ -21451,7 +21492,10 @@ async fn test_fetch_dead_probe_batches_exhaust_cycle_then_complete() {
         .unwrap();
 
     for node in [node2, node3, node4] {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(2), true)
             .await
             .unwrap();
@@ -21500,10 +21544,9 @@ async fn test_fetch_dead_probe_batches_exhaust_cycle_then_complete() {
     assert_eq!(obs.downloads_started, 0);
 
     // Ciclo 1, segundo batch: el cuarto compiler, también mudo.
-    let obs = wait_fetch_obs(&node5.api, &artifact_name, |obs| {
-        obs.probes_sent == 4
-    })
-    .await;
+    let obs =
+        wait_fetch_obs(&node5.api, &artifact_name, |obs| obs.probes_sent == 4)
+            .await;
     assert_eq!(obs.downloads_started, 0);
 
     // Sin `CanServe` ni busy: el ciclo se agota y entra en timeoff.
@@ -21832,8 +21875,7 @@ async fn test_fetch_single_download_with_all_servers_serving() {
         || format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst));
 
     let mut extra = Vec::new();
-    for contracts in [&node2_contracts, &node3_contracts, &node4_contracts]
-    {
+    for contracts in [&node2_contracts, &node3_contracts, &node4_contracts] {
         let (node, _dirs) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: make_addr(),
@@ -21896,7 +21938,10 @@ async fn test_fetch_single_download_with_all_servers_serving() {
         .unwrap();
 
     for node in [node2, node3] {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(1), true)
             .await
             .unwrap();
@@ -21973,7 +22018,10 @@ async fn test_fetch_single_download_with_all_servers_serving() {
         .unwrap();
 
     for node in [node2, node3] {
-        node.api.update_subject(governance_id.clone()).await.unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(&node.api, governance_id.clone(), Some(2), true)
             .await
             .unwrap();

@@ -232,12 +232,9 @@ impl Validation {
             ValidationReq::Event {
                 actual_protocols, ..
             } => match actual_protocols.as_ref() {
-                ActualProtocols::EvalApprove {
-                    approval_data, ..
-                }
+                ActualProtocols::EvalApprove { approval_data, .. }
                 | ActualProtocols::CompileEvalApprove {
-                    approval_data,
-                    ..
+                    approval_data, ..
                 } => Some(approval_data.clone()),
                 _ => None,
             },
@@ -444,10 +441,8 @@ impl Handler<Self> for Validation {
                             approval_data,
                             ..
                         } => {
-                            let hash = hash_borsh(
-                                &*self.hash.hasher(),
-                                approval_data,
-                            );
+                            let hash =
+                                hash_borsh(&*self.hash.hasher(), approval_data);
                             match hash {
                                 Ok(hash) => Some(hash),
                                 Err(e) => {
@@ -532,9 +527,8 @@ impl Handler<Self> for Validation {
                                 // the approval evidence carried by the
                                 // request (and none when the request did
                                 // not go through the approval phase).
-                                let approval_hash_matches =
-                                    approval_data_hash
-                                        == self.approval_data_hash;
+                                let approval_hash_matches = approval_data_hash
+                                    == self.approval_data_hash;
 
                                 match (
                                     signature,
@@ -554,7 +548,11 @@ impl Handler<Self> for Validation {
                                         self.validators_signatures
                                             .push(signature);
                                     }
-                                    (signed, req_hash_matches, approval_matches) => {
+                                    (
+                                        signed,
+                                        req_hash_matches,
+                                        approval_matches,
+                                    ) => {
                                         error!(
                                             msg_type = "Response",
                                             sender = %sender,

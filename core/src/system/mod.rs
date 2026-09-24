@@ -86,9 +86,8 @@ pub async fn system(
     // silently undeliverable (the network worker drops oversized
     // outbound messages). The default cap is bound at compile time in
     // `compilation::artifact`; this catches a configured smaller value.
-    let artifact_budget =
-        crate::compilation::artifact::MAX_ARTIFACT_WIRE_BYTES
-            + crate::compilation::artifact::ARTIFACT_ENVELOPE_HEADROOM_BYTES;
+    let artifact_budget = crate::compilation::artifact::MAX_ARTIFACT_WIRE_BYTES
+        + crate::compilation::artifact::ARTIFACT_ENVELOPE_HEADROOM_BYTES;
     if config.network.max_app_message_bytes < artifact_budget {
         return Err(SystemError::NetworkConfig(format!(
             "max_app_message_bytes ({}) is below the artifact wire \
@@ -189,17 +188,14 @@ pub async fn system(
                     "invalid compiler_public_key: {e}"
                 ))
             })?;
-        let compiler_client =
-            crate::compilation::client::CompilerClient::new(
-                config.compiler.endpoints.clone(),
-                config.compiler.api_key.clone().unwrap_or_default(),
-                expected_toolchain,
-                compiler_public_key,
-                Some(Duration::from_secs(
-                    config.compiler.request_timeout_secs,
-                )),
-                config.compiler.pinned_cert_pem.clone(),
-            );
+        let compiler_client = crate::compilation::client::CompilerClient::new(
+            config.compiler.endpoints.clone(),
+            config.compiler.api_key.clone().unwrap_or_default(),
+            expected_toolchain,
+            compiler_public_key,
+            Some(Duration::from_secs(config.compiler.request_timeout_secs)),
+            config.compiler.pinned_cert_pem.clone(),
+        );
         system.add_helper("compiler_client", Arc::new(compiler_client));
     }
 
@@ -495,9 +491,9 @@ pub mod tests {
             Err(err) => {
                 panic!("expected SystemError::NetworkConfig, got {err}")
             }
-            Ok(_) => panic!(
-                "a message cap below the artifact budget must not start"
-            ),
+            Ok(_) => {
+                panic!("a message cap below the artifact budget must not start")
+            }
         }
     }
 }

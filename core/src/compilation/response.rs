@@ -226,7 +226,10 @@ mod tests {
         // CompilationRes::Abort
         let mut expected = vec![1];
         expected.extend_from_slice(&string_bytes("abort"));
-        assert_wire_shape(&CompilationRes::Abort("abort".to_owned()), &expected);
+        assert_wire_shape(
+            &CompilationRes::Abort("abort".to_owned()),
+            &expected,
+        );
 
         // CompilationRes::TimeOut / Reboot / Unavailable / Working
         assert_wire_shape(&CompilationRes::TimeOut, &[2]);
@@ -245,9 +248,7 @@ mod tests {
         expected.extend_from_slice(&default_digest_bytes());
         assert_wire_shape(
             &CompilationResult::Error {
-                error: CompilationError::CompilationFailed(
-                    "failed".to_owned()
-                ),
+                error: CompilationError::CompilationFailed("failed".to_owned()),
                 compile_req_hash: DigestIdentifier::default(),
                 req_subject_data_hash: DigestIdentifier::default(),
             },

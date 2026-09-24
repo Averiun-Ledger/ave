@@ -19,6 +19,8 @@ use ave_common::{
     },
     sink::DataToSink,
 };
+#[cfg(feature = "test")]
+use ave_core::config::CompilerNodeConfig;
 use ave_core::{
     Api,
     config::{
@@ -29,8 +31,6 @@ use ave_core::{
     },
     governance::data::GovernanceData,
 };
-#[cfg(feature = "test")]
-use ave_core::config::CompilerNodeConfig;
 use ave_network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use serde_json::{Value, from_value};
@@ -944,7 +944,6 @@ pub fn assert_tracker_visibility(
     Ok(())
 }
 
-
 // Contract fixtures live in `ave_core::test_contracts` (single source
 // of truth, shared with unit tests); re-exported here so suites keep
 // using `common::EXAMPLE_CONTRACT` etc.
@@ -953,7 +952,10 @@ pub use ave_core::test_contracts::*;
 
 #[track_caller]
 #[allow(dead_code)]
-pub fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
+pub fn assert_governance_properties_eq(
+    actual: Value,
+    expected: GovernanceData,
+) {
     let actual: GovernanceData = from_value(actual).unwrap();
     assert_eq!(actual, expected);
 }

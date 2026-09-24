@@ -1569,8 +1569,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     );
                     return;
                 }
-                if let Err(error) = self.send_message(peer, message, delivery)
-                {
+                if let Err(error) = self.send_message(peer, message, delivery) {
                     error!(target: TARGET, error = %error, "failed to deliver message");
                     self.send_event(NetworkEvent::Error(error)).await;
                 }
@@ -3914,11 +3913,7 @@ mod tests {
 
         let peer = PeerId::random();
         worker
-            .send_message(
-                peer,
-                Bytes::from_static(b"hello"),
-                Delivery::Direct,
-            )
+            .send_message(peer, Bytes::from_static(b"hello"), Delivery::Direct)
             .expect("direct send");
 
         // Nothing queued, the drop is counted and the connection is
@@ -3983,9 +3978,7 @@ mod tests {
             .expect("direct send");
 
         // Sent immediately: nothing buffered and no drop counted.
-        assert!(
-            !worker.pending_outbound_messages.contains_key(&remote_peer)
-        );
+        assert!(!worker.pending_outbound_messages.contains_key(&remote_peer));
         let mut text = String::new();
         encode(&mut text, &registry).expect("encode metrics");
         assert_eq!(

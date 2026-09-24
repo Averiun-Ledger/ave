@@ -66,9 +66,7 @@ pub(crate) fn classify(message: &ActorMessage) -> FaultMessage {
         ActorMessage::EvaluationReq { .. } => FaultMessage::EvaluationReq,
         ActorMessage::EvaluationRes { .. } => FaultMessage::EvaluationRes,
         ActorMessage::ApprovalReq { .. } => FaultMessage::ApprovalReq,
-        ActorMessage::ApprovalHashPing { .. } => {
-            FaultMessage::ApprovalHashPing
-        }
+        ActorMessage::ApprovalHashPing { .. } => FaultMessage::ApprovalHashPing,
         ActorMessage::ApprovalRes { .. } => FaultMessage::ApprovalRes,
         ActorMessage::ApprovalVoteReport { .. } => {
             FaultMessage::ApprovalVoteReport
@@ -112,12 +110,8 @@ pub(crate) fn classify(message: &ActorMessage) -> FaultMessage {
         ActorMessage::TrackerSyncRes { .. } => FaultMessage::TrackerSyncRes,
         ActorMessage::CompilationReq { .. } => FaultMessage::CompilationReq,
         ActorMessage::CompilationRes { .. } => FaultMessage::CompilationRes,
-        ActorMessage::ArtifactProbeReq { .. } => {
-            FaultMessage::ArtifactProbeReq
-        }
-        ActorMessage::ArtifactProbeRes { .. } => {
-            FaultMessage::ArtifactProbeRes
-        }
+        ActorMessage::ArtifactProbeReq { .. } => FaultMessage::ArtifactProbeReq,
+        ActorMessage::ArtifactProbeRes { .. } => FaultMessage::ArtifactProbeRes,
         ActorMessage::ArtifactReq { .. } => FaultMessage::ArtifactReq,
         ActorMessage::ArtifactRes { .. } => FaultMessage::ArtifactRes,
     }
@@ -236,15 +230,12 @@ impl TestFaultRegistry {
         kind: FaultMessage,
         peer: &PublicKey,
     ) -> Option<FaultAction> {
-        let index = self
-            .rules
-            .iter()
-            .position(|rule| {
-                rule.direction == direction
-                    && rule.message == kind
-                    && rule.peer.as_ref().is_none_or(|p| p == peer)
-                    && rule.remaining != Some(0)
-            })?;
+        let index = self.rules.iter().position(|rule| {
+            rule.direction == direction
+                && rule.message == kind
+                && rule.peer.as_ref().is_none_or(|p| p == peer)
+                && rule.remaining != Some(0)
+        })?;
         let action = self.rules[index].action;
         if let Some(remaining) = &mut self.rules[index].remaining {
             *remaining -= 1;
@@ -321,9 +312,7 @@ impl TestFaultRegistry {
     /// Takes every held message out as re-injection commands and
     /// removes the hold rules: released messages must flow. The caller
     /// sends the commands AFTER dropping the lock.
-    pub fn take_held_commands(
-        &mut self,
-    ) -> Vec<Command<NetworkMessage>> {
+    pub fn take_held_commands(&mut self) -> Vec<Command<NetworkMessage>> {
         self.rules.retain(|rule| rule.action != FaultAction::Hold);
         std::mem::take(&mut self.held)
             .into_iter()
@@ -344,9 +333,7 @@ impl TestFaultRegistry {
 
     /// The node's own command channel, to re-inject releases and
     /// test-crafted inbound messages.
-    pub fn control_sender(
-        &self,
-    ) -> mpsc::Sender<Command<NetworkMessage>> {
+    pub fn control_sender(&self) -> mpsc::Sender<Command<NetworkMessage>> {
         self.control.clone()
     }
 
@@ -376,8 +363,7 @@ pub type SharedFaultRegistry = Arc<Mutex<TestFaultRegistry>>;
 /// Applies a corruption action to an `ArtifactRes` payload; any other
 /// message passes through untouched.
 fn corrupt_artifact(message: &mut NetworkMessage, action: FaultAction) {
-    let ActorMessage::ArtifactRes { result, .. } = &mut message.message
-    else {
+    let ActorMessage::ArtifactRes { result, .. } = &mut message.message else {
         return;
     };
     let ArtifactFetchResult::Artifact(data) = result else {

@@ -456,8 +456,7 @@ impl ApprovalConfig {
         if schedule_sum != self.min_window_secs {
             return Err(Error::InvalidConfiguration {
                 component: "approval.probe_schedule_secs".to_string(),
-                reason: "must sum exactly approval.min_window_secs"
-                    .to_string(),
+                reason: "must sum exactly approval.min_window_secs".to_string(),
             });
         }
         if self.keepalive_secs == 0 {

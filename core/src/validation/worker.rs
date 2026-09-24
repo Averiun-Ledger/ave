@@ -230,9 +230,8 @@ impl ApprovalCollection {
         &self,
         wanted: Option<&HashSet<PublicKey>>,
     ) -> Vec<Signed<ApprovalRes>> {
-        let wanted = |who: &PublicKey| {
-            wanted.is_none_or(|wanted| wanted.contains(who))
-        };
+        let wanted =
+            |who: &PublicKey| wanted.is_none_or(|wanted| wanted.contains(who));
         let mut votes: Vec<Signed<ApprovalRes>> = self
             .votes
             .iter()
@@ -252,12 +251,10 @@ impl ApprovalCollection {
             .map(|(_, timeout)| timeout.clone())
             .collect();
         timeouts.sort_by(|a, b| {
-            let ApprovalRes::TimeOut { who: a_who, .. } = a.content()
-            else {
+            let ApprovalRes::TimeOut { who: a_who, .. } = a.content() else {
                 return std::cmp::Ordering::Equal;
             };
-            let ApprovalRes::TimeOut { who: b_who, .. } = b.content()
-            else {
+            let ApprovalRes::TimeOut { who: b_who, .. } = b.content() else {
                 return std::cmp::Ordering::Equal;
             };
             a_who.cmp(b_who)
@@ -684,7 +681,9 @@ impl ValiWorker {
         }
 
         if req.sn != metadata.sn + 1 {
-            return Err(ValidatorError::InvalidData { value: "approval sn" });
+            return Err(ValidatorError::InvalidData {
+                value: "approval sn",
+            });
         }
 
         if req.gov_version != gov_version {
@@ -781,19 +780,15 @@ impl ValiWorker {
                 )
             });
 
-        if let Some((old_hash, old_issued_at, old_version, old_request_id))
-            = existing
+        if let Some((old_hash, old_issued_at, old_version, old_request_id)) =
+            existing
         {
             let incoming = (
                 collection.approval_req.content().issued_at.as_nanos(),
                 collection.version,
                 collection.request_id.as_str(),
             );
-            let stored = (
-                old_issued_at,
-                old_version,
-                old_request_id.as_str(),
-            );
+            let stored = (old_issued_at, old_version, old_request_id.as_str());
             if incoming <= stored {
                 warn!(
                     msg_type = "ApprovalCollectReq",
@@ -859,8 +854,7 @@ impl ValiWorker {
         ctx: &mut ActorContext<Self>,
         approval_req_hash: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(collection) = self.approvals.get_mut(approval_req_hash)
-        else {
+        let Some(collection) = self.approvals.get_mut(approval_req_hash) else {
             return Ok(());
         };
 
@@ -1156,9 +1150,7 @@ impl ValiWorker {
     ) -> Result<(), ActorError> {
         match &route.owner_route {
             OwnerRoute::Local => {
-                let Ok(parent) =
-                    ctx.get_parent::<Approval>().await
-                else {
+                let Ok(parent) = ctx.get_parent::<Approval>().await else {
                     debug!(
                         msg_type = "VoteReport",
                         "Approval actor gone, dropping vote report"
@@ -1208,9 +1200,7 @@ impl ValiWorker {
     ) -> Result<(), ActorError> {
         match &route.owner_route {
             OwnerRoute::Local => {
-                let Ok(parent) =
-                    ctx.get_parent::<Approval>().await
-                else {
+                let Ok(parent) = ctx.get_parent::<Approval>().await else {
                     debug!(
                         msg_type = "StatusRes",
                         "Approval actor gone, dropping status"
@@ -1304,11 +1294,10 @@ impl ValiWorker {
         let Ok(config) = Self::approval_config(ctx) else {
             return Err(ApprovalCollectAck::Unavailable);
         };
-        let min_deadline = TimeStamp::from_nanos(
-            req.issued_at.as_nanos().saturating_add(
+        let min_deadline =
+            TimeStamp::from_nanos(req.issued_at.as_nanos().saturating_add(
                 config.min_window_secs.saturating_mul(1_000_000_000),
-            ),
-        );
+            ));
         if req.deadline < min_deadline {
             warn!(
                 msg_type = "ApprovalCollectReq",
@@ -1330,7 +1319,11 @@ impl ValiWorker {
             return Err(ApprovalCollectAck::Unavailable);
         }
 
-        if !self.current_roles.validation.workers.contains(&*self.our_key)
+        if !self
+            .current_roles
+            .validation
+            .workers
+            .contains(&*self.our_key)
             || self.approvers_role().workers.is_empty()
         {
             return Err(ApprovalCollectAck::Unavailable);
@@ -1382,10 +1375,8 @@ impl ValiWorker {
         request_id: String,
         version: u64,
     ) -> Result<(), ActorError> {
-        let approval_req_hash = hash_borsh(
-            &*self.hash.hasher(),
-            approval_req.content(),
-        );
+        let approval_req_hash =
+            hash_borsh(&*self.hash.hasher(), approval_req.content());
         let approval_req_hash = match approval_req_hash {
             Ok(hash) => hash,
             Err(e) => {
@@ -1440,9 +1431,7 @@ impl ValiWorker {
 
         match owner_route {
             OwnerRoute::Local => {
-                let Ok(parent) =
-                    ctx.get_parent::<Approval>().await
-                else {
+                let Ok(parent) = ctx.get_parent::<Approval>().await else {
                     debug!(
                         msg_type = "ApprovalCollectReq",
                         "Approval actor gone, dropping collect ack"
@@ -1535,16 +1524,12 @@ impl ValiWorker {
                         value: "evaluation gov state",
                     })?,
             },
-            (true, EventRequestType::Transfer) => {
-                EvaluateData::GovTransfer {
-                    state: GovernanceData::try_from(
-                        metadata.properties.clone(),
-                    )
+            (true, EventRequestType::Transfer) => EvaluateData::GovTransfer {
+                state: GovernanceData::try_from(metadata.properties.clone())
                     .map_err(|_| ValidatorError::InvalidData {
                         value: "evaluation gov state",
                     })?,
-                }
-            }
+            },
             (true, EventRequestType::Confirm) => EvaluateData::GovConfirm {
                 state: GovernanceData::try_from(metadata.properties.clone())
                     .map_err(|_| ValidatorError::InvalidData {
@@ -1806,8 +1791,7 @@ impl ValiWorker {
         // through the compilation phase: a missing schema would commit
         // without a ledger anchor and an extra one would overwrite the
         // anchor of a contract the event did not touch.
-        if let CompilationResponse::Ok { result, .. } = &compilation.response
-        {
+        if let CompilationResponse::Ok { result, .. } = &compilation.response {
             let EventRequest::Fact(fact_request) = event_request.content()
             else {
                 return Err(ValidatorError::InvalidData {
@@ -1920,44 +1904,43 @@ impl ValiWorker {
             problem: e.to_string(),
         })?;
 
-        let (eval_data, comp_data, appro_data) = if gov_version
-            == self.gov_version
-        {
-            (
-                self.current_evaluation_roles(),
-                compilation
-                    .as_ref()
-                    .map(|_| self.current_compilation_roles()),
-                approval_data
-                    .as_ref()
-                    .map(|_| self.current_approval_roles()),
-            )
-        } else {
-            let (eval_roles, appro_roles, comp_roles) =
-                get_actual_roles_register(
-                    ctx,
-                    &metadata.governance_id,
-                    SearchRole {
-                        schema_id: metadata.schema_id.clone(),
-                        namespace: metadata.namespace.clone(),
-                    },
-                    approval_data.is_some(),
-                    compilation.is_some(),
-                    gov_version,
+        let (eval_data, comp_data, appro_data) =
+            if gov_version == self.gov_version {
+                (
+                    self.current_evaluation_roles(),
+                    compilation
+                        .as_ref()
+                        .map(|_| self.current_compilation_roles()),
+                    approval_data
+                        .as_ref()
+                        .map(|_| self.current_approval_roles()),
                 )
-                .await
-                .map_err(|e| {
-                    if let ActorError::UnexpectedResponse { .. } = e {
-                        ValidatorError::OutOfVersion
-                    } else {
-                        ValidatorError::InternalError {
-                            problem: e.to_string(),
+            } else {
+                let (eval_roles, appro_roles, comp_roles) =
+                    get_actual_roles_register(
+                        ctx,
+                        &metadata.governance_id,
+                        SearchRole {
+                            schema_id: metadata.schema_id.clone(),
+                            namespace: metadata.namespace.clone(),
+                        },
+                        approval_data.is_some(),
+                        compilation.is_some(),
+                        gov_version,
+                    )
+                    .await
+                    .map_err(|e| {
+                        if let ActorError::UnexpectedResponse { .. } = e {
+                            ValidatorError::OutOfVersion
+                        } else {
+                            ValidatorError::InternalError {
+                                problem: e.to_string(),
+                            }
                         }
-                    }
-                })?;
+                    })?;
 
-            (eval_roles, comp_roles, appro_roles)
-        };
+                (eval_roles, comp_roles, appro_roles)
+            };
 
         if let Some(compilation) = compilation {
             let Some(comp_data) = comp_data else {
@@ -1981,17 +1964,16 @@ impl ValiWorker {
             return Ok(None);
         };
 
-        let (appr_required, req_patch, properties) = self
-            .check_evaluation(
-                evaluation,
-                eval_data,
-                metadata.properties.clone(),
-                event_request,
-                metadata,
-                gov_version,
-                req_subject_data_hash.clone(),
-                signer.clone(),
-            )?;
+        let (appr_required, req_patch, properties) = self.check_evaluation(
+            evaluation,
+            eval_data,
+            metadata.properties.clone(),
+            event_request,
+            metadata,
+            gov_version,
+            req_subject_data_hash.clone(),
+            signer.clone(),
+        )?;
 
         let Some(approval_data) = approval_data else {
             if appr_required {
@@ -2411,27 +2393,25 @@ impl ValiWorker {
                 // With approval the evidence is already closed inside
                 // the request: the event succeeds exactly when it was
                 // approved and the response attests its hash.
-                let (is_success, approval_data_hash) =
-                    match actual_protocols.as_ref() {
-                        ActualProtocols::EvalApprove {
-                            approval_data, ..
-                        }
-                        | ActualProtocols::CompileEvalApprove {
-                            approval_data, ..
-                        } => {
-                            let hash = hash_borsh(
-                                &*self.hash.hasher(),
-                                approval_data,
-                            )
-                            .map_err(|e| ValidatorError::InternalError {
-                                problem: e.to_string(),
-                            })?;
-                            (approval_data.approved, Some(hash))
-                        }
-                        // The `approved` flag only applies to the
-                        // approve variants, absent here.
-                        _ => (actual_protocols.is_success(false), None),
-                    };
+                let (is_success, approval_data_hash) = match actual_protocols
+                    .as_ref()
+                {
+                    ActualProtocols::EvalApprove { approval_data, .. }
+                    | ActualProtocols::CompileEvalApprove {
+                        approval_data,
+                        ..
+                    } => {
+                        let hash =
+                            hash_borsh(&*self.hash.hasher(), approval_data)
+                                .map_err(|e| ValidatorError::InternalError {
+                                    problem: e.to_string(),
+                                })?;
+                        (approval_data.approved, Some(hash))
+                    }
+                    // The `approved` flag only applies to the
+                    // approve variants, absent here.
+                    _ => (actual_protocols.is_success(false), None),
+                };
 
                 let modified_metadata = Self::create_modified_metadata(
                     is_success,
@@ -2605,25 +2585,23 @@ impl Handler<Self> for ValiWorker {
                 request_id: _,
                 version: _,
             } => {
-                let validation = match self
-                    .create_res(ctx, &validation_req)
-                    .await
-                {
-                    Ok(validation) => validation,
-                    Err(e) => {
-                        if matches!(e, ValidatorError::OutOfVersion) {
-                            ValidationRes::Reboot
-                        } else {
-                            return Err(crash_system(
-                                ctx,
-                                ActorError::FunctionalCritical {
-                                    description: e.to_string(),
-                                },
-                            )
-                            .await);
+                let validation =
+                    match self.create_res(ctx, &validation_req).await {
+                        Ok(validation) => validation,
+                        Err(e) => {
+                            if matches!(e, ValidatorError::OutOfVersion) {
+                                ValidationRes::Reboot
+                            } else {
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: e.to_string(),
+                                    },
+                                )
+                                .await);
+                            }
                         }
-                    }
-                };
+                    };
 
                 let signature = match get_sign(
                     ctx,
@@ -2698,8 +2676,7 @@ impl Handler<Self> for ValiWorker {
                     actual_protocols, ..
                 } = validation_req.content()
                 {
-                    let approval_req_hash = match actual_protocols.as_ref()
-                    {
+                    let approval_req_hash = match actual_protocols.as_ref() {
                         ActualProtocols::EvalApprove {
                             approval_data, ..
                         }
@@ -2757,10 +2734,7 @@ impl Handler<Self> for ValiWorker {
                             ValidationRes::Reboot
                         }
                         GovVersionSync::Current => {
-                            match self
-                                .create_res(ctx, &validation_req)
-                                .await
-                            {
+                            match self.create_res(ctx, &validation_req).await {
                                 Ok(validation) => validation,
                                 Err(e) => {
                                     if let ValidatorError::InternalError {
@@ -2919,12 +2893,7 @@ impl Handler<Self> for ValiWorker {
                         }
 
                         let route = collection.route();
-                        self.push_vote_report(
-                            ctx,
-                            &route,
-                            *approval_res,
-                        )
-                        .await
+                        self.push_vote_report(ctx, &route, *approval_res).await
                     };
 
                     if let Err(e) = push {
@@ -2937,9 +2906,11 @@ impl Handler<Self> for ValiWorker {
                     }
 
                     self.approvals.remove(&approval_req_hash);
-                    if self.pending.as_ref().is_some_and(|pending| {
-                        pending.request_id == request_id
-                    }) {
+                    if self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.request_id == request_id)
+                    {
                         self.pending = None;
                     }
                     return Ok(());
@@ -2954,8 +2925,7 @@ impl Handler<Self> for ValiWorker {
                     approval_req_hash: need_hash,
                 } = approval_res.content()
                 {
-                    let Some(collection) = self.approvals.get(need_hash)
-                    else {
+                    let Some(collection) = self.approvals.get(need_hash) else {
                         debug!(
                             msg_type = "ApprovalResponse",
                             approval_req_hash = %need_hash,
@@ -2997,11 +2967,9 @@ impl Handler<Self> for ValiWorker {
                     }
 
                     let decided = collection.votes.contains_key(&sender)
-                        || collection.double_votes.iter().any(
-                            |(accept, _)| {
-                                accept.signature().signer == sender
-                            },
-                        );
+                        || collection.double_votes.iter().any(|(accept, _)| {
+                            accept.signature().signer == sender
+                        });
                     if decided {
                         return Ok(());
                     }
@@ -3035,10 +3003,7 @@ impl Handler<Self> for ValiWorker {
                         );
                         return Ok(());
                     }
-                    if matches!(
-                        approval_res.content(),
-                        ApprovalRes::Pending
-                    ) {
+                    if matches!(approval_res.content(), ApprovalRes::Pending) {
                         Self::observe_approval_event("pending");
                     }
                     debug!(
@@ -3089,8 +3054,7 @@ impl Handler<Self> for ValiWorker {
                         return Ok(());
                     }
 
-                    if req_subject_data_hash
-                        != collection.req_subject_data_hash
+                    if req_subject_data_hash != collection.req_subject_data_hash
                     {
                         warn!(
                             msg_type = "ApprovalResponse",
@@ -3172,8 +3136,7 @@ impl Handler<Self> for ValiWorker {
                 }
 
                 let route = collection.route();
-                let snapshot =
-                    collection.status_snapshot(wanted.as_ref());
+                let snapshot = collection.status_snapshot(wanted.as_ref());
                 if let Err(error) = self
                     .send_status_to_owner(
                         ctx,
@@ -3296,13 +3259,9 @@ impl Handler<Self> for ValiWorker {
                         "Approval collection expired"
                     );
 
-                    if self
-                        .pending
-                        .as_ref()
-                        .is_some_and(|pending| {
-                            pending.request_id == collection.request_id
-                        })
-                    {
+                    if self.pending.as_ref().is_some_and(|pending| {
+                        pending.request_id == collection.request_id
+                    }) {
                         self.pending = None;
                     }
                 }
@@ -3318,8 +3277,7 @@ mod tests {
     use super::*;
     use crate::{
         compilation::response::CompilerResponse,
-        evaluation::response::EvaluatorResponse,
-        governance::model::Quorum,
+        evaluation::response::EvaluatorResponse, governance::model::Quorum,
         model::event::ApprovalData,
     };
     use ave_common::{
@@ -3530,7 +3488,10 @@ mod tests {
                 compile_req_signature: signed_req.signature().clone(),
                 compile_req_hash,
                 compilers_signatures,
-                response: CompilationResponse::Ok { result: response, result_hash },
+                response: CompilationResponse::Ok {
+                    result: response,
+                    result_hash,
+                },
             }
         }
 
@@ -3661,8 +3622,8 @@ mod tests {
                 issued_at,
                 deadline,
             };
-            let signed_req = Signed::new(approval_req.clone(), &self.owner)
-                .unwrap();
+            let signed_req =
+                Signed::new(approval_req.clone(), &self.owner).unwrap();
             // The approval phase hashes the request content, not the
             // signed envelope (unlike compilation and evaluation).
             let approval_req_hash =
@@ -3688,8 +3649,7 @@ mod tests {
                 .collect();
             // The tally is canonical: every list is ordered by signer
             // public key.
-            approvers_agrees_signatures
-                .sort_by(|a, b| a.signer.cmp(&b.signer));
+            approvers_agrees_signatures.sort_by(|a, b| a.signer.cmp(&b.signer));
 
             ApprovalData {
                 approval_req_signature: signed_req.signature().clone(),
@@ -3738,7 +3698,9 @@ mod tests {
 
         // Honest evidence, reconstructed byte-for-byte, is accepted.
         assert!(
-            fixture.check_compilation(fixture.honest_compilation()).is_ok()
+            fixture
+                .check_compilation(fixture.honest_compilation())
+                .is_ok()
         );
 
         // The stored request signature does not verify over the rebuilt
@@ -3866,7 +3828,9 @@ mod tests {
         // Honest approval evidence over the evaluated patch is accepted.
         let approval = fixture.honest_approval(patch.clone());
         assert!(
-            fixture.check_approval(approval.clone(), patch.clone()).is_ok()
+            fixture
+                .check_approval(approval.clone(), patch.clone())
+                .is_ok()
         );
 
         // The stored approval request signature does not verify over the
@@ -3986,8 +3950,7 @@ mod tests {
         // An issued_at further in the future than the clock skew
         // allowance is rejected, even with a valid window.
         let future = TimeStamp::from_nanos(
-            TimeStamp::now().as_nanos()
-                + 2 * CLOCK_SKEW.as_nanos() as u64,
+            TimeStamp::now().as_nanos() + 2 * CLOCK_SKEW.as_nanos() as u64,
         );
         let skewed = signed_req(
             future,
@@ -4166,20 +4129,18 @@ mod tests {
 
         assert_eq!(collection.status_snapshot(None).len(), 2);
 
-        let only_a0 = collection
-            .status_snapshot(Some(&HashSet::from([public_key(&a0)])));
+        let only_a0 =
+            collection.status_snapshot(Some(&HashSet::from([public_key(&a0)])));
         assert_eq!(only_a0.len(), 1);
 
-        let only_a1 = collection
-            .status_snapshot(Some(&HashSet::from([public_key(&a1)])));
+        let only_a1 =
+            collection.status_snapshot(Some(&HashSet::from([public_key(&a1)])));
         assert_eq!(only_a1.len(), 1);
 
         let unknown = Ed25519Signer::generate().unwrap();
         assert!(
             collection
-                .status_snapshot(Some(&HashSet::from([public_key(
-                    &unknown
-                )])))
+                .status_snapshot(Some(&HashSet::from([public_key(&unknown)])))
                 .is_empty()
         );
     }
@@ -4192,7 +4153,10 @@ mod tests {
         assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 2, 5), 9);
         assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 1, -10), 0);
         assert_eq!(ValiWorker::probe_wait_secs(&[u64::MAX], 0, 0), u64::MAX);
-        assert_eq!(ValiWorker::probe_wait_secs(&[u64::MAX], 0, -10), u64::MAX - 10);
+        assert_eq!(
+            ValiWorker::probe_wait_secs(&[u64::MAX], 0, -10),
+            u64::MAX - 10
+        );
         assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 3, 0), 0);
     }
 }

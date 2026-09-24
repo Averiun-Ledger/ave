@@ -76,8 +76,7 @@ pub(crate) fn is_retryable_compiler_recovery_error(
         error,
         CompilerError::CompilersUnavailable { .. }
             | CompilerError::FileReadFailed {
-                kind:
-                    std::io::ErrorKind::Interrupted
+                kind: std::io::ErrorKind::Interrupted
                     | std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::TimedOut,
                 ..
@@ -227,8 +226,7 @@ impl CompilerSupport {
         _contract_path: &Path,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         Err(CompilerError::CompilersUnavailable {
-            details: "node built without the `toolchain` feature"
-                .to_owned(),
+            details: "node built without the `toolchain` feature".to_owned(),
         })
     }
 
@@ -380,11 +378,8 @@ impl CompilerSupport {
             let (wasm, toolchain_fingerprint) =
                 Self::build_local(hash, contract, contract_path).await?;
 
-            let wasm_hash = pipeline::hash_bytes(
-                hash,
-                &wasm,
-                "compiled wasm artifact",
-            )?;
+            let wasm_hash =
+                pipeline::hash_bytes(hash, &wasm, "compiled wasm artifact")?;
             if let Some(expected) = expected_wasm_hash
                 && wasm_hash != *expected
             {
@@ -550,10 +545,12 @@ impl CompilerSupport {
                 &expected_toolchain,
             )
         });
-        let persisted_matches_anchor = persisted.as_ref().is_none_or(|persisted| {
-            expected_wasm_hash
-                .is_none_or(|expected_wasm_hash| persisted.wasm_hash == *expected_wasm_hash)
-        });
+        let persisted_matches_anchor =
+            persisted.as_ref().is_none_or(|persisted| {
+                expected_wasm_hash.is_none_or(|expected_wasm_hash| {
+                    persisted.wasm_hash == *expected_wasm_hash
+                })
+            });
 
         // Without a ledger anchor, metadata still decides whether these
         // bytes belong to the source requested by a regular compilation.
@@ -571,61 +568,62 @@ impl CompilerSupport {
                 }
             })?;
             match pipeline::load_artifact_precompiled(contract_path).await {
-            Ok(precompiled_bytes) => {
-                let precompiled_hash = pipeline::hash_bytes(
-                    hash,
-                    &precompiled_bytes,
-                    "persisted cwasm artifact",
-                )?;
-                if precompiled_hash == persisted.cwasm_hash {
-                    match contract_runtime.load_precompiled(&precompiled_bytes)
-                    {
-                        Ok(module) => {
-                            match pipeline::validate_module(
-                                &contract_runtime,
-                                &module,
-                                ValueWrapper(initial_value.clone()),
-                            ) {
-                                Ok(()) => {
-                                    return Ok(Some((
-                                        Arc::new(module),
-                                        persisted.clone(),
-                                        "cwasm_hit",
-                                    )));
-                                }
-                                Err(error) => {
-                                    debug!(
-                                        error = %error,
-                                        path = %contract_path.display(),
-                                        "Persisted precompiled contract is invalid, retrying from wasm artifact"
-                                    );
+                Ok(precompiled_bytes) => {
+                    let precompiled_hash = pipeline::hash_bytes(
+                        hash,
+                        &precompiled_bytes,
+                        "persisted cwasm artifact",
+                    )?;
+                    if precompiled_hash == persisted.cwasm_hash {
+                        match contract_runtime
+                            .load_precompiled(&precompiled_bytes)
+                        {
+                            Ok(module) => {
+                                match pipeline::validate_module(
+                                    &contract_runtime,
+                                    &module,
+                                    ValueWrapper(initial_value.clone()),
+                                ) {
+                                    Ok(()) => {
+                                        return Ok(Some((
+                                            Arc::new(module),
+                                            persisted.clone(),
+                                            "cwasm_hit",
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        debug!(
+                                            error = %error,
+                                            path = %contract_path.display(),
+                                            "Persisted precompiled contract is invalid, retrying from wasm artifact"
+                                        );
+                                    }
                                 }
                             }
+                            Err(error) => {
+                                debug!(
+                                    error = %error,
+                                    path = %contract_path.display(),
+                                    "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
+                                );
+                            }
                         }
-                        Err(error) => {
-                            debug!(
-                                error = %error,
-                                path = %contract_path.display(),
-                                "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
-                            );
-                        }
+                    } else {
+                        debug!(
+                            expected = %persisted.cwasm_hash,
+                            actual = %precompiled_hash,
+                            path = %contract_path.display(),
+                            "Persisted precompiled artifact hash mismatch, retrying from wasm artifact"
+                        );
                     }
-                } else {
+                }
+                Err(error) => {
                     debug!(
-                        expected = %persisted.cwasm_hash,
-                        actual = %precompiled_hash,
+                        error = %error,
                         path = %contract_path.display(),
-                        "Persisted precompiled artifact hash mismatch, retrying from wasm artifact"
+                        "Persisted precompiled artifact can not be read, retrying from wasm artifact"
                     );
                 }
-            }
-            Err(error) => {
-                debug!(
-                    error = %error,
-                    path = %contract_path.display(),
-                    "Persisted precompiled artifact can not be read, retrying from wasm artifact"
-                );
-            }
             }
         }
 
@@ -636,11 +634,12 @@ impl CompilerSupport {
                     &wasm_bytes,
                     "persisted wasm artifact",
                 )?;
-                if persisted.as_ref().is_none_or(|persisted| {
-                    wasm_hash == persisted.wasm_hash
-                })
-                    && expected_wasm_hash
-                        .is_none_or(|expected_wasm_hash| wasm_hash == *expected_wasm_hash)
+                if persisted
+                    .as_ref()
+                    .is_none_or(|persisted| wasm_hash == persisted.wasm_hash)
+                    && expected_wasm_hash.is_none_or(|expected_wasm_hash| {
+                        wasm_hash == *expected_wasm_hash
+                    })
                 {
                     match pipeline::precompile_module(
                         &contract_runtime,
@@ -667,16 +666,14 @@ impl CompilerSupport {
                                             &wasm_bytes,
                                             &precompiled_bytes,
                                             engine_fingerprint.clone(),
-                                            persisted
-                                                .as_ref()
-                                                .map_or_else(
-                                                    DigestIdentifier::default,
-                                                    |persisted| {
-                                                        persisted
-                                                            .toolchain_fingerprint
-                                                            .clone()
-                                                    },
-                                                ),
+                                            persisted.as_ref().map_or_else(
+                                                DigestIdentifier::default,
+                                                |persisted| {
+                                                    persisted
+                                                        .toolchain_fingerprint
+                                                        .clone()
+                                                },
+                                            ),
                                         )?;
 
                                     register
@@ -774,8 +771,7 @@ impl CompilerSupport {
         contract_path: &Path,
         initial_value: Value,
         register_path: &ActorPath,
-    ) -> Result<Arc<CompiledModule>, CompilerError>
-    {
+    ) -> Result<Arc<CompiledModule>, CompilerError> {
         let register = ctx
             .system()
             .get_actor::<ContractRegister>(register_path)
@@ -806,19 +802,21 @@ impl CompilerSupport {
         // acceptable: the next recovery would be unable to reproduce it.
         pipeline::validate_contract_source(contract)?;
 
-        let contract_hash = hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "contract hash",
-                details: e.to_string(),
-            }
-        })?;
+        let contract_hash =
+            hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "contract hash",
+                    details: e.to_string(),
+                }
+            })?;
         let manifest = pipeline::compilation_toml();
-        let manifest_hash = hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "contract manifest hash",
-                details: e.to_string(),
-            }
-        })?;
+        let manifest_hash =
+            hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "contract manifest hash",
+                    details: e.to_string(),
+                }
+            })?;
         let contract_runtime = Self::contract_runtime(ctx).await?;
         let engine_fingerprint = contract_runtime
             .engine_fingerprint(hash)
@@ -890,8 +888,7 @@ impl CompilerSupport {
 
         // Best-effort eviction, only when the in-memory module is stale
         // the same way the bytes were.
-        if evict_module
-            && let Ok(contracts) = Self::contracts_helper(ctx).await
+        if evict_module && let Ok(contracts) = Self::contracts_helper(ctx).await
         {
             contracts.write().await.remove(contract_name);
         }
@@ -1048,11 +1045,8 @@ impl CompilerSupport {
                 details: error.to_string(),
             }
         })?;
-        let wasm_hash = pipeline::hash_bytes(
-            hash,
-            &wasm,
-            "fetched wasm artifact",
-        )?;
+        let wasm_hash =
+            pipeline::hash_bytes(hash, &wasm, "fetched wasm artifact")?;
         if &wasm_hash != expected_wasm_hash {
             return Err(CompilerError::FetchedArtifactMismatch {
                 expected: expected_wasm_hash.to_string(),
@@ -1088,12 +1082,8 @@ impl CompilerSupport {
             &module,
             ValueWrapper(initial_value),
         )?;
-        pipeline::persist_artifact(
-            contract_path,
-            &wasm,
-            &precompiled_bytes,
-        )
-        .await?;
+        pipeline::persist_artifact(contract_path, &wasm, &precompiled_bytes)
+            .await?;
 
         // The build toolchain fingerprint comes from the serving node;
         // unknown (default) forces a recompile if this node ever becomes

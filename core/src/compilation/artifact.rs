@@ -39,9 +39,13 @@ pub enum ArtifactTransferError {
     Compression { details: String },
     #[error("artifact decompression failed: {details}")]
     Decompression { details: String },
-    #[error("compressed artifact is too large for the network: {size} bytes (max {max})")]
+    #[error(
+        "compressed artifact is too large for the network: {size} bytes (max {max})"
+    )]
     TooLarge { size: usize, max: usize },
-    #[error("artifact is too large after decompression: {size} bytes (max {max})")]
+    #[error(
+        "artifact is too large after decompression: {size} bytes (max {max})"
+    )]
     UncompressedTooLarge { size: usize, max: usize },
 }
 
@@ -67,11 +71,12 @@ impl ArtifactData {
                 max: MAX_ARTIFACT_UNCOMPRESSED_BYTES,
             });
         }
-        let compressed_wasm = zstd::bulk::compress(wasm, 0).map_err(|error| {
-            ArtifactTransferError::Compression {
-                details: error.to_string(),
-            }
-        })?;
+        let compressed_wasm =
+            zstd::bulk::compress(wasm, 0).map_err(|error| {
+                ArtifactTransferError::Compression {
+                    details: error.to_string(),
+                }
+            })?;
         if compressed_wasm.len() > MAX_ARTIFACT_WIRE_BYTES {
             return Err(ArtifactTransferError::TooLarge {
                 size: compressed_wasm.len(),
@@ -143,7 +148,10 @@ mod tests {
             .expect("compressing a wasm artifact must succeed");
 
         assert!(artifact.compressed_wasm.len() < wasm.len());
-        assert_eq!(artifact.decompress().expect("artifact must decompress"), wasm);
+        assert_eq!(
+            artifact.decompress().expect("artifact must decompress"),
+            wasm
+        );
     }
 
     #[test]

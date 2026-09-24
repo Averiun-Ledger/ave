@@ -720,8 +720,7 @@ impl Protocols {
                         let Some(approval_data) = approval_data else {
                             return Err(
                                 ProtocolsError::InvalidActualProtocols {
-                                    expected:
-                                        "approval data for CompileEvalApprove",
+                                    expected: "approval data for CompileEvalApprove",
                                     got: "no approval data",
                                 },
                             );

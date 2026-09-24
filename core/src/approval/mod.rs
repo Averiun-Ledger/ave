@@ -223,9 +223,8 @@ impl Approval {
             .await
         {
             let _ = coordinator.ask_stop().await;
-        } else if let Ok(worker) = ctx
-            .get_child::<ValiWorker>(&format!("{}", validator))
-            .await
+        } else if let Ok(worker) =
+            ctx.get_child::<ValiWorker>(&format!("{}", validator)).await
         {
             let _ = worker.ask_stop().await;
         }
@@ -246,10 +245,9 @@ impl Approval {
             }
         }
 
-        let threshold = self.quorum.get_signers(
-            self.validators_quantity,
-            self.validators_quantity,
-        );
+        let threshold = self
+            .quorum
+            .get_signers(self.validators_quantity, self.validators_quantity);
         let reachable = self.working.len()
             + self.current_validators.len()
             + self.pending_validators.len();
@@ -308,7 +306,11 @@ impl Approval {
                         node_key: (*self.our_key).clone(),
                         our_key: self.our_key.clone(),
                         init_state: None,
-                        governance_id: self.request.content().subject_id.clone(),
+                        governance_id: self
+                            .request
+                            .content()
+                            .subject_id
+                            .clone(),
                         gov_version: self.request.content().gov_version,
                         sn: self.request.content().sn,
                         hash: self.hash,
@@ -477,8 +479,11 @@ impl Approval {
             let Some(previous) = self.votes.remove(&signer) else {
                 return false;
             };
-            let (accept, reject) =
-                if *agrees { (vote, previous) } else { (previous, vote) };
+            let (accept, reject) = if *agrees {
+                (vote, previous)
+            } else {
+                (previous, vote)
+            };
             self.double_votes.push((accept, reject));
             self.timeouts.remove(&signer);
             true
@@ -715,19 +720,13 @@ pub enum ApprovalMessage {
     },
     /// A validator acknowledged the request and is collecting the
     /// approver votes.
-    Working {
-        sender: PublicKey,
-    },
+    Working { sender: PublicKey },
     /// A validator can not collect for this request (never acknowledged
     /// or explicitly unavailable): it is dropped and replaced.
-    Unavailable {
-        sender: PublicKey,
-    },
+    Unavailable { sender: PublicKey },
     /// A validator reports the requester is behind its governance
     /// version: the request reboots so the requester syncs first.
-    Reboot {
-        sender: PublicKey,
-    },
+    Reboot { sender: PublicKey },
     /// A validator pushes a newly observed approver vote, a signed
     /// timeout attestation or an approver abort.
     VoteReport {
@@ -785,10 +784,8 @@ impl Handler<Self> for Approval {
                 version,
                 signers,
             } => {
-                let approval_req_hash = hash_borsh(
-                    &*self.hash.hasher(),
-                    self.request.content(),
-                );
+                let approval_req_hash =
+                    hash_borsh(&*self.hash.hasher(), self.request.content());
                 let approval_req_hash = match approval_req_hash {
                     Ok(hash) => hash,
                     Err(e) => {
@@ -1119,14 +1116,12 @@ impl Handler<Self> for Approval {
                     return Ok(());
                 }
 
-                let changed = if matches!(
-                    vote.content(),
-                    ApprovalRes::TimeOut { .. }
-                ) {
-                    self.merge_timeout(*vote, &sender)
-                } else {
-                    self.merge_vote(*vote)
-                };
+                let changed =
+                    if matches!(vote.content(), ApprovalRes::TimeOut { .. }) {
+                        self.merge_timeout(*vote, &sender)
+                    } else {
+                        self.merge_vote(*vote)
+                    };
 
                 if changed
                     && let Err(e) = self.maybe_close_collection(ctx).await
@@ -1359,12 +1354,10 @@ mod tests {
     fn fixture() -> Fixture {
         let owner = Ed25519Signer::generate().unwrap();
         let owner_key = key(&owner);
-        let approvers: Vec<Ed25519Signer> = (0..3)
-            .map(|_| Ed25519Signer::generate().unwrap())
-            .collect();
-        let validators: Vec<Ed25519Signer> = (0..3)
-            .map(|_| Ed25519Signer::generate().unwrap())
-            .collect();
+        let approvers: Vec<Ed25519Signer> =
+            (0..3).map(|_| Ed25519Signer::generate().unwrap()).collect();
+        let validators: Vec<Ed25519Signer> =
+            (0..3).map(|_| Ed25519Signer::generate().unwrap()).collect();
         let request = Signed::new(
             ApprovalReq {
                 subject_id: DigestIdentifier::default(),
@@ -1379,14 +1372,12 @@ mod tests {
         )
         .unwrap();
         let hash = HashAlgorithm::Blake3;
-        let req_hash =
-            hash_borsh(&*hash.hasher(), request.content()).unwrap();
+        let req_hash = hash_borsh(&*hash.hasher(), request.content()).unwrap();
         let subject_hash =
             hash_borsh(&*hash.hasher(), &b"subject data".to_vec()).unwrap();
         let (tx, _) = mpsc::channel(8);
-        let faults = Arc::new(std::sync::Mutex::new(
-            TestFaultRegistry::new(tx.clone()),
-        ));
+        let faults =
+            Arc::new(std::sync::Mutex::new(TestFaultRegistry::new(tx.clone())));
         let mut approval = Approval::new(
             Arc::new(owner_key),
             request,
@@ -1456,41 +1447,43 @@ mod tests {
         assert_eq!(pending_set(&fx), all);
 
         // A verified vote settles its approver.
-        assert!(
-            fx.approval
-                .merge_vote(vote(&req_hash, &subject_hash, &fx.approvers[0], true))
-        );
+        assert!(fx.approval.merge_vote(vote(
+            &req_hash,
+            &subject_hash,
+            &fx.approvers[0],
+            true
+        )));
         let mut rest: HashSet<PublicKey> = a[1..].iter().cloned().collect();
         assert_eq!(pending_set(&fx), rest);
 
         // A single timeout attestation is not a quorum of 2.
-        assert!(
-            fx.approval.merge_timeout(
-                timeout(&req_hash, &fx.validators[0], &fx.approvers[1]),
-                &key(&fx.validators[0]),
-            )
-        );
+        assert!(fx.approval.merge_timeout(
+            timeout(&req_hash, &fx.validators[0], &fx.approvers[1]),
+            &key(&fx.validators[0]),
+        ));
         assert_eq!(pending_set(&fx), rest);
 
         // The second attestation reaches the quorum and settles it.
-        assert!(
-            fx.approval.merge_timeout(
-                timeout(&req_hash, &fx.validators[1], &fx.approvers[1]),
-                &key(&fx.validators[1]),
-            )
-        );
+        assert!(fx.approval.merge_timeout(
+            timeout(&req_hash, &fx.validators[1], &fx.approvers[1]),
+            &key(&fx.validators[1]),
+        ));
         rest.remove(&a[1]);
         assert_eq!(pending_set(&fx), rest);
 
         // A conflicting pair settles the approver as excluded.
-        assert!(
-            fx.approval
-                .merge_vote(vote(&req_hash, &subject_hash, &fx.approvers[2], true))
-        );
-        assert!(
-            fx.approval
-                .merge_vote(vote(&req_hash, &subject_hash, &fx.approvers[2], false))
-        );
+        assert!(fx.approval.merge_vote(vote(
+            &req_hash,
+            &subject_hash,
+            &fx.approvers[2],
+            true
+        )));
+        assert!(fx.approval.merge_vote(vote(
+            &req_hash,
+            &subject_hash,
+            &fx.approvers[2],
+            false
+        )));
         assert!(pending_set(&fx).is_empty());
     }
 
@@ -1516,8 +1509,9 @@ mod tests {
         else {
             panic!("expected a response vote");
         };
-        let other_sig =
-            vote(&req_hash, &subject_hash, &a0, false).signature().clone();
+        let other_sig = vote(&req_hash, &subject_hash, &a0, false)
+            .signature()
+            .clone();
         let corrupt = Signed::from_parts(
             ApprovalRes::Response {
                 approval_req_hash,

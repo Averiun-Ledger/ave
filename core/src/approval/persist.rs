@@ -388,7 +388,10 @@ pub enum ApprPersistEvent {
         asker: (PublicKey, String),
     },
     /// Another validator asked for the same vote.
-    AddAsker { key: PublicKey, actor: String },
+    AddAsker {
+        key: PublicKey,
+        actor: String,
+    },
 }
 
 impl Event for ApprPersistEvent {}
@@ -651,19 +654,18 @@ impl Handler<Self> for ApprPersist {
                         });
                     }
 
-                    let metadata = match get_metadata(ctx, &self.subject_id)
-                        .await
-                    {
-                        Ok(metadata) => metadata,
-                        Err(e) => {
-                            warn!(
-                                msg_type = "NetworkRequest",
-                                error = %e,
-                                "Failed to get subject metadata"
-                            );
-                            return Err(crash_system(ctx, e).await);
-                        }
-                    };
+                    let metadata =
+                        match get_metadata(ctx, &self.subject_id).await {
+                            Ok(metadata) => metadata,
+                            Err(e) => {
+                                warn!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to get subject metadata"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
+                        };
 
                     if approval_req.signature().signer != metadata.owner {
                         warn!(
@@ -929,9 +931,7 @@ impl Handler<Self> for ApprPersist {
                 let asker = (sender.clone(), asker_actor.clone());
                 let supplier = self.needfull_supplier.clone();
                 match supplier {
-                    Some((current, attempts))
-                        if current == sender =>
-                    {
+                    Some((current, attempts)) if current == sender => {
                         if attempts >= NEEDFULL_ROTATE_AFTER {
                             match self.needfull_backups.pop() {
                                 Some(next) => {
@@ -965,8 +965,7 @@ impl Handler<Self> for ApprPersist {
                         {
                             self.needfull_backups.push(asker);
                         } else if supplier.is_none() {
-                            self.needfull_supplier =
-                                Some((sender.clone(), 0));
+                            self.needfull_supplier = Some((sender.clone(), 0));
                             self.send_need_full(
                                 ctx,
                                 &approval_req_hash,
@@ -1016,20 +1015,17 @@ impl ApprPersist {
 
         match state {
             ApprovalState::Accepted | ApprovalState::Rejected => {
-                let approval_req =
-                    if let Some(approval_req) = self.request.clone() {
-                        approval_req
-                    } else {
-                        error!(
-                            msg_type = msg_type,
-                            "Approval request not found"
-                        );
-                        let e = ActorError::FunctionalCritical {
-                            description: "Can not get approve request"
-                                .to_owned(),
-                        };
-                        return Err(crash_system(ctx, e).await);
+                let approval_req = if let Some(approval_req) =
+                    self.request.clone()
+                {
+                    approval_req
+                } else {
+                    error!(msg_type = msg_type, "Approval request not found");
+                    let e = ActorError::FunctionalCritical {
+                        description: "Can not get approve request".to_owned(),
                     };
+                    return Err(crash_system(ctx, e).await);
+                };
 
                 if let Err(e) = self
                     .send_response(

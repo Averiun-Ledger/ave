@@ -118,7 +118,9 @@ pub enum CompilerError {
     #[error("missing ledger anchor for artifact [{contract_name}]")]
     MissingArtifactAnchor { contract_name: String },
 
-    #[error("artifact hash does not match ledger anchor: expected {expected}, got {actual}")]
+    #[error(
+        "artifact hash does not match ledger anchor: expected {expected}, got {actual}"
+    )]
     ArtifactAnchorMismatch { expected: String, actual: String },
 }
 

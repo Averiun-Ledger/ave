@@ -1453,9 +1453,13 @@ impl RequestManager {
                 self.needs_subject_manager(),
             )
             .await?;
-            let update_result =
-                update_ledger(ctx, &self.subject_id, vec![ledger.clone()], false)
-                    .await;
+            let update_result = update_ledger(
+                ctx,
+                &self.subject_id,
+                vec![ledger.clone()],
+                false,
+            )
+            .await;
             lease.finish(ctx).await?;
             update_result?;
         }
@@ -2243,9 +2247,7 @@ impl RequestManager {
                 };
             }
             RequestManagerState::Approval { .. } => {
-                if let Ok(actor) =
-                    ctx.get_child::<Approval>("approval").await
-                {
+                if let Ok(actor) = ctx.get_child::<Approval>("approval").await {
                     actor.ask_stop().await?;
                 };
             }
@@ -3134,8 +3136,8 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    if let Some(evaluator_res) = eval_res
-                        .evaluator_response_ok()
+                    if let Some(evaluator_res) =
+                        eval_res.evaluator_response_ok()
                         && evaluator_res.appr_required
                     {
                         debug!(
@@ -3507,9 +3509,8 @@ impl Handler<Self> for RequestManager {
                         "Approval phase closed, entering validation"
                     );
 
-                    let RequestManagerState::Approval {
-                        compile, eval, ..
-                    } = self.state.clone()
+                    let RequestManagerState::Approval { compile, eval, .. } =
+                        self.state.clone()
                     else {
                         // Benign race: the request already left the
                         // approval phase (reboot, abort...) while this

@@ -63,9 +63,7 @@ mod tests {
     use super::*;
     use ave_common::{
         ValueWrapper,
-        identity::{
-            DigestIdentifier, KeyPair, TimeStamp, keys::Ed25519Signer,
-        },
+        identity::{DigestIdentifier, KeyPair, TimeStamp, keys::Ed25519Signer},
     };
 
     fn core_req() -> ApprovalReq {

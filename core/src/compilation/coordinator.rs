@@ -523,9 +523,7 @@ mod tests {
 
     use ave_common::{
         ValueWrapper,
-        identity::{
-            DigestIdentifier, KeyPair, keys::Ed25519Signer,
-        },
+        identity::{DigestIdentifier, KeyPair, keys::Ed25519Signer},
         request::{EventRequest, FactRequest},
     };
 
@@ -608,8 +606,7 @@ mod tests {
             .unwrap();
 
         let request_id =
-            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &"request-1")
-                .unwrap();
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &"request-1").unwrap();
         let version = 7;
         compilation
             .tell(CompilationMessage::Create {
@@ -622,11 +619,10 @@ mod tests {
 
         // The first send of the retry cycle confirms that the
         // coordinator child and its retry actor are up.
-        let command =
-            timeout(Duration::from_secs(5), command_receiver.recv())
-                .await
-                .expect("the compilation request was not sent")
-                .expect("network channel closed");
+        let command = timeout(Duration::from_secs(5), command_receiver.recv())
+            .await
+            .expect("the compilation request was not sent")
+            .expect("network channel closed");
         let CommandHelper::SendMessage { message, .. } = command else {
             panic!("expected an outbound send command");
         };
@@ -638,12 +634,9 @@ mod tests {
         assert_eq!(message.info.request_id, request_id.to_string());
         assert_eq!(message.info.version, version);
 
-        let coordinator_path = ActorPath::from(format!(
-            "/user/compilation/{}",
-            compiler_key
-        ));
-        let retry_path =
-            ActorPath::from(format!("{}/retry", coordinator_path));
+        let coordinator_path =
+            ActorPath::from(format!("/user/compilation/{}", compiler_key));
+        let retry_path = ActorPath::from(format!("{}/retry", coordinator_path));
         let coordinator = system
             .get_actor::<CompileCoordinator>(&coordinator_path)
             .await
@@ -761,8 +754,7 @@ mod tests {
     /// `CompilationRes::TimeOut` and stop the coordinator).
     #[test(tokio::test)]
     async fn result_deadline_reports_timeout_and_stops() {
-        let (_system, runner, _dirs, _rx, coordinator, ..) =
-            setup().await;
+        let (_system, runner, _dirs, _rx, coordinator, ..) = setup().await;
 
         coordinator
             .tell(CompileCoordinatorMessage::ResultDeadline)

@@ -30,12 +30,12 @@ use ave_core::governance::model::{
 
 use ave_network::{NodeType, RoutingNode};
 use common::{
-    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig,
-    CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2,
-    assert_governance_properties_eq, create_and_authorize_governance,
-    create_nodes_and_connections, create_subject, emit_approve,
-    emit_confirm, emit_eol, emit_fact, emit_reject, emit_transfer,
-    get_events, get_subject, governance_properties, wait_sink_events,
+    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig, CreateNodesAndConnectionsConfig,
+    EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, assert_governance_properties_eq,
+    create_and_authorize_governance, create_nodes_and_connections,
+    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
+    emit_reject, emit_transfer, get_events, get_subject, governance_properties,
+    wait_sink_events,
 };
 use futures::future::join_all;
 use serde_json::json;

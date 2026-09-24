@@ -83,9 +83,13 @@ async fn owner_and_two_approvers(
     owner_always_accept: bool,
     approvers_always_accept: bool,
 ) -> (Vec<NodeData>, Vec<TempDir>) {
-    let (owner, mut dirs) =
-        create_node_with(NodeType::Bootstrap, owner_always_accept, vec![], None)
-            .await;
+    let (owner, mut dirs) = create_node_with(
+        NodeType::Bootstrap,
+        owner_always_accept,
+        vec![],
+        None,
+    )
+    .await;
     let mut nodes = vec![owner];
     for _ in 0..2 {
         let peers = vec![RoutingNode {
@@ -130,7 +134,12 @@ impl TestNode {
     async fn bootstrap() -> Self {
         let (data, dirs) =
             create_node_with(NodeType::Bootstrap, true, vec![], None).await;
-        Self { data, dirs, always_accept: true, approval: None }
+        Self {
+            data,
+            dirs,
+            always_accept: true,
+            approval: None,
+        }
     }
 
     async fn addressable(
@@ -149,7 +158,12 @@ impl TestNode {
             approval.clone(),
         )
         .await;
-        Self { data, dirs, always_accept, approval }
+        Self {
+            data,
+            dirs,
+            always_accept,
+            approval,
+        }
     }
 
     const fn api(&self) -> &Api {
@@ -293,7 +307,9 @@ async fn inject_vote(
                         "/user/node/subject_manager/{governance_id}/validator"
                     ),
                 },
-                message: ActorMessage::ApprovalRes { res: Box::new(vote) },
+                message: ActorMessage::ApprovalRes {
+                    res: Box::new(vote),
+                },
             },
             from,
         )
@@ -456,11 +472,9 @@ async fn test_approval_auto_commit_evidence() {
     let approver_2 = &nodes[2].api;
     let approver_1_pk = PublicKey::from_str(approver_1.public_key()).unwrap();
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     // Approver1 doubles as a validator with a fixed quorum of 2, so the
     // validation request always crosses the network.
@@ -521,7 +535,9 @@ async fn test_approval_auto_commit_evidence() {
         .unwrap();
 
     let signed_req = wait_held_validation_req(owner, &approver_1_pk).await;
-    let ValidationReq::Event { actual_protocols, .. } = signed_req.content()
+    let ValidationReq::Event {
+        actual_protocols, ..
+    } = signed_req.content()
     else {
         panic!("a governance fact must produce an event validation request");
     };
@@ -547,10 +563,9 @@ async fn test_approval_auto_commit_evidence() {
     assert_eq!(properties.members.len(), 4);
 
     for approver in [approver_1, approver_2] {
-        let state =
-            get_subject(approver, governance_id.clone(), Some(2), true)
-                .await
-                .unwrap();
+        let state = get_subject(approver, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
         assert_eq!(state.sn, 2);
     }
 
@@ -571,11 +586,9 @@ async fn test_approval_manual_pending_to_commit() {
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     let json = two_approvers_setup(approver_1, approver_2);
     emit_fact(owner, governance_id.clone(), json, true)
@@ -592,10 +605,13 @@ async fn test_approval_manual_pending_to_commit() {
     )
     .await
     .unwrap();
-    let state =
-        wait_request_state(owner, request_id.clone(), Some(RequestState::Approval))
-            .await
-            .unwrap();
+    let state = wait_request_state(
+        owner,
+        request_id.clone(),
+        Some(RequestState::Approval),
+    )
+    .await
+    .unwrap();
     assert_eq!(state, RequestState::Approval);
 
     emit_approve(
@@ -646,11 +662,9 @@ async fn test_approval_rejection_commits_event() {
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     let json = two_approvers_setup(approver_1, approver_2);
     emit_fact(owner, governance_id.clone(), json, true)
@@ -711,11 +725,9 @@ async fn test_approval_early_rejection_no_deadline_wait() {
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     let json = two_approvers_setup(approver_1, approver_2);
     emit_fact(owner, governance_id.clone(), json, true)
@@ -968,9 +980,8 @@ async fn test_approval_owner_is_approver_remote_validator() {
 // deserializes.
 fn approval_data_serialization_roundtrip() {
     let signer = Ed25519Signer::generate().unwrap();
-    let mk_sig = |content: &[u8]| {
-        Signature::new(&content.to_vec(), &signer).unwrap()
-    };
+    let mk_sig =
+        |content: &[u8]| Signature::new(&content.to_vec(), &signer).unwrap();
 
     let data = ApprovalData {
         approval_req_signature: mk_sig(b"approval request"),
@@ -1049,7 +1060,6 @@ fn approval_data_serialization_roundtrip() {
     assert_eq!(serde_json::to_value(&back).unwrap(), json);
 }
 
-
 #[test(tokio::test)]
 // Approver offline: its absence is attested at the deadline by the
 // approval validators and the event commits accepted once the absent
@@ -1113,9 +1123,14 @@ async fn test_approval_offline_approver_absent_at_deadline() {
     // Owner and Approver1 vote (2 < 3); Ghost never answers. At the
     // deadline the absent vote counts as acceptance: 2 + 1 >= 3.
     let start = Instant::now();
-    emit_fact(owner, governance_id.clone(), add_fake_member("AveNode1"), false)
-        .await
-        .unwrap();
+    emit_fact(
+        owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
 
     wait_subject_sn(owner, governance_id.clone(), 2, 90).await;
     let elapsed = start.elapsed();
@@ -1220,8 +1235,9 @@ async fn test_approval_deadline_tick_closes_without_votes() {
             ]
         }
     });
-    let request_id =
-        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+    let request_id = emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     emit_approve(
         owner,
         governance_id.clone(),
@@ -1234,9 +1250,14 @@ async fn test_approval_deadline_tick_closes_without_votes() {
 
     // Nobody votes: at the deadline the two absences reach quorum.
     let start = Instant::now();
-    emit_fact(owner, governance_id.clone(), add_fake_member("AveNode1"), false)
-        .await
-        .unwrap();
+    emit_fact(
+        owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
 
     wait_subject_sn(owner, governance_id.clone(), 2, 90).await;
     let elapsed = start.elapsed();
@@ -1276,15 +1297,10 @@ async fn test_approval_deadline_tick_closes_without_votes() {
             PublicKey::from_str(&ghost).unwrap()
         ])
     );
-    assert!(
-        approval
-            .approvers_timeouts
-            .iter()
-            .all(|(_, attestations)| {
-                attestations.len() == 1
-                    && attestations[0].signer == nodes[1].public_key()
-            })
-    );
+    assert!(approval.approvers_timeouts.iter().all(|(_, attestations)| {
+        attestations.len() == 1
+            && attestations[0].signer == nodes[1].public_key()
+    }));
 }
 
 #[test(tokio::test)]
@@ -1345,9 +1361,14 @@ async fn test_approval_validator_restart_mid_collection() {
         .unwrap();
 
     // Emit and kill the remote validator before it can ACK.
-    emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode1"), false)
-        .await
-        .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
     nodes[2].kill().await;
 
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -1527,9 +1548,14 @@ async fn test_approval_replacement_after_deadline_immediate_close() {
 
     // Owner auto-accepts (1 < 2), Ghost never votes: close at deadline.
     let start = Instant::now();
-    emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode1"), false)
-        .await
-        .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
     nodes[2].kill().await;
 
     wait_subject_sn(&owner, governance_id.clone(), 2, 180).await;
@@ -1651,11 +1677,9 @@ async fn test_approval_owner_abort_mid_collection() {
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, &nodes[2].api],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, &nodes[2].api])
+            .await;
 
     let json = two_approvers_setup(approver_1, &nodes[2].api);
     emit_fact(owner, governance_id.clone(), json, true)
@@ -1671,13 +1695,19 @@ async fn test_approval_owner_abort_mid_collection() {
     )
     .await
     .unwrap();
-    let state =
-        wait_request_state(owner, request_id.clone(), Some(RequestState::Approval))
-            .await
-            .unwrap();
+    let state = wait_request_state(
+        owner,
+        request_id.clone(),
+        Some(RequestState::Approval),
+    )
+    .await
+    .unwrap();
     assert_eq!(state, RequestState::Approval);
 
-    owner.manual_request_abort(governance_id.clone()).await.unwrap();
+    owner
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
 
     // The abort is recorded and the ledger did not advance.
     wait_abort_recorded(owner, governance_id.clone(), request_id.clone()).await;
@@ -1707,9 +1737,10 @@ async fn test_approval_owner_abort_mid_collection() {
     )
     .await
     .unwrap();
-    let state = wait_request_state(owner, request_id, Some(RequestState::Finish))
-        .await
-        .unwrap();
+    let state =
+        wait_request_state(owner, request_id, Some(RequestState::Finish))
+            .await
+            .unwrap();
     assert_eq!(state, RequestState::Finish);
 
     let state = get_subject(owner, governance_id.clone(), Some(2), true)
@@ -1735,11 +1766,9 @@ async fn test_approval_superseded_request_no_mixing() {
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, &nodes[2].api],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, &nodes[2].api])
+            .await;
 
     let json = two_approvers_setup(approver_1, &nodes[2].api);
     emit_fact(owner, governance_id.clone(), json, true)
@@ -1767,7 +1796,10 @@ async fn test_approval_superseded_request_no_mixing() {
     .await
     .unwrap();
 
-    owner.manual_request_abort(governance_id.clone()).await.unwrap();
+    owner
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
 
     wait_abort_recorded(owner, governance_id.clone(), request_id.clone()).await;
 
@@ -1784,9 +1816,10 @@ async fn test_approval_superseded_request_no_mixing() {
     )
     .await
     .unwrap();
-    let state = wait_request_state(owner, queued_id, Some(RequestState::Finish))
-        .await
-        .unwrap();
+    let state =
+        wait_request_state(owner, queued_id, Some(RequestState::Finish))
+            .await
+            .unwrap();
     assert_eq!(state, RequestState::Finish);
 
     // sn 2 carries the second fact's patch, not the aborted one's.
@@ -2326,8 +2359,7 @@ async fn test_approval_forged_votes_ignored() {
         .await
         .unwrap()
         .version;
-    let worker =
-        format!("/user/request/{governance_id}/approval/{owner_pk}");
+    let worker = format!("/user/request/{governance_id}/approval/{owner_pk}");
     tell_vote_to_worker(
         &owner,
         &worker,
@@ -2406,11 +2438,8 @@ async fn test_approval_approver_ignores_forged_probes() {
     let owner = nodes[1].api().clone();
     let owner_pk = nodes[1].public_key();
 
-    let governance_id = create_and_authorize_governance(
-        &owner,
-        vec![nodes[2].api()],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![nodes[2].api()]).await;
 
     // Approvers = {Owner, Approver1} fixed 2, the owner is the only
     // validator. The owner auto-accepts, Approver1 is manual.
@@ -2666,7 +2695,11 @@ async fn test_approval_status_asks_only_want_missing_votes() {
             wants.push(wanted.clone());
         }
     }
-    assert!(wants.len() >= 4, "expected four held asks, got {}", wants.len());
+    assert!(
+        wants.len() >= 4,
+        "expected four held asks, got {}",
+        wants.len()
+    );
     assert_eq!(wants.pop().unwrap(), Some(HashSet::from([a2_pk])));
     owner.test_release_held().await.unwrap();
 
@@ -2724,11 +2757,8 @@ async fn test_approval_probes_full_once_then_hash() {
     nodes.push(TestNode::addressable(&nodes, true, Some(short)).await);
     let owner = nodes[1].api().clone();
 
-    let governance_id = create_and_authorize_governance(
-        &owner,
-        vec![nodes[2].api()],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![nodes[2].api()]).await;
 
     // Approvers = {Owner, Approver1} fixed 2, the owner is the only
     // validator. Both auto-accept.
@@ -2770,10 +2800,7 @@ async fn test_approval_probes_full_once_then_hash() {
     .await
     .unwrap();
 
-    for message in [
-        FaultMessage::ApprovalReq,
-        FaultMessage::ApprovalHashPing,
-    ] {
+    for message in [FaultMessage::ApprovalReq, FaultMessage::ApprovalHashPing] {
         owner
             .test_install_fault(FaultRule {
                 direction: FaultDirection::Outbound,
@@ -2849,11 +2876,8 @@ async fn test_approval_need_full_recovers_missing_request() {
     nodes.push(TestNode::addressable(&nodes, true, Some(short)).await);
     let owner = nodes[1].api().clone();
 
-    let governance_id = create_and_authorize_governance(
-        &owner,
-        vec![nodes[2].api()],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![nodes[2].api()]).await;
 
     // Approvers = {Owner, Approver1} fixed 2, the owner is the only
     // validator. Both auto-accept.
@@ -3032,7 +3056,10 @@ async fn test_approval_stale_approver_unavailable_then_votes() {
 
     // Approver2 never receives event 2: it stays at sn 1.
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let state = approver_2.get_subject_state(governance_id.clone()).await.unwrap();
+    let state = approver_2
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(state.sn, 1, "approver2 must be stale before the next fact");
 
     // The next request is built on v2: Approver2 is behind, answers
@@ -3055,7 +3082,10 @@ async fn test_approval_stale_approver_unavailable_then_votes() {
 
     // With the fault cleared, Approver2 catches up fully.
     approver_2.test_clear_faults().await.unwrap();
-    approver_2.update_subject(governance_id.clone()).await.unwrap();
+    approver_2
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
     let state = get_subject(&approver_2, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
@@ -3408,9 +3438,14 @@ async fn test_approval_owner_role_matrix() {
     .await;
 
     // (a) approvers = {Owner}: auto-commits.
-    emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode1"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        true,
+    )
+    .await
+    .unwrap();
     get_subject(&owner, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
@@ -3435,15 +3470,22 @@ async fn test_approval_owner_role_matrix() {
             ]
         }
     });
-    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     get_subject(&owner, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
     // (c) two validators sign, owner-only approval.
-    emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode2"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode2"),
+        true,
+    )
+    .await
+    .unwrap();
     get_subject(&owner, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
@@ -3468,17 +3510,23 @@ async fn test_approval_owner_role_matrix() {
             ]
         }
     });
-    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     get_subject(&owner, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
 
     // (e) approvers = {Owner, Approver1} (majority 2): the owner
     // auto-accepts and Approver1 approves manually.
-    let request_id =
-        emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode3"), true)
-            .await
-            .unwrap();
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode3"),
+        true,
+    )
+    .await
+    .unwrap();
     wait_request_state(
         &owner,
         request_id.clone(),
@@ -3546,9 +3594,14 @@ async fn test_approval_owner_role_matrix() {
     // (g) approvers = {Owner, Approver1, Approver2} (majority 2): the
     // owner and Approver2 auto-accept. Validators = {Owner, Validator1,
     // Approver2} (majority 2): any two of the three sign.
-    emit_fact(&owner, governance_id.clone(), add_fake_member("AveNode4"), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode4"),
+        true,
+    )
+    .await
+    .unwrap();
     let state = get_subject(&owner, governance_id.clone(), Some(7), true)
         .await
         .unwrap();
@@ -4068,9 +4121,11 @@ async fn test_approval_answer_wins_over_timeout() {
     let validator_1 = nodes[2].api().clone();
     let approver_1 = nodes[3].api().clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner, vec![&validator_1, &approver_1])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&validator_1, &approver_1],
+    )
+    .await;
 
     // Validators = {Owner, Validator1} (majority 2), approvers = {Owner,
     // Approver1} fixed 2.
@@ -4341,16 +4396,10 @@ async fn test_validation_response_missing_approval_hash_rejected() {
                 &b"fake properties".to_vec(),
             )
             .unwrap(),
-            event_request_hash: hash_borsh(
-                &*hasher,
-                &b"fake request".to_vec(),
-            )
-            .unwrap(),
-            viewpoints_hash: hash_borsh(
-                &*hasher,
-                &b"fake viewpoints".to_vec(),
-            )
-            .unwrap(),
+            event_request_hash: hash_borsh(&*hasher, &b"fake request".to_vec())
+                .unwrap(),
+            viewpoints_hash: hash_borsh(&*hasher, &b"fake viewpoints".to_vec())
+                .unwrap(),
             approval_data_hash: None,
         },
         &fake,
@@ -4551,16 +4600,10 @@ async fn test_validation_unexpected_approval_hash_rejected() {
                 &b"fake properties".to_vec(),
             )
             .unwrap(),
-            event_request_hash: hash_borsh(
-                &*hasher,
-                &b"fake request".to_vec(),
-            )
-            .unwrap(),
-            viewpoints_hash: hash_borsh(
-                &*hasher,
-                &b"fake viewpoints".to_vec(),
-            )
-            .unwrap(),
+            event_request_hash: hash_borsh(&*hasher, &b"fake request".to_vec())
+                .unwrap(),
+            viewpoints_hash: hash_borsh(&*hasher, &b"fake viewpoints".to_vec())
+                .unwrap(),
             approval_data_hash: Some(
                 hash_borsh(&*hasher, &b"fake approval".to_vec()).unwrap(),
             ),
@@ -4857,7 +4900,8 @@ async fn test_approval_close_lost_leaves_no_residue() {
         })
         .await
         .unwrap();
-    let vote = craft_vote(&probe_req, &governance_id, &nodes[3].data.keys, false);
+    let vote =
+        craft_vote(&probe_req, &governance_id, &nodes[3].data.keys, false);
     inject_vote(
         nodes[2].api(),
         &val1_pk,
@@ -4992,8 +5036,12 @@ async fn test_approval_governance_commit_purges_stale_state() {
         .unwrap()
         .version;
 
-    owner.manual_request_abort(governance_id.clone()).await.unwrap();
-    wait_abort_recorded(&owner, governance_id.clone(), request_id.clone()).await;
+    owner
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+    wait_abort_recorded(&owner, governance_id.clone(), request_id.clone())
+        .await;
     let aborted_id = request_id;
 
     // The second request parks in Approval too; wait until Approver2 is
@@ -5076,12 +5124,8 @@ async fn test_approval_governance_commit_purges_stale_state() {
             })
             .await
             .unwrap();
-        let vote = craft_vote(
-            &probe_req,
-            &governance_id,
-            &nodes[4].data.keys,
-            false,
-        );
+        let vote =
+            craft_vote(&probe_req, &governance_id, &nodes[4].data.keys, false);
         inject_vote(
             nodes[validator].api(),
             &nodes[validator].public_key(),
@@ -5335,9 +5379,8 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
     // a different hash. Signed by the owner, so it passes the static
     // checks and reaches the freshness guard.
     let mut stale_req = live_req.clone();
-    stale_req.issued_at = TimeStamp::from_nanos(
-        live_req.issued_at.as_nanos().saturating_sub(1),
-    );
+    stale_req.issued_at =
+        TimeStamp::from_nanos(live_req.issued_at.as_nanos().saturating_sub(1));
     let stale_signed = Signed::new(stale_req, &nodes[1].data.keys).unwrap();
     nodes[2]
         .api()
@@ -5351,9 +5394,7 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
                         "/user/node/subject_manager/{governance_id}/validator"
                     ),
                 },
-                message: ActorMessage::ApprovalCollectReq {
-                    req: stale_signed,
-                },
+                message: ActorMessage::ApprovalCollectReq { req: stale_signed },
             },
             &nodes[1].public_key(),
         )

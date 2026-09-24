@@ -276,11 +276,8 @@ impl DistriWorker {
                             // The catch-up round reached the
                             // witness-certified tip: run the deferred
                             // artifact acquisition pass.
-                            self.trigger_deferred_acquisition(
-                                ctx,
-                                &subject_id,
-                            )
-                            .await;
+                            self.trigger_deferred_acquisition(ctx, &subject_id)
+                                .await;
                         }
                     }
                     Err(e) => {
@@ -349,8 +346,7 @@ impl DistriWorker {
                 } else if is_gov {
                     // The catch-up round reached the witness-certified
                     // tip: run the deferred artifact acquisition pass.
-                    self.trigger_deferred_acquisition(ctx, &subject_id)
-                        .await;
+                    self.trigger_deferred_acquisition(ctx, &subject_id).await;
                 }
             }
 

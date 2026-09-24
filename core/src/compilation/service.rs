@@ -239,14 +239,12 @@ impl ArtifactStore {
         let mut entries: Vec<(String, u64, SystemTime)> = Vec::new();
         let mut total: u64 = 0;
 
-        let mut read_dir = fs::read_dir(&self.dir)
-            .await
-            .map_err(|e| CompilerError::file_read(self.dir.to_string_lossy(), e))?;
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|e| CompilerError::file_read(self.dir.to_string_lossy(), e))?
-        {
+        let mut read_dir = fs::read_dir(&self.dir).await.map_err(|e| {
+            CompilerError::file_read(self.dir.to_string_lossy(), e)
+        })?;
+        while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
+            CompilerError::file_read(self.dir.to_string_lossy(), e)
+        })? {
             let is_dir = match entry.file_type().await {
                 Ok(file_type) => file_type.is_dir(),
                 Err(_) => false,

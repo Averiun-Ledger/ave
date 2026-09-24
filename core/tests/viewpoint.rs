@@ -22,8 +22,7 @@ use ave_core::governance::{
 };
 use ave_network::{NodeType, RoutingNode};
 use common::{
-    EXAMPLE_CONTRACT,
-    CreateNodeConfig, CreateNodesAndConnectionsConfig,
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
     assert_tracker_fact_full, assert_tracker_fact_opaque,
     assert_tracker_visibility, create_and_authorize_governance, create_node,
     create_nodes_and_connections, create_subject, emit_confirm, emit_eol,

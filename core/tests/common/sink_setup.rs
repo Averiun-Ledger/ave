@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, collections::HashMap, time::Duration};
 
-use ave_core::test_contracts::EXAMPLE_CONTRACT;
 use ave_common::{
     IncomingSinkEvent, LightEvent, SchemaType, SinkTypes,
     sink::{
@@ -8,6 +7,7 @@ use ave_common::{
         SinkAuthMethod, SinkCompression,
     },
 };
+use ave_core::test_contracts::EXAMPLE_CONTRACT;
 use ave_core::{
     Api,
     config::{

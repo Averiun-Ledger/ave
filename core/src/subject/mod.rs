@@ -19,7 +19,9 @@ use crate::{
         common::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
-        event::{ApprovalData, Ledger, LedgerSeal, Protocols, ValidationMetadata},
+        event::{
+            ApprovalData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
+        },
         sink::SubjectSinkEvent,
     },
     node::register::{Register, RegisterMessage},

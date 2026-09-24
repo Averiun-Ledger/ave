@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     evaluation::{

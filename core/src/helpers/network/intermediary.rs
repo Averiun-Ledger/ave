@@ -4,6 +4,9 @@ use crate::{
         coordinator::{ApprCoordinator, ApprCoordinatorMessage},
         persist::{ApprPersist, ApprPersistMessage},
     },
+    compilation::contract_compiler::{
+        ContractCompiler, ContractCompilerMessage,
+    },
     compilation::{
         coordinator::{CompileCoordinator, CompileCoordinatorMessage},
         worker::{CompileWorker, CompileWorkerMessage},
@@ -16,9 +19,6 @@ use crate::{
         coordinator::{EvalCoordinator, EvalCoordinatorMessage},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
-    },
-    compilation::contract_compiler::{
-        ContractCompiler, ContractCompilerMessage,
     },
     governance::tracker_sync::{
         TrackerSync, TrackerSyncMessage, TrackerSyncNetworkRequest,
@@ -69,17 +69,14 @@ impl Intermediary {
         let faults = {
             let faults: test_faults::SharedFaultRegistry =
                 Arc::new(std::sync::Mutex::new(
-                    test_faults::TestFaultRegistry::new(
-                        command_sender.clone(),
-                    ),
+                    test_faults::TestFaultRegistry::new(command_sender.clone()),
                 ));
             system.add_helper("test_faults", faults.clone());
             faults
         };
 
         #[cfg(feature = "test")]
-        let service_sender =
-            NetworkSender::new(command_sender, faults.clone());
+        let service_sender = NetworkSender::new(command_sender, faults.clone());
         #[cfg(not(feature = "test"))]
         let service_sender = NetworkSender::new(command_sender);
 
@@ -745,12 +742,12 @@ impl Intermediary {
                             })?;
                     }
                     ActorMessage::ApprovalVoteReport { res } => {
-                        let actor = system
-                            .get_actor::<Approval>(&path)
-                            .await
-                            .map_err(|_| IntermediaryError::ActorNotFound {
-                                path: path.to_string(),
-                            })?;
+                        let actor =
+                            system.get_actor::<Approval>(&path).await.map_err(
+                                |_| IntermediaryError::ActorNotFound {
+                                    path: path.to_string(),
+                                },
+                            )?;
                         actor
                             .tell(ApprovalMessage::VoteReport {
                                 vote: res,
@@ -794,12 +791,12 @@ impl Intermediary {
                         approval_req_hash,
                         votes,
                     } => {
-                        let actor = system
-                            .get_actor::<Approval>(&path)
-                            .await
-                            .map_err(|_| IntermediaryError::ActorNotFound {
-                                path: path.to_string(),
-                            })?;
+                        let actor =
+                            system.get_actor::<Approval>(&path).await.map_err(
+                                |_| IntermediaryError::ActorNotFound {
+                                    path: path.to_string(),
+                                },
+                            )?;
                         actor
                             .tell(ApprovalMessage::StatusRes {
                                 approval_req_hash,

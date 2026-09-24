@@ -275,12 +275,10 @@ impl Evaluation {
         result_hash_signature: Signature,
     ) {
         let eval_req_hash = match &result {
-            response::EvaluationResult::Ok {
-                eval_req_hash, ..
+            response::EvaluationResult::Ok { eval_req_hash, .. }
+            | response::EvaluationResult::Error { eval_req_hash, .. } => {
+                eval_req_hash
             }
-            | response::EvaluationResult::Error {
-                eval_req_hash, ..
-            } => eval_req_hash,
         };
         if *eval_req_hash != self.evaluation_request_hash {
             error!(

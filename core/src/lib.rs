@@ -2316,10 +2316,7 @@ fn manager_sort_key(manager: &SinkManagerTarget) -> String {
 impl Api {
     fn test_faults(
         &self,
-    ) -> Result<
-        helpers::network::test_faults::SharedFaultRegistry,
-        Error,
-    > {
+    ) -> Result<helpers::network::test_faults::SharedFaultRegistry, Error> {
         self.system
             .get_helper::<helpers::network::test_faults::SharedFaultRegistry>(
                 "test_faults",
@@ -2447,20 +2444,12 @@ impl Api {
 
     /// Whether the contract module is currently resident in memory
     /// (the `contracts` map).
-    pub async fn test_has_contract_module(
-        &self,
-        contract_name: &str,
-    ) -> bool {
-        let Some(contracts) = self.system.get_helper::<
-            Arc<
-                tokio::sync::RwLock<
-                    HashMap<
-                        String,
-                        Arc<ave_contract_sdk::runtime::CompiledModule>,
-                    >,
-                >,
+    pub async fn test_has_contract_module(&self, contract_name: &str) -> bool {
+        let Some(contracts) = self.system.get_helper::<Arc<
+            tokio::sync::RwLock<
+                HashMap<String, Arc<ave_contract_sdk::runtime::CompiledModule>>,
             >,
-        >("contracts") else {
+        >>("contracts") else {
             return false;
         };
         contracts.read().await.contains_key(contract_name)
@@ -2472,9 +2461,11 @@ impl Api {
         &self,
         contract_name: &str,
     ) -> Option<compilation::contract_compiler::FetchObs> {
-        let obs = self.system.get_helper::<
-            compilation::contract_compiler::SharedFetchObs,
-        >("test_fetch_obs")?;
+        let obs = self
+            .system
+            .get_helper::<compilation::contract_compiler::SharedFetchObs>(
+                "test_fetch_obs",
+            )?;
         #[allow(clippy::unwrap_used)]
         let obs = obs.lock().unwrap();
         obs.get(contract_name).cloned()
@@ -2503,13 +2494,12 @@ impl Api {
         match response {
             crate::governance::GovernanceResponse::Ledger {
                 ledger, ..
-            } => ledger
-                .into_iter()
-                .find(|event| event.sn == sn)
-                .ok_or(Error::EventNotFound {
+            } => ledger.into_iter().find(|event| event.sn == sn).ok_or(
+                Error::EventNotFound {
                     subject: subject_id.to_string(),
                     sn,
-                }),
+                },
+            ),
             _ => Err(Error::UnexpectedResponse {
                 actor: "governance".to_owned(),
                 expected: "Ledger".to_owned(),
