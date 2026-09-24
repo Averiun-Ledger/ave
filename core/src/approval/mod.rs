@@ -213,6 +213,23 @@ impl Approval {
         self.check_validator(validator.clone());
         Self::observe_event("validator_replaced");
 
+        // Stop the dropped validator's child (delivery coordinator or
+        // ephemeral worker): otherwise it keeps retrying and its late
+        // unavailable notice would trigger a second replacement cycle,
+        // and its name would block re-adding the same validator. A
+        // missing child is fine (already stopped).
+        if let Ok(coordinator) = ctx
+            .get_child::<ApprCoordinator>(&format!("{}", validator))
+            .await
+        {
+            let _ = coordinator.ask_stop().await;
+        } else if let Ok(worker) = ctx
+            .get_child::<ValiWorker>(&format!("{}", validator))
+            .await
+        {
+            let _ = worker.ask_stop().await;
+        }
+
         let replacement = self.pending_validators.iter().next().cloned();
         if let Some(replacement) = replacement {
             self.pending_validators.remove(&replacement);
@@ -971,6 +988,21 @@ impl Handler<Self> for Approval {
             }
             ApprovalMessage::Unavailable { sender } => {
                 if self.closed {
+                    return Ok(());
+                }
+
+                // Late notices from already-dropped validators (their
+                // retry outlived the drop) must not pull a second
+                // replacement from the pool.
+                if !self.current_validators.contains(&sender)
+                    && !self.pending_validators.contains(&sender)
+                    && !self.working.contains(&sender)
+                {
+                    debug!(
+                        msg_type = "Unavailable",
+                        sender = %sender,
+                        "Unavailability from an unknown validator ignored"
+                    );
                     return Ok(());
                 }
 

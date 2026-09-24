@@ -581,6 +581,32 @@ impl Intermediary {
                                 }
                             })?;
                     }
+                    ActorMessage::ApprovalHashPing {
+                        approval_req_hash,
+                        asker_actor,
+                    } => {
+                        let actor = system
+                            .get_actor::<ApprPersist>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(ApprPersistMessage::HashPing {
+                                approval_req_hash,
+                                info: message.info,
+                                sender: sender.clone(),
+                                asker_actor,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
                     ActorMessage::DistributionLastEventReq { ledger } => {
                         let actor = match system
                             .get_actor::<DistriWorker>(&path)

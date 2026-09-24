@@ -2393,6 +2393,175 @@ async fn test_approval_forged_votes_ignored() {
 }
 
 #[test(tokio::test)]
+// Forged probes never alter the approver state: a validly signed
+// request from a non-owner key and a request with a corrupt signature
+// go straight into the approver mailbox, both are dropped (gates and
+// signature check), the stored request is untouched and the honest
+// vote still commits the event approved.
+async fn test_approval_approver_ignores_forged_probes() {
+    let short = short_window_approval();
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, false, Some(short)).await);
+    let owner = nodes[1].api().clone();
+    let owner_pk = nodes[1].public_key();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api()],
+    )
+    .await;
+
+    // Approvers = {Owner, Approver1} fixed 2, the owner is the only
+    // validator. The owner auto-accepts, Approver1 is manual.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Approver1"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Approver1",
+                    "key": nodes[2].api().public_key()
+                }
+            ]
+        }
+    });
+    let request_id = emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &owner,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // The real probe lands first: the approver stores it pending.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (stored, _) = nodes[2]
+        .api()
+        .get_approval(governance_id.clone(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
+
+    // (a) valid signature from a non-owner key, (b) corrupt signature:
+    // neither may touch the stored request. A different version routes
+    // both through the first-delivery gates (same id+version would take
+    // the re-ask path, which rightly ignores the content).
+    let outsider = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let foreign = Signed::new(stored.clone(), &outsider).unwrap();
+    inject_ask(
+        nodes[2].api(),
+        &nodes[2].public_key(),
+        &governance_id,
+        foreign,
+        &request_id,
+        version + 1,
+        &outsider.public_key(),
+    )
+    .await;
+    let corrupt = Signed::from_parts(
+        stored.clone(),
+        craft_vote(&stored, &governance_id, &nodes[2].data.keys, true)
+            .signature()
+            .clone(),
+    );
+    assert!(corrupt.verify().is_err());
+    inject_ask(
+        nodes[2].api(),
+        &nodes[2].public_key(),
+        &governance_id,
+        corrupt,
+        &request_id,
+        version + 1,
+        &owner_pk,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let (kept, _) = nodes[2]
+        .api()
+        .get_approval(governance_id.clone(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        hash_borsh(&*HashAlgorithm::Blake3.hasher(), &kept).unwrap(),
+        hash_borsh(&*HashAlgorithm::Blake3.hasher(), &stored).unwrap(),
+        "forged probes must not touch the stored request"
+    );
+
+    emit_approve(
+        nodes[2].api(),
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_subject_sn(&owner, governance_id.clone(), 2, 30).await;
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert_eq!(
+        approval
+            .approvers_agrees_signatures
+            .iter()
+            .map(|signature| signature.signer.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([nodes[1].public_key(), nodes[2].public_key()])
+    );
+    assert!(approval.double_votes.is_empty());
+    assert!(approval.approvers_timeouts.is_empty());
+}
+
+#[test(tokio::test)]
 // Keepalive asks only carry the approvers still missing evidence: with
 // two of three votes already merged, the held asks want exactly the
 // silent approver, and the request still closes approved once it
@@ -2541,6 +2710,240 @@ async fn test_approval_status_asks_only_want_missing_votes() {
             nodes[4].public_key()
         ])
     );
+    assert!(approval.approvers_timeouts.is_empty());
+}
+
+#[test(tokio::test)]
+// Probes are full only once: the owner holds its outbound probes to
+// the approver and observes a full request first and hash pings
+// afterwards. Released, the approver votes and the event commits.
+async fn test_approval_probes_full_once_then_hash() {
+    let short = short_window_approval();
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(short)).await);
+    let owner = nodes[1].api().clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api()],
+    )
+    .await;
+
+    // Approvers = {Owner, Approver1} fixed 2, the owner is the only
+    // validator. Both auto-accept.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Approver1"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Approver1",
+                    "key": nodes[2].api().public_key()
+                }
+            ]
+        }
+    });
+    let request_id = emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &owner,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    for message in [
+        FaultMessage::ApprovalReq,
+        FaultMessage::ApprovalHashPing,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Hold,
+            })
+            .await
+            .unwrap();
+    }
+    let _request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // First probe full, retries hash-only.
+    wait_held_count(&owner, 2, 20).await;
+    let held = owner.test_held_outbound().await.unwrap();
+    let mut shapes = vec![];
+    for message in &held {
+        match &message.message {
+            ActorMessage::ApprovalReq { .. } => shapes.push("full"),
+            ActorMessage::ApprovalHashPing { .. } => shapes.push("ping"),
+            _ => {}
+        }
+    }
+    assert_eq!(shapes, vec!["full", "ping"]);
+    owner.test_release_held().await.unwrap();
+
+    wait_subject_sn(&owner, governance_id.clone(), 2, 30).await;
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert_eq!(
+        approval
+            .approvers_agrees_signatures
+            .iter()
+            .map(|signature| signature.signer.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([nodes[1].public_key(), nodes[2].public_key()])
+    );
+    assert!(approval.approvers_timeouts.is_empty());
+}
+
+#[test(tokio::test)]
+// An approver that misses the full first probe recovers through
+// `NeedFull`: its hash-only pings appoint one supplier validator,
+// the supplier resends the full request out of schedule, and the
+// approver votes. The event commits approved with both agrees.
+async fn test_approval_need_full_recovers_missing_request() {
+    let short = short_window_approval();
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(short)).await);
+    let owner = nodes[1].api().clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api()],
+    )
+    .await;
+
+    // Approvers = {Owner, Approver1} fixed 2, the owner is the only
+    // validator. Both auto-accept.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 2 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Approver1"],
+                    "approver": ["Approver1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Approver1",
+                    "key": nodes[2].api().public_key()
+                }
+            ]
+        }
+    });
+    let request_id = emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &owner,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Drop the first (full) probe to the approver: it only ever sees
+    // hash pings and must recover through `NeedFull`.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    let _request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    wait_subject_sn(&owner, governance_id.clone(), 2, 30).await;
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert_eq!(
+        approval
+            .approvers_agrees_signatures
+            .iter()
+            .map(|signature| signature.signer.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([nodes[1].public_key(), nodes[2].public_key()])
+    );
+    assert!(approval.approvers_disagrees_signatures.is_empty());
+    assert!(approval.double_votes.is_empty());
     assert!(approval.approvers_timeouts.is_empty());
 }
 

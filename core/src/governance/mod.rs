@@ -2342,6 +2342,11 @@ impl Governance {
             }
 
             if let Some(approver) = approver {
+                let node_key =
+                    self.subject_metadata.new_owner.as_ref().map_or_else(
+                        || self.subject_metadata.owner.clone(),
+                        |new_owner| new_owner.clone(),
+                    );
                 approver
                     .tell(ApprPersistMessage::Update {
                         validators: current_roles
@@ -2350,6 +2355,7 @@ impl Governance {
                             .iter()
                             .map(|role| role.key.clone())
                             .collect(),
+                        node_key,
                     })
                     .await?;
             }

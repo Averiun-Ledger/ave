@@ -117,6 +117,9 @@ pub struct ValiWorker {
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
     pub current_roles: CurrentWorkerRoles,
+    /// Parent-bounded ephemeral worker (child of a request phase actor)
+    /// instead of the shared role worker: no absolute TTL of its own,
+    /// and it stops itself on messages for a request it does not serve.
     pub stop: bool,
     /// In-flight network validation request, if any (see `pre_stop`).
     pub pending: Option<PendingValidation>,
@@ -918,6 +921,61 @@ impl ValiWorker {
         Ok(())
     }
 
+    /// Sends the full approval request to one approver: the first probe
+    /// of the schedule, or an out-of-schedule answer to `NeedFull`.
+    /// A local approver gets a direct tell on the single approver code
+    /// path, like probes do.
+    async fn send_full_request(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        collection: &ApprovalCollection,
+        approver: &PublicKey,
+    ) -> Result<(), ActorError> {
+        let asker_actor = ctx.path().to_string();
+        if approver == &*self.our_key {
+            let path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/approver",
+                collection.governance_id
+            ));
+            let actor = ctx.system().get_actor::<ApprPersist>(&path).await?;
+            actor
+                .tell(ApprPersistMessage::NetworkRequest {
+                    approval_req: collection.approval_req.clone(),
+                    info: ComunicateInfo {
+                        request_id: collection.request_id.clone(),
+                        version: collection.version,
+                        receiver: approver.clone(),
+                        receiver_actor: path.to_string(),
+                    },
+                    sender: (*self.our_key).clone(),
+                    asker_actor,
+                })
+                .await?;
+            return Ok(());
+        }
+
+        let info = ComunicateInfo {
+            request_id: collection.request_id.clone(),
+            version: collection.version,
+            receiver: approver.clone(),
+            receiver_actor: format!(
+                "/user/node/subject_manager/{}/approver",
+                collection.governance_id
+            ),
+        };
+        let message = ActorMessage::ApprovalReq {
+            req: collection.approval_req.clone(),
+            asker_actor,
+        };
+        self.network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
+                message: NetworkMessage { info, message },
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Sends the approval request to every approver without a vote and
     /// schedules the next probe round of the configured schedule. The
     /// last round lands on the deadline itself.
@@ -1011,9 +1069,19 @@ impl ValiWorker {
                 ),
             };
 
-            let message = ActorMessage::ApprovalReq {
-                req: collection.approval_req.clone(),
-                asker_actor: asker_actor.clone(),
+            // The first probe carries the full request; retries only
+            // ping with its hash (the approver answers from its stored
+            // request, or asks for the full one with `NeedFull`).
+            let message = if attempt == 0 {
+                ActorMessage::ApprovalReq {
+                    req: collection.approval_req.clone(),
+                    asker_actor: asker_actor.clone(),
+                }
+            } else {
+                ActorMessage::ApprovalHashPing {
+                    approval_req_hash: approval_req_hash.clone(),
+                    asker_actor: asker_actor.clone(),
+                }
             };
             if let Err(error) = self
                 .network
@@ -1034,8 +1102,11 @@ impl ValiWorker {
         }
 
         if attempt < config.probe_schedule_secs.len() {
-            let base = config.probe_schedule_secs[attempt] as i64;
-            let wait = (base + Self::probe_jitter_secs()).max(0) as u64;
+            let wait = Self::probe_wait_secs(
+                &config.probe_schedule_secs,
+                attempt,
+                Self::probe_jitter_secs(),
+            );
             ctx.schedule_once(
                 Duration::from_secs(wait),
                 ValiWorkerMessage::Probe {
@@ -1046,6 +1117,17 @@ impl ValiWorker {
         }
 
         Ok(())
+    }
+
+    /// Wait before a probe round. Saturating unit conversion: a
+    /// pathological schedule must delay, never wrap into a hot
+    /// re-probe loop.
+    fn probe_wait_secs(schedule: &[u64], attempt: usize, jitter: i64) -> u64 {
+        schedule
+            .get(attempt)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add_signed(jitter)
     }
 
     /// Random jitter in [-10, 10] seconds applied to probe rounds so
@@ -2863,6 +2945,82 @@ impl Handler<Self> for ValiWorker {
                     return Ok(());
                 }
 
+                // An approver that was pinged without ever receiving the
+                // full request asks for it: serve it once, out of
+                // schedule, when the collection is still open and the
+                // approver undecided. Only one full send per need: the
+                // approver escalates across validators on its own.
+                if let ApprovalRes::NeedFull {
+                    approval_req_hash: need_hash,
+                } = approval_res.content()
+                {
+                    let Some(collection) = self.approvals.get(need_hash)
+                    else {
+                        debug!(
+                            msg_type = "ApprovalResponse",
+                            approval_req_hash = %need_hash,
+                            sender = %sender,
+                            "NeedFull for an unknown or closed collection"
+                        );
+                        return Ok(());
+                    };
+
+                    if request_id != collection.request_id
+                        || version != collection.version
+                    {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "NeedFull with a stale request id or version"
+                        );
+                        return Ok(());
+                    }
+
+                    if sender != approval_res.signature().signer
+                        || !collection.approvers.workers.contains(&sender)
+                    {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "NeedFull from an unexpected approver"
+                        );
+                        return Ok(());
+                    }
+
+                    if approval_res.verify().is_err() {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "NeedFull with invalid signature"
+                        );
+                        return Ok(());
+                    }
+
+                    let decided = collection.votes.contains_key(&sender)
+                        || collection.double_votes.iter().any(
+                            |(accept, _)| {
+                                accept.signature().signer == sender
+                            },
+                        );
+                    if decided {
+                        return Ok(());
+                    }
+
+                    let sender_key = sender.clone();
+                    if let Err(error) = self
+                        .send_full_request(ctx, collection, &sender_key)
+                        .await
+                    {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            error = %error,
+                            sender = %sender,
+                            "Failed to resend full approval request"
+                        );
+                    }
+                    return Ok(());
+                }
+
                 let ApprovalRes::Response {
                     approval_req_hash,
                     agrees,
@@ -4024,5 +4182,17 @@ mod tests {
                 )])))
                 .is_empty()
         );
+    }
+
+    /// A pathological probe schedule delays instead of wrapping into a
+    /// hot re-probe loop; missing attempts schedule nothing.
+    #[test]
+    fn probe_wait_secs_saturates() {
+        assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 0, 0), 1);
+        assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 2, 5), 9);
+        assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 1, -10), 0);
+        assert_eq!(ValiWorker::probe_wait_secs(&[u64::MAX], 0, 0), u64::MAX);
+        assert_eq!(ValiWorker::probe_wait_secs(&[u64::MAX], 0, -10), u64::MAX - 10);
+        assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 3, 0), 0);
     }
 }

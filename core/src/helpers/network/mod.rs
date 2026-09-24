@@ -42,6 +42,18 @@ pub enum ActorMessage {
         /// Actor path the asking validator listens on for the vote.
         asker_actor: String,
     },
+    /// A validator re-asks an approver for its vote without resending
+    /// the full request (approval phase, validator → approver). The
+    /// approver answers from its stored request, or with `NeedFull`
+    /// when it never received it. A validator on an older release
+    /// fails to decode this ask and stays silent on it (its full
+    /// first probe still works) — liveness degrades to full probes,
+    /// never to silence.
+    ApprovalHashPing {
+        approval_req_hash: DigestIdentifier,
+        /// Actor path the asking validator listens on for the vote.
+        asker_actor: String,
+    },
     /// The requester asks a validator to collect the approver votes for
     /// this approval request (approval phase, owner → validator).
     ApprovalCollectReq {
