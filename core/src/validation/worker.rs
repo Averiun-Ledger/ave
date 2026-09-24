@@ -28,7 +28,7 @@ use crate::{
         data::GovernanceData,
         role_register::{RoleDataRegister, SearchRole},
     },
-    helpers::network::{NetworkMessage, service::NetworkSender},
+    helpers::network::{NetworkMessage, delivery_of, service::NetworkSender},
     metrics::try_core_metrics,
     model::{
         common::{
@@ -291,15 +291,14 @@ impl ValiWorker {
 
         let signed_response: Signed<ValidationRes> =
             Signed::from_parts(ValidationRes::Unavailable, signature);
+        let message = ActorMessage::ValidationRes {
+            res: signed_response,
+        };
         if let Err(error) = self
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info,
-                    message: ActorMessage::ValidationRes {
-                        res: signed_response,
-                    },
-                },
+                delivery: delivery_of(&message),
+                message: NetworkMessage { info, message },
             })
             .await
         {
@@ -939,16 +938,15 @@ impl ValiWorker {
                 ),
             };
 
+            let message = ActorMessage::ApprovalReq {
+                req: collection.approval_req.clone(),
+                asker_actor: asker_actor.clone(),
+            };
             if let Err(error) = self
                 .network
                 .send_command(ave_network::CommandHelper::SendMessage {
-                    message: NetworkMessage {
-                        info,
-                        message: ActorMessage::ApprovalReq {
-                            req: collection.approval_req.clone(),
-                            asker_actor: asker_actor.clone(),
-                        },
-                    },
+                    delivery: delivery_of(&message),
+                    message: NetworkMessage { info, message },
                 })
                 .await
             {
@@ -1022,14 +1020,13 @@ impl ValiWorker {
                     ),
                 };
 
+                let message = ActorMessage::ApprovalVoteReport {
+                    res: Box::new(vote),
+                };
                 self.network
                     .send_command(ave_network::CommandHelper::SendMessage {
-                        message: NetworkMessage {
-                            info,
-                            message: ActorMessage::ApprovalVoteReport {
-                                res: Box::new(vote),
-                            },
-                        },
+                        delivery: delivery_of(&message),
+                        message: NetworkMessage { info, message },
                     })
                     .await?;
             }
@@ -1089,17 +1086,14 @@ impl ValiWorker {
                     ),
                 };
 
+                let message = ActorMessage::ApprovalStatusRes {
+                    approval_req_hash: collection.approval_req_hash.clone(),
+                    votes,
+                };
                 self.network
                     .send_command(ave_network::CommandHelper::SendMessage {
-                        message: NetworkMessage {
-                            info,
-                            message: ActorMessage::ApprovalStatusRes {
-                                approval_req_hash: collection
-                                    .approval_req_hash
-                                    .clone(),
-                                votes,
-                            },
-                        },
+                        delivery: delivery_of(&message),
+                        message: NetworkMessage { info, message },
                     })
                     .await?;
             }
@@ -1332,15 +1326,14 @@ impl ValiWorker {
                     ),
                 };
 
+                let message = ActorMessage::ApprovalCollectAck {
+                    approval_req_hash,
+                    ack,
+                };
                 self.network
                     .send_command(ave_network::CommandHelper::SendMessage {
-                        message: NetworkMessage {
-                            info,
-                            message: ActorMessage::ApprovalCollectAck {
-                                approval_req_hash,
-                                ack,
-                            },
-                        },
+                        delivery: delivery_of(&message),
+                        message: NetworkMessage { info, message },
                     })
                     .await?;
             }
@@ -2666,14 +2659,16 @@ impl Handler<Self> for ValiWorker {
 
                 let signed_response: Signed<ValidationRes> =
                     Signed::from_parts(validation, signature);
+                let message = ActorMessage::ValidationRes {
+                    res: signed_response,
+                };
                 if let Err(e) = self
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
+                        delivery: delivery_of(&message),
                         message: NetworkMessage {
                             info: new_info.clone(),
-                            message: ActorMessage::ValidationRes {
-                                res: signed_response,
-                            },
+                            message,
                         },
                     })
                     .await

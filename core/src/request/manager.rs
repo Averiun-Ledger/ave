@@ -35,7 +35,7 @@ use crate::governance::model::{
     HashThisRole, ProtocolTypes, Quorum, RoleTypes, WitnessesData,
 };
 use crate::governance::role_register::RoleDataRegister;
-use crate::helpers::network::service::NetworkSender;
+use crate::helpers::network::{delivery_of, service::NetworkSender};
 use crate::metrics::try_core_metrics;
 use crate::model::common::distribution_plan::build_tracker_event_distribution_plan;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
@@ -1650,17 +1650,16 @@ impl RequestManager {
                 ),
             };
 
+            let message = ActorMessage::DistributionLedgerReq {
+                actual_sn: Some(gov_sn),
+                target_sn: None,
+                subject_id: governance_id.clone(),
+                already_verified_transfer_sn: None,
+            };
             network
                 .send_command(ave_network::CommandHelper::SendMessage {
-                    message: NetworkMessage {
-                        info,
-                        message: ActorMessage::DistributionLedgerReq {
-                            actual_sn: Some(gov_sn),
-                            target_sn: None,
-                            subject_id: governance_id.clone(),
-                            already_verified_transfer_sn: None,
-                        },
-                    },
+                    delivery: delivery_of(&message),
+                    message: NetworkMessage { info, message },
                 })
                 .await?;
 

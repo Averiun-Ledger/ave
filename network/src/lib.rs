@@ -322,6 +322,11 @@ pub struct Config {
     /// `0` disables the global bytes limit.
     #[serde(default = "default_max_pending_inbound_bytes_total")]
     pub max_pending_inbound_bytes_total: usize,
+
+    /// Maximum age in seconds of a queued outbound message before it is
+    /// purged. `0` disables the TTL.
+    #[serde(default = "default_pending_outbound_ttl_secs")]
+    pub pending_outbound_ttl_secs: u64,
 }
 
 impl Config {
@@ -349,6 +354,7 @@ impl Config {
                 default_max_pending_outbound_bytes_total(),
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
+            pending_outbound_ttl_secs: default_pending_outbound_ttl_secs(),
         }
     }
 }
@@ -373,6 +379,10 @@ const fn default_max_pending_inbound_bytes_total() -> usize {
     crate::utils::DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL
 }
 
+const fn default_pending_outbound_ttl_secs() -> u64 {
+    180
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -392,6 +402,7 @@ impl Default for Config {
                 default_max_pending_outbound_bytes_total(),
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
+            pending_outbound_ttl_secs: default_pending_outbound_ttl_secs(),
         }
     }
 }
@@ -562,6 +573,21 @@ impl fmt::Display for NodeType {
     }
 }
 
+/// Delivery policy for an outbound message that can not be sent
+/// immediately.
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default,
+)]
+pub enum Delivery {
+    /// Buffer the message in the per-peer pending queue until the peer
+    /// is reachable again.
+    #[default]
+    Queued,
+    /// Drop the message: the sender has its own retry machine and will
+    /// retransmit by design.
+    Direct,
+}
+
 /// Command enumeration for the network service.
 #[derive(Debug)]
 pub enum Command {
@@ -571,6 +597,8 @@ pub enum Command {
         peer: PeerId,
         /// The message to send.
         message: Bytes,
+        /// What to do when the message can not be sent immediately.
+        delivery: Delivery,
     },
 }
 
@@ -594,6 +622,9 @@ where
     SendMessage {
         /// The message to send.
         message: T,
+        /// What to do when the message can not be sent immediately.
+        #[serde(default)]
+        delivery: Delivery,
     },
     /// Received a message.
     ReceivedMessage {

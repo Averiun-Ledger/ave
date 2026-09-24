@@ -20,7 +20,7 @@ use crate::{
     governance::witnesses_register::{
         TrackerDeliveryMode, TrackerDeliveryRange,
     },
-    helpers::network::{ActorMessage, service::NetworkSender},
+    helpers::network::{ActorMessage, delivery_of, service::NetworkSender},
     model::common::{
         crash_system, get_verified_transfer_sn, node::get_subject_data,
         subject::get_local_subject_sn,
@@ -276,17 +276,16 @@ impl Update {
             ),
         };
 
+        let message = ActorMessage::DistributionLedgerReq {
+            actual_sn: self.our_sn,
+            target_sn,
+            subject_id: self.subject_id.clone(),
+            already_verified_transfer_sn,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info,
-                    message: ActorMessage::DistributionLedgerReq {
-                        actual_sn: self.our_sn,
-                        target_sn,
-                        subject_id: self.subject_id.clone(),
-                        already_verified_transfer_sn,
-                    },
-                },
+                delivery: delivery_of(&message),
+                message: NetworkMessage { info, message },
             })
             .await
     }

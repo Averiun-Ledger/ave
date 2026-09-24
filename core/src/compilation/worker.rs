@@ -29,7 +29,7 @@ use crate::{
         },
         model::Schema,
     },
-    helpers::network::{NetworkMessage, service::NetworkSender},
+    helpers::network::{NetworkMessage, delivery_of, service::NetworkSender},
     model::common::{
         GovVersionSync, crash_system, gov_version_sync,
         node::{SignTypesNode, get_sign},
@@ -178,15 +178,14 @@ impl CompileWorker {
             ),
         };
 
+        let message = ActorMessage::CompilationRes {
+            res: CompilationRes::Unavailable,
+        };
         if let Err(error) = self
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info,
-                    message: ActorMessage::CompilationRes {
-                        res: CompilationRes::Unavailable,
-                    },
-                },
+                delivery: delivery_of(&message),
+                message: NetworkMessage { info, message },
             })
             .await
         {
@@ -357,9 +356,11 @@ impl CompileWorker {
             receiver_actor,
         };
 
+        let delivery = delivery_of(&message);
         if let Err(e) = self
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery,
                 message: NetworkMessage {
                     info: new_info,
                     message,
@@ -1104,13 +1105,13 @@ impl Handler<Self> for CompileWorker {
                 };
 
                 if let Some(gate_res) = gate {
+                    let message = ActorMessage::CompilationRes { res: gate_res };
                     if let Err(e) = self.network.send_command(
                         ave_network::CommandHelper::SendMessage {
+                            delivery: delivery_of(&message),
                             message: NetworkMessage {
                                 info: new_info,
-                                message: ActorMessage::CompilationRes {
-                                    res: gate_res,
-                                },
+                                message,
                             },
                         },
                     )
@@ -1143,13 +1144,15 @@ impl Handler<Self> for CompileWorker {
                     .await
                     .is_ok()
                 {
+                    let message = ActorMessage::CompilationRes {
+                        res: CompilationRes::Working,
+                    };
                     if let Err(e) = self.network.send_command(
                         ave_network::CommandHelper::SendMessage {
+                            delivery: delivery_of(&message),
                             message: NetworkMessage {
                                 info: new_info,
-                                message: ActorMessage::CompilationRes {
-                                    res: CompilationRes::Working,
-                                },
+                                message,
                             },
                         },
                     )
@@ -1253,14 +1256,16 @@ impl Handler<Self> for CompileWorker {
                 // takes longer to compile than the ACK retry budget —
                 // without the ACK this node would be dropped as a
                 // timeout while compiling correctly.
+                let message = ActorMessage::CompilationRes {
+                    res: CompilationRes::Working,
+                };
                 if let Err(e) = self
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
+                        delivery: delivery_of(&message),
                         message: NetworkMessage {
                             info: new_info.clone(),
-                            message: ActorMessage::CompilationRes {
-                                res: CompilationRes::Working,
-                            },
+                            message,
                         },
                     })
                     .await
@@ -1293,14 +1298,16 @@ impl Handler<Self> for CompileWorker {
                     }
                 };
 
+                let message = ActorMessage::CompilationRes {
+                    res: compilation,
+                };
                 if let Err(e) = self
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
+                        delivery: delivery_of(&message),
                         message: NetworkMessage {
                             info: new_info,
-                            message: ActorMessage::CompilationRes {
-                                res: compilation,
-                            },
+                            message,
                         },
                     })
                     .await
@@ -1713,7 +1720,7 @@ mod tests {
                 .await
                 .expect("no working ACK received")
                 .expect("network channel closed");
-        let CommandHelper::SendMessage { message: ack } = command else {
+        let CommandHelper::SendMessage { message: ack, .. } = command else {
             panic!("expected an outbound send command");
         };
         assert!(
@@ -1738,6 +1745,7 @@ mod tests {
                 .expect("network channel closed");
         let CommandHelper::SendMessage {
             message: result_message,
+            ..
         } = command
         else {
             panic!("expected an outbound send command");

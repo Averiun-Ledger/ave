@@ -7,7 +7,7 @@
 //! drives the exact interleaving — no sleeps, no log tracing. The whole
 //! module is compiled out of production builds.
 
-use super::{ActorMessage, NetworkMessage};
+use super::{ActorMessage, NetworkMessage, delivery_of};
 use crate::compilation::artifact::{ArtifactData, ArtifactFetchResult};
 use ave_common::identity::PublicKey;
 use ave_network::CommandHelper as Command;
@@ -324,9 +324,10 @@ impl TestFaultRegistry {
         std::mem::take(&mut self.held)
             .into_iter()
             .map(|held| match held {
-                HeldMessage::Outbound { message } => {
-                    Command::SendMessage { message }
-                }
+                HeldMessage::Outbound { message } => Command::SendMessage {
+                    delivery: delivery_of(&message.message),
+                    message,
+                },
                 HeldMessage::Inbound { sender, raw } => {
                     Command::ReceivedMessage {
                         sender,

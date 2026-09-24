@@ -47,7 +47,10 @@ impl NetworkSender {
     ) -> Result<(), ActorError> {
         #[cfg(feature = "test")]
         let command = match command {
-            Command::SendMessage { mut message } => {
+            Command::SendMessage {
+                mut message,
+                delivery,
+            } => {
                 // Test infrastructure: the lock is never held across an
                 // await and poisoning only means the test panicked.
                 #[allow(clippy::unwrap_used)]
@@ -57,7 +60,9 @@ impl NetworkSender {
                     .unwrap()
                     .check_outbound(&mut message);
                 match verdict {
-                    OutboundVerdict::Pass => Command::SendMessage { message },
+                    OutboundVerdict::Pass => {
+                        Command::SendMessage { message, delivery }
+                    }
                     OutboundVerdict::Drop | OutboundVerdict::Held => {
                         return Ok(())
                     }

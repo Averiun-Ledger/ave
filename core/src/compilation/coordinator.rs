@@ -627,7 +627,7 @@ mod tests {
                 .await
                 .expect("the compilation request was not sent")
                 .expect("network channel closed");
-        let CommandHelper::SendMessage { message } = command else {
+        let CommandHelper::SendMessage { message, .. } = command else {
             panic!("expected an outbound send command");
         };
         assert!(

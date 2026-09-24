@@ -19,7 +19,7 @@ use crate::{
     },
     governance::{model::Quorum, role_register::RoleDataRegister},
     helpers::network::{
-        ActorMessage, NetworkMessage, service::NetworkSender,
+        ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
     },
     metrics::try_core_metrics,
     model::common::{
@@ -352,8 +352,12 @@ impl Approval {
                 self.drop_and_replace_validator(ctx, validator).await?;
             }
         } else {
+            let message = ActorMessage::ApprovalStatusReq {
+                approval_req_hash,
+            };
             self.network
                 .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: delivery_of(&message),
                     message: NetworkMessage {
                         info: ComunicateInfo {
                             request_id: self.request_id.to_string(),
@@ -364,9 +368,7 @@ impl Approval {
                                 self.request.content().subject_id
                             ),
                         },
-                        message: ActorMessage::ApprovalStatusReq {
-                            approval_req_hash,
-                        },
+                        message,
                     },
                 })
                 .await?;

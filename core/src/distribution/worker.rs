@@ -22,7 +22,7 @@ use crate::{
             TrackerDeliveryRange, WitnessesRegister,
         },
     },
-    helpers::network::service::NetworkSender,
+    helpers::network::{delivery_of, service::NetworkSender},
     model::{
         common::{
             OwnerContext, TrackerIdentity, TrackerParams, TrackerPeers,
@@ -230,8 +230,10 @@ impl DistriWorker {
         info: ComunicateInfo,
         message: ActorMessage,
     ) -> Result<(), ActorError> {
+        let delivery = delivery_of(&message);
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery,
                 message: NetworkMessage { info, message },
             })
             .await

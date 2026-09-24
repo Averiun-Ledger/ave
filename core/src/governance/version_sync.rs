@@ -13,7 +13,7 @@ use tracing::{Span, debug, info_span, warn};
 
 use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::helpers::network::{
-    ActorMessage, NetworkMessage, service::NetworkSender,
+    ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
 };
 use crate::metrics::try_core_metrics;
 use ave_network::ComunicateInfo;
@@ -170,17 +170,16 @@ impl GovernanceVersionSync {
             ),
         };
 
+        let message = ActorMessage::DistributionLedgerReq {
+            actual_sn: Some(self.local_version),
+            target_sn: None,
+            subject_id: self.governance_id.clone(),
+            already_verified_transfer_sn: None,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info,
-                    message: ActorMessage::DistributionLedgerReq {
-                        actual_sn: Some(self.local_version),
-                        target_sn: None,
-                        subject_id: self.governance_id.clone(),
-                        already_verified_transfer_sn: None,
-                    },
-                },
+                delivery: delivery_of(&message),
+                message: NetworkMessage { info, message },
             })
             .await
     }
@@ -331,6 +330,7 @@ impl GovernanceVersionSync {
             if let Err(error) = self
                 .network
                 .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: delivery_of(&message.message),
                     message,
                 })
                 .await

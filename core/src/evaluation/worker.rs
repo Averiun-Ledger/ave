@@ -12,7 +12,7 @@ use crate::{
         },
         runner::types::EvaluateInfo,
     },
-    helpers::network::{NetworkMessage, service::NetworkSender},
+    helpers::network::{NetworkMessage, delivery_of, service::NetworkSender},
     model::common::{
         GovVersionSync, crash_system, gov_version_sync,
         node::{SignTypesNode, get_sign},
@@ -102,15 +102,14 @@ impl EvalWorker {
             ),
         };
 
+        let message = ActorMessage::EvaluationRes {
+            res: EvaluationRes::Unavailable,
+        };
         if let Err(error) = self
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info,
-                    message: ActorMessage::EvaluationRes {
-                        res: EvaluationRes::Unavailable,
-                    },
-                },
+                delivery: delivery_of(&message),
+                message: NetworkMessage { info, message },
             })
             .await
         {
@@ -706,14 +705,14 @@ impl Handler<Self> for EvalWorker {
                     ),
                 };
 
+                let message = ActorMessage::EvaluationRes { res: evaluation };
                 if let Err(e) = self
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
+                        delivery: delivery_of(&message),
                         message: NetworkMessage {
                             info: new_info,
-                            message: ActorMessage::EvaluationRes {
-                                res: evaluation,
-                            },
+                            message,
                         },
                     })
                     .await

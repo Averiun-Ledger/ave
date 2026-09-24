@@ -6,7 +6,10 @@ use ave_actors::{
 };
 use tracing::{Span, error, info_span};
 
-use crate::{NetworkMessage, helpers::network::service::NetworkSender};
+use crate::{
+    NetworkMessage,
+    helpers::network::{delivery_of, service::NetworkSender},
+};
 
 use super::common::crash_system;
 
@@ -51,6 +54,7 @@ impl Handler<Self> for RetryNetwork {
         if let Err(e) = self
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&msg.message),
                 message: msg,
             })
             .await

@@ -393,6 +393,26 @@ impl NetworkMetrics {
             .inc();
     }
 
+    pub(crate) fn inc_direct_outbound_drop(&self) {
+        self.messages_dropped_total
+            .get_or_create(&MessageDropLabels {
+                direction: "outbound",
+                reason: "direct",
+            })
+            .inc();
+    }
+
+    pub(crate) fn inc_outbound_queue_ttl_drop_by(&self, count: u64) {
+        if count > 0 {
+            self.messages_dropped_total
+                .get_or_create(&MessageDropLabels {
+                    direction: "outbound",
+                    reason: "ttl_expired",
+                })
+                .inc_by(count);
+        }
+    }
+
     pub(crate) fn inc_reqres_request_received(&self) {
         self.reqres_messages_received_total
             .get_or_create(&ReqResMessageLabels { kind: "request" })

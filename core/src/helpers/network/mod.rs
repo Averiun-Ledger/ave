@@ -3,7 +3,7 @@ use ave_common::{
     SchemaType,
     identity::{DigestIdentifier, Signed},
 };
-use ave_network::ComunicateInfo;
+use ave_network::{ComunicateInfo, Delivery};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -152,3 +152,15 @@ pub struct NetworkMessage {
 }
 
 impl Message for NetworkMessage {}
+
+/// Delivery policy of a protocol message: a sender with its own retry
+/// machine (a coordinator with retry, a probe or keepalive schedule, a
+/// periodic sync tick) retransmits by design, so its messages are
+/// `Direct` and never buffered; only one-shot pushes whose sole backup
+/// is a slow cycle are `Queued`.
+pub fn delivery_of(message: &ActorMessage) -> Delivery {
+    match message {
+        ActorMessage::ApprovalVoteReport { .. } => Delivery::Queued,
+        _ => Delivery::Direct,
+    }
+}

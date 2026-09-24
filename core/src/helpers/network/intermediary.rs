@@ -134,7 +134,7 @@ impl Intermediary {
         #[cfg(feature = "test")] faults: &test_faults::SharedFaultRegistry,
     ) -> Result<(), IntermediaryError> {
         match command {
-            Command::SendMessage { message } => {
+            Command::SendMessage { message, delivery } => {
                 let receiver = message.info.receiver.clone();
                 let receiver_actor = message.info.receiver_actor.clone();
 
@@ -166,6 +166,7 @@ impl Intermediary {
                     .send(NetworkCommand::SendMessage {
                         peer: node_peer,
                         message: Bytes::from(network_message),
+                        delivery,
                     })
                     .await
                 {

@@ -35,7 +35,7 @@ use crate::governance::contract_register::{
 };
 use crate::governance::{Governance, GovernanceMessage};
 use crate::helpers::network::{
-    ActorMessage, NetworkMessage, service::NetworkSender,
+    ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::{
@@ -395,8 +395,16 @@ impl ContractCompiler {
             };
             // A send failure would leave the probes half-sent with no
             // live timer: local infrastructure failure, fail loud.
+            let message = ActorMessage::ArtifactProbeReq {
+                subject_id: gov_id.clone(),
+                schema_id: schema_id.clone(),
+                gov_version: self.gov_version,
+                request_nonce: nonce,
+                receiver_actor: ctx.path().to_string(),
+            };
             if let Err(e) = network
                 .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: delivery_of(&message),
                     message: NetworkMessage {
                         info: ComunicateInfo {
                             receiver: peer.clone(),
@@ -404,13 +412,7 @@ impl ContractCompiler {
                             version: 0,
                             receiver_actor: target_path,
                         },
-                        message: ActorMessage::ArtifactProbeReq {
-                            subject_id: gov_id.clone(),
-                            schema_id: schema_id.clone(),
-                            gov_version: self.gov_version,
-                            request_nonce: nonce,
-                            receiver_actor: ctx.path().to_string(),
-                        },
+                        message,
                     },
                 })
                 .await
@@ -659,8 +661,16 @@ impl ContractCompiler {
         let network = Self::network(ctx)?;
         // A send failure would leave the fetch with no live timer:
         // local infrastructure failure, fail loud.
+        let message = ActorMessage::ArtifactReq {
+            subject_id: gov_id,
+            schema_id,
+            gov_version: self.gov_version,
+            request_nonce: nonce,
+            receiver_actor: ctx.path().to_string(),
+        };
         if let Err(e) = network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: peer.clone(),
@@ -668,13 +678,7 @@ impl ContractCompiler {
                         version: 0,
                         receiver_actor: target_path,
                     },
-                    message: ActorMessage::ArtifactReq {
-                        subject_id: gov_id,
-                        schema_id,
-                        gov_version: self.gov_version,
-                        request_nonce: nonce,
-                        receiver_actor: ctx.path().to_string(),
-                    },
+                    message,
                 },
             })
             .await
@@ -1234,8 +1238,10 @@ impl ContractCompiler {
         };
 
         let network = Self::network(ctx)?;
+        let delivery = delivery_of(&message);
         if let Err(e) = network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery,
                 message: NetworkMessage {
                     info: new_info,
                     message,
@@ -2321,7 +2327,7 @@ mod tests {
             .await
             .expect("expected an outbound network message within 5s")
             .expect("network channel closed");
-        let CommandHelper::SendMessage { message } = command else {
+        let CommandHelper::SendMessage { message, .. } = command else {
             panic!("expected an outbound send command");
         };
         message

@@ -23,7 +23,7 @@ use crate::governance::{
     Governance, GovernanceMessage, GovernanceResponse, model::WitnessesData,
 };
 use crate::helpers::network::{
-    ActorMessage, NetworkMessage, service::NetworkSender,
+    ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::{
@@ -322,8 +322,17 @@ impl TrackerSync {
         self.cancel_update_timeout(ctx);
         let request_nonce = self.allocate_nonce();
 
+        let message = ActorMessage::TrackerSyncReq {
+            subject_id: self.governance_id.clone(),
+            request_nonce,
+            governance_version,
+            after_subject_id,
+            limit: self.page_size,
+            receiver_actor: ctx.path().to_string(),
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: peer.clone(),
@@ -334,14 +343,7 @@ impl TrackerSync {
                             self.governance_id
                         ),
                     },
-                    message: ActorMessage::TrackerSyncReq {
-                        subject_id: self.governance_id.clone(),
-                        request_nonce,
-                        governance_version,
-                        after_subject_id,
-                        limit: self.page_size,
-                        receiver_actor: ctx.path().to_string(),
-                    },
+                    message,
                 },
             })
             .await?;
@@ -387,8 +389,15 @@ impl TrackerSync {
                 .flatten()
                 .map(|(sn, _)| sn);
 
+        let message = ActorMessage::DistributionLedgerReq {
+            actual_sn,
+            target_sn: None,
+            subject_id: subject_id.clone(),
+            already_verified_transfer_sn,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: peer.clone(),
@@ -399,12 +408,7 @@ impl TrackerSync {
                             subject_id
                         ),
                     },
-                    message: ActorMessage::DistributionLedgerReq {
-                        actual_sn,
-                        target_sn: None,
-                        subject_id: subject_id.clone(),
-                        already_verified_transfer_sn,
-                    },
+                    message,
                 },
             })
             .await
@@ -634,8 +638,15 @@ impl TrackerSync {
             });
         };
 
+        let message = ActorMessage::TrackerSyncRes {
+            request_nonce: request.request_nonce,
+            governance_version,
+            items,
+            next_cursor,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: request.sender,
@@ -643,12 +654,7 @@ impl TrackerSync {
                         version: request.info.version,
                         receiver_actor: request.receiver_actor,
                     },
-                    message: ActorMessage::TrackerSyncRes {
-                        request_nonce: request.request_nonce,
-                        governance_version,
-                        items,
-                        next_cursor,
-                    },
+                    message,
                 },
             })
             .await

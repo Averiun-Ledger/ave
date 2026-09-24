@@ -8,7 +8,7 @@ use ave_network::ComunicateInfo;
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
     auth::{SubjectAccess, SubjectAccessMessage},
-    helpers::network::service::NetworkSender,
+    helpers::network::{delivery_of, service::NetworkSender},
     model::event::LedgerSeal,
     node::SubjectData,
 };
@@ -191,6 +191,7 @@ pub async fn update_ledger_network(
 
     network
         .send_command(ave_network::CommandHelper::SendMessage {
+            delivery: delivery_of(&request),
             message: NetworkMessage {
                 info,
                 message: request,

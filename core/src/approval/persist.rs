@@ -5,7 +5,7 @@ use crate::{
     approval::types::VotationType,
     db::Storable,
     governance::data::GovernanceData,
-    helpers::network::service::NetworkSender,
+    helpers::network::{delivery_of, service::NetworkSender},
     model::common::{
         crash_system,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
@@ -244,13 +244,15 @@ impl ApprPersist {
                 receiver_actor: asker.1.clone(),
             };
 
+            let message = ActorMessage::ApprovalRes {
+                res: Box::new(signed_response),
+            };
             if let Err(e) = network
                 .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: delivery_of(&message),
                     message: NetworkMessage {
                         info: new_info,
-                        message: ActorMessage::ApprovalRes {
-                            res: Box::new(signed_response),
-                        },
+                        message,
                     },
                 })
                 .await
