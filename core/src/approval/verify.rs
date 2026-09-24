@@ -33,7 +33,7 @@ use crate::{
 /// verifier's clock lags a few seconds behind the signers'.
 pub const CLOCK_SKEW: Duration = Duration::from_secs(60);
 
-fn now_plus_skew(now: TimeStamp) -> TimeStamp {
+const fn now_plus_skew(now: TimeStamp) -> TimeStamp {
     TimeStamp::from_nanos(
         now.as_nanos().saturating_add(CLOCK_SKEW.as_nanos() as u64),
     )
@@ -68,8 +68,9 @@ fn sorted_unique_by_signer(signatures: &[Signature]) -> bool {
 }
 
 /// Terminal condition of an approval collection, evaluated over the
-/// votes observed so far. Returns `None` while the collection must keep
-/// waiting: acceptance needs `agrees >= quorum`, rejection needs the
+/// votes observed so far. Returns `None` while it must keep waiting.
+///
+/// Acceptance needs `agrees >= quorum, rejection needs the
 /// remaining approvers unable to reach quorum, and past the deadline the
 /// absent approvers are counted as acceptances — but only the ones whose
 /// absence is proven: double voters (their conflicting pair is the
@@ -111,8 +112,9 @@ pub fn terminal_outcome(
     None
 }
 
-/// Builds the canonical tally from the votes collected by the requester:
-/// one vote per approver, double voters excluded with their conflicting
+/// Builds the canonical tally from the votes collected by the requester.
+///
+/// One vote per approver, double voters excluded with their conflicting
 /// pair as evidence, validator-signed timeout attestations grouped per
 /// absent approver, every list ordered by signer public key so all
 /// validators reconstruct (and hash) the exact same `ApprovalData`.

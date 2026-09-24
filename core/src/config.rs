@@ -404,7 +404,7 @@ fn default_approval_min_window_secs() -> u64 {
 }
 
 #[cfg(not(any(test, feature = "test")))]
-fn default_approval_min_window_secs() -> u64 {
+const fn default_approval_min_window_secs() -> u64 {
     100_800
 }
 
@@ -427,7 +427,7 @@ fn default_approval_keepalive_secs() -> u64 {
 }
 
 #[cfg(not(any(test, feature = "test")))]
-fn default_approval_keepalive_secs() -> u64 {
+const fn default_approval_keepalive_secs() -> u64 {
     3_600
 }
 

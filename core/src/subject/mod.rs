@@ -589,8 +589,22 @@ impl EventLedgerDataForSink {
                 ..
             } => {
                 let success = protocols.is_success();
-                let (patch, error) = match evaluation {
-                    Some(evaluation) => match &evaluation.response {
+                let (patch, error) = evaluation.as_ref().map_or_else(|| {
+                        let error = compilation.as_ref().and_then(|compilation| match &compilation.response {
+                                crate::model::event::CompilationResponse::Error {
+                                    result,
+                                    ..
+                                } => Some(format!(
+                                    "compilation: {}",
+                                    result
+                                )),
+                                crate::model::event::CompilationResponse::Ok {
+                                    ..
+                                } => None,
+                            });
+
+                        (None, error)
+                    }, |evaluation| match &evaluation.response {
                         crate::model::event::EvaluationResponse::Ok {
                             result,
                             ..
@@ -602,29 +616,7 @@ impl EventLedgerDataForSink {
                             result,
                             ..
                         } => (None, Some(result.to_string())),
-                    },
-                    // No evaluation means the compilation phase rejected
-                    // the contracts.
-                    None => {
-                        let error = match compilation {
-                            Some(compilation) => match &compilation.response {
-                                crate::model::event::CompilationResponse::Error {
-                                    result,
-                                    ..
-                                } => Some(format!(
-                                    "compilation: {}",
-                                    result
-                                )),
-                                crate::model::event::CompilationResponse::Ok {
-                                    ..
-                                } => None,
-                            },
-                            None => None,
-                        };
-
-                        (None, error)
-                    }
-                };
+                    });
 
                 Self::FactFull {
                     patch,
@@ -1331,7 +1323,7 @@ where
                 };
 
                 (
-                    validation,
+                    validation.as_ref(),
                     actual_protocols,
                     Some(event_request),
                     None,

@@ -76,11 +76,13 @@ pub enum CompilationResponse {
 
 impl CompilationResponse {
     pub const fn is_ok(&self) -> bool {
-        matches!(&self, CompilationResponse::Ok { .. })
+        matches!(&self, Self::Ok { .. })
     }
 }
 
-/// Evidence of the compilation phase of a governance fact: the owner's
+/// Evidence of the compilation phase of a governance fact.
+///
+/// The owner's
 /// signature over the compilation request, its hash, and one signature
 /// per compiler over the agreed result. Follows the same shape as
 /// `EvaluationData` / `ApprovalData` / `ValidationData`.
@@ -235,7 +237,9 @@ pub enum Protocols {
         /// there is nothing to evaluate and the event commits as failed.
         evaluation: Option<EvaluationData>,
         approval: Option<ApprovalData>,
-        validation: ValidationData,
+        /// Boxed to keep the enum size close to the other variants,
+        /// like the compilation evidence above.
+        validation: Box<ValidationData>,
     },
     Transfer {
         event_request: Signed<EventRequest>,
@@ -442,8 +446,30 @@ impl Protocols {
                 event_request,
                 ..
             } => {
-                let (evaluation_response, approval_success) = match evaluation {
-                    Some(evaluation) => match evaluation.response.clone() {
+                let (evaluation_response, approval_success) = evaluation.as_ref().map_or_else(|| {
+                        // No evaluation means the compilation phase
+                        // rejected the contracts.
+                        let compilation_error = compilation.as_ref().map_or_else(|| unreachable!(
+                                "In a fact governance event, if there is no evaluation, there must be compilation"
+                            ), |compilation| match &compilation.response {
+                                CompilationResponse::Error {
+                                    result, ..
+                                } => result.to_string(),
+                                CompilationResponse::Ok { .. } => {
+                                    unreachable!(
+                                        "In a fact governance event without evaluation, the compilation must have failed"
+                                    )
+                                }
+                            });
+
+                        (
+                            EvalResDB::Error(format!(
+                                "compilation: {}",
+                                compilation_error
+                            )),
+                            None,
+                        )
+                    }, |evaluation| match evaluation.response.clone() {
                         EvaluationResponse::Ok { result, .. } => {
                             if let Some(appr) = approval {
                                 (
@@ -459,35 +485,7 @@ impl Protocols {
                         EvaluationResponse::Error { result, .. } => {
                             (EvalResDB::Error(result.to_string()), None)
                         }
-                    },
-                    None => {
-                        // No evaluation means the compilation phase
-                        // rejected the contracts.
-                        let compilation_error = match compilation {
-                            Some(compilation) => match &compilation.response {
-                                CompilationResponse::Error {
-                                    result, ..
-                                } => result.to_string(),
-                                CompilationResponse::Ok { .. } => {
-                                    unreachable!(
-                                        "In a fact governance event without evaluation, the compilation must have failed"
-                                    )
-                                }
-                            },
-                            None => unreachable!(
-                                "In a fact governance event, if there is no evaluation, there must be compilation"
-                            ),
-                        };
-
-                        (
-                            EvalResDB::Error(format!(
-                                "compilation: {}",
-                                compilation_error
-                            )),
-                            None,
-                        )
-                    }
-                };
+                    });
 
                 let EventRequest::Fact(fact_request) = event_request.content()
                 else {
@@ -585,10 +583,10 @@ impl Protocols {
 
     pub fn get_validation_data(&self) -> ValidationData {
         match self {
+            Self::GovFact { validation, .. } => validation.as_ref().clone(),
             Self::Create { validation, .. }
             | Self::TrackerFactFull { validation, .. }
             | Self::TrackerFactOpaque { validation, .. }
-            | Self::GovFact { validation, .. }
             | Self::Transfer { validation, .. }
             | Self::TrackerConfirm { validation, .. }
             | Self::GovConfirm { validation, .. }
@@ -744,7 +742,7 @@ impl Protocols {
                     compilation,
                     evaluation,
                     approval,
-                    validation,
+                    validation: Box::new(validation),
                 })
             }
             (EventRequestType::Fact, false) => {

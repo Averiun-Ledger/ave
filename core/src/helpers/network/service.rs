@@ -52,10 +52,13 @@ impl NetworkSender {
                 delivery,
             } => {
                 // Test infrastructure: the lock is never held across an
-                // await and poisoning only means the test panicked.
-                #[allow(clippy::unwrap_used)]
-                let verdict =
-                    self.faults.lock().unwrap().check_outbound(&mut message);
+                // await; on poisoning (a test already panicked) keep
+                // going with the guarded state.
+                let verdict = self
+                    .faults
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .check_outbound(&mut message);
                 match verdict {
                     OutboundVerdict::Pass => {
                         Command::SendMessage { message, delivery }

@@ -1,6 +1,8 @@
 //! Artifact fetch between nodes of a governance: an evaluator without
 //! the compiler role obtains the official contract artifact from the
-//! network instead of compiling it. The governance version is always
+//! network instead of compiling it.
+//!
+//! The governance version is always
 //! negotiated FIRST — different versions mean different contracts, so
 //! there is nothing to talk about — and the received bytes are verified
 //! against the compilation evidence anchored in the requester's own
@@ -49,8 +51,9 @@ pub enum ArtifactTransferError {
     UncompressedTooLarge { size: usize, max: usize },
 }
 
-/// The official artifact of a contract, as served over the network. The wasm
-/// crosses the wire compressed with zstd; the precompiled artifact is
+/// The official artifact of a contract, as served over the network.
+///
+/// The wasm crosses the wire compressed with zstd; the precompiled artifact is
 /// engine-specific and is regenerated locally after verifying the hash.
 /// The toolchain fingerprint is cache-hygiene metadata of the build that
 /// produced the wasm (the security anchor is the wasm hash itself).

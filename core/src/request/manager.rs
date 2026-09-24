@@ -1995,7 +1995,7 @@ impl RequestManager {
     /// failures are logged, never propagated — the abort must complete,
     /// and a leftover stage is consumed or discarded by the next commit
     /// touching the same contract.
-    async fn sweep_staged_contracts(&self, ctx: &mut ActorContext<Self>) {
+    async fn sweep_staged_contracts(&self, ctx: &ActorContext<Self>) {
         if !self.gov_fact_needs_compilation() {
             return;
         }
@@ -2221,7 +2221,7 @@ impl RequestManager {
 
     async fn stops_childs(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         match self.state {
             RequestManagerState::Reboot => {
@@ -2393,8 +2393,9 @@ pub enum RequestManagerMessage {
         val_req: Box<ValidationReq>,
         val_res: ValidationData,
         /// Approval tally collected by the validators, present when the
-        /// request required approval.
-        approval_data: Option<ApprovalData>,
+        /// request required approval. Boxed to keep the message size
+        /// close to the other variants.
+        approval_data: Option<Box<ApprovalData>>,
     },
     /// The approval phase closed: the request leaves the approval state
     /// and enters validation with the closed approval evidence.
@@ -3418,7 +3419,7 @@ impl Handler<Self> for RequestManager {
                             ctx,
                             *val_req,
                             val_res,
-                            approval_data,
+                            approval_data.map(|approval_data| *approval_data),
                             distribution_plan.clone(),
                         )
                         .await

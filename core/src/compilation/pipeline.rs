@@ -72,8 +72,10 @@ pub const MAX_CONTRACT_SOURCE_BYTES: usize = 1024 * 1024;
 /// replaying).
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
-/// Decodes a governance-event contract payload into source bytes: base64,
-/// then bounded zstd decompression when the decoded payload carries the
+/// Decodes a governance-event contract payload into source bytes.
+///
+/// Base64, then bounded zstd decompression when the decoded payload
+/// carries the
 /// zstd magic number. Deterministic and identical on every node.
 pub fn decode_contract_source(
     contract: &str,
@@ -192,11 +194,17 @@ fn cargo_config(
 ) -> String {
     let mut config =
         ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
+    // Template placeholders are built programmatically: a `{...}`
+    // literal here would trip the formatting-args lint while being
+    // exactly what the template needs.
+    fn pattern(name: &str) -> String {
+        format!("{{{name}}}")
+    }
     config = config
-        .replace("{target_dir}", &target_dir.to_string_lossy())
-        .replace("{cargo_home}", &cargo_home.to_string_lossy())
-        .replace("{rust_src}", &rust_src.to_string_lossy())
-        .replace("{rustc_commit}", rustc_commit);
+        .replace(&pattern("target_dir"), &target_dir.to_string_lossy())
+        .replace(&pattern("cargo_home"), &cargo_home.to_string_lossy())
+        .replace(&pattern("rust_src"), &rust_src.to_string_lossy())
+        .replace(&pattern("rustc_commit"), rustc_commit);
 
     if let Some(vendor_dir) = vendor_dir {
         config.push_str(&format!(

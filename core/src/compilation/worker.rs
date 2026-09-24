@@ -16,10 +16,10 @@ use crate::{
         request::CompilationReq,
         resolve_compile_targets,
         support::{
-            CompilerSupport, HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS,
-            SERVING_CACHE_TTL, ServedArtifact, ServingCacheEntry,
-            is_compiler_infra_error, is_local_fatal_compiler_error,
-            is_retryable_compiler_recovery_error,
+            CompilerSupport, ContractSourceInput, HEAL_RETRY_BASE_MS,
+            HEAL_RETRY_MAX_MS, SERVING_CACHE_TTL, ServedArtifact,
+            ServingCacheEntry, is_compiler_infra_error,
+            is_local_fatal_compiler_error, is_retryable_compiler_recovery_error,
         },
     },
     governance::{
@@ -105,7 +105,9 @@ pub struct CompileWorker {
     pub pending: Option<PendingCompilation>,
 }
 
-/// A network compilation request being processed. `pre_stop` uses it to
+/// A network compilation request being processed.
+///
+/// `pre_stop` uses it to
 /// notify the requester that this compiler is going down mid-compilation
 /// (`CompilationRes::Unavailable`) instead of letting it burn the
 /// coordinator retries on a dead node.
@@ -648,10 +650,12 @@ impl CompileWorker {
             match CompilerSupport::compile_or_load_registered(
                 self.hash,
                 ctx,
-                &contract_name,
-                &target.source,
-                &contract_path,
-                target.initial_value,
+                ContractSourceInput {
+                    contract_name: &contract_name,
+                    contract: &target.source,
+                    contract_path: &contract_path,
+                    initial_value: target.initial_value,
+                },
                 &register_path,
                 expected_wasm_hash.as_ref(),
             )
@@ -1138,8 +1142,8 @@ impl Handler<Self> for CompileWorker {
                 // compiling. A retry of the same request (its ACK is
                 // still in flight or was lost) finds the child already
                 // working: re-ACK instead of duplicating the build.
-                let child_name = format!("{}", info.request_id);
-                if ctx.get_child::<CompileWorker>(&child_name).await.is_ok() {
+                let child_name = info.request_id.to_string();
+                if ctx.get_child::<Self>(&child_name).await.is_ok() {
                     let message = ActorMessage::CompilationRes {
                         res: CompilationRes::Working,
                     };
@@ -1172,7 +1176,7 @@ impl Handler<Self> for CompileWorker {
                 let child = ctx
                     .create_child(
                         &child_name,
-                        CompileWorker {
+                        Self {
                             node_key: self.node_key.clone(),
                             our_key: self.our_key.clone(),
                             governance_id: self.governance_id.clone(),
@@ -1417,15 +1421,12 @@ impl Handler<Self> for CompileWorker {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        match self
-                            .serve_artifact(ctx, &schema_id, &contract_name)
+                        self.serve_artifact(ctx, &schema_id, &contract_name)
                             .await?
-                        {
-                            Some(artifact) => {
-                                ArtifactFetchResult::Artifact(artifact)
-                            }
-                            None => ArtifactFetchResult::NotServed,
-                        }
+                            .map_or(
+                                ArtifactFetchResult::NotServed,
+                                ArtifactFetchResult::Artifact,
+                            )
                     }
                 };
 
@@ -1495,10 +1496,12 @@ impl Handler<Self> for CompileWorker {
                 match CompilerSupport::recover_official_artifact(
                     self.hash,
                     ctx,
-                    &contract_name,
-                    &schema.contract,
-                    &contract_path,
-                    schema.initial_value.0.clone(),
+                    ContractSourceInput {
+                        contract_name: &contract_name,
+                        contract: &schema.contract,
+                        contract_path: &contract_path,
+                        initial_value: schema.initial_value.0.clone(),
+                    },
                     &self.register_path(),
                 )
                 .await

@@ -6,7 +6,9 @@ use ave_common::{
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-/// A struct representing a compilation request. Only governance fact
+/// A struct representing a compilation request.
+///
+/// Only governance fact
 /// events that add a schema or change a contract (or its initial value)
 /// go through the compilation phase, and only the governance owner can
 /// request it — the same shape as the governance evaluation request.

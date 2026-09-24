@@ -68,7 +68,9 @@ pub enum CompilationResult {
 }
 
 /// Deterministic compilation verdicts: every honest compiler reaches the
-/// same one for the same request, so they are signed and voted. Node or
+/// same one for the same request, so they are signed and voted.
+///
+/// Node or
 /// infrastructure problems are never voted — the worker answers
 /// `CompilationRes::Unavailable` instead.
 #[derive(

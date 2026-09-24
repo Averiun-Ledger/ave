@@ -26,6 +26,20 @@ pub struct UpdateTarget {
     pub version: u64,
 }
 
+/// Constructor parameters for the version sync worker, grouped so the
+/// call signature stays readable.
+#[derive(Debug, Clone)]
+pub struct GovernanceVersionSyncConfig {
+    pub governance_id: DigestIdentifier,
+    pub our_key: Arc<PublicKey>,
+    pub network: Arc<NetworkSender>,
+    pub local_version: u64,
+    pub sample_size: usize,
+    pub tick_interval: Duration,
+    pub response_timeout: Duration,
+    pub has_boot_nodes: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum GovernanceVersionSyncMessage {
     RefreshGovernance {
@@ -66,16 +80,17 @@ pub struct GovernanceVersionSync {
 }
 
 impl GovernanceVersionSync {
-    pub fn new(
-        governance_id: DigestIdentifier,
-        our_key: Arc<PublicKey>,
-        network: Arc<NetworkSender>,
-        local_version: u64,
-        sample_size: usize,
-        tick_interval: Duration,
-        response_timeout: Duration,
-        has_boot_nodes: bool,
-    ) -> Self {
+    pub fn new(config: GovernanceVersionSyncConfig) -> Self {
+        let GovernanceVersionSyncConfig {
+            governance_id,
+            our_key,
+            network,
+            local_version,
+            sample_size,
+            tick_interval,
+            response_timeout,
+            has_boot_nodes,
+        } = config;
         Self {
             governance_id,
             our_key,

@@ -22,7 +22,8 @@ use ave_network::ComunicateInfo;
 use super::error::CompilerError;
 use super::pipeline;
 use super::support::{
-    CompilerResponse, CompilerSupport, HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS,
+    CompilerResponse, CompilerSupport, ContractSourceInput,
+    HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS, RegisteredLoadInput,
     SERVING_CACHE_TTL, ServedArtifact, ServingCacheEntry,
     is_compiler_infra_error, is_local_fatal_compiler_error,
     is_retryable_compiler_recovery_error,
@@ -85,7 +86,7 @@ fn busy_retry_delay(_attempt: usize) -> Duration {
 /// Wait between re-probes to the same busy batch, stepped: compilations
 /// are not instant, give them room.
 #[cfg(not(any(test, feature = "test")))]
-fn busy_retry_delay(attempt: usize) -> Duration {
+const fn busy_retry_delay(attempt: usize) -> Duration {
     match attempt {
         1..=5 => Duration::from_secs(3),
         6..=10 => Duration::from_secs(5),
@@ -108,6 +109,18 @@ const TIMEOFF_BASE_MS: u64 = 5_000;
 const TIMEOFF_MAX_MS: u64 = 5_000;
 #[cfg(not(any(test, feature = "test")))]
 const TIMEOFF_MAX_MS: u64 = 60_000;
+
+/// Fetch start input: what to fetch and where it is anchored. Groups
+/// the data parameters so the entry point stays readable.
+struct FetchInput {
+    contract: String,
+    contract_name: String,
+    initial_value: Value,
+    contract_path: PathBuf,
+    gov_id: DigestIdentifier,
+    schema_id: SchemaType,
+    contract_hash: DigestIdentifier,
+}
 
 #[derive(Debug)]
 pub struct ContractCompiler {
@@ -288,17 +301,11 @@ impl ContractCompiler {
         else {
             return;
         };
-        // Test infrastructure: the lock is never held across an await
-        // and poisoning only means the test panicked.
-        #[allow(clippy::unwrap_used)]
-        let mut obs = obs.lock().unwrap();
+        // Test infrastructure: the lock is never held across an await;
+        // on poisoning (a test already panicked) keep going with the
+        // guarded state.
+        let mut obs = obs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         update(obs.entry(contract_name.to_owned()).or_default());
-    }
-
-    fn allocate_nonce(&mut self) -> u64 {
-        let nonce = self.next_nonce;
-        self.next_nonce += 1;
-        nonce
     }
 
     /// Whether any evaluator can be asked for the artifact (plan B).
@@ -384,7 +391,8 @@ impl ContractCompiler {
 
         let plan_b = round.plan_b;
         let batch_size = round.pending.len();
-        let nonce = self.allocate_nonce();
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
         let network = Self::network(ctx)?;
         for peer in &round.pending {
             let target_path = match self.fetch.as_ref() {
@@ -649,7 +657,8 @@ impl ContractCompiler {
         };
 
         let plan_b = round.plan_b;
-        let nonce = self.allocate_nonce();
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
         let target_path = match self.fetch.as_ref() {
             Some(fetch) => Self::peer_path(fetch, plan_b),
             None => return Ok(()),
@@ -865,18 +874,20 @@ impl ContractCompiler {
     /// the authority for local and fetched bytes alike — without it
     /// this node cannot know what is safe to execute or request, so a
     /// missing anchor is fatal.
-    #[allow(clippy::too_many_arguments)]
     async fn begin_fetch(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        contract: String,
-        contract_name: String,
-        initial_value: Value,
-        contract_path: PathBuf,
-        gov_id: DigestIdentifier,
-        schema_id: SchemaType,
-        contract_hash: DigestIdentifier,
+        input: FetchInput,
     ) -> Result<CompilerResponse, ActorError> {
+        let FetchInput {
+            contract,
+            contract_name,
+            initial_value,
+            contract_path,
+            gov_id,
+            schema_id,
+            contract_hash,
+        } = input;
         let register_path = Self::register_path(ctx);
 
         let register = match ctx
@@ -976,15 +987,17 @@ impl ContractCompiler {
         match CompilerSupport::load_registered_artifact(
             self.hash,
             ctx,
-            &contract_name,
-            &contract_path,
-            &initial_value,
-            &register_path,
-            &contract_hash,
-            &manifest_hash,
-            &engine_fingerprint,
-            None,
-            Some(&wasm_hash),
+            RegisteredLoadInput {
+                contract_name: &contract_name,
+                contract_path: &contract_path,
+                initial_value: &initial_value,
+                register_path: &register_path,
+                contract_hash: &contract_hash,
+                manifest_hash: &manifest_hash,
+                engine_fingerprint: &engine_fingerprint,
+                expected_toolchain: None,
+                expected_wasm_hash: Some(&wasm_hash),
+            },
         )
         .await
         {
@@ -1487,10 +1500,12 @@ impl Handler<Self> for ContractCompiler {
                                 match CompilerSupport::compile_or_load_registered(
                                     self.hash,
                                     ctx,
-                                    &contract_name,
-                                    &contract,
-                                    &contract_path,
-                                    initial_value,
+                                    ContractSourceInput {
+                                        contract_name: &contract_name,
+                                        contract: &contract,
+                                        contract_path: &contract_path,
+                                        initial_value,
+                                    },
                                     &register_path,
                                     expected_wasm_hash.as_ref(),
                                 )
@@ -1660,13 +1675,15 @@ impl Handler<Self> for ContractCompiler {
 
                         self.begin_fetch(
                             ctx,
-                            contract,
-                            contract_name,
-                            initial_value,
-                            contract_path,
-                            gov_id,
-                            schema_id,
-                            contract_hash,
+                            FetchInput {
+                                contract,
+                                contract_name,
+                                initial_value,
+                                contract_path,
+                                gov_id,
+                                schema_id,
+                                contract_hash,
+                            },
                         )
                         .await
                     }
@@ -1688,10 +1705,12 @@ impl Handler<Self> for ContractCompiler {
                         match CompilerSupport::recover_official_artifact(
                             self.hash,
                             ctx,
-                            &contract_name,
-                            &contract,
-                            &contract_path,
-                            initial_value,
+                            ContractSourceInput {
+                                contract_name: &contract_name,
+                                contract: &contract,
+                                contract_path: &contract_path,
+                                initial_value,
+                            },
                             &Self::register_path(ctx),
                         )
                         .await
@@ -1805,13 +1824,15 @@ impl Handler<Self> for ContractCompiler {
                             };
                         self.begin_fetch(
                             ctx,
-                            contract,
-                            contract_name,
-                            initial_value,
-                            contract_path,
-                            gov_id,
-                            schema_id,
-                            contract_hash,
+                            FetchInput {
+                                contract,
+                                contract_name,
+                                initial_value,
+                                contract_path,
+                                gov_id,
+                                schema_id,
+                                contract_hash,
+                            },
                         )
                         .await
                     }
@@ -1925,17 +1946,22 @@ impl Handler<Self> for ContractCompiler {
                         }
                         ArtifactProbeResult::NotServed
                         | ArtifactProbeResult::Busy => {
-                            let mut round_closed = false;
-                            if let Some(fetch) = &mut self.fetch
-                                && let FetchPhase::Probe(round) =
-                                    &mut fetch.phase
-                            {
-                                round.pending.remove(&sender);
-                                if matches!(result, ArtifactProbeResult::Busy) {
-                                    round.busy.insert(sender.clone());
-                                }
-                                round_closed = round.pending.is_empty();
-                            }
+                            let round_closed =
+                                if let Some(fetch) = &mut self.fetch
+                                    && let FetchPhase::Probe(round) =
+                                        &mut fetch.phase
+                                {
+                                    round.pending.remove(&sender);
+                                    if matches!(
+                                        result,
+                                        ArtifactProbeResult::Busy
+                                    ) {
+                                        round.busy.insert(sender.clone());
+                                    }
+                                    round.pending.is_empty()
+                                } else {
+                                    false
+                                };
                             if round_closed {
                                 self.resolve_probe_round(ctx).await?;
                             }
@@ -2011,12 +2037,12 @@ impl Handler<Self> for ContractCompiler {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        match self.serve_artifact(ctx, &contract_name).await? {
-                            Some(artifact) => {
-                                ArtifactFetchResult::Artifact(artifact)
-                            }
-                            None => ArtifactFetchResult::NotServed,
-                        }
+                        self.serve_artifact(ctx, &contract_name)
+                            .await?
+                            .map_or(
+                                ArtifactFetchResult::NotServed,
+                                ArtifactFetchResult::Artifact,
+                            )
                     }
                 };
 
@@ -2074,10 +2100,12 @@ impl Handler<Self> for ContractCompiler {
                         match CompilerSupport::register_fetched_artifact(
                             self.hash,
                             ctx,
-                            &fetch.contract_name,
-                            &fetch.contract,
-                            &fetch.contract_path,
-                            fetch.initial_value.clone(),
+                            ContractSourceInput {
+                                contract_name: &fetch.contract_name,
+                                contract: &fetch.contract,
+                                contract_path: &fetch.contract_path,
+                                initial_value: fetch.initial_value.clone(),
+                            },
                             &Self::register_path(ctx),
                             &fetch.wasm_hash,
                             artifact,
@@ -2335,16 +2363,19 @@ mod tests {
     /// A contract compiler with a fetch anchor recorded in the register
     /// and the network helper wired to a test-owned channel. The
     /// contract is absent on disk, so the fetch cycle starts probing.
-    #[allow(clippy::type_complexity)]
-    async fn setup_actors() -> (
-        SystemRef,
-        JoinHandle<()>,
-        Vec<TempDir>,
-        TempDir,
-        mpsc::Receiver<CommandHelper<NetworkMessage>>,
-        SharedFaultRegistry,
-        ActorRef<ContractCompiler>,
-    ) {
+    struct FetchHarness {
+        // Held for ownership only: dropping them would shut the test
+        // system down and delete the tempdirs early.
+        _system: SystemRef,
+        runner: JoinHandle<()>,
+        _dirs: Vec<TempDir>,
+        contracts_dir: TempDir,
+        rx: mpsc::Receiver<CommandHelper<NetworkMessage>>,
+        faults: SharedFaultRegistry,
+        compiler: ActorRef<ContractCompiler>,
+    }
+
+    async fn setup_actors() -> FetchHarness {
         let (system, runner, dirs) = create_system().await;
 
         let (command_sender, command_receiver) = mpsc::channel(32);
@@ -2386,15 +2417,15 @@ mod tests {
             .unwrap();
 
         let contracts_dir = tempfile::tempdir().unwrap();
-        (
-            system,
+        FetchHarness {
+            _system: system,
             runner,
-            dirs,
+            _dirs: dirs,
             contracts_dir,
-            command_receiver,
+            rx: command_receiver,
             faults,
             compiler,
-        )
+        }
     }
 
     async fn reconcile_fetch(
@@ -2431,8 +2462,12 @@ mod tests {
     async fn resumed_probe_keeps_nonce_and_outlives_stale_timer() {
         let p1 = test_public_key();
         let p2 = test_public_key();
-        let (_system, _runner, _dirs, contracts_dir, mut rx, _faults, compiler) =
-            setup_actors().await;
+        let FetchHarness {
+            contracts_dir,
+            mut rx,
+            compiler,
+            ..
+        } = setup_actors().await;
 
         let start = Instant::now();
         reconcile_fetch(
@@ -2547,8 +2582,13 @@ mod tests {
     async fn probe_send_failure_crashes_system() {
         let p1 = test_public_key();
         let p2 = test_public_key();
-        let (_system, runner, _dirs, contracts_dir, _rx, faults, compiler) =
-            setup_actors().await;
+        let FetchHarness {
+            runner,
+            contracts_dir,
+            faults,
+            compiler,
+            ..
+        } = setup_actors().await;
         faults.lock().unwrap().install(FaultRule {
             direction: FaultDirection::Outbound,
             message: FaultMessage::ArtifactProbeReq,
@@ -2573,8 +2613,14 @@ mod tests {
     async fn artifact_request_send_failure_crashes_system() {
         let p1 = test_public_key();
         let p2 = test_public_key();
-        let (_system, runner, _dirs, contracts_dir, mut rx, faults, compiler) =
-            setup_actors().await;
+        let FetchHarness {
+            runner,
+            contracts_dir,
+            mut rx,
+            faults,
+            compiler,
+            ..
+        } = setup_actors().await;
         faults.lock().unwrap().install(FaultRule {
             direction: FaultDirection::Outbound,
             message: FaultMessage::ArtifactReq,

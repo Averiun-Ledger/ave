@@ -231,15 +231,17 @@ impl Intermediary {
                 let message = {
                     let mut message = message;
                     // Test infrastructure: the lock is never held across
-                    // an await and poisoning only means the test
-                    // panicked.
-                    #[allow(clippy::unwrap_used)]
-                    let verdict = faults.lock().unwrap().check_inbound(
-                        &sender,
-                        sender_raw,
-                        &raw_message,
-                        &mut message,
-                    );
+                    // an await; on poisoning (a test already panicked)
+                    // keep going with the guarded state.
+                    let verdict = faults
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .check_inbound(
+                            &sender,
+                            sender_raw,
+                            &raw_message,
+                            &mut message,
+                        );
                     match verdict {
                         test_faults::InboundVerdict::Pass => {}
                         test_faults::InboundVerdict::Drop => {

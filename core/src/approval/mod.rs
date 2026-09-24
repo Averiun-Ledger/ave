@@ -67,7 +67,9 @@ pub mod verify;
 const FULL_STATUS_SWEEP_ROUNDS: u64 = 8;
 
 /// Requester-side actor of the approval phase: one per request, child of
-/// the request manager. All its state is volatile — on a restart the
+/// the request manager.
+///
+/// All its state is volatile — on a restart the
 /// phase is recreated from the persisted request manager state and the
 /// votes are recovered from the validators (their collections hold them
 /// and the approvers persist their own votes).
@@ -485,13 +487,11 @@ impl Approval {
                 (previous, vote)
             };
             self.double_votes.push((accept, reject));
-            self.timeouts.remove(&signer);
-            true
         } else {
             self.votes.insert(signer.clone(), vote);
-            self.timeouts.remove(&signer);
-            true
         }
+        self.timeouts.remove(&signer);
+        true
     }
 
     /// Merges a validator-signed timeout attestation into the collection.
@@ -538,7 +538,7 @@ impl Approval {
         self.timeouts
             .entry(who.clone())
             .or_default()
-            .insert(signer.clone(), timeout)
+            .insert(signer, timeout)
             .is_none()
     }
 
@@ -632,7 +632,7 @@ impl Approval {
     /// collections.
     async fn maybe_close_collection(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.closed {
             return Ok(());
@@ -1262,7 +1262,7 @@ impl Handler<Self> for Approval {
                 // liveness heartbeat either way.
                 self.keepalive_rounds = self.keepalive_rounds.saturating_add(1);
                 let wanted =
-                    if self.keepalive_rounds % FULL_STATUS_SWEEP_ROUNDS == 0 {
+                    if self.keepalive_rounds.is_multiple_of(FULL_STATUS_SWEEP_ROUNDS) {
                         None
                     } else {
                         Some(self.pending_approvers())

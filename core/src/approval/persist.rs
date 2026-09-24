@@ -61,15 +61,11 @@ pub struct ApprPersist {
     #[serde(skip)]
     validators: HashSet<PublicKey>,
     /// Validator appointed to (re)send a full request missed by
-    /// hash-only probes, with its unanswered-ping count for rotation.
-    /// Volatile: a restart simply appoints the next pinger.
+    /// hash-only probes, with the count of pings seen without the
+    /// request arriving. Volatile: a restart simply appoints the next
+    /// pinger.
     #[serde(skip)]
     needfull_supplier: Option<(PublicKey, u8)>,
-    /// Other pinging validators while waiting for the full request:
-    /// rotation backups with their vote-listener paths, never asked
-    /// all at once.
-    #[serde(skip)]
-    needfull_backups: Vec<(PublicKey, String)>,
 }
 
 /// Unanswered supplier pings before rotating to the next validator.
@@ -122,7 +118,6 @@ impl BorshDeserialize for ApprPersist {
             node_key,
             validators: HashSet::new(),
             needfull_supplier: None,
-            needfull_backups: Vec::new(),
         })
     }
 }
@@ -924,58 +919,33 @@ impl Handler<Self> for ApprPersist {
                     return Ok(ApprPersistResponse::Ok);
                 }
 
-                // Missing request: appoint one supplier and rotate
-                // across pingers without timers. Only the supplier gets
-                // a `NeedFull` reply; the rest stay silent (they keep
-                // probing on their own schedule).
-                let asker = (sender.clone(), asker_actor.clone());
-                let supplier = self.needfull_supplier.clone();
-                match supplier {
-                    Some((current, attempts)) if current == sender => {
-                        if attempts >= NEEDFULL_ROTATE_AFTER {
-                            match self.needfull_backups.pop() {
-                                Some(next) => {
-                                    self.needfull_supplier =
-                                        Some((next.0.clone(), 0));
-                                    self.send_need_full(
-                                        ctx,
-                                        &approval_req_hash,
-                                        &next,
-                                        &info.request_id,
-                                        info.version,
-                                    )
-                                    .await?;
-                                }
-                                None => {
-                                    self.needfull_supplier = None;
-                                }
-                            }
-                        } else {
-                            self.needfull_supplier =
-                                Some((current, attempts + 1));
-                        }
+                // Missing request: appoint one supplier at a time and
+                // rotate to the most recent pinger when it does not
+                // deliver. No timers: every ping either appoints,
+                // counts, or rotates, so a dead supplier can never wedge
+                // the wait while other validators keep probing.
+                let asker = (sender.clone(), asker_actor);
+                let rotate = match &self.needfull_supplier {
+                    None => true,
+                    Some((current, attempts)) => {
+                        *current != sender
+                            || *attempts + 1 >= NEEDFULL_ROTATE_AFTER
                     }
-                    _ => {
-                        if let Some((current, _)) = &supplier
-                            && *current != sender
-                            && !self
-                                .needfull_backups
-                                .iter()
-                                .any(|(key, _)| key == &sender)
-                        {
-                            self.needfull_backups.push(asker);
-                        } else if supplier.is_none() {
-                            self.needfull_supplier = Some((sender.clone(), 0));
-                            self.send_need_full(
-                                ctx,
-                                &approval_req_hash,
-                                &asker,
-                                &info.request_id,
-                                info.version,
-                            )
-                            .await?;
-                        }
-                    }
+                };
+                if rotate {
+                    self.needfull_supplier = Some((sender.clone(), 0));
+                    self.send_need_full(
+                        ctx,
+                        &approval_req_hash,
+                        &asker,
+                        &info.request_id,
+                        info.version,
+                    )
+                    .await?;
+                } else if let Some((current, attempts)) =
+                    self.needfull_supplier.clone()
+                {
+                    self.needfull_supplier = Some((current, attempts + 1));
                 }
             }
         }
@@ -1151,7 +1121,6 @@ impl PersistentActor for ApprPersist {
             askers: Vec::new(),
             validators,
             needfull_supplier: None,
-            needfull_backups: Vec::new(),
         }
     }
 
@@ -1172,7 +1141,6 @@ impl PersistentActor for ApprPersist {
                 // Any transition settles the wait for a missing full
                 // request (voted, or the request is dead).
                 inner.needfull_supplier = None;
-                inner.needfull_backups.clear();
             }
             ApprPersistEvent::SafeState {
                 request,
@@ -1196,7 +1164,6 @@ impl PersistentActor for ApprPersist {
                 inner.askers = vec![asker.clone()];
                 // The full request arrived: no supplier needed.
                 inner.needfull_supplier = None;
-                inner.needfull_backups.clear();
             }
             ApprPersistEvent::AddAsker { key, actor } => {
                 debug!(

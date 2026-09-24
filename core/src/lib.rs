@@ -2333,26 +2333,30 @@ impl Api {
         rule: helpers::network::test_faults::FaultRule,
     ) -> Result<(), Error> {
         let faults = self.test_faults()?;
-        // Test infrastructure: the lock is never held across an await
-        // and poisoning only means the test panicked.
-        #[allow(clippy::unwrap_used)]
-        faults.lock().unwrap().install(rule);
+        // Test infrastructure: the lock is never held across an await;
+        // on poisoning (a test already panicked) keep going with the
+        // guarded state.
+        faults.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).install(rule);
         Ok(())
     }
 
     /// Clears every fault rule and drops every held message.
     pub async fn test_clear_faults(&self) -> Result<(), Error> {
         let faults = self.test_faults()?;
-        #[allow(clippy::unwrap_used)]
-        faults.lock().unwrap().clear();
+        faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         Ok(())
     }
 
     /// How many messages are currently held by fault rules.
     pub async fn test_held_count(&self) -> Result<usize, Error> {
         let faults = self.test_faults()?;
-        #[allow(clippy::unwrap_used)]
-        let count = faults.lock().unwrap().held_count();
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held_count();
         Ok(count)
     }
 
@@ -2362,8 +2366,10 @@ impl Api {
         &self,
     ) -> Result<Vec<NetworkMessage>, Error> {
         let faults = self.test_faults()?;
-        #[allow(clippy::unwrap_used)]
-        let messages = faults.lock().unwrap().held_outbound_messages();
+        let messages = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held_outbound_messages();
         Ok(messages)
     }
 
@@ -2373,8 +2379,9 @@ impl Api {
     pub async fn test_release_held(&self) -> Result<usize, Error> {
         let faults = self.test_faults()?;
         let (commands, control) = {
-            #[allow(clippy::unwrap_used)]
-            let mut faults = faults.lock().unwrap();
+            let mut faults = faults
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let commands = faults.take_held_commands();
             (commands, faults.control_sender())
         };
@@ -2427,8 +2434,9 @@ impl Api {
     ) -> Result<(), Error> {
         let faults = self.test_faults()?;
         let control = {
-            #[allow(clippy::unwrap_used)]
-            let faults = faults.lock().unwrap();
+            let faults = faults
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             faults.control_sender()
         };
         let command =
@@ -2466,8 +2474,7 @@ impl Api {
             .get_helper::<compilation::contract_compiler::SharedFetchObs>(
                 "test_fetch_obs",
             )?;
-        #[allow(clippy::unwrap_used)]
-        let obs = obs.lock().unwrap();
+        let obs = obs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         obs.get(contract_name).cloned()
     }
 

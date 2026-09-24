@@ -67,7 +67,9 @@ pub mod support;
 pub mod worker;
 
 /// Schemas whose contract must go through the compilation phase for this
-/// governance fact payload: every added schema plus every change with a
+/// governance fact payload.
+///
+/// Every added schema plus every change with a
 /// new contract or a new initial value. `None` when the payload is not a
 /// valid governance event — evaluation will fail the event instead.
 pub fn schemas_to_compile(
@@ -98,7 +100,9 @@ pub fn schemas_to_compile(
 }
 
 /// Contract sources coming in a governance fact payload, paired with
-/// their schema id: every added schema plus every change with a new
+/// their schema id.
+///
+/// Every added schema plus every change with a new
 /// contract. These are the only contracts the compilation phase stages —
 /// unchanged contracts reuse the official artifact. Returns an empty vec
 /// when the payload is not a valid governance event.
@@ -132,7 +136,9 @@ pub fn payload_contract_sources(
 
 /// Everything the compilation phase needs for one schema: the effective
 /// contract source and initial value, and whether the contract itself
-/// changes. Added or changed contracts come from the event; the source
+/// changes.
+///
+/// Added or changed contracts come from the event; the source
 /// (and initial value) of an unchanged one comes from the committed
 /// governance schemas.
 #[derive(Debug, Clone)]
@@ -143,7 +149,9 @@ pub struct CompileTarget {
 }
 
 /// Effective compile target of every schema to compile, resolving
-/// changes against the committed governance schemas: what the event does
+/// changes against the committed governance schemas.
+///
+/// What the event does
 /// not provide comes from the committed state, which is identical at the
 /// same governance version.
 pub fn resolve_compile_targets(

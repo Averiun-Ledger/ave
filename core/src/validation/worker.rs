@@ -130,7 +130,9 @@ pub struct ValiWorker {
     pub approvals: HashMap<DigestIdentifier, ApprovalCollection>,
 }
 
-/// A network validation request being processed. `pre_stop` uses it to
+/// A network validation request being processed.
+///
+/// `pre_stop` uses it to
 /// notify the requester that this validator is going down mid-validation
 /// (`ValidationRes::Unavailable`) instead of letting it burn the
 /// coordinator retries on a dead node.
@@ -157,7 +159,9 @@ pub enum OwnerRoute {
     Network,
 }
 
-/// An approval vote collection in flight. All of it is volatile: keyed by
+/// An approval vote collection in flight.
+///
+/// All of it is volatile: keyed by
 /// the approval request hash, superseded by a strictly newer request of
 /// the same subject, purged when the validation request carries the
 /// closed evidence or the governance commits, and — on the shared role
@@ -198,6 +202,16 @@ struct ApprovalRoute {
     request_id: String,
     version: u64,
     subject_id: DigestIdentifier,
+}
+
+/// Ledger-anchored identity of the event under validation, shared by
+/// the evidence checks so their signatures stay readable.
+struct EventAnchor<'a> {
+    event_request: &'a Signed<EventRequest>,
+    metadata: &'a Metadata,
+    gov_version: u64,
+    req_subject_data_hash: DigestIdentifier,
+    signer: PublicKey,
 }
 
 /// Outcome of merging an approver vote into an approval collection.
@@ -756,7 +770,7 @@ impl ValiWorker {
     /// opened.
     async fn start_collection(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         collection: ApprovalCollection,
     ) -> Result<bool, ActorError> {
         let approval_req_hash = collection.approval_req_hash.clone();
@@ -921,7 +935,7 @@ impl ValiWorker {
     /// path, like probes do.
     async fn send_full_request(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         collection: &ApprovalCollection,
         approver: &PublicKey,
     ) -> Result<(), ActorError> {
@@ -974,8 +988,8 @@ impl ValiWorker {
     /// schedules the next probe round of the configured schedule. The
     /// last round lands on the deadline itself.
     async fn probe_approvers(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
+        &self,
+        ctx: &ActorContext<Self>,
         approval_req_hash: &DigestIdentifier,
         attempt: usize,
     ) -> Result<(), ActorError> {
@@ -1144,7 +1158,7 @@ impl ValiWorker {
     /// requester verifies the approver signature and aborts the request.
     async fn push_vote_report(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         route: &ApprovalRoute,
         vote: Signed<ApprovalRes>,
     ) -> Result<(), ActorError> {
@@ -1193,7 +1207,7 @@ impl ValiWorker {
     /// Answers a keepalive status ask with the given snapshot.
     async fn send_status_to_owner(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         route: &ApprovalRoute,
         approval_req_hash: DigestIdentifier,
         votes: Vec<Signed<ApprovalRes>>,
@@ -1494,13 +1508,16 @@ impl ValiWorker {
         evaluation: EvaluationData,
         eval_data: RoleDataRegister,
         mut properties: ValueWrapper,
-        event_request: &Signed<EventRequest>,
-        metadata: &Metadata,
-        gov_version: u64,
-        req_subject_data_hash: DigestIdentifier,
-        signer: PublicKey,
+        anchor: EventAnchor<'_>,
     ) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
     {
+        let EventAnchor {
+            event_request,
+            metadata,
+            gov_version,
+            req_subject_data_hash,
+            signer,
+        } = anchor;
         if signer != evaluation.eval_req_signature.signer {
             return Err(ValidatorError::InvalidSigner {
                 signer: signer.to_string(),
@@ -1682,12 +1699,15 @@ impl ValiWorker {
         &self,
         compilation: CompilationData,
         comp_data: RoleDataRegister,
-        event_request: &Signed<EventRequest>,
-        metadata: &Metadata,
-        gov_version: u64,
-        req_subject_data_hash: DigestIdentifier,
-        signer: PublicKey,
+        anchor: EventAnchor<'_>,
     ) -> Result<(), ValidatorError> {
+        let EventAnchor {
+            event_request,
+            metadata,
+            gov_version,
+            req_subject_data_hash,
+            signer,
+        } = anchor;
         if signer != compilation.compile_req_signature.signer {
             return Err(ValidatorError::InvalidSigner {
                 signer: signer.to_string(),
@@ -1952,11 +1972,13 @@ impl ValiWorker {
             self.check_compilation(
                 compilation,
                 comp_data,
-                event_request,
-                metadata,
-                gov_version,
-                req_subject_data_hash.clone(),
-                signer.clone(),
+                EventAnchor {
+                    event_request,
+                    metadata,
+                    gov_version,
+                    req_subject_data_hash: req_subject_data_hash.clone(),
+                    signer: signer.clone(),
+                },
             )?;
         }
 
@@ -1968,11 +1990,13 @@ impl ValiWorker {
             evaluation,
             eval_data,
             metadata.properties.clone(),
-            event_request,
-            metadata,
-            gov_version,
-            req_subject_data_hash.clone(),
-            signer.clone(),
+            EventAnchor {
+                event_request,
+                metadata,
+                gov_version,
+                req_subject_data_hash: req_subject_data_hash.clone(),
+                signer: signer.clone(),
+            },
         )?;
 
         let Some(approval_data) = approval_data else {
@@ -3505,18 +3529,20 @@ mod tests {
             )]))
         }
 
-        fn check_compilation(
+    fn check_compilation(
             &self,
             compilation: CompilationData,
         ) -> Result<(), ValidatorError> {
             self.worker.check_compilation(
                 compilation,
                 self.roles(&self.compilers),
-                &self.event_request,
-                &self.metadata,
-                self.gov_version,
-                self.req_subject_data_hash.clone(),
-                self.signer.clone(),
+                EventAnchor {
+                    event_request: &self.event_request,
+                    metadata: &self.metadata,
+                    gov_version: self.gov_version,
+                    req_subject_data_hash: self.req_subject_data_hash.clone(),
+                    signer: self.signer.clone(),
+                },
             )
         }
 
@@ -3589,7 +3615,7 @@ mod tests {
             )
         }
 
-        fn check_evaluation(
+    fn check_evaluation(
             &self,
             evaluation: EvaluationData,
         ) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
@@ -3598,11 +3624,13 @@ mod tests {
                 evaluation,
                 self.roles(&self.evaluators),
                 self.metadata.properties.clone(),
-                &self.event_request,
-                &self.metadata,
-                self.gov_version,
-                self.req_subject_data_hash.clone(),
-                self.signer.clone(),
+                EventAnchor {
+                    event_request: &self.event_request,
+                    metadata: &self.metadata,
+                    gov_version: self.gov_version,
+                    req_subject_data_hash: self.req_subject_data_hash.clone(),
+                    signer: self.signer.clone(),
+                },
             )
         }
 

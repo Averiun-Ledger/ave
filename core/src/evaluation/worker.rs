@@ -62,7 +62,9 @@ pub struct EvalWorker {
     pub pending: Option<PendingEvaluation>,
 }
 
-/// A network evaluation request being processed. `pre_stop` uses it to
+/// A network evaluation request being processed.
+///
+/// `pre_stop` uses it to
 /// notify the requester that this evaluator is going down mid-evaluation
 /// (`EvaluationRes::Unavailable`) instead of letting it burn the
 /// coordinator retries on a dead node.

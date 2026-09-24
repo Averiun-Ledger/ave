@@ -140,7 +140,7 @@ impl CompileCoordinator {
     /// compilation phase drops it and replaces it from the pending
     /// pool. If the phase was already torn down, the timeout is moot
     /// and dropped.
-    async fn notify_timeout(&self, ctx: &mut ActorContext<Self>) {
+    async fn notify_timeout(&self, ctx: &ActorContext<Self>) {
         match ctx.get_parent::<Compilation>().await {
             Ok(compilation_actor) => {
                 if let Err(e) = compilation_actor
@@ -546,19 +546,22 @@ mod tests {
     /// A compilation phase actor (root, no request manager) with a
     /// single remote compiler: creating the phase spawns the coordinator
     /// child, whose retry cycle sends the request over the network.
-    #[allow(clippy::type_complexity)]
-    async fn setup() -> (
-        SystemRef,
-        JoinHandle<()>,
-        Vec<TempDir>,
-        mpsc::Receiver<CommandHelper<NetworkMessage>>,
-        ActorRef<CompileCoordinator>,
-        ActorPath,
-        ActorPath,
-        DigestIdentifier,
-        u64,
-        PublicKey,
-    ) {
+    struct PhaseHarness {
+        system: SystemRef,
+        runner: JoinHandle<()>,
+        // Held for ownership only: dropping it would delete the
+        // tempdirs early.
+        _dirs: Vec<TempDir>,
+        rx: mpsc::Receiver<CommandHelper<NetworkMessage>>,
+        coordinator: ActorRef<CompileCoordinator>,
+        coordinator_path: ActorPath,
+        retry_path: ActorPath,
+        request_id: DigestIdentifier,
+        version: u64,
+        compiler_key: PublicKey,
+    }
+
+    async fn setup() -> PhaseHarness {
         let (system, runner, dirs) = create_system().await;
 
         let (command_sender, mut command_receiver) = mpsc::channel(16);
@@ -646,18 +649,18 @@ mod tests {
             .await
             .expect("the retry actor must exist before the ACK");
 
-        (
+        PhaseHarness {
             system,
             runner,
-            dirs,
-            command_receiver,
+            _dirs: dirs,
+            rx: command_receiver,
             coordinator,
             coordinator_path,
             retry_path,
             request_id,
             version,
             compiler_key,
-        )
+        }
     }
 
     /// The working ACK cancels the request retry and the coordinator
@@ -666,18 +669,18 @@ mod tests {
     /// actor, and a duplicate ACK is ignored.
     #[test(tokio::test)]
     async fn working_ack_cancels_retry_and_is_never_counted() {
-        let (
+        let PhaseHarness {
             system,
             runner,
-            _dirs,
-            mut command_receiver,
+            _dirs: _,
+            rx: mut command_receiver,
             coordinator,
             coordinator_path,
             retry_path,
             request_id,
             version,
             compiler_key,
-        ) = setup().await;
+        } = setup().await;
 
         let working = || CompileCoordinatorMessage::NetworkResponse {
             compilation_res: Box::new(CompilationRes::Working),
@@ -754,7 +757,9 @@ mod tests {
     /// `CompilationRes::TimeOut` and stop the coordinator).
     #[test(tokio::test)]
     async fn result_deadline_reports_timeout_and_stops() {
-        let (_system, runner, _dirs, _rx, coordinator, ..) = setup().await;
+        let PhaseHarness {
+            runner, coordinator, ..
+        } = setup().await;
 
         coordinator
             .tell(CompileCoordinatorMessage::ResultDeadline)

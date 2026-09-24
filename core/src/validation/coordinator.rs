@@ -52,7 +52,7 @@ impl ValiCoordinator {
     /// coordinator.
     async fn timeout_and_stop(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         msg_type: &'static str,
     ) {
         match ctx.get_parent::<Validation>().await {

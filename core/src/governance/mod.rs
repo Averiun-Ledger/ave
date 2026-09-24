@@ -14,8 +14,8 @@ use crate::{
         error::CompilerError,
         payload_contract_sources,
         support::{
-            CompilerResponse, CompilerSupport, is_compiler_infra_error,
-            is_local_fatal_compiler_error,
+            CompilerResponse, CompilerSupport, ContractSourceInput,
+            is_compiler_infra_error, is_local_fatal_compiler_error,
             is_retryable_compiler_recovery_error,
         },
         worker::{CompileWorker, CompileWorkerMessage},
@@ -54,7 +54,10 @@ use crate::{
             TransferVerificationRegister, TransferVerificationRegisterMessage,
             TransferVerificationRegisterResponse,
         },
-        version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
+        version_sync::{
+            GovernanceVersionSync, GovernanceVersionSyncConfig,
+            GovernanceVersionSyncMessage,
+        },
         witnesses_register::{
             CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
@@ -1707,10 +1710,12 @@ impl Governance {
                 match CompilerSupport::recover_official_artifact(
                     *hash,
                     ctx,
-                    &contract_name,
-                    &schema.contract,
-                    &contract_path,
-                    schema.initial_value.0.clone(),
+                    ContractSourceInput {
+                        contract_name: &contract_name,
+                        contract: &schema.contract,
+                        contract_path: &contract_path,
+                        initial_value: schema.initial_value.0.clone(),
+                    },
                     &register_path,
                 )
                 .await
@@ -5083,16 +5088,19 @@ impl Actor for Governance {
             let version_sync = ctx
                 .create_child(
                     "version_sync",
-                    GovernanceVersionSync::new(
-                        self.subject_metadata.subject_id.clone(),
-                        self.our_key.clone(),
-                        network.clone(),
-                        self.properties.version,
-                        config.sync_governance.sample_size,
-                        version_sync_tick_interval,
-                        version_sync_response_timeout,
-                        config.has_boot_nodes,
-                    ),
+                    GovernanceVersionSync::new(GovernanceVersionSyncConfig {
+                        governance_id: self
+                            .subject_metadata
+                            .subject_id
+                            .clone(),
+                        our_key: self.our_key.clone(),
+                        network: network.clone(),
+                        local_version: self.properties.version,
+                        sample_size: config.sync_governance.sample_size,
+                        tick_interval: version_sync_tick_interval,
+                        response_timeout: version_sync_response_timeout,
+                        has_boot_nodes: config.has_boot_nodes,
+                    }),
                 )
                 .await?;
 

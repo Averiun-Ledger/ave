@@ -35,7 +35,7 @@ impl Response for CompilerResponse {}
 /// Whether a compiler error is an infrastructure failure (compilers
 /// unreachable, toolchain drift, attestation problems) rather than a
 /// contract failure. Infrastructure errors retry; contract errors do not.
-pub(crate) fn is_compiler_infra_error(error: &CompilerError) -> bool {
+pub(crate) const fn is_compiler_infra_error(error: &CompilerError) -> bool {
     matches!(
         error,
         CompilerError::CompilersUnavailable { .. }
@@ -50,7 +50,7 @@ pub(crate) fn is_compiler_infra_error(error: &CompilerError) -> bool {
 /// broken and these must stay fatal — they never degrade. This is the
 /// same family that maps to `EvaluatorError::InternalError` in
 /// `evaluation/response.rs`; keep both in sync.
-pub(crate) fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
+pub(crate) const fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
     matches!(
         error,
         CompilerError::InvalidContractPath { .. }
@@ -69,7 +69,7 @@ pub(crate) fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
 
 /// Whether recovery may retry this local failure. `NotFound` is deliberately
 /// absent: a missing artifact is rebuilt immediately, not retried as I/O.
-pub(crate) fn is_retryable_compiler_recovery_error(
+pub(crate) const fn is_retryable_compiler_recovery_error(
     error: &CompilerError,
 ) -> bool {
     matches!(
@@ -85,6 +85,30 @@ pub(crate) fn is_retryable_compiler_recovery_error(
 }
 
 pub(crate) struct CompilerSupport;
+
+/// Contract source bundle: what to build, without anchors. Groups the
+/// data parameters so the build entry points stay readable.
+pub(crate) struct ContractSourceInput<'a> {
+    pub contract_name: &'a str,
+    pub contract: &'a str,
+    pub contract_path: &'a Path,
+    pub initial_value: Value,
+}
+
+/// Registered load input: where the persisted artifact lives and what
+/// it must match. Groups the data parameters so call signatures stay
+/// readable.
+pub(crate) struct RegisteredLoadInput<'a> {
+    pub contract_name: &'a str,
+    pub contract_path: &'a Path,
+    pub initial_value: &'a Value,
+    pub register_path: &'a ActorPath,
+    pub contract_hash: &'a DigestIdentifier,
+    pub manifest_hash: &'a DigestIdentifier,
+    pub engine_fingerprint: &'a DigestIdentifier,
+    pub expected_toolchain: Option<DigestIdentifier>,
+    pub expected_wasm_hash: Option<&'a DigestIdentifier>,
+}
 
 /// TTL of a serving cache entry: after a contract change every evaluator
 /// fetches the artifact at once (thundering herd), so the serving node
@@ -247,14 +271,17 @@ impl CompilerSupport {
     pub(crate) async fn compile_or_load_registered<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
-        contract_name: &str,
-        contract: &str,
-        contract_path: &Path,
-        initial_value: Value,
+        source: ContractSourceInput<'_>,
         register_path: &ActorPath,
         expected_wasm_hash: Option<&DigestIdentifier>,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
+        let ContractSourceInput {
+            contract_name,
+            contract,
+            contract_path,
+            initial_value,
+        } = source;
         let started_at = Instant::now();
         let result = async {
             let contract_hash = hash_borsh(&*hash.hasher(), &contract)
@@ -286,15 +313,17 @@ impl CompilerSupport {
                 Self::load_registered_artifact(
                     hash,
                     ctx,
-                    contract_name,
-                    contract_path,
-                    &initial_value,
-                    register_path,
-                    &contract_hash,
-                    &manifest_hash,
-                    &engine_fingerprint,
-                    None,
-                    expected_wasm_hash,
+                    RegisteredLoadInput {
+                        contract_name,
+                        contract_path,
+                        initial_value: &initial_value,
+                        register_path,
+                        contract_hash: &contract_hash,
+                        manifest_hash: &manifest_hash,
+                        engine_fingerprint: &engine_fingerprint,
+                        expected_toolchain: None,
+                        expected_wasm_hash,
+                    },
                 )
                 .await?
             {
@@ -485,23 +514,25 @@ impl CompilerSupport {
     /// `expected_toolchain`: `Some` pins the check to that toolchain;
     /// `None` is a deliberate no-op against the persisted record itself
     /// (level 1 of trust).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn load_registered_artifact<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
-        contract_name: &str,
-        contract_path: &Path,
-        initial_value: &Value,
-        register_path: &ActorPath,
-        contract_hash: &DigestIdentifier,
-        manifest_hash: &DigestIdentifier,
-        engine_fingerprint: &DigestIdentifier,
-        expected_toolchain: Option<DigestIdentifier>,
-        expected_wasm_hash: Option<&DigestIdentifier>,
+        input: RegisteredLoadInput<'_>,
     ) -> Result<
         Option<(Arc<CompiledModule>, ContractArtifactRecord, &'static str)>,
         CompilerError,
     > {
+        let RegisteredLoadInput {
+            contract_name,
+            contract_path,
+            initial_value,
+            register_path,
+            contract_hash,
+            manifest_hash,
+            engine_fingerprint,
+            expected_toolchain,
+            expected_wasm_hash,
+        } = input;
         let register = ctx
             .system()
             .get_actor::<ContractRegister>(register_path)
@@ -762,16 +793,18 @@ impl CompilerSupport {
     /// Recovers an official compiler artifact from local storage or the
     /// compiler pool. The ledger anchor is the only authority accepted for
     /// the wasm bytes; cache metadata merely avoids unnecessary work.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn recover_official_artifact<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
-        contract_name: &str,
-        contract: &str,
-        contract_path: &Path,
-        initial_value: Value,
+        source: ContractSourceInput<'_>,
         register_path: &ActorPath,
     ) -> Result<Arc<CompiledModule>, CompilerError> {
+        let ContractSourceInput {
+            contract_name,
+            contract,
+            contract_path,
+            initial_value,
+        } = source;
         let register = ctx
             .system()
             .get_actor::<ContractRegister>(register_path)
@@ -824,15 +857,17 @@ impl CompilerSupport {
         if let Some((module, _, _)) = Self::load_registered_artifact(
             hash,
             ctx,
-            contract_name,
-            contract_path,
-            &initial_value,
-            register_path,
-            &contract_hash,
-            &manifest_hash,
-            &engine_fingerprint,
-            None,
-            Some(&anchor),
+            RegisteredLoadInput {
+                contract_name,
+                contract_path,
+                initial_value: &initial_value,
+                register_path,
+                contract_hash: &contract_hash,
+                manifest_hash: &manifest_hash,
+                engine_fingerprint: &engine_fingerprint,
+                expected_toolchain: None,
+                expected_wasm_hash: Some(&anchor),
+            },
         )
         .await?
         {
@@ -842,10 +877,12 @@ impl CompilerSupport {
         let (module, _) = Self::compile_or_load_registered(
             hash,
             ctx,
-            contract_name,
-            contract,
-            contract_path,
-            initial_value,
+            ContractSourceInput {
+                contract_name,
+                contract,
+                contract_path,
+                initial_value,
+            },
             register_path,
             Some(&anchor),
         )
@@ -1027,19 +1064,21 @@ impl CompilerSupport {
     /// (wasmtime, no toolchain), the init check runs and the module is
     /// inserted into the in-memory cache — the same end state as a local
     /// compile.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn register_fetched_artifact<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
-        contract_name: &str,
-        contract: &str,
-        contract_path: &Path,
-        initial_value: Value,
+        source: ContractSourceInput<'_>,
         register_path: &ActorPath,
         expected_wasm_hash: &DigestIdentifier,
         artifact: ArtifactData,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
+        let ContractSourceInput {
+            contract_name,
+            contract,
+            contract_path,
+            initial_value,
+        } = source;
         let wasm = artifact.decompress().map_err(|error| {
             CompilerError::FetchedArtifactDecompressionFailed {
                 details: error.to_string(),

@@ -76,10 +76,9 @@ pub enum ActorMessage {
     /// The requester asks a validator for the votes observed so far
     /// (keepalive). `wanted` holds the approvers the requester still
     /// needs evidence about; `None` asks for the full snapshot (legacy
-    /// behavior and periodic backstop). A validator on an older release
-    /// fails to decode this ask and stays silent, and the keepalive
-    /// replaces it from the pool — liveness is preserved across the
-    /// upgrade.
+    /// behavior and periodic backstop). Unknown fields are ignored on
+    /// decode, so a validator on an older release answers the full
+    /// snapshot — liveness degrades to full probes, never to silence.
     ApprovalStatusReq {
         approval_req_hash: DigestIdentifier,
         wanted: Option<HashSet<PublicKey>>,
@@ -172,12 +171,14 @@ pub struct NetworkMessage {
 
 impl Message for NetworkMessage {}
 
-/// Delivery policy of a protocol message: a sender with its own retry
+/// Delivery policy of a protocol message.
+///
+/// A sender with its own retry
 /// machine (a coordinator with retry, a probe or keepalive schedule, a
 /// periodic sync tick) retransmits by design, so its messages are
 /// `Direct` and never buffered; only one-shot pushes whose sole backup
 /// is a slow cycle are `Queued`.
-pub fn delivery_of(message: &ActorMessage) -> Delivery {
+pub const fn delivery_of(message: &ActorMessage) -> Delivery {
     match message {
         ActorMessage::ApprovalVoteReport { .. } => Delivery::Queued,
         _ => Delivery::Direct,
