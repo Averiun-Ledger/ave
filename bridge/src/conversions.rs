@@ -33,6 +33,8 @@ pub fn core_approval_req_to_common(data: ApprovalReq) -> ApprovalReqCommon {
         gov_version: data.gov_version,
         patch: data.patch.0,
         signer: data.signer.to_string(),
+        issued_at: data.issued_at.as_nanos(),
+        deadline: data.deadline.as_nanos(),
     }
 }
 
@@ -53,5 +55,41 @@ pub fn core_request_to_common(
     RequestData {
         request_id: data.request_id.to_string(),
         subject_id: data.subject_id.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_common::{
+        ValueWrapper,
+        identity::{
+            DigestIdentifier, KeyPair, TimeStamp, keys::Ed25519Signer,
+        },
+    };
+
+    fn core_req() -> ApprovalReq {
+        let signer = Ed25519Signer::generate().unwrap();
+        ApprovalReq {
+            subject_id: DigestIdentifier::default(),
+            sn: 7,
+            gov_version: 3,
+            patch: ValueWrapper(serde_json::json!({"op": "add"})),
+            signer: KeyPair::Ed25519(signer).public_key(),
+            issued_at: TimeStamp::from_nanos(111),
+            deadline: TimeStamp::from_nanos(222),
+        }
+    }
+
+    #[test]
+    fn approval_window_maps_to_nanos() {
+        let request = core_req();
+        let common = core_approval_req_to_common(request.clone());
+        assert_eq!(common.subject_id, request.subject_id.to_string());
+        assert_eq!(common.sn, 7);
+        assert_eq!(common.gov_version, 3);
+        assert_eq!(common.signer, request.signer.to_string());
+        assert_eq!(common.issued_at, 111);
+        assert_eq!(common.deadline, 222);
     }
 }

@@ -2237,6 +2237,314 @@ async fn test_approval_double_vote_excluded() {
 }
 
 #[test(tokio::test)]
+// Forged approver votes never reach the tally: a vote from a
+// non-approver key and a vote with a corrupt signature for a real
+// approver go straight into the owner's worker mailbox, both are
+// dropped (gates first, signature checked before merging) and the
+// request still closes approved on the two honest accepts. Without
+// the signature check the forged reject would pair with the honest
+// accept into a false double vote.
+async fn test_approval_forged_votes_ignored() {
+    let short = short_window_approval();
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, false, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, false, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, false, Some(short)).await);
+    let owner = nodes[1].api().clone();
+    let owner_pk = nodes[1].public_key();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api(), nodes[3].api()],
+    )
+    .await;
+
+    // Approvers = {Owner, Approver1, Approver2} fixed 2, the owner is
+    // the only validator. Everyone is manual.
+    let json = two_approvers_setup(nodes[2].api(), nodes[3].api());
+    let request_id = emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &owner,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // (a) vote from a key outside the approver set, (b) reject content
+    // carrying a real approver accept signature: the claimed signer
+    // passes the membership gates but the signature check drops it.
+    // Forged first, while the collection is guaranteed open: the
+    // honest votes below would close it and stop the worker.
+    let (req, _) = nodes[2]
+        .api()
+        .get_approval(governance_id.clone(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    let outsider = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let outsider_pk = outsider.public_key();
+    let foreign = craft_vote(&req, &governance_id, &outsider, true);
+    let ApprovalRes::Response {
+        approval_req_hash,
+        req_subject_data_hash,
+        ..
+    } = craft_vote(&req, &governance_id, &nodes[2].data.keys, true)
+        .content()
+        .clone()
+    else {
+        panic!("expected a response vote");
+    };
+    let forged = Signed::from_parts(
+        ApprovalRes::Response {
+            approval_req_hash,
+            agrees: false,
+            req_subject_data_hash,
+        },
+        craft_vote(&req, &governance_id, &nodes[2].data.keys, true)
+            .signature()
+            .clone(),
+    );
+    assert!(forged.verify().is_err());
+    let version = owner
+        .get_request_state(request_id.clone())
+        .await
+        .unwrap()
+        .version;
+    let worker =
+        format!("/user/request/{governance_id}/approval/{owner_pk}");
+    tell_vote_to_worker(
+        &owner,
+        &worker,
+        foreign,
+        &request_id,
+        version,
+        &outsider_pk,
+    )
+    .await;
+    tell_vote_to_worker(
+        &owner,
+        &worker,
+        forged,
+        &request_id,
+        version,
+        &nodes[2].public_key(),
+    )
+    .await;
+
+    for approver in [&nodes[2], &nodes[3]] {
+        emit_approve(
+            approver.api(),
+            governance_id.clone(),
+            ApprovalStateRes::Accepted,
+            request_id.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Two honest accepts close the collection: no exclusion, no
+    // timeouts, approved.
+    wait_subject_sn(&owner, governance_id.clone(), 2, 30).await;
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert_eq!(
+        approval
+            .approvers_agrees_signatures
+            .iter()
+            .map(|signature| signature.signer.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([nodes[2].public_key(), nodes[3].public_key()])
+    );
+    assert!(approval.approvers_disagrees_signatures.is_empty());
+    assert!(approval.double_votes.is_empty());
+    assert!(approval.approvers_timeouts.is_empty());
+}
+
+#[test(tokio::test)]
+// Keepalive asks only carry the approvers still missing evidence: with
+// two of three votes already merged, the held asks want exactly the
+// silent approver, and the request still closes approved once it
+// votes. Held asks are released before the next round so the answered
+// validator is never mistaken for dead.
+async fn test_approval_status_asks_only_want_missing_votes() {
+    let short = short_window_approval();
+    let mut nodes = vec![TestNode::bootstrap().await];
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, true, Some(short.clone())).await);
+    nodes.push(TestNode::addressable(&nodes, false, Some(short)).await);
+    let owner = nodes[1].api().clone();
+    let a2_pk = nodes[4].public_key();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![nodes[2].api(), nodes[3].api(), nodes[4].api()],
+    )
+    .await;
+
+    // Approvers = {Owner, Approver1, Approver2} fixed 3, the only
+    // validator is a fourth node. The owner and Approver1 auto-accept,
+    // Approver2 stays silent so the collection outlives several
+    // keepalive rounds.
+    let json = json!({
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": { "fixed": 3 }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["Approver1", "Approver2", "Validator1"],
+                    "approver": ["Approver1", "Approver2"],
+                    "validator": ["Validator1"]
+                }
+            }
+        },
+        "members": {
+            "add": [
+                {
+                    "name": "Approver1",
+                    "key": nodes[3].api().public_key()
+                },
+                {
+                    "name": "Approver2",
+                    "key": nodes[4].api().public_key()
+                },
+                {
+                    "name": "Validator1",
+                    "key": nodes[2].api().public_key()
+                }
+            ]
+        }
+    });
+    let request_id = emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &owner,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Hold the owner's outbound asks: the validator keeps collecting
+    // and pushing through the unheld paths while the asks pile up.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ApprovalStatusReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    let request_id = emit_fact(
+        &owner,
+        governance_id.clone(),
+        add_fake_member("AveNode1"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Four keepalive rounds pile up; by the last one both auto votes
+    // are merged, so the ask wants exactly the silent approver.
+    wait_held_count(&owner, 4, 20).await;
+    let held = owner.test_held_outbound().await.unwrap();
+    let mut wants = vec![];
+    for message in &held {
+        if let ActorMessage::ApprovalStatusReq { wanted, .. } = &message.message
+        {
+            wants.push(wanted.clone());
+        }
+    }
+    assert!(wants.len() >= 4, "expected four held asks, got {}", wants.len());
+    assert_eq!(wants.pop().unwrap(), Some(HashSet::from([a2_pk])));
+    owner.test_release_held().await.unwrap();
+
+    // The silent approver votes: early closure with all three agrees.
+    emit_approve(
+        nodes[4].api(),
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_subject_sn(&owner, governance_id.clone(), 2, 30).await;
+    let events = get_events(&owner, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_approval_outcome(&events, 2, Some(true));
+
+    let ledger_event = owner
+        .test_get_ledger_event(governance_id.clone(), 2)
+        .await
+        .unwrap();
+    let Protocols::GovFact {
+        approval: Some(approval),
+        ..
+    } = ledger_event.protocols
+    else {
+        panic!("expected a governance fact with approval evidence");
+    };
+    assert!(approval.approved);
+    assert_eq!(
+        approval
+            .approvers_agrees_signatures
+            .iter()
+            .map(|signature| signature.signer.clone())
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            nodes[1].public_key(),
+            nodes[3].public_key(),
+            nodes[4].public_key()
+        ])
+    );
+    assert!(approval.approvers_timeouts.is_empty());
+}
+
+#[test(tokio::test)]
 // Stale approver: the approver misses the previous event (its inbound
 // distribution push is dropped), answers Unavailable to the next
 // request's probe, resynchronizes through the network update channel
@@ -4691,6 +4999,7 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
                 },
                 message: ActorMessage::ApprovalStatusReq {
                     approval_req_hash: live_hash,
+                    wanted: None,
                 },
             },
             &nodes[1].public_key(),

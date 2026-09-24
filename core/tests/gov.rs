@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::atomic::Ordering,
+    time::Duration,
 };
 
 mod common;
@@ -13,12 +14,13 @@ use ave_common::{
         response::{EvalResDB, RequestEventDB},
     },
     identity::{
-        PublicKey,
+        DigestIdentifier, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
     response::RequestState,
     sink::DataToSinkEvent,
 };
+use ave_core::Api;
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
 use ave_core::governance::model::{
@@ -1228,6 +1230,105 @@ async fn test_transfer_event_governance_1() {
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected);
+}
+/// Bounded poll for a governance owner change: an unreachable confirm
+/// must fail the test instead of hanging it forever.
+async fn wait_gov_owner(
+    node: &Api,
+    governance_id: DigestIdentifier,
+    expected_owner: String,
+    max_secs: u64,
+) {
+    for _ in 0..(max_secs * 10 / 3) {
+        if let Ok(state) = node.get_subject_state(governance_id.clone()).await
+            && state.owner == expected_owner
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!(
+        "timeout waiting for governance {governance_id} owner {expected_owner}"
+    );
+}
+#[test(tokio::test)]
+// Transferencia donde un tercer nodo es el único validador continuo:
+// tras el transfer el tercer nodo sigue validando pero la clave del
+// owner cambió, así que su worker tiene que aprender la nueva clave
+// para aceptar el confirm. El confirm solo commitea si el tercer nodo
+// lo valida (quórum 2 de 2 junto al nuevo owner).
+async fn test_transfer_confirm_with_third_party_validator() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let old_owner = &nodes[0].api;
+    let new_owner = &nodes[1].api;
+    let third = &nodes[2].api;
+
+    let governance_id =
+        create_and_authorize_governance(old_owner, vec![new_owner, third])
+            .await;
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "NewOwner",
+                    "key": new_owner.public_key()
+                },
+                {
+                    "name": "Third",
+                    "key": third.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["NewOwner", "Third"],
+                    "validator": ["Third"]
+                }
+            }
+        }
+    });
+    emit_fact(old_owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // The third node validates the transfer together with the old
+    // owner: its worker still expects the old owner key here.
+    emit_transfer(
+        old_owner,
+        governance_id.clone(),
+        PublicKey::from_str(new_owner.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The confirm is signed by the new owner: without the key update
+    // the third node drops it and the ownership never changes.
+    emit_confirm(new_owner, governance_id.clone(), None, false)
+        .await
+        .unwrap();
+    wait_gov_owner(
+        new_owner,
+        governance_id.clone(),
+        new_owner.public_key().to_string(),
+        60,
+    )
+    .await;
+
+    let state = get_subject(new_owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, new_owner.public_key());
+    assert_eq!(state.new_owner, None);
+    assert!(state.active);
 }
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza, pero el owner se queda como miembro

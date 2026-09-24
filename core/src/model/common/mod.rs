@@ -17,8 +17,8 @@ use ave_common::identity::{DigestIdentifier, PublicKey};
 
 use crate::governance::model::Quorum;
 use crate::governance::role_register::{
-    CurrentValidationRoles, RoleDataRegister, RoleRegister,
-    RoleRegisterMessage, RoleRegisterResponse, SearchRole,
+    RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
+    SearchRole,
 };
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
@@ -111,9 +111,11 @@ where
             approval,
             compilation,
         } => Ok((evaluation, approval, compilation)),
-        _ => Err(ActorError::UnexpectedResponse {
+        other => Err(ActorError::UnexpectedResponse {
             path,
-            expected: "RolesRegisterResponse::ActualRoles".to_string(),
+            expected: format!(
+                "RolesRegisterResponse::ActualRoles, got {other:?}"
+            ),
         }),
     }
 }
@@ -139,37 +141,11 @@ where
 
     match response {
         RoleRegisterResponse::Validation(validation) => Ok(validation),
-        _ => Err(ActorError::UnexpectedResponse {
+        other => Err(ActorError::UnexpectedResponse {
             path,
-            expected: "RolesRegisterResponse::Validation".to_string(),
-        }),
-    }
-}
-
-pub async fn get_current_validation_roles_register<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    schema_id: SchemaType,
-) -> Result<CurrentValidationRoles, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/role_register",
-        governance_id
-    ));
-    let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
-
-    let response = actor
-        .ask(RoleRegisterMessage::GetCurrentValidationRoles { schema_id })
-        .await?;
-
-    match response {
-        RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
-        _ => Err(ActorError::UnexpectedResponse {
-            path,
-            expected: "RolesRegisterResponse::CurrentValidationRoles"
-                .to_string(),
+            expected: format!(
+                "RolesRegisterResponse::Validation, got {other:?}"
+            ),
         }),
     }
 }
@@ -880,26 +856,6 @@ where
 
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &T)> {
         self.inner.iter()
-    }
-
-    pub fn range_with_predecessor(
-        &self,
-        lower: u64,
-        upper: u64,
-    ) -> Vec<(u64, T)> {
-        let mut out: Vec<(u64, T)> = Vec::new();
-
-        if let Some((key, value)) = self.inner.range(..lower).next_back() {
-            out.push((*key, value.clone()));
-        }
-
-        for (key, value) in
-            self.inner.range((Included(&lower), Included(&upper)))
-        {
-            out.push((*key, value.clone()));
-        }
-
-        out
     }
 
     pub fn get_prev_or_equal(&self, key: u64) -> Option<T> {

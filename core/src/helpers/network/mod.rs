@@ -1,10 +1,11 @@
 use ave_actors::Message;
 use ave_common::{
     SchemaType,
-    identity::{DigestIdentifier, Signed},
+    identity::{DigestIdentifier, PublicKey, Signed},
 };
 use ave_network::{ComunicateInfo, Delivery};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
@@ -61,9 +62,15 @@ pub enum ActorMessage {
         res: Box<Signed<ApprovalRes>>,
     },
     /// The requester asks a validator for the votes observed so far
-    /// (keepalive).
+    /// (keepalive). `wanted` holds the approvers the requester still
+    /// needs evidence about; `None` asks for the full snapshot (legacy
+    /// behavior and periodic backstop). A validator on an older release
+    /// fails to decode this ask and stays silent, and the keepalive
+    /// replaces it from the pool — liveness is preserved across the
+    /// upgrade.
     ApprovalStatusReq {
         approval_req_hash: DigestIdentifier,
+        wanted: Option<HashSet<PublicKey>>,
     },
     /// A validator answers the keepalive ask with its votes.
     ApprovalStatusRes {

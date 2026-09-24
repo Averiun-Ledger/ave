@@ -693,13 +693,14 @@ impl Governance {
 
         match response {
             RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
-            _ => Err(ActorError::UnexpectedResponse {
+            other => Err(ActorError::UnexpectedResponse {
                 path: ActorPath::from(format!(
                     "/user/node/subject_manager/{}/role_register",
                     self.subject_metadata.subject_id
                 )),
-                expected: "RoleRegisterResponse::CurrentValidationRoles"
-                    .to_owned(),
+                expected: format!(
+                    "RoleRegisterResponse::CurrentValidationRoles, got {other:?}"
+                ),
             }),
         }
     }
@@ -2294,9 +2295,15 @@ impl Governance {
                 .await?;
 
             if let Some(validator) = validator {
+                let node_key =
+                    self.subject_metadata.new_owner.as_ref().map_or_else(
+                        || self.subject_metadata.owner.clone(),
+                        |new_owner| new_owner.clone(),
+                    );
                 validator
                     .tell(ValiWorkerMessage::UpdateCurrentRoles {
                         gov_version: self.properties.version,
+                        node_key,
                         current_roles:
                             crate::validation::worker::CurrentWorkerRoles {
                                 approval: current_roles.approval.clone(),

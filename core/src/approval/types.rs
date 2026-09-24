@@ -17,12 +17,3 @@ pub enum VotationType {
     Manual,
     AlwaysAccept,
 }
-
-impl From<bool> for VotationType {
-    fn from(passvotation: bool) -> Self {
-        if passvotation {
-            return Self::AlwaysAccept;
-        }
-        Self::Manual
-    }
-}

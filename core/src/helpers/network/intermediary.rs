@@ -740,6 +740,7 @@ impl Intermediary {
                     }
                     ActorMessage::ApprovalStatusReq {
                         approval_req_hash,
+                        wanted,
                     } => {
                         let actor = system
                             .get_actor::<ValiWorker>(&path)
@@ -753,6 +754,7 @@ impl Intermediary {
                                 request_id: message.info.request_id,
                                 version: message.info.version,
                                 sender: sender.clone(),
+                                wanted,
                             })
                             .await
                             .map_err(|e| {

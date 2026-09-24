@@ -60,6 +60,12 @@ pub mod response;
 pub mod types;
 pub mod verify;
 
+/// Keepalive rounds between full status snapshots. Filtered rounds only
+/// ask about the approvers still missing evidence; every N-th round
+/// asks for everything as a backstop against lost vote pushes (e.g. a
+/// late conflicting vote the owner would otherwise never relearn).
+const FULL_STATUS_SWEEP_ROUNDS: u64 = 8;
+
 /// Requester-side actor of the approval phase: one per request, child of
 /// the request manager. All its state is volatile — on a restart the
 /// phase is recreated from the persisted request manager state and the
@@ -119,6 +125,19 @@ pub struct Approval {
     /// Validators asked at the last keepalive round that have not
     /// answered yet.
     status_pending: HashSet<PublicKey>,
+
+    /// Keepalive rounds elapsed. Every `FULL_STATUS_SWEEP_ROUNDS`-th
+    /// round asks for the full snapshot as a backstop against lost
+    /// vote pushes; the rounds in between only ask about the approvers
+    /// still missing evidence.
+    keepalive_rounds: u64,
+
+    /// Hashes of the exact signed votes already verified. Validators
+    /// push every vote they observe and resend full snapshots per
+    /// keepalive round, so most verifies are repeats. Keyed by the
+    /// signed bytes (content and signature), so only byte-identical
+    /// evidence skips the check. Volatile per request, dropped at close.
+    verified: HashSet<DigestIdentifier>,
 }
 
 impl Approval {
@@ -160,6 +179,8 @@ impl Approval {
             timeouts: HashMap::new(),
             working: HashSet::new(),
             status_pending: HashSet::new(),
+            keepalive_rounds: 0,
+            verified: HashSet::new(),
         }
     }
 
@@ -319,10 +340,13 @@ impl Approval {
     /// Sends a keepalive status ask to one working validator. A local
     /// child that is gone is dropped and replaced like an unresponsive
     /// validator — a recoverable condition that must never crash.
+    /// `wanted` holds the approvers the collection still needs evidence
+    /// about; `None` asks for the full snapshot.
     async fn send_status_req(
         &mut self,
         ctx: &mut ActorContext<Self>,
         validator: PublicKey,
+        wanted: Option<HashSet<PublicKey>>,
     ) -> Result<(), ActorError> {
         let approval_req_hash = self.approval_req_hash.clone();
 
@@ -338,6 +362,7 @@ impl Approval {
                             request_id: self.request_id.to_string(),
                             version: self.version,
                             sender: (*self.our_key).clone(),
+                            wanted,
                         })
                         .await
                 }
@@ -354,6 +379,7 @@ impl Approval {
         } else {
             let message = ActorMessage::ApprovalStatusReq {
                 approval_req_hash,
+                wanted,
             };
             self.network
                 .send_command(ave_network::CommandHelper::SendMessage {
@@ -379,6 +405,21 @@ impl Approval {
 
     /// Merges a reported vote into the collection. Returns true when the
     /// union changed (new vote or new double vote).
+    /// True when these exact signed bytes were already verified. A
+    /// hashing failure simply misses: the cache is a pure optimization,
+    /// never a gate.
+    fn is_verified(&self, vote: &Signed<ApprovalRes>) -> bool {
+        hash_borsh(&*self.hash.hasher(), vote)
+            .is_ok_and(|hash| self.verified.contains(&hash))
+    }
+
+    /// Records exact signed bytes as verified.
+    fn mark_verified(&mut self, vote: &Signed<ApprovalRes>) {
+        if let Ok(hash) = hash_borsh(&*self.hash.hasher(), vote) {
+            self.verified.insert(hash);
+        }
+    }
+
     fn merge_vote(&mut self, vote: Signed<ApprovalRes>) -> bool {
         let ApprovalRes::Response {
             approval_req_hash,
@@ -491,6 +532,39 @@ impl Approval {
                 )
             })
             .count()
+    }
+
+    /// True when no more evidence is needed about this approver: a vote
+    /// or a conflicting pair is recorded (a verified vote cannot be
+    /// forged, so one report suffices), or the absence is attested by a
+    /// validator quorum.
+    fn approver_settled(&self, who: &PublicKey) -> bool {
+        if self.votes.contains_key(who) {
+            return true;
+        }
+        if self
+            .double_votes
+            .iter()
+            .any(|(accept, _)| accept.signature().signer == *who)
+        {
+            return true;
+        }
+        self.timeouts.get(who).is_some_and(|attestations| {
+            self.quorum.check_quorum(
+                self.validators_quantity,
+                attestations.len() as u32,
+            )
+        })
+    }
+
+    /// Approvers the collection still needs evidence about.
+    fn pending_approvers(&self) -> HashSet<PublicKey> {
+        self.approvers
+            .workers
+            .iter()
+            .filter(|who| !self.approver_settled(who))
+            .cloned()
+            .collect()
     }
 
     /// Timeout attestations that reached the validation quorum, flattened
@@ -882,8 +956,10 @@ impl Handler<Self> for Approval {
 
                 // A freshly acknowledged validator is surveyed
                 // immediately so a recovered requester does not wait a
-                // whole keepalive round for its votes.
-                if let Err(e) = self.send_status_req(ctx, sender.clone()).await
+                // whole keepalive round for its votes. Full snapshot: a
+                // new validator may hold votes the owner never saw.
+                if let Err(e) =
+                    self.send_status_req(ctx, sender.clone(), None).await
                 {
                     error!(
                         msg_type = "Working",
@@ -956,14 +1032,20 @@ impl Handler<Self> for Approval {
                 // any open keepalive round for this validator.
                 self.status_pending.remove(&sender);
 
-                if let Err(e) = vote.verify() {
-                    warn!(
-                        msg_type = "VoteReport",
-                        sender = %sender,
-                        error = %e,
-                        "Approval vote with invalid signature"
-                    );
-                    return Ok(());
+                // Same evidence arrives many times (every observing
+                // validator pushes it, snapshots resend it): verify
+                // byte-identical bytes only once.
+                if !self.is_verified(&vote) {
+                    if let Err(e) = vote.verify() {
+                        warn!(
+                            msg_type = "VoteReport",
+                            sender = %sender,
+                            error = %e,
+                            "Approval vote with invalid signature"
+                        );
+                        return Ok(());
+                    }
+                    self.mark_verified(&vote);
                 }
 
                 // An approver ahead of the request's governance version
@@ -1046,26 +1128,26 @@ impl Handler<Self> for Approval {
                     && reporter_in_play
                 {
                     for vote in votes {
-                        match vote.verify() {
-                            Ok(()) => {
-                                changed |= if matches!(
-                                    vote.content(),
-                                    ApprovalRes::TimeOut { .. }
-                                ) {
-                                    self.merge_timeout(vote, &sender)
-                                } else {
-                                    self.merge_vote(vote)
-                                };
-                            }
-                            Err(e) => {
+                        if !self.is_verified(&vote) {
+                            if let Err(e) = vote.verify() {
                                 warn!(
                                     msg_type = "StatusRes",
                                     sender = %sender,
                                     error = %e,
                                     "Approval vote with invalid signature"
                                 );
+                                continue;
                             }
+                            self.mark_verified(&vote);
                         }
+                        changed |= if matches!(
+                            vote.content(),
+                            ApprovalRes::TimeOut { .. }
+                        ) {
+                            self.merge_timeout(vote, &sender)
+                        } else {
+                            self.merge_vote(vote)
+                        };
                     }
                 }
 
@@ -1147,14 +1229,25 @@ impl Handler<Self> for Approval {
                 }
 
                 // New keepalive round: ask every working validator for
-                // the votes it has observed so far.
+                // the votes it has observed so far. Filtered rounds only
+                // carry the approvers still missing evidence; every
+                // N-th round sweeps everything. The ask itself is the
+                // liveness heartbeat either way.
+                self.keepalive_rounds = self.keepalive_rounds.saturating_add(1);
+                let wanted =
+                    if self.keepalive_rounds % FULL_STATUS_SWEEP_ROUNDS == 0 {
+                        None
+                    } else {
+                        Some(self.pending_approvers())
+                    };
                 let working: Vec<PublicKey> =
                     self.working.iter().cloned().collect();
                 self.status_pending.clone_from(&self.working);
 
                 for validator in working {
-                    if let Err(e) =
-                        self.send_status_req(ctx, validator).await
+                    if let Err(e) = self
+                        .send_status_req(ctx, validator, wanted.clone())
+                        .await
                     {
                         error!(
                             msg_type = "KeepaliveTick",
@@ -1202,5 +1295,206 @@ impl Handler<Self> for Approval {
             }
         };
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+    use ave_common::{
+        ValueWrapper,
+        identity::{KeyPair, keys::Ed25519Signer},
+    };
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    use crate::helpers::network::{
+        service::NetworkSender, test_faults::TestFaultRegistry,
+    };
+
+    fn key(signer: &Ed25519Signer) -> PublicKey {
+        KeyPair::Ed25519(signer.clone()).public_key()
+    }
+
+    struct Fixture {
+        approval: Approval,
+        approvers: Vec<Ed25519Signer>,
+        validators: Vec<Ed25519Signer>,
+        req_hash: DigestIdentifier,
+        subject_hash: DigestIdentifier,
+    }
+
+    fn fixture() -> Fixture {
+        let owner = Ed25519Signer::generate().unwrap();
+        let owner_key = key(&owner);
+        let approvers: Vec<Ed25519Signer> = (0..3)
+            .map(|_| Ed25519Signer::generate().unwrap())
+            .collect();
+        let validators: Vec<Ed25519Signer> = (0..3)
+            .map(|_| Ed25519Signer::generate().unwrap())
+            .collect();
+        let request = Signed::new(
+            ApprovalReq {
+                subject_id: DigestIdentifier::default(),
+                sn: 1,
+                gov_version: 0,
+                patch: ValueWrapper(serde_json::json!({})),
+                signer: owner_key.clone(),
+                issued_at: TimeStamp::from_nanos(10),
+                deadline: TimeStamp::from_nanos(20),
+            },
+            &owner,
+        )
+        .unwrap();
+        let hash = HashAlgorithm::Blake3;
+        let req_hash =
+            hash_borsh(&*hash.hasher(), request.content()).unwrap();
+        let subject_hash =
+            hash_borsh(&*hash.hasher(), &b"subject data".to_vec()).unwrap();
+        let (tx, _) = mpsc::channel(8);
+        let faults = Arc::new(std::sync::Mutex::new(
+            TestFaultRegistry::new(tx.clone()),
+        ));
+        let mut approval = Approval::new(
+            Arc::new(owner_key),
+            request,
+            RoleDataRegister {
+                workers: approvers.iter().map(key).collect(),
+                quorum: Quorum::Fixed(2),
+            },
+            Quorum::Fixed(2),
+            hash,
+            Arc::new(NetworkSender::new(tx, faults)),
+        );
+        approval.validators_quantity = 3;
+        approval.approval_req_hash = req_hash.clone();
+        approval.req_subject_data_hash = subject_hash.clone();
+        Fixture {
+            approval,
+            approvers,
+            validators,
+            req_hash,
+            subject_hash,
+        }
+    }
+
+    fn vote(
+        req_hash: &DigestIdentifier,
+        subject_hash: &DigestIdentifier,
+        approver: &Ed25519Signer,
+        agrees: bool,
+    ) -> Signed<ApprovalRes> {
+        Signed::new(
+            ApprovalRes::Response {
+                approval_req_hash: req_hash.clone(),
+                agrees,
+                req_subject_data_hash: subject_hash.clone(),
+            },
+            approver,
+        )
+        .unwrap()
+    }
+
+    fn timeout(
+        req_hash: &DigestIdentifier,
+        validator: &Ed25519Signer,
+        approver: &Ed25519Signer,
+    ) -> Signed<ApprovalRes> {
+        Signed::new(
+            ApprovalRes::TimeOut {
+                approval_req_hash: req_hash.clone(),
+                who: key(approver),
+            },
+            validator,
+        )
+        .unwrap()
+    }
+
+    fn pending_set(fx: &Fixture) -> HashSet<PublicKey> {
+        fx.approval.pending_approvers()
+    }
+
+    #[test]
+    fn pending_approvers_tracks_votes_and_timeouts() {
+        let mut fx = fixture();
+        let (req_hash, subject_hash) =
+            (fx.req_hash.clone(), fx.subject_hash.clone());
+        let a: Vec<PublicKey> = fx.approvers.iter().map(key).collect();
+        let all: HashSet<PublicKey> = a.iter().cloned().collect();
+        assert_eq!(pending_set(&fx), all);
+
+        // A verified vote settles its approver.
+        assert!(
+            fx.approval
+                .merge_vote(vote(&req_hash, &subject_hash, &fx.approvers[0], true))
+        );
+        let mut rest: HashSet<PublicKey> = a[1..].iter().cloned().collect();
+        assert_eq!(pending_set(&fx), rest);
+
+        // A single timeout attestation is not a quorum of 2.
+        assert!(
+            fx.approval.merge_timeout(
+                timeout(&req_hash, &fx.validators[0], &fx.approvers[1]),
+                &key(&fx.validators[0]),
+            )
+        );
+        assert_eq!(pending_set(&fx), rest);
+
+        // The second attestation reaches the quorum and settles it.
+        assert!(
+            fx.approval.merge_timeout(
+                timeout(&req_hash, &fx.validators[1], &fx.approvers[1]),
+                &key(&fx.validators[1]),
+            )
+        );
+        rest.remove(&a[1]);
+        assert_eq!(pending_set(&fx), rest);
+
+        // A conflicting pair settles the approver as excluded.
+        assert!(
+            fx.approval
+                .merge_vote(vote(&req_hash, &subject_hash, &fx.approvers[2], true))
+        );
+        assert!(
+            fx.approval
+                .merge_vote(vote(&req_hash, &subject_hash, &fx.approvers[2], false))
+        );
+        assert!(pending_set(&fx).is_empty());
+    }
+
+    #[test]
+    fn verified_cache_keys_on_exact_bytes() {
+        let mut fx = fixture();
+        let (req_hash, subject_hash) =
+            (fx.req_hash.clone(), fx.subject_hash.clone());
+        let a0 = fx.approvers[0].clone();
+        let v = vote(&req_hash, &subject_hash, &a0, true);
+        assert!(!fx.approval.is_verified(&v));
+        fx.approval.mark_verified(&v);
+        assert!(fx.approval.is_verified(&v));
+        assert!(fx.approval.is_verified(&v.clone()));
+
+        // The same content with another signature is different bytes:
+        // it misses the cache and fails verification.
+        let ApprovalRes::Response {
+            approval_req_hash,
+            agrees,
+            req_subject_data_hash,
+        } = v.content().clone()
+        else {
+            panic!("expected a response vote");
+        };
+        let other_sig =
+            vote(&req_hash, &subject_hash, &a0, false).signature().clone();
+        let corrupt = Signed::from_parts(
+            ApprovalRes::Response {
+                approval_req_hash,
+                agrees,
+                req_subject_data_hash,
+            },
+            other_sig,
+        );
+        assert!(!fx.approval.is_verified(&corrupt));
+        assert!(corrupt.verify().is_err());
     }
 }

@@ -443,9 +443,17 @@ impl ApprovalConfig {
             "approval.probe_schedule_secs",
             &self.probe_schedule_secs,
         )?;
-        if self.probe_schedule_secs.iter().sum::<u64>()
-            != self.min_window_secs
-        {
+        let mut schedule_sum: u64 = 0;
+        for value in &self.probe_schedule_secs {
+            let Some(next) = schedule_sum.checked_add(*value) else {
+                return Err(Error::InvalidConfiguration {
+                    component: "approval.probe_schedule_secs".to_string(),
+                    reason: "sum overflows u64".to_string(),
+                });
+            };
+            schedule_sum = next;
+        }
+        if schedule_sum != self.min_window_secs {
             return Err(Error::InvalidConfiguration {
                 component: "approval.probe_schedule_secs".to_string(),
                 reason: "must sum exactly approval.min_window_secs"
@@ -1122,4 +1130,24 @@ fn validate_positive_vec(component: &str, values: &[u64]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_schedule_overflow_is_rejected() {
+        let config = ApprovalConfig {
+            min_window_secs: u64::MAX,
+            probe_schedule_secs: vec![u64::MAX, u64::MAX],
+            keepalive_secs: 1,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn default_config_validates() {
+        assert!(ApprovalConfig::default().validate().is_ok());
+    }
 }

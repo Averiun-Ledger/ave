@@ -31,7 +31,7 @@ pub enum RequestHandlerError {
     #[error("a user cannot mark a request approval as obsolete")]
     ObsoleteApproval,
 
-    /// Approval actor not found for a subject.
+    /// No approval state found for a subject.
     #[error(
         "no approval found for subject '{0}', node likely no longer has approver role"
     )]

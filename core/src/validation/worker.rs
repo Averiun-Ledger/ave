@@ -157,8 +157,8 @@ pub enum OwnerRoute {
 /// An approval vote collection in flight. All of it is volatile: keyed by
 /// the approval request hash, superseded by a strictly newer request of
 /// the same subject, purged when the validation request carries the
-/// closed evidence or the governance commits, and expired at
-/// `deadline + 2 * keepalive`.
+/// closed evidence or the governance commits, and — on the shared role
+/// worker only — expired at `deadline + 2 * keepalive`.
 #[derive(Clone, Debug)]
 pub struct ApprovalCollection {
     /// Requester node key (vote pushes receiver).
@@ -185,6 +185,18 @@ pub struct ApprovalCollection {
     pub timeouts_signed: bool,
 }
 
+/// Owned data to reach the requester of an approval collection.
+/// Pushed around instead of cloning the whole collection, which also
+/// carries the request, the roles and every vote observed so far.
+#[derive(Clone, Debug)]
+struct ApprovalRoute {
+    owner_route: OwnerRoute,
+    requester: PublicKey,
+    request_id: String,
+    version: u64,
+    subject_id: DigestIdentifier,
+}
+
 /// Outcome of merging an approver vote into an approval collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VoteMerge {
@@ -197,6 +209,61 @@ enum VoteMerge {
 }
 
 impl ApprovalCollection {
+    /// Captures the owned routing data of this collection.
+    fn route(&self) -> ApprovalRoute {
+        ApprovalRoute {
+            owner_route: self.owner_route.clone(),
+            requester: self.requester.clone(),
+            request_id: self.request_id.clone(),
+            version: self.version,
+            subject_id: self.subject_id.clone(),
+        }
+    }
+
+    /// Votes and own timeout attestations observed so far for the
+    /// wanted approvers (`None` for all), deterministically ordered by
+    /// signer.
+    fn status_snapshot(
+        &self,
+        wanted: Option<&HashSet<PublicKey>>,
+    ) -> Vec<Signed<ApprovalRes>> {
+        let wanted = |who: &PublicKey| {
+            wanted.is_none_or(|wanted| wanted.contains(who))
+        };
+        let mut votes: Vec<Signed<ApprovalRes>> = self
+            .votes
+            .iter()
+            .filter(|(who, _)| wanted(who))
+            .map(|(_, vote)| vote.clone())
+            .collect();
+        for (accept, reject) in &self.double_votes {
+            if wanted(&accept.signature().signer) {
+                votes.push(accept.clone());
+                votes.push(reject.clone());
+            }
+        }
+        let mut timeouts: Vec<Signed<ApprovalRes>> = self
+            .timeouts
+            .iter()
+            .filter(|(who, _)| wanted(who))
+            .map(|(_, timeout)| timeout.clone())
+            .collect();
+        timeouts.sort_by(|a, b| {
+            let ApprovalRes::TimeOut { who: a_who, .. } = a.content()
+            else {
+                return std::cmp::Ordering::Equal;
+            };
+            let ApprovalRes::TimeOut { who: b_who, .. } = b.content()
+            else {
+                return std::cmp::Ordering::Equal;
+            };
+            a_who.cmp(b_who)
+        });
+        votes.extend(timeouts);
+        votes.sort_by(|a, b| a.signature().signer.cmp(&b.signature().signer));
+        votes
+    }
+
     /// Merges an approver vote into the collection. The caller has
     /// already checked that the signer is the sender, belongs to the
     /// approver set and that the subject data hash matches. An approver
@@ -765,7 +832,12 @@ impl ValiWorker {
             let ttl_nanos = deadline
                 .as_nanos()
                 .saturating_sub(TimeStamp::now().as_nanos())
-                .saturating_add(2 * config.keepalive_secs * 1_000_000_000);
+                .saturating_add(
+                    config
+                        .keepalive_secs
+                        .saturating_mul(2)
+                        .saturating_mul(1_000_000_000),
+                );
             ctx.schedule_once(
                 Duration::from_nanos(ttl_nanos),
                 ValiWorkerMessage::ExpireCollection { approval_req_hash },
@@ -827,11 +899,12 @@ impl ValiWorker {
 
         Self::observe_approval_event("timeout_signed");
 
-        let collection = collection.clone();
-        for timeout in collection.timeouts.values() {
-            if let Err(error) = self
-                .push_vote_report(ctx, &collection, timeout.clone())
-                .await
+        let route = collection.route();
+        let timeouts: Vec<Signed<ApprovalRes>> =
+            collection.timeouts.values().cloned().collect();
+        for timeout in timeouts {
+            if let Err(error) =
+                self.push_vote_report(ctx, &route, timeout).await
             {
                 warn!(
                     msg_type = "ApprovalDeadline",
@@ -996,12 +1069,20 @@ impl ValiWorker {
     async fn push_vote_report(
         &self,
         ctx: &mut ActorContext<Self>,
-        collection: &ApprovalCollection,
+        route: &ApprovalRoute,
         vote: Signed<ApprovalRes>,
     ) -> Result<(), ActorError> {
-        match &collection.owner_route {
+        match &route.owner_route {
             OwnerRoute::Local => {
-                let parent = ctx.get_parent::<Approval>().await?;
+                let Ok(parent) =
+                    ctx.get_parent::<Approval>().await
+                else {
+                    debug!(
+                        msg_type = "VoteReport",
+                        "Approval actor gone, dropping vote report"
+                    );
+                    return Ok(());
+                };
                 parent
                     .tell(ApprovalMessage::VoteReport {
                         vote: Box::new(vote),
@@ -1011,12 +1092,12 @@ impl ValiWorker {
             }
             OwnerRoute::Network => {
                 let info = ComunicateInfo {
-                    request_id: collection.request_id.clone(),
-                    version: collection.version,
-                    receiver: collection.requester.clone(),
+                    request_id: route.request_id.clone(),
+                    version: route.version,
+                    receiver: route.requester.clone(),
                     receiver_actor: format!(
                         "/user/request/{}/approval",
-                        collection.subject_id
+                        route.subject_id
                     ),
                 };
 
@@ -1035,41 +1116,28 @@ impl ValiWorker {
         Ok(())
     }
 
-    /// Answers a keepalive status ask with every vote and own timeout
-    /// attestation observed so far, deterministically ordered by signer.
+    /// Answers a keepalive status ask with the given snapshot.
     async fn send_status_to_owner(
         &self,
         ctx: &mut ActorContext<Self>,
-        collection: &ApprovalCollection,
+        route: &ApprovalRoute,
+        approval_req_hash: DigestIdentifier,
+        votes: Vec<Signed<ApprovalRes>>,
     ) -> Result<(), ActorError> {
-        let mut votes: Vec<Signed<ApprovalRes>> =
-            collection.votes.values().cloned().collect();
-        for (accept, reject) in &collection.double_votes {
-            votes.push(accept.clone());
-            votes.push(reject.clone());
-        }
-        let mut timeouts: Vec<Signed<ApprovalRes>> =
-            collection.timeouts.values().cloned().collect();
-        timeouts.sort_by(|a, b| {
-            let ApprovalRes::TimeOut { who: a_who, .. } = a.content()
-            else {
-                return std::cmp::Ordering::Equal;
-            };
-            let ApprovalRes::TimeOut { who: b_who, .. } = b.content()
-            else {
-                return std::cmp::Ordering::Equal;
-            };
-            a_who.cmp(b_who)
-        });
-        votes.extend(timeouts);
-        votes.sort_by(|a, b| a.signature().signer.cmp(&b.signature().signer));
-
-        match &collection.owner_route {
+        match &route.owner_route {
             OwnerRoute::Local => {
-                let parent = ctx.get_parent::<Approval>().await?;
+                let Ok(parent) =
+                    ctx.get_parent::<Approval>().await
+                else {
+                    debug!(
+                        msg_type = "StatusRes",
+                        "Approval actor gone, dropping status"
+                    );
+                    return Ok(());
+                };
                 parent
                     .tell(ApprovalMessage::StatusRes {
-                        approval_req_hash: collection.approval_req_hash.clone(),
+                        approval_req_hash,
                         votes,
                         sender: (*self.our_key).clone(),
                     })
@@ -1077,17 +1145,17 @@ impl ValiWorker {
             }
             OwnerRoute::Network => {
                 let info = ComunicateInfo {
-                    request_id: collection.request_id.clone(),
-                    version: collection.version,
-                    receiver: collection.requester.clone(),
+                    request_id: route.request_id.clone(),
+                    version: route.version,
+                    receiver: route.requester.clone(),
                     receiver_actor: format!(
                         "/user/request/{}/approval",
-                        collection.subject_id
+                        route.subject_id
                     ),
                 };
 
                 let message = ActorMessage::ApprovalStatusRes {
-                    approval_req_hash: collection.approval_req_hash.clone(),
+                    approval_req_hash,
                     votes,
                 };
                 self.network
@@ -1290,7 +1358,15 @@ impl ValiWorker {
 
         match owner_route {
             OwnerRoute::Local => {
-                let parent = ctx.get_parent::<Approval>().await?;
+                let Ok(parent) =
+                    ctx.get_parent::<Approval>().await
+                else {
+                    debug!(
+                        msg_type = "ApprovalCollectReq",
+                        "Approval actor gone, dropping collect ack"
+                    );
+                    return Ok(());
+                };
                 match ack {
                     ApprovalCollectAck::Accepted => {
                         parent
@@ -2325,6 +2401,7 @@ impl ValiWorker {
 pub enum ValiWorkerMessage {
     UpdateCurrentRoles {
         gov_version: u64,
+        node_key: PublicKey,
         current_roles: CurrentWorkerRoles,
     },
     LocalValidation {
@@ -2345,11 +2422,14 @@ pub enum ValiWorkerMessage {
         sender: PublicKey,
     },
     /// The requester asks for the votes collected so far (keepalive).
+    /// `wanted` holds the approvers the requester still needs evidence
+    /// about; `None` asks for the full snapshot.
     ApprovalStatusReq {
         approval_req_hash: DigestIdentifier,
         request_id: String,
         version: u64,
         sender: PublicKey,
+        wanted: Option<HashSet<PublicKey>>,
     },
     /// The requester (this node) asks this worker to collect the
     /// approver votes for an approval request (approval phase).
@@ -2422,6 +2502,7 @@ impl Handler<Self> for ValiWorker {
         match msg {
             ValiWorkerMessage::UpdateCurrentRoles {
                 gov_version,
+                node_key,
                 current_roles,
             } => {
                 // A governance commit obsoletes every in-flight
@@ -2434,6 +2515,7 @@ impl Handler<Self> for ValiWorker {
                     self.approvals.clear();
                 }
                 self.gov_version = gov_version;
+                self.node_key = node_key;
                 self.current_roles = current_roles;
             }
             ValiWorkerMessage::LocalValidation {
@@ -2493,12 +2575,13 @@ impl Handler<Self> for ValiWorker {
                             "Validation completed and sent to parent"
                         );
                     }
-                    Err(e) => {
-                        error!(
+                    Err(_) => {
+                        debug!(
                             msg_type = "LocalValidation",
-                            "Failed to obtain Validation actor"
+                            "Validation actor gone, dropping response"
                         );
-                        return Err(e);
+                        ctx.stop(None).await;
+                        return Ok(());
                     }
                 };
 
@@ -2699,15 +2782,9 @@ impl Handler<Self> for ValiWorker {
                 version,
                 sender,
             } => {
-                if approval_res.verify().is_err() {
-                    warn!(
-                        msg_type = "ApprovalResponse",
-                        sender = %sender,
-                        "Approval response with invalid signature"
-                    );
-                    return Ok(());
-                }
-
+                // Cheap gates run before the signature check: lookups
+                // and membership use the claimed sender, and only a
+                // message that would otherwise merge pays the verify.
                 // An approver ahead of the request's governance version
                 // aborts it: the requester built on a stale governance.
                 // The signed abort is pushed to the requester, which
@@ -2750,10 +2827,19 @@ impl Handler<Self> for ValiWorker {
                             return Ok(());
                         }
 
-                        let collection = collection.clone();
+                        if approval_res.verify().is_err() {
+                            warn!(
+                                msg_type = "ApprovalResponse",
+                                sender = %sender,
+                                "Approval abort with invalid signature"
+                            );
+                            return Ok(());
+                        }
+
+                        let route = collection.route();
                         self.push_vote_report(
                             ctx,
-                            &collection,
+                            &route,
                             *approval_res,
                         )
                         .await
@@ -2769,6 +2855,11 @@ impl Handler<Self> for ValiWorker {
                     }
 
                     self.approvals.remove(&approval_req_hash);
+                    if self.pending.as_ref().is_some_and(|pending| {
+                        pending.request_id == request_id
+                    }) {
+                        self.pending = None;
+                    }
                     return Ok(());
                 }
 
@@ -2778,6 +2869,14 @@ impl Handler<Self> for ValiWorker {
                     req_subject_data_hash,
                 } = approval_res.content().clone()
                 else {
+                    if approval_res.verify().is_err() {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "Approval response with invalid signature"
+                        );
+                        return Ok(());
+                    }
                     if matches!(
                         approval_res.content(),
                         ApprovalRes::Pending
@@ -2843,6 +2942,15 @@ impl Handler<Self> for ValiWorker {
                         return Ok(());
                     }
 
+                    if approval_res.verify().is_err() {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "Vote with invalid signature"
+                        );
+                        return Ok(());
+                    }
+
                     collection.merge_vote(*approval_res.clone(), agrees)
                 };
 
@@ -2864,14 +2972,12 @@ impl Handler<Self> for ValiWorker {
                             Self::observe_approval_event("vote_received");
                         }
 
-                        if let Some(collection) =
-                            self.approvals.get(&approval_req_hash).cloned()
+                        if let Some(route) = self
+                            .approvals
+                            .get(&approval_req_hash)
+                            .map(ApprovalCollection::route)
                             && let Err(error) = self
-                                .push_vote_report(
-                                    ctx,
-                                    &collection,
-                                    *approval_res,
-                                )
+                                .push_vote_report(ctx, &route, *approval_res)
                                 .await
                         {
                             warn!(
@@ -2888,6 +2994,7 @@ impl Handler<Self> for ValiWorker {
                 request_id,
                 version,
                 sender,
+                wanted,
             } => {
                 let Some(collection) = self.approvals.get(&approval_req_hash)
                 else {
@@ -2906,9 +3013,17 @@ impl Handler<Self> for ValiWorker {
                     return Ok(());
                 }
 
-                let collection = collection.clone();
-                if let Err(error) =
-                    self.send_status_to_owner(ctx, &collection).await
+                let route = collection.route();
+                let snapshot =
+                    collection.status_snapshot(wanted.as_ref());
+                if let Err(error) = self
+                    .send_status_to_owner(
+                        ctx,
+                        &route,
+                        approval_req_hash,
+                        snapshot,
+                    )
+                    .await
                 {
                     warn!(
                         msg_type = "ApprovalStatusReq",
@@ -3821,5 +3936,93 @@ mod tests {
             VoteMerge::New
         );
         assert!(collection.votes.contains_key(&public_key(&other)));
+    }
+
+    /// A status snapshot only carries the wanted approvers: `None`
+    /// sends everything (legacy backstop), a set filters votes, double
+    /// pairs and timeouts by approver, and an unknown approver sends
+    /// nothing while still answering the keepalive round.
+    #[test]
+    fn status_snapshot_filters_by_wanted_approvers() {
+        let fixture = PhaseFixture::new();
+        let hasher = fixture.worker.hash.hasher();
+        let a0 = fixture.approvers[0].clone();
+        let a1 = fixture.approvers[1].clone();
+
+        let issued_at = TimeStamp::now();
+        let approval_req = ApprovalReq {
+            subject_id: fixture.metadata.subject_id.clone(),
+            sn: fixture.metadata.sn + 1,
+            gov_version: fixture.gov_version,
+            patch: ValueWrapper(serde_json::json!([
+                { "op": "replace", "path": "/version", "value": 1 }
+            ])),
+            signer: fixture.signer.clone(),
+            issued_at,
+            deadline: TimeStamp::from_nanos(
+                issued_at.as_nanos() + 7_000_000_000,
+            ),
+        };
+        let approval_req_hash = hash_borsh(&*hasher, &approval_req).unwrap();
+        let signed_req = Signed::new(approval_req, &fixture.owner).unwrap();
+
+        let vote = |signer: &Ed25519Signer, agrees: bool| {
+            Signed::new(
+                ApprovalRes::Response {
+                    approval_req_hash: approval_req_hash.clone(),
+                    agrees,
+                    req_subject_data_hash: fixture
+                        .req_subject_data_hash
+                        .clone(),
+                },
+                signer,
+            )
+            .unwrap()
+        };
+        let attestation = Signed::new(
+            ApprovalRes::TimeOut {
+                approval_req_hash: approval_req_hash.clone(),
+                who: public_key(&a1),
+            },
+            &a0,
+        )
+        .unwrap();
+
+        let collection = ApprovalCollection {
+            requester: fixture.signer.clone(),
+            request_id: "request".to_owned(),
+            version: 0,
+            owner_route: OwnerRoute::Local,
+            subject_id: fixture.metadata.subject_id.clone(),
+            governance_id: fixture.metadata.governance_id.clone(),
+            gov_version: fixture.gov_version,
+            approval_req: signed_req,
+            approval_req_hash: approval_req_hash.clone(),
+            approvers: fixture.roles(&fixture.approvers),
+            req_subject_data_hash: fixture.req_subject_data_hash.clone(),
+            votes: HashMap::from([(public_key(&a0), vote(&a0, true))]),
+            double_votes: vec![],
+            timeouts: HashMap::from([(public_key(&a1), attestation)]),
+            timeouts_signed: true,
+        };
+
+        assert_eq!(collection.status_snapshot(None).len(), 2);
+
+        let only_a0 = collection
+            .status_snapshot(Some(&HashSet::from([public_key(&a0)])));
+        assert_eq!(only_a0.len(), 1);
+
+        let only_a1 = collection
+            .status_snapshot(Some(&HashSet::from([public_key(&a1)])));
+        assert_eq!(only_a1.len(), 1);
+
+        let unknown = Ed25519Signer::generate().unwrap();
+        assert!(
+            collection
+                .status_snapshot(Some(&HashSet::from([public_key(
+                    &unknown
+                )])))
+                .is_empty()
+        );
     }
 }

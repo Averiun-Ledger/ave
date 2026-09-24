@@ -87,6 +87,12 @@ pub struct ApprovalReq {
     pub patch: Value,
 
     pub signer: String,
+    /// When the owner issued the request, in nanoseconds since the Unix
+    /// epoch. Together with `deadline` it fixes the approval window.
+    pub issued_at: u64,
+    /// Approvers that have not voted by this instant (nanoseconds since
+    /// the Unix epoch) are counted as absent.
+    pub deadline: u64,
 }
 
 /// Network status exposed by monitoring endpoints.
@@ -823,6 +829,8 @@ mod tests {
                     gov_version: 1,
                     patch: json!({}),
                     signer: "signer".to_string(),
+                    issued_at: 1,
+                    deadline: 2,
                 },
                 state: state.clone(),
             };
@@ -830,6 +838,8 @@ mod tests {
             let decoded: ApprovalEntry =
                 serde_json::from_str(&json_str).unwrap();
             assert_eq!(decoded.state, state);
+            assert_eq!(decoded.request.issued_at, 1);
+            assert_eq!(decoded.request.deadline, 2);
         }
     }
 

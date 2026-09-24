@@ -67,7 +67,8 @@ impl BorshSerialize for ApprPersist {
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
+        // Serialize only the persisted fields (request id, version,
+        // state, request and askers); live-only maps stay in memory.
         BorshSerialize::serialize(&self.request_id, writer)?;
         BorshSerialize::serialize(&self.version, writer)?;
         BorshSerialize::serialize(&self.state, writer)?;
