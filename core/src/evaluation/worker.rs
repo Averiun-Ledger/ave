@@ -459,6 +459,7 @@ impl EvalWorker {
 pub enum EvalWorkerMessage {
     Update {
         gov_version: u64,
+        node_key: PublicKey,
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
     },
@@ -516,10 +517,12 @@ impl Handler<Self> for EvalWorker {
         match msg {
             EvalWorkerMessage::Update {
                 gov_version,
+                node_key,
                 issuers,
                 issuer_any,
             } => {
                 self.gov_version = gov_version;
+                self.node_key = node_key;
                 self.context = EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,

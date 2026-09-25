@@ -18,6 +18,7 @@ use ave_common::identity::{
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Identity, ServerTlsConfig};
@@ -79,6 +80,42 @@ enum Flight {
 struct CompileArtifact {
     wasm: Vec<u8>,
     wasm_hash: DigestIdentifier,
+}
+
+/// Writes bytes atomically: temp sibling with a unique name, fsync,
+// rename over the target and dir fsync. Concurrent readers either see
+// the old entry or a miss, never truncated bytes.
+async fn write_file_atomic(
+    dir: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(), CompilerError> {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        "{file_name}.tmp.{}.{nanos}",
+        std::process::id()
+    ));
+    let target = dir.join(file_name);
+    let result = async {
+        let mut file = fs::File::create(&tmp).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(&tmp, &target).await?;
+        fs::File::open(dir).await?.sync_all().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp).await;
+    }
+    result.map_err(|e| CompilerError::FileWriteFailed {
+        path: target.to_string_lossy().to_string(),
+        details: e.to_string(),
+    })
 }
 
 /// Content-addressed wasm artifact store with LRU garbage collection.
@@ -166,12 +203,11 @@ impl ArtifactStore {
         let expected = match fs::read_to_string(&hash_path).await {
             Ok(expected) => expected,
             Err(error) => {
-                warn!(
+                debug!(
                     error = %error,
                     path = %hash_path.display(),
-                    "Artifact store entry without hash file, dropping it"
+                    "Artifact store entry without hash file, treating as miss"
                 );
-                self.remove_entry(key).await;
                 return Ok(None);
             }
         };
@@ -183,9 +219,8 @@ impl ArtifactStore {
                 expected = %expected.trim(),
                 actual = %wasm_hash,
                 path = %entry_dir.display(),
-                "Artifact store entry hash mismatch, dropping it"
+                "Artifact store entry hash mismatch, treating as miss"
             );
-            self.remove_entry(key).await;
             return Ok(None);
         }
 
@@ -211,21 +246,10 @@ impl ArtifactStore {
             }
         })?;
 
-        let wasm_path = entry_dir.join(ARTIFACT_WASM);
-        fs::write(&wasm_path, wasm).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
-                path: wasm_path.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-
-        let hash_path = entry_dir.join(ARTIFACT_WASM_HASH);
-        fs::write(&hash_path, wasm_hash.to_string())
-            .await
-            .map_err(|e| CompilerError::FileWriteFailed {
-                path: hash_path.to_string_lossy().to_string(),
-                details: e.to_string(),
-            })?;
+        write_file_atomic(&entry_dir, ARTIFACT_WASM, wasm).await?;
+        let hash_bytes = wasm_hash.to_string();
+        write_file_atomic(&entry_dir, ARTIFACT_WASM_HASH, hash_bytes.as_bytes())
+            .await?;
 
         self.touch(key).await;
         self.collect_garbage().await?;
@@ -296,17 +320,6 @@ impl ArtifactStore {
         }
 
         Ok(())
-    }
-
-    async fn remove_entry(&self, key: &str) {
-        if let Err(error) = fs::remove_dir_all(self.dir.join(key)).await {
-            debug!(
-                error = %error,
-                key = %key,
-                "Failed to remove artifact store entry"
-            );
-        }
-        self.last_access.lock().await.remove(key);
     }
 
     async fn touch(&self, key: &str) {

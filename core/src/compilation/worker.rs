@@ -833,6 +833,7 @@ impl CompileWorker {
 pub enum CompileWorkerMessage {
     Update {
         gov_version: u64,
+        node_key: PublicKey,
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
         schemas: BTreeMap<SchemaType, Schema>,
@@ -945,12 +946,14 @@ impl Handler<Self> for CompileWorker {
         match msg {
             CompileWorkerMessage::Update {
                 gov_version,
+                node_key,
                 issuers,
                 issuer_any,
                 schemas,
                 evaluators,
             } => {
                 self.gov_version = gov_version;
+                self.node_key = node_key;
                 self.issuers = issuers;
                 self.issuer_any = issuer_any;
                 self.schemas = schemas;

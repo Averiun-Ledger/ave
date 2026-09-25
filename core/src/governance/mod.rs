@@ -2267,11 +2267,17 @@ impl Governance {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        let node_key =
+            self.subject_metadata.new_owner.as_ref().map_or_else(
+                || self.subject_metadata.owner.clone(),
+                |new_owner| new_owner.clone(),
+            );
         if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
             let (issuers, issuer_any) = self.properties.governance_issuers();
             evaluator
                 .tell(EvalWorkerMessage::Update {
                     gov_version: self.properties.version,
+                    node_key: node_key.clone(),
                     issuers: issuers.clone(),
                     issuer_any,
                 })
@@ -2284,6 +2290,7 @@ impl Governance {
             compiler
                 .tell(CompileWorkerMessage::Update {
                     gov_version: self.properties.version,
+                    node_key: node_key.clone(),
                     issuers,
                     issuer_any,
                     schemas: self.properties.schemas.clone(),
