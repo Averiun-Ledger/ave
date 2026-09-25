@@ -68,8 +68,11 @@ pub fn check_quorum_signers(
     quorum: &Quorum,
     workers: &HashSet<PublicKey>,
 ) -> bool {
-    signers.is_subset(workers)
-        && quorum.check_quorum(workers.len() as u32, signers.len() as u32)
+    // Set sizes can not overflow `u32` on any real node, but never truncate
+    // them with `as` in consensus code.
+    let total = u32::try_from(workers.len()).unwrap_or(u32::MAX);
+    let signed = u32::try_from(signers.len()).unwrap_or(u32::MAX);
+    signers.is_subset(workers) && quorum.check_quorum(total, signed)
 }
 
 pub async fn get_actual_roles_register<A>(
@@ -355,6 +358,21 @@ impl Interval {
     pub const fn contains(&self, value: u64) -> bool {
         value >= self.lo && value <= self.hi
     }
+
+    /// Membership `[from, version)` as a closed range, or `None` when it
+    /// never held (opened and closed in the same version): callers must
+    /// not fabricate inverted ranges — `new` swaps them into a
+    /// retroactively active grant.
+    pub const fn closed_before(from: u64, version: u64) -> Option<Self> {
+        if from < version {
+            Some(Self {
+                lo: from,
+                hi: version.saturating_sub(1),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(
@@ -393,6 +411,15 @@ impl IntervalSet {
                 let iv = self.intervals[pos - 1];
                 iv.hi >= x
             }
+        }
+    }
+
+    /// Closes a membership opened at `open_from` as of `version`
+    /// (`[open_from, version - 1]`), ignoring memberships that never
+    /// held (opened and closed in the same version).
+    pub fn close_open(&mut self, open_from: u64, version: u64) {
+        if let Some(closed) = Interval::closed_before(open_from, version) {
+            self.insert(closed);
         }
     }
 
@@ -1027,7 +1054,7 @@ where
     let response = store
         .ask(StoreCommand::GetEvents {
             from: last_sn,
-            to: last_sn + quantity,
+            to: last_sn.saturating_add(quantity),
         })
         .await?;
 

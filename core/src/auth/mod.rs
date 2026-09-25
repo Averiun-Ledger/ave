@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{Span, debug, error, info, info_span, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::get_subject_data;
@@ -697,11 +697,19 @@ impl Handler<Self> for SubjectAccess {
                             "Update process initiated with multiple witnesses"
                         );
                     } else {
-                        info!(
+                        // A second update with possibly different
+                        // witnesses can not merge into the running one:
+                        // surface it instead of dropping it silently.
+                        warn!(
                             msg_type = "Update",
                             subject_id = %subject_id,
                             "An update is already in progress."
                         );
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Update already in progress for subject {subject_id}"
+                            ),
+                        });
                     };
                 }
             }

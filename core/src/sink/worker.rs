@@ -369,6 +369,7 @@ impl Handler<Self> for SinkWorker {
                             {
                                 self.healthcheck_state =
                                     HealthcheckState::Healthy;
+                                self.live_in_flight.clear();
                                 self.broadcast_to_children(
                                     crate::sink::subject_worker::SinkSubjectWorkerMessage::Resume,
                                     ctx,
@@ -683,6 +684,18 @@ impl Handler<Self> for SinkWorker {
                         HealthcheckState::Unhealthy { .. }
                     ) {
                         self.healthcheck_state = HealthcheckState::Healthy;
+                        // Reports lost in the unhealthy window can never
+                        // settle: drop the counters (late reports are
+                        // tolerated, catch-up re-delivers).
+                        self.live_in_flight.clear();
+                        // Paused children drop events while unhealthy:
+                        // resume them like the healthcheck path does, or
+                        // the recovery stays silent until the next cycle.
+                        self.broadcast_to_children(
+                            crate::sink::subject_worker::SinkSubjectWorkerMessage::Resume,
+                            ctx,
+                        )
+                        .await;
                         match ctx.get_parent::<SinkManager>().await {
                             Ok(parent) => {
                                 if let Err(e) = parent
@@ -1147,7 +1160,18 @@ impl SinkWorker {
             Arc::clone(&self.client),
             self.is_governance,
         );
-        let child_ref = ctx.create_child(subject_id, worker).await?;
+        let child_ref = match ctx.create_child(subject_id, worker).await {
+            Ok(child_ref) => child_ref,
+            // A concurrent ensure won the race: reuse the winner
+            // instead of failing the delivery.
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<crate::sink::subject_worker::SinkSubjectWorker>(
+                    subject_id,
+                )
+                .await?
+            }
+            Err(e) => return Err(e),
+        };
         self.active_subject_workers
             .insert(subject_id.to_string(), child_ref.clone());
         Ok(child_ref)
@@ -1359,14 +1383,21 @@ impl SinkWorker {
         if self.idle_reported {
             return;
         }
-        self.idle_reported = true;
         match ctx.get_parent::<SinkManager>().await {
             Ok(parent) => {
-                let _ = parent
+                // Latch only on delivery: a lost report must be retried,
+                // not suppressed forever.
+                if parent
                     .tell(SinkManagerMessage::WorkerIdle {
                         sink: self.sink_name.clone(),
                     })
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    self.idle_reported = true;
+                } else {
+                    error!(msg_type = "ReportIdle", sink = %self.sink_name, "Failed to report idle to parent");
+                }
             }
             Err(e) => {
                 error!(msg_type = "ReportIdle", sink = %self.sink_name, error = %e, "Failed to report idle to parent");

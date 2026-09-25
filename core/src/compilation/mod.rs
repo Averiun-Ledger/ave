@@ -748,13 +748,13 @@ impl Handler<Self> for Compilation {
 
                             self.closed = true;
 
-                            if !matches!(summary, ResponseSummary::Reboot) {
-                                Self::observe_event(if summary.is_ok() {
-                                    "success"
-                                } else {
-                                    "error"
-                                });
-                            }
+                            // The `Reboot` summary returned above, so only
+                            // terminal success/error observations remain.
+                            Self::observe_event(if summary.is_ok() {
+                                "success"
+                            } else {
+                                "error"
+                            });
 
                             debug!(
                                 msg_type = "Response",

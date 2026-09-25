@@ -60,7 +60,8 @@ pub struct ServiceConfig {
     pub api_keys: Vec<String>,
     /// Maximum concurrent cargo builds. Defaults to available parallelism.
     pub max_concurrent_builds: Option<usize>,
-    /// Maximum accepted `source_b64` length in bytes.
+    /// Maximum accepted decoded source length in bytes (the `source_b64`
+    /// payload is bounded with its base64 overhead accounted for).
     pub max_source_bytes: usize,
     /// Directory of the content-addressed wasm artifact store.
     pub artifacts_dir: PathBuf,

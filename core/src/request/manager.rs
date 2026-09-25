@@ -1152,67 +1152,53 @@ impl RequestManager {
             let ledger_hash = last_ledger_event.ledger_hash(hash)?;
             let schema_id = metadata.schema_id.clone();
 
-            let current_request_roles =
-                if gov_version == governance_data.version {
-                    let (evaluation_workers, evaluation_quorum) =
+            // A version mismatch returned above, so the versions are
+            // equal here: the roles below always resolve.
+            let current_request_roles = {
+                let (evaluation_workers, evaluation_quorum) =
+                    governance_data.get_quorum_and_signers(
+                        ProtocolTypes::Evaluation,
+                        &metadata.schema_id,
+                        metadata.namespace.clone(),
+                    )?;
+
+                let (compilation_workers, compilation_quorum) =
+                    if has_compilation {
                         governance_data.get_quorum_and_signers(
-                            ProtocolTypes::Evaluation,
-                            &metadata.schema_id,
-                            metadata.namespace.clone(),
-                        )?;
+                            ProtocolTypes::Compilation,
+                            &SchemaType::Governance,
+                            Namespace::new(),
+                        )?
+                    } else {
+                        (HashSet::new(), Quorum::default())
+                    };
 
-                    let (compilation_workers, compilation_quorum) =
-                        if has_compilation {
-                            governance_data.get_quorum_and_signers(
-                                ProtocolTypes::Compilation,
-                                &SchemaType::Governance,
-                                Namespace::new(),
-                            )?
-                        } else {
-                            (HashSet::new(), Quorum::default())
-                        };
+                let (approval_workers, approval_quorum) =
+                    if appro_data.is_some() {
+                        governance_data.get_quorum_and_signers(
+                            ProtocolTypes::Approval,
+                            &SchemaType::Governance,
+                            Namespace::new(),
+                        )?
+                    } else {
+                        (HashSet::new(), Quorum::default())
+                    };
 
-                    let (approval_workers, approval_quorum) =
-                        if appro_data.is_some() {
-                            governance_data.get_quorum_and_signers(
-                                ProtocolTypes::Approval,
-                                &SchemaType::Governance,
-                                Namespace::new(),
-                            )?
-                        } else {
-                            (HashSet::new(), Quorum::default())
-                        };
-
-                    CurrentRequestRoles {
-                        evaluation: RoleDataRegister {
-                            workers: evaluation_workers,
-                            quorum: evaluation_quorum,
-                        },
-                        compilation: RoleDataRegister {
-                            workers: compilation_workers,
-                            quorum: compilation_quorum,
-                        },
-                        approval: RoleDataRegister {
-                            workers: approval_workers,
-                            quorum: approval_quorum,
-                        },
-                    }
-                } else {
-                    CurrentRequestRoles {
-                        evaluation: RoleDataRegister {
-                            workers: HashSet::new(),
-                            quorum: Quorum::default(),
-                        },
-                        compilation: RoleDataRegister {
-                            workers: HashSet::new(),
-                            quorum: Quorum::default(),
-                        },
-                        approval: RoleDataRegister {
-                            workers: HashSet::new(),
-                            quorum: Quorum::default(),
-                        },
-                    }
-                };
+                CurrentRequestRoles {
+                    evaluation: RoleDataRegister {
+                        workers: evaluation_workers,
+                        quorum: evaluation_quorum,
+                    },
+                    compilation: RoleDataRegister {
+                        workers: compilation_workers,
+                        quorum: compilation_quorum,
+                    },
+                    approval: RoleDataRegister {
+                        workers: approval_workers,
+                        quorum: approval_quorum,
+                    },
+                }
+            };
 
             Ok((
                 ValidationReq::Event {
@@ -1439,8 +1425,18 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         if ledger.get_event_request_type().is_create_event() {
             if let Err(e) = create_subject(ctx, ledger.clone()).await {
-                if let ActorError::Functional { .. } = e {
+                // Only the creations quota maps to `CheckLimit`;
+                // any other deterministic rejection carries its own
+                // reason instead of a misleading limit message.
+                if let ActorError::Functional { description } = &e
+                    && description.contains("Maximum number of subjects")
+                {
                     return Err(RequestManagerError::CheckLimit);
+                }
+                if let ActorError::Functional { description } = e {
+                    return Err(RequestManagerError::CreateRejected {
+                        details: description,
+                    });
                 }
                 return Err(e.into());
             }
@@ -1628,7 +1624,12 @@ impl RequestManager {
                         request_id: self.id.clone(),
                     })
                     .await?;
-            };
+            } else {
+                warn!(
+                    request_id = %self.id,
+                    "Dropping FinishReboot: manager reference unavailable"
+                );
+            }
         } else if witnesses.len() == 1 {
             let Some(objetive) = witnesses.iter().next() else {
                 error!(
@@ -1668,6 +1669,10 @@ impl RequestManager {
                 .await?;
 
             let Ok(actor) = ctx.reference().await else {
+                warn!(
+                    request_id = %self.id,
+                    "Dropping RebootWait: manager reference unavailable"
+                );
                 return Ok(());
             };
 
@@ -1681,7 +1686,7 @@ impl RequestManager {
             let Some(config): Option<ConfigHelper> =
                 ctx.system().get_helper("config")
             else {
-                return Ok(());
+                return Err(RequestManagerError::HelpersNotInitialized);
             };
             let data = UpdateNew {
                 network,
@@ -1708,6 +1713,10 @@ impl RequestManager {
             let updater = Update::new(data);
             let Ok(child) = ctx.create_child("update", updater).await else {
                 let Ok(actor) = ctx.reference().await else {
+                    warn!(
+                        request_id = %self.id,
+                        "Dropping RebootWait after update-spawn failure: manager reference unavailable"
+                    );
                     return Ok(());
                 };
 
@@ -1759,6 +1768,10 @@ impl RequestManager {
         governance_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
         let Ok(actor) = ctx.reference().await else {
+            warn!(
+                request_id = %self.id,
+                "Dropping reboot: manager reference unavailable"
+            );
             return Ok(());
         };
 
@@ -1800,6 +1813,7 @@ impl RequestManager {
                 }
             }
             RequestManagerError::CheckLimit
+            | RequestManagerError::CreateRejected { .. }
             | RequestManagerError::Governance(..)
             | RequestManagerError::NotIssuer
             | RequestManagerError::NotCreator => {
@@ -2298,8 +2312,14 @@ impl RequestManager {
             RequestManagerState::Reboot => true,
             _ => false,
         };
-        if drop_pending {
-            let _ = make_obsolete(ctx, &self.subject_id).await;
+        if drop_pending
+            && let Err(e) = make_obsolete(ctx, &self.subject_id).await
+        {
+            warn!(
+                request_id = %self.id,
+                error = %e,
+                "Failed to mark approval obsolete on abort"
+            );
         }
 
         // The request will never commit: sweep the staged contract
@@ -2589,6 +2609,19 @@ impl Handler<Self> for RequestManager {
             }
             RequestManagerMessage::FinishReboot { request_id } => {
                 if request_id == self.id {
+                    // A duplicate or late reboot completion must not
+                    // re-run the command mid-phase (child name
+                    // collisions crash the manager).
+                    if !matches!(self.state, RequestManagerState::Reboot)
+                    {
+                        warn!(
+                            msg_type = "FinishReboot",
+                            request_id = %self.id,
+                            state = %self.state,
+                            "Stale reboot completion outside reboot state, ignoring"
+                        );
+                        return Ok(());
+                    }
                     info!("Init reboot finish {}", self.id);
                     debug!(
                         msg_type = "FinishReboot",
@@ -2596,6 +2629,16 @@ impl Handler<Self> for RequestManager {
                         version = self.version,
                         "Reboot completed, resuming request"
                     );
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "FinishReboot",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs before resuming"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    }
                     self.on_event(
                         RequestManagerEvent::UpdateVersion {
                             version: self.version + 1,
@@ -2655,26 +2698,45 @@ impl Handler<Self> for RequestManager {
                 sn,
             } => {
                 if request_id == self.id {
-                    warn!(
-                        msg_type = "Abort",
-                        state = %self.state,
-                        request_id = %self.id,
-                        who = %who,
-                        reason = %reason,
-                        sn = sn,
-                        "Request abort received"
-                    );
-                    if let Err(e) =
-                        self.abort_request(ctx, reason, Some(sn), who).await
-                    {
-                        error!(
-                            msg_type = "Abort",
-                            request_id = %self.id,
-                            error = %e,
-                            "Failed to abort request"
-                        );
-                        self.match_error(ctx, e).await;
-                        return Ok(());
+                    // Like `ManualAbort`: a late abort must not kill a
+                    // request already past its phases (applied ledger
+                    // events report through tracking, not abort).
+                    match &self.state {
+                        RequestManagerState::Reboot
+                        | RequestManagerState::Starting
+                        | RequestManagerState::Compilation
+                        | RequestManagerState::Evaluation { .. }
+                        | RequestManagerState::Approval { .. }
+                        | RequestManagerState::Validation { .. } => {
+                            warn!(
+                                msg_type = "Abort",
+                                state = %self.state,
+                                request_id = %self.id,
+                                who = %who,
+                                reason = %reason,
+                                sn = sn,
+                                "Request abort received"
+                            );
+                            if let Err(e) = self
+                                .abort_request(ctx, reason, Some(sn), who)
+                                .await
+                            {
+                                error!(
+                                    msg_type = "Abort",
+                                    request_id = %self.id,
+                                    error = %e,
+                                    "Failed to abort request"
+                                );
+                                self.match_error(ctx, e).await;
+                                return Ok(());
+                            }
+                        }
+                        _ => {
+                            info!(
+                                "Late abort for request {} in non-abortable state {} ignored",
+                                self.id, self.state
+                            );
+                        }
                     }
                 }
             }
@@ -3459,8 +3521,15 @@ impl Handler<Self> for RequestManager {
                     // for this request is obsolete now. Sweeping it
                     // earlier could drop live votes for a request whose
                     // ledger build or commit then failed.
-                    if had_approval {
-                        let _ = make_obsolete(ctx, &self.subject_id).await;
+                    if had_approval
+                        && let Err(e) =
+                            make_obsolete(ctx, &self.subject_id).await
+                    {
+                        warn!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to mark approval obsolete after commit"
+                        );
                     }
 
                     match self

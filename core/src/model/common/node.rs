@@ -140,6 +140,9 @@ where
     }
 }
 
+/// Fire-and-forget subject update through the access actor (best
+/// effort: `tell` errors are returned to the caller, delivery beyond
+/// the access actor is the update actor's responsibility).
 pub async fn try_to_update<A>(
     ctx: &mut ActorContext<A>,
     subject_id: DigestIdentifier,

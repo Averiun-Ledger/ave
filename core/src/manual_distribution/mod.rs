@@ -20,7 +20,8 @@ use crate::{
         node::i_can_send_last_ledger,
         subject::{
             acquire_subject, get_last_ledger_event, get_members,
-            get_schema_roles, get_tracker_roles, get_witnesses,
+            get_metadata, get_schema_roles, get_tracker_roles,
+            get_witnesses,
         },
     },
     request::types::{DistributionPlanEntry, DistributionPlanMode},
@@ -281,7 +282,26 @@ impl Handler<Self> for ManualDistribution {
 
                     let namespace =
                         ave_common::Namespace::from(data.get_namespace());
-                    let signer = &ledger.ledger_seal_signature.signer;
+                    // Witnesses resolve against the subject owner (like
+                    // the automatic plan), not the ledger seal signer:
+                    // after transfers the two diverge and the witness
+                    // sets would too.
+                    let owner = get_metadata(ctx, &subject_id)
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get subject metadata for tracker manual plan"
+                            );
+                            ActorError::Functional {
+                                description: e.to_string(),
+                            }
+                        })?
+                        .owner;
+                    let signer = &owner;
 
                     let witnesses = get_witnesses(
                         ctx,
@@ -408,10 +428,31 @@ impl Handler<Self> for ManualDistribution {
                     });
                 };
 
+                // A fresh id per manual run: the empty default
+                // collides across runs and blinds traceability.
+                let request_id = {
+                    use ave_common::identity::{
+                        HashAlgorithm, hash_borsh,
+                    };
+                    hash_borsh(
+                        &*HashAlgorithm::Blake3.hasher(),
+                        &(
+                            subject_id.to_string(),
+                            ledger.sn,
+                            ave_common::identity::TimeStamp::now()
+                                .as_nanos(),
+                        ),
+                    )
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Can not hash manual distribution id: {e}"
+                        ),
+                    })?
+                };
                 let distribution = Distribution::new(
                     network,
                     DistributionType::Manual,
-                    DigestIdentifier::default(),
+                    request_id,
                 );
 
                 let distribution_actor = ctx.create_child(&subject_id.to_string(), distribution).await.map_err(|e| {

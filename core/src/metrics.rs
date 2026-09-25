@@ -59,6 +59,11 @@ struct DistributionFailureLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct NetworkIngressDropLabels {
+    cause: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct DistributionDurationLabels {
     kind: &'static str,
 }
@@ -121,6 +126,7 @@ pub struct CoreMetrics {
     governance_version_sync_failures:
         Family<GovernanceVersionSyncFailureLabels, Counter>,
     http_server_errors: Counter,
+    network_ingress_drops: Family<NetworkIngressDropLabels, Counter>,
 }
 
 static CORE_METRICS: OnceLock<Arc<CoreMetrics>> = OnceLock::new();
@@ -197,6 +203,7 @@ impl CoreMetrics {
             external_db_critical_errors: Counter::default(),
             governance_version_sync_failures: Family::default(),
             http_server_errors: Counter::default(),
+            network_ingress_drops: Family::default(),
         }
     }
 
@@ -360,6 +367,11 @@ impl CoreMetrics {
             "core_http_server_errors",
             "Total HTTP 5xx server errors.",
             self.http_server_errors.clone(),
+        );
+        registry.register(
+            "core_network_ingress_drops",
+            "Total inbound network messages dropped after libp2p delivery, labeled by cause.",
+            self.network_ingress_drops.clone(),
         );
     }
 
@@ -656,6 +668,12 @@ impl CoreMetrics {
 
     pub fn observe_http_server_error(&self) {
         self.http_server_errors.inc();
+    }
+
+    pub fn observe_network_ingress_drop(&self, cause: &'static str) {
+        self.network_ingress_drops
+            .get_or_create(&NetworkIngressDropLabels { cause })
+            .inc();
     }
 }
 

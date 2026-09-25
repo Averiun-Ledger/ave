@@ -154,6 +154,9 @@ pub enum RequestManagerError {
         "the subject could not be created; the maximum limit has been reached."
     )]
     CheckLimit,
+
+    #[error("the subject could not be created: {details}")]
+    CreateRejected { details: String },
     // Internal state errors
     #[error("request is not set")]
     RequestNotSet,
@@ -243,13 +246,3 @@ pub enum RequestManagerError {
     NotCreator,
 }
 
-/*
-Abort:
-Governance
-
-//////////////////////
-reboot:
-NoEvaluatorsAvailable
-NoApproversAvailable
-NoValidatorsAvailable
-*/

@@ -44,6 +44,12 @@ pub enum CompilerError {
     #[error("compilers unavailable: {details}")]
     CompilersUnavailable { details: String },
 
+    /// A node built without the `toolchain` feature holds the compiler
+    /// role: a permanent misconfiguration, never a transient outage, so
+    /// it fails loud instead of retrying forever.
+    #[error("node built without the `toolchain` feature")]
+    NoLocalToolchain,
+
     #[error("compiler toolchain mismatch: expected {expected}, got {actual}")]
     ToolchainMismatch { expected: String, actual: String },
 

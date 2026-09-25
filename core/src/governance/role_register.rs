@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     governance::model::Quorum,
     model::common::{
-        CeilingMap, Interval, IntervalSet, crash_system, purge_storage,
+        CeilingMap, IntervalSet, crash_system, purge_storage,
     },
 };
 use async_trait::async_trait;
@@ -834,10 +834,7 @@ impl PersistentActor for RoleRegister {
                             .entry((validator.clone(), ns.clone()))
                             .or_default();
                         if let Some(last) = last.take() {
-                            interval.insert(Interval {
-                                lo: last,
-                                hi: *version - 1,
-                            });
+                            interval.close_open(last, *version);
                         }
                     }
                 }
@@ -956,10 +953,7 @@ impl PersistentActor for RoleRegister {
                             .entry((validator.clone(), ns.clone()))
                             .or_default();
                         if let Some(last) = last.take() {
-                            interval.insert(Interval {
-                                lo: last,
-                                hi: *version - 1,
-                            });
+                            interval.close_open(last, *version);
                         }
                     }
                 }

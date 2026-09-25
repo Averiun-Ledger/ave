@@ -22,7 +22,7 @@ use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tracing::{Span, error, info_span};
+use tracing::{Span, error, info_span, warn};
 use types::ReqManInitMessage;
 
 use crate::approval::persist::{
@@ -59,6 +59,10 @@ pub struct RequestData {
     pub request_id: DigestIdentifier,
     pub subject_id: DigestIdentifier,
 }
+
+/// Maximum queued requests per subject: bounds the memory and disk a
+/// single authorized signer can force the handler to persist.
+const MAX_QUEUED_REQUESTS_PER_SUBJECT: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
@@ -730,6 +734,19 @@ impl RequestHandler {
             )
             .await?;
         } else {
+            // Bounded queue: an authorized signer must not enqueue
+            // without limit (the payload is persisted per entry).
+            if self
+                .in_queue
+                .get(subject_id)
+                .is_some_and(|queue| queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT)
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Request queue for subject {subject_id} is full"
+                    ),
+                });
+            }
             self.on_event(
                 RequestHandlerEvent::EventToQueue {
                     subject_id: subject_id.clone(),
@@ -918,8 +935,22 @@ impl RequestHandler {
         {
             Ok(actor) => actor,
             Err(ActorError::Exists { .. }) => {
-                ctx.get_child::<RequestManager>(&subject_id.to_string())
-                    .await?
+                let actor =
+                    ctx.get_child::<RequestManager>(&subject_id.to_string())
+                        .await?;
+                // A live manager may hold an in-flight request: abort
+                // it first so tracking records the outcome instead of
+                // freezing on the last state.
+                if let Err(e) =
+                    actor.tell(RequestManagerMessage::ManualAbort).await
+                {
+                    warn!(
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to abort in-flight request before purge"
+                    );
+                }
+                actor
             }
             Err(err) => return Err(err),
         };
@@ -1424,10 +1455,8 @@ impl Handler<Self> for RequestHandler {
                 let (event, request_id) = if let Some(events) =
                     self.in_queue.get(&subject_id)
                 {
-                    if let Some((event, request_id)) =
-                        events.clone().pop_front()
-                    {
-                        (event, request_id)
+                    if let Some((event, request_id)) = events.front() {
+                        (event.clone(), request_id.clone())
                     } else {
                         if let Err(e) = Self::end_child(ctx, &subject_id).await
                         {

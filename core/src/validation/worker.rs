@@ -648,7 +648,7 @@ impl ValiWorker {
         }
 
         // sn
-        if sn != metadata.sn + 1 {
+        if sn != metadata.sn.saturating_add(1) {
             return Err(ValidatorError::InvalidData { value: "sn" });
         }
         Ok(())
@@ -694,7 +694,7 @@ impl ValiWorker {
             });
         }
 
-        if req.sn != metadata.sn + 1 {
+        if req.sn != metadata.sn.saturating_add(1) {
             return Err(ValidatorError::InvalidData {
                 value: "approval sn",
             });
@@ -1574,7 +1574,7 @@ impl ValiWorker {
                 event_request: event_request.clone(),
                 governance_id: metadata.governance_id.clone(),
                 data: eval_state,
-                sn: metadata.sn + 1,
+                sn: metadata.sn.saturating_add(1),
                 gov_version,
                 namespace: metadata.namespace.clone(),
                 schema_id: metadata.schema_id.clone(),
@@ -1725,7 +1725,7 @@ impl ValiWorker {
             CompilationReq {
                 event_request: event_request.clone(),
                 governance_id: metadata.governance_id.clone(),
-                sn: metadata.sn + 1,
+                sn: metadata.sn.saturating_add(1),
                 gov_version,
             },
             compilation.compile_req_signature.clone(),
@@ -1913,7 +1913,7 @@ impl ValiWorker {
             &RequestSubjectData {
                 subject_id: metadata.subject_id.clone(),
                 governance_id: metadata.governance_id.clone(),
-                sn: metadata.sn + 1,
+                sn: metadata.sn.saturating_add(1),
                 namespace: metadata.namespace.clone(),
                 schema_id: metadata.schema_id.clone(),
                 gov_version,
@@ -2059,7 +2059,7 @@ impl ValiWorker {
             rebuild_approval_req(
                 &approval_data,
                 &metadata.subject_id,
-                metadata.sn + 1,
+                metadata.sn.saturating_add(1),
                 gov_version,
                 &req_patch,
                 &signer,
@@ -2090,7 +2090,7 @@ impl ValiWorker {
             validators: &validators,
             req_subject_data_hash: &req_subject_data_hash,
             subject_id: &metadata.subject_id,
-            sn: metadata.sn + 1,
+            sn: metadata.sn.saturating_add(1),
             gov_version,
             patch: &req_patch,
             signer: &signer,
@@ -3440,7 +3440,7 @@ mod tests {
                 &RequestSubjectData {
                     subject_id: subject_id.clone(),
                     governance_id: subject_id,
-                    sn: metadata.sn + 1,
+                    sn: metadata.sn.saturating_add(1),
                     namespace: metadata.namespace.clone(),
                     schema_id: metadata.schema_id.clone(),
                     gov_version: 0,
@@ -3487,7 +3487,7 @@ mod tests {
                 CompilationReq {
                     event_request: self.event_request.clone(),
                     governance_id: self.metadata.governance_id.clone(),
-                    sn: self.metadata.sn + 1,
+                    sn: self.metadata.sn.saturating_add(1),
                     gov_version: self.gov_version,
                 },
                 &self.owner,
@@ -3561,7 +3561,7 @@ mod tests {
                         )
                         .unwrap(),
                     },
-                    sn: self.metadata.sn + 1,
+                    sn: self.metadata.sn.saturating_add(1),
                     gov_version: self.gov_version,
                     namespace: self.metadata.namespace.clone(),
                     schema_id: self.metadata.schema_id.clone(),
@@ -3643,7 +3643,7 @@ mod tests {
                 TimeStamp::from_nanos(issued_at.as_nanos() + 7_000_000_000);
             let approval_req = ApprovalReq {
                 subject_id: self.metadata.subject_id.clone(),
-                sn: self.metadata.sn + 1,
+                sn: self.metadata.sn.saturating_add(1),
                 gov_version: self.gov_version,
                 patch,
                 signer: self.signer.clone(),
@@ -3707,7 +3707,7 @@ mod tests {
                 validators: &self.roles(&[]),
                 req_subject_data_hash: &self.req_subject_data_hash,
                 subject_id: &self.metadata.subject_id,
-                sn: self.metadata.sn + 1,
+                sn: self.metadata.sn.saturating_add(1),
                 gov_version: self.gov_version,
                 patch: &patch,
                 signer: &self.signer,
@@ -3739,7 +3739,7 @@ mod tests {
             CompilationReq {
                 event_request: fixture.event_request.clone(),
                 governance_id: fixture.metadata.governance_id.clone(),
-                sn: fixture.metadata.sn + 1,
+                sn: fixture.metadata.sn.saturating_add(1),
                 gov_version: fixture.gov_version + 1,
             },
             &fixture.owner,
@@ -3823,7 +3823,7 @@ mod tests {
                     )
                     .unwrap(),
                 },
-                sn: fixture.metadata.sn + 1,
+                sn: fixture.metadata.sn.saturating_add(1),
                 gov_version: fixture.gov_version + 1,
                 namespace: fixture.metadata.namespace.clone(),
                 schema_id: fixture.metadata.schema_id.clone(),
@@ -3867,7 +3867,7 @@ mod tests {
         tampered.approval_req_signature = Signed::new(
             ApprovalReq {
                 subject_id: fixture.metadata.subject_id.clone(),
-                sn: fixture.metadata.sn + 1,
+                sn: fixture.metadata.sn.saturating_add(1),
                 gov_version: fixture.gov_version + 1,
                 patch: patch.clone(),
                 signer: fixture.signer.clone(),
@@ -3928,7 +3928,7 @@ mod tests {
             Signed::new(
                 ApprovalReq {
                     subject_id: fixture.metadata.subject_id.clone(),
-                    sn: fixture.metadata.sn + 1,
+                    sn: fixture.metadata.sn.saturating_add(1),
                     gov_version: fixture.gov_version,
                     patch: patch.clone(),
                     signer: fixture.signer.clone(),
@@ -4007,7 +4007,7 @@ mod tests {
         let issued_at = TimeStamp::now();
         let approval_req = ApprovalReq {
             subject_id: fixture.metadata.subject_id.clone(),
-            sn: fixture.metadata.sn + 1,
+            sn: fixture.metadata.sn.saturating_add(1),
             gov_version: fixture.gov_version,
             patch: ValueWrapper(serde_json::json!([
                 { "op": "replace", "path": "/version", "value": 1 }
@@ -4101,7 +4101,7 @@ mod tests {
         let issued_at = TimeStamp::now();
         let approval_req = ApprovalReq {
             subject_id: fixture.metadata.subject_id.clone(),
-            sn: fixture.metadata.sn + 1,
+            sn: fixture.metadata.sn.saturating_add(1),
             gov_version: fixture.gov_version,
             patch: ValueWrapper(serde_json::json!([
                 { "op": "replace", "path": "/version", "value": 1 }

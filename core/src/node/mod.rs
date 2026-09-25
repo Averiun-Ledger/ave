@@ -377,6 +377,30 @@ impl Node {
         Ok(())
     }
 
+    /// Stops the gossip distributor of a subject leaving this node
+    /// (delete, transfer out, end of life): without it the actor keeps
+    /// gossiping and serving with stale roles, leaking the actor. A
+    /// missing distributor is not an error.
+    async fn remove_distributor(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let distributor_name = format!("distributor_{}", subject_id);
+        match ctx.get_child::<DistriWorker>(&distributor_name).await {
+            Ok(distributor) => {
+                if let Err(e) = distributor.ask_stop().await {
+                    debug!(
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to stop subject distributor"
+                    );
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
     async fn create_distributors(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -585,6 +609,17 @@ impl Node {
                     .to_owned(),
             });
         }
+        // Same cap as the HTTP edge: the actor joins every event with
+        // per-item buffers, so callers bypassing the edge must not
+        // request unbounded batches.
+        if limit > crate::api_input_validation::MAX_QUERY_LIMIT {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Replay limit must not exceed {}",
+                    crate::api_input_validation::MAX_QUERY_LIMIT
+                ),
+            });
+        }
         if let Some(to_sn) = to_sn
             && from_sn > to_sn
         {
@@ -730,12 +765,29 @@ impl Node {
                 }
                 .await;
 
-                let _ = subject_manager
+                // The `Up` above holds a requester slot: a lost
+                // `Finish` leaks the tracker alive forever, so retry
+                // once and fail loud instead of dropping the error.
+                if subject_manager
                     .ask(SubjectManagerMessage::Finish {
-                        subject_id,
-                        requester,
+                        subject_id: subject_id.clone(),
+                        requester: requester.clone(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                    && let Err(e) = subject_manager
+                        .ask(SubjectManagerMessage::Finish {
+                            subject_id,
+                            requester,
+                        })
+                        .await
+                {
+                    error!(
+                        error = %e,
+                        "Failed to release replay requester slot after retry"
+                    );
+                    return Err(e);
+                }
 
                 result
             }
@@ -885,6 +937,11 @@ impl Actor for Node {
             .await
         {
             Ok(actor) => actor,
+            // A supervised restart re-runs `pre_start` with live
+            // children: reuse them instead of failing.
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SinkRegistry>("sink_registry").await?
+            }
             Err(e) => {
                 error!(error = %e, "Failed to create SinkRegistry");
                 return Err(e);
@@ -907,7 +964,7 @@ impl Actor for Node {
             ))
             .flat_map(|entry| entry.servers.clone())
             .collect();
-        if let Err(e) = ctx
+        match ctx
             .create_child(
                 "node_sink_manager",
                 SinkManager::initial(SinkManagerInitParams {
@@ -918,8 +975,14 @@ impl Actor for Node {
             )
             .await
         {
-            error!(error = %e, "Failed to create NodeSinkManager");
-            return Err(e);
+            Ok(_) => {}
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SinkManager>("node_sink_manager").await?;
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to create NodeSinkManager");
+                return Err(e);
+            }
         }
 
         let config = config_helper;
@@ -938,6 +1001,9 @@ impl Actor for Node {
             let register_actor =
                 match ctx.create_child("register", Register).await {
                     Ok(actor) => actor,
+                    Err(ActorError::Exists { .. }) => {
+                        ctx.get_child::<Register>("register").await?
+                    }
                     Err(e) => {
                         error!(error = %e, "Failed to create register child");
                         return Err(e);
@@ -957,18 +1023,25 @@ impl Actor for Node {
             let mut sink = register_actor.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_register());
 
-            if let Err(e) = ctx
+            match ctx
                 .create_child(
                     "manual_distribution",
                     ManualDistribution::new(self.our_key.clone()),
                 )
                 .await
             {
-                error!(
-                    error = %e,
-                    "Failed to create manual_distribution child"
-                );
-                return Err(e);
+                Ok(_) => {}
+                Err(ActorError::Exists { .. }) => {
+                    ctx.get_child::<ManualDistribution>("manual_distribution")
+                        .await?;
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create manual_distribution child"
+                    );
+                    return Err(e);
+                }
             }
 
             if let Err(e) = self.create_distributors(ctx, &network).await {
@@ -987,36 +1060,9 @@ impl Actor for Node {
             });
         };
 
-        let subject_manager = match ctx
-            .create_child(
-                "subject_manager",
-                SubjectManager::new(
-                    self.our_key.clone(),
-                    hash,
-                    self.is_service,
-                    self.only_clear_events,
-                ),
-            )
-            .await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                error!(error = %e, "Failed to create subject_manager child");
-                return Err(e);
-            }
-        };
-
-        if let Err(e) = subject_manager
-            .ask(SubjectManagerMessage::UpGovernances {
-                governance_ids: self.governance_ids(),
-            })
-            .await
-        {
-            error!(error = %e, "Failed to bootstrap governances");
-            return Err(e);
-        }
-
-        if let Err(e) = ctx
+        // The access actor first: booting governances query it (sync
+        // peers, bans) and must never observe it missing.
+        match ctx
             .create_child(
                 "auth",
                 SubjectAccess::initial(SubjectAccessInitParams {
@@ -1034,10 +1080,48 @@ impl Actor for Node {
             )
             .await
         {
-            error!(
-                error = %e,
-                "Failed to create subject_access child"
-            );
+            Ok(_) => {}
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SubjectAccess>("auth").await?;
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Failed to create subject_access child"
+                );
+                return Err(e);
+            }
+        }
+
+        let subject_manager = match ctx
+            .create_child(
+                "subject_manager",
+                SubjectManager::new(
+                    self.our_key.clone(),
+                    hash,
+                    self.is_service,
+                    self.only_clear_events,
+                ),
+            )
+            .await
+        {
+            Ok(actor) => actor,
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SubjectManager>("subject_manager").await?
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to create subject_manager child");
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = subject_manager
+            .ask(SubjectManagerMessage::UpGovernances {
+                governance_ids: self.governance_ids(),
+            })
+            .await
+        {
+            error!(error = %e, "Failed to bootstrap governances");
             return Err(e);
         }
 
@@ -1173,6 +1257,7 @@ impl Handler<Self> for Node {
                     ctx,
                 )
                 .await;
+                self.remove_distributor(ctx, &subject_id).await;
 
                 debug!(
                     msg_type = "EOLSubject",
@@ -1246,6 +1331,7 @@ impl Handler<Self> for Node {
                     ctx,
                 )
                 .await;
+                self.remove_distributor(ctx, &subject_id).await;
 
                 debug!(
                     msg_type = "DeleteSubject",
@@ -1293,6 +1379,7 @@ impl Handler<Self> for Node {
             NodeMessage::TransferSubject(data) => {
                 let subject_id = data.subject_id.clone();
                 self.on_event(NodeEvent::TransferSubject(data), ctx).await;
+                self.remove_distributor(ctx, &subject_id).await;
 
                 debug!(
                     msg_type = "TransferSubject",

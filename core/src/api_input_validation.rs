@@ -22,7 +22,7 @@ use crate::error::Error;
 /// paginated/limited endpoint (events, aborts, sink events, first/last
 /// events). Keeps a malicious or misconfigured client from forcing
 /// unbounded in-memory reads.
-const MAX_QUERY_LIMIT: u64 = 1000;
+pub(crate) const MAX_QUERY_LIMIT: u64 = 1000;
 
 /// Rejects `0` with a message that names the field.
 pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {
@@ -204,6 +204,13 @@ pub fn validate_sink_replay_request(
             "requests must not be empty".to_owned(),
         ));
     }
+    // Bound the fan-out: the actor joins every item with per-item
+    // buffers, so an unbounded batch exhausts memory and CPU.
+    if request.requests.len() > MAX_QUERY_LIMIT as usize {
+        return Err(Error::InvalidQueryParams(format!(
+            "requests must not exceed {MAX_QUERY_LIMIT}"
+        )));
+    }
     for item in &request.requests {
         require_non_empty_str("sink", &item.sink)?;
         require_non_empty_str("subject_id", &item.subject_id)?;
@@ -221,6 +228,23 @@ pub fn validate_event_request(request: &EventRequest) -> Result<(), Error> {
             if !create.schema_id.is_valid_in_request() {
                 return Err(Error::InvalidEventRequest(
                     "schema_id is not valid in request".to_owned(),
+                ));
+            }
+            // Same bounds the pipeline enforces downstream (fail fast at
+            // the edge with identical limits, never stricter).
+            if let Some(name) = &create.name
+                && (name.is_empty() || name.len() > 100)
+            {
+                return Err(Error::InvalidEventRequest(
+                    "name must be between 1 and 100 characters".to_owned(),
+                ));
+            }
+            if let Some(description) = &create.description
+                && (description.is_empty() || description.len() > 200)
+            {
+                return Err(Error::InvalidEventRequest(
+                    "description must be between 1 and 200 characters"
+                        .to_owned(),
                 ));
             }
             let is_governance =

@@ -2,6 +2,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
 };
 use std::future::Future;
+use tracing::warn;
 
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -472,7 +473,19 @@ where
         acquire_subject(ctx, subject_id, requester, create_ledger, active)
             .await?;
     let result = operation(ctx).await;
-    lease.finish(ctx).await?;
+    // Never mask the operation error with a lease-release failure: a
+    // failed release is logged and only reported when the operation
+    // itself succeeded.
+    if let Err(finish_error) = lease.finish(ctx).await {
+        if result.is_ok() {
+            return Err(finish_error);
+        }
+        warn!(
+            subject_id = %subject_id,
+            error = %finish_error,
+            "Failed to release subject lease after operation error"
+        );
+    }
     result
 }
 

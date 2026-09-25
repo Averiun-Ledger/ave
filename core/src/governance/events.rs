@@ -1799,6 +1799,24 @@ pub fn gov_role_event_check_data(
                         },
                     });
                 }
+                if issuer.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuer name to remove".to_owned(),
+                        },
+                    });
+                }
+                if issuer.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: "issuer name to remove".to_owned(),
+                            actual: issuer.len(),
+                            max: 100,
+                        },
+                    });
+                }
                 if issuer != ReservedWords::Any.to_string() {
                     if !new_roles.issuer.signers.remove(&issuer) {
                         return Err(RunnerError::InvalidEvent {
@@ -2794,6 +2812,30 @@ pub fn schema_id_role_check_data(
                             reason:
                                 "cannot have leading or trailing whitespace"
                                     .to_owned(),
+                        },
+                    });
+                }
+                if issuer.name.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: format!(
+                                "issuer name to remove in schema {}",
+                                schema_id
+                            ),
+                        },
+                    });
+                }
+                if issuer.name.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: format!(
+                                "issuer name to remove in schema {}",
+                                schema_id
+                            ),
+                            actual: issuer.name.len(),
+                            max: 100,
                         },
                     });
                 }

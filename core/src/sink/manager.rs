@@ -1166,7 +1166,7 @@ impl SinkManager {
         {
             Some(cursor) if cursor >= last_sn => 0,
             Some(cursor) => last_sn - cursor,
-            None => last_sn + 1,
+            None => last_sn.saturating_add(1),
         }
     }
 
@@ -1733,7 +1733,7 @@ impl SinkManager {
                 .get(&(sink_name.clone(), subject_id.clone()))
                 .copied()
                 .or(cursor_sn)
-                .map(|sn| sn + 1)
+                .map(|sn| sn.saturating_add(1))
                 .unwrap_or(0);
             if sn != expected_sn {
                 warn!(
@@ -2293,7 +2293,7 @@ impl SinkManager {
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
                 .copied();
-            let from_sn = cursor_sn.map_or(0, |sn| sn + 1);
+            let from_sn = cursor_sn.map_or(0, |sn| sn.saturating_add(1));
 
             // If the cursor is already up-to-date, there is nothing to catch up.
             if cursor_sn.is_some_and(|sn| sn >= last_sn) {

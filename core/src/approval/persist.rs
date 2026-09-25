@@ -578,6 +578,19 @@ impl Handler<Self> for ApprPersist {
                         });
                     };
 
+                    // Persist before emitting: a crash between the vote
+                    // and the state write must not allow a second,
+                    // contradictory signed vote (same order as
+                    // `NetworkRequest`).
+                    debug!(
+                        msg_type = "ChangeResponse",
+                        new_state = ?state,
+                        "State changed successfully"
+                    );
+
+                    self.on_event(ApprPersistEvent::ChangeState { state }, ctx)
+                        .await;
+
                     // Every validator that asked for this vote receives
                     // it once cast.
                     for asker in self.askers.clone() {
@@ -601,15 +614,6 @@ impl Handler<Self> for ApprPersist {
                             return Err(crash_system(ctx, e).await);
                         };
                     }
-
-                    debug!(
-                        msg_type = "ChangeResponse",
-                        new_state = ?state,
-                        "State changed successfully"
-                    );
-
-                    self.on_event(ApprPersistEvent::ChangeState { state }, ctx)
-                        .await;
                 }
             }
             ApprPersistMessage::NetworkRequest {

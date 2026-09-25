@@ -1093,6 +1093,14 @@ impl PageAnchorCache {
             .or_insert(0);
         *generation = generation.saturating_add(1);
     }
+
+    /// Drops the generation counter of a deleted subject: query and
+    /// count entries are already invalidated by generation mismatch
+    /// and evicted lazily, but the counter itself would leak one entry
+    /// per deleted subject forever.
+    fn prune_subject_generation(&mut self, subject_id: &str) {
+        self.subject_generations.remove(subject_id);
+    }
 }
 
 #[async_trait]
@@ -1271,7 +1279,15 @@ impl SqliteLocal {
         let tuning = tuning_for_ram(resolved.ram_mb);
         let sync_mode = if durability { "FULL" } else { "NORMAL" };
 
-        let runtime = SqliteRuntime::new(path, sync_mode, &tuning)?;
+        // Opening the database runs migrations and checkpoints: blocking
+        // file IO that must not stall the async executor.
+        let path_owned = path.to_owned();
+        let sync_mode_owned = sync_mode.to_owned();
+        let runtime = task::spawn_blocking(move || {
+            SqliteRuntime::new(&path_owned, &sync_mode_owned, &tuning)
+        })
+        .await
+        .map_err(|e| DatabaseError::BlockingTask(e.to_string()))??;
         let runtime = Arc::new(runtime);
 
         debug!(
@@ -1523,8 +1539,15 @@ fn spawn_write_worker(
             .map_err(|e| DatabaseError::BlockingTask(e.to_string()))
             .and_then(|result| result);
 
-            if result.is_err() {
-                break;
+            // A terminal batch reports its error to its own jobs and
+            // the writer keeps serving the queue: killing the writer
+            // here would wedge every later job silently. Locally fatal
+            // breakage surfaces per batch through the job responses.
+            if let Err(error) = &result {
+                debug!(
+                    error = %error,
+                    "SQLite write batch failed terminally, writer continues"
+                );
             }
         }
     })
@@ -1689,7 +1712,10 @@ fn persist_write_batch(
                 }
             },
             WriteCommand::DeleteSubject(subject_id) => {
-                touched_subjects.push(subject_id.clone());
+                // Deleted subjects leave the generation map instead of
+                // bumping it: their cache entries (page anchors, counts)
+                // are dropped with them.
+                runtime.prune_subject_generation(subject_id);
                 delete_by_subject_with_stmt(
                     &mut delete_subject_state_stmt,
                     subject_id,
@@ -1740,8 +1766,19 @@ fn persist_write_batch(
     Ok(())
 }
 
-const fn is_retryable_write_error(error: &DatabaseError) -> bool {
-    matches!(error, DatabaseError::Query(_))
+/// Only lock contention is transient: constraint violations (a replayed
+/// duplicate row, corrupt data) fail deterministically and must not burn
+/// retries. `ON CONFLICT DO NOTHING` was considered for replays and
+/// rejected: it would also silence a conflicting row with different
+/// bytes, hiding a divergence.
+fn is_retryable_write_error(error: &DatabaseError) -> bool {
+    match error {
+        DatabaseError::Query(details) => {
+            let details = details.to_lowercase();
+            details.contains("locked") || details.contains("busy")
+        }
+        _ => false,
+    }
 }
 
 const fn retry_backoff(attempt: usize) -> Duration {
@@ -1803,15 +1840,30 @@ impl SqliteRuntime {
         })
     }
 
+    /// Locks the page cache, resetting it on mutex poisoning: a poisoned
+    /// mutex means a previous holder panicked, so the cached entries can
+    /// not be trusted — dropping them only costs recomputation, while
+    /// serving them would serve stale results silently.
+    fn lock_page_cache(&self) -> std::sync::MutexGuard<'_, PageAnchorCache> {
+        match self.page_cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Page anchor cache mutex poisoned, resetting cache");
+                let mut guard = poisoned.into_inner();
+                *guard = PageAnchorCache::default();
+                guard
+            }
+        }
+    }
+
     fn lookup_page_anchor(
         &self,
         key: &str,
         subject_id: &str,
         target_page: u64,
     ) -> Option<(u64, String)> {
-        self.page_cache.lock().ok().and_then(|mut cache| {
-            cache.lookup_anchor(key, subject_id, target_page)
-        })
+        self.lock_page_cache()
+            .lookup_anchor(key, subject_id, target_page)
     }
 
     fn store_page_anchor(
@@ -1821,31 +1873,28 @@ impl SqliteRuntime {
         target_page: u64,
         cursor: String,
     ) {
-        if let Ok(mut cache) = self.page_cache.lock() {
-            cache.store_anchor(key, subject_id, target_page, cursor);
-        }
+        self.lock_page_cache()
+            .store_anchor(key, subject_id, target_page, cursor);
     }
 
     fn lookup_count_cache(&self, key: &str, subject_id: &str) -> Option<u64> {
         let cached = self
-            .page_cache
-            .lock()
-            .ok()
-            .and_then(|mut cache| cache.lookup_count(key, subject_id));
+            .lock_page_cache()
+            .lookup_count(key, subject_id);
         self.metrics.record_count_cache_lookup(cached.is_some());
         cached
     }
 
     fn store_count_cache(&self, key: String, subject_id: &str, total: u64) {
-        if let Ok(mut cache) = self.page_cache.lock() {
-            cache.store_count(key, subject_id, total);
-        }
+        self.lock_page_cache().store_count(key, subject_id, total);
     }
 
     fn bump_subject_generation(&self, subject_id: &str) {
-        if let Ok(mut cache) = self.page_cache.lock() {
-            cache.bump_subject_generation(subject_id);
-        }
+        self.lock_page_cache().bump_subject_generation(subject_id);
+    }
+
+    fn prune_subject_generation(&self, subject_id: &str) {
+        self.lock_page_cache().prune_subject_generation(subject_id);
     }
 
     fn run_shutdown_maintenance(&self) -> Result<(), DatabaseError> {
@@ -1891,10 +1940,17 @@ impl ConnectionPool {
     }
 
     fn release(&self, conn: Connection) {
-        if let Ok(mut guard) = self.connections.lock() {
-            guard.push(conn);
-            self.available.notify_one();
-        }
+        // A poisoned pool must not silently shrink: recover the guard so
+        // the connection is returned instead of leaked.
+        let mut guard = match self.connections.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Reader pool mutex poisoned, recovering guard");
+                poisoned.into_inner()
+            }
+        };
+        guard.push(conn);
+        self.available.notify_one();
     }
 }
 
@@ -1907,6 +1963,9 @@ impl std::ops::Deref for PooledConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
+        // Structural invariant: the connection is only taken in `Drop`,
+        // so a live guard always holds one. `Deref` can not return a
+        // `Result`, hence the expect on an unreachable path.
         self.conn.as_ref().expect("pooled connection missing")
     }
 }
@@ -2262,8 +2321,18 @@ fn get_events_from_conn(
     let mut page = query.page.unwrap_or(1).max(1);
     let total = count_events_from_conn(conn, runtime, subject_id, &query)?;
 
+    // Empty subjects page like aborts do: an empty ledger is not an
+    // error (the `NoEvents` phantom below only guards inconsistent
+    // page walks).
     if total == 0 {
-        return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+        return Ok(PaginatorEvents {
+            paginator: Paginator {
+                pages: 0,
+                next: None,
+                prev: None,
+            },
+            events: Vec::new(),
+        });
     }
 
     let mut pages = total.div_ceil(quantity);
@@ -3464,8 +3533,9 @@ fn insert_event_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
     event: &Ledger,
 ) -> Result<(), DatabaseError> {
-    let event_db =
-        event.build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos());
+    let event_db = event
+        .build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos())
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     let sn_i64 = i64::try_from(event_db.sn).map_err(|_| {
         DatabaseError::IntegerConversion(format!(
@@ -3669,7 +3739,9 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                 let subject_id = event.get_subject_id().to_string();
                 let sn = event.sn;
 
-                if let Err(e) = self.persist_signed_ledger(event).await {
+                let persist_result =
+                    self.persist_signed_ledger(event).await;
+                if let Err(e) = &persist_result {
                     error!(
                         subject_id = %subject_id,
                         sn = sn,
@@ -3679,7 +3751,9 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                     if let Err(e) = self
                         .inner
                         .manager
-                        .tell(DBManagerMessage::Error(e))
+                        .tell(DBManagerMessage::Error(
+                            e.clone(),
+                        ))
                         .await
                     {
                         error!(
@@ -3696,13 +3770,25 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                         "Signed ledger saved to SQLite successfully"
                     );
                 }
+                // A failed persistence must not report `Ok`: the node
+                // would diverge silently when the manager notice is
+                // lost too.
+                if let Err(e) = persist_result {
+                    return Err(ActorError::FunctionalCritical {
+                        description: format!(
+                            "Failed to save signed ledger to SQLite: {e}"
+                        ),
+                    });
+                }
             }
             SubjectSinkEvent::SinkData(SinkDataEvent::State(metadata)) => {
                 let metadata = metadata.clone();
                 let subject_id = metadata.subject_id.clone();
                 let sn = metadata.sn;
 
-                if let Err(e) = self.persist_subject_state(*metadata).await {
+                let persist_result =
+                    self.persist_subject_state(*metadata).await;
+                if let Err(e) = &persist_result {
                     error!(
                         subject_id = %subject_id,
                         sn = sn,
@@ -3712,7 +3798,7 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                     if let Err(e) = self
                         .inner
                         .manager
-                        .tell(DBManagerMessage::Error(e))
+                        .tell(DBManagerMessage::Error(e.clone()))
                         .await
                     {
                         error!(
@@ -3728,6 +3814,13 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                         sn = sn,
                         "Subject state saved to SQLite successfully"
                     );
+                }
+                if let Err(e) = persist_result {
+                    return Err(ActorError::FunctionalCritical {
+                        description: format!(
+                            "Failed to save subject state to SQLite: {e}"
+                        ),
+                    });
                 }
             }
         }
@@ -3748,7 +3841,8 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
         let sn = event.sn;
         let who = event.who.clone();
 
-        if let Err(e) = self.persist_abort(event).await {
+        let persist_result = self.persist_abort(event).await;
+        if let Err(e) = &persist_result {
             error!(
                 subject_id = %subject_id,
                 request_id = %request_id,
@@ -3757,7 +3851,7 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 "Failed to save abort record to SQLite"
             );
             if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e)).await
+                self.inner.manager.tell(DBManagerMessage::Error(e.clone())).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3776,6 +3870,13 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 "Abort record saved to SQLite successfully"
             );
         }
+        if let Err(e) = persist_result {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Failed to save abort record to SQLite: {e}"
+                ),
+            });
+        }
         Ok(())
     }
 }
@@ -3786,10 +3887,11 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         &self,
         event: Arc<RegisterEvent>,
     ) -> Result<(), ActorError> {
-        if let Err(e) = self.persist_register((*event).clone()).await {
+        let persist_result = self.persist_register((*event).clone()).await;
+        if let Err(e) = &persist_result {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
             if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e)).await
+                self.inner.manager.tell(DBManagerMessage::Error(e.clone())).await
             {
                 error!(
                     error = %e,
@@ -3798,6 +3900,13 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
             }
         } else {
             debug!(event = ?event, "Register event saved to SQLite successfully");
+        }
+        if let Err(e) = persist_result {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Failed to save register event to SQLite: {e}"
+                ),
+            });
         }
         Ok(())
     }

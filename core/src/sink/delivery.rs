@@ -363,6 +363,10 @@ where
 /// batch. Group order follows first appearance so a homogeneous batch
 /// produces one message, and the relative order inside each group is
 /// preserved.
+///
+/// Delivery is at-least-once per route: retries and multi-route fan-out
+/// can deliver the same event twice. Downstream consumers must dedupe by
+/// `(subject_id, sn)`.
 pub fn group_events_by_type(
     events: Vec<IncomingSinkEvent>,
     route_by_type: bool,

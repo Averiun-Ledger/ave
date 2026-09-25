@@ -348,17 +348,19 @@ impl Handler<Self> for CompileCoordinator {
             } => {
                 if request_id == self.request_id && version == self.version {
                     if self.node_key != sender {
-                        error!(
+                        // A forged or misrouted response: report the
+                        // compiler as timed out so the phase drops and
+                        // replaces it at once instead of burning the
+                        // slot until the result deadline.
+                        warn!(
                             msg_type = "NetworkResponse",
                             expected_node = %self.node_key,
                             network_sender = %sender,
-                            "Compilation response sender mismatch"
+                            "Compilation response sender mismatch, dropping compiler"
                         );
-                        return Err(ActorError::Functional {
-                            description:
-                                "We received a compilation response from an unexpected sender"
-                                    .to_string(),
-                        });
+                        self.notify_timeout(ctx).await;
+                        ctx.stop(None).await;
+                        return Ok(());
                     }
 
                     // Working ACK: the compiler accepted the job. Stop
@@ -419,12 +421,24 @@ impl Handler<Self> for CompileCoordinator {
                         result_hash,
                         result_hash_signature,
                     } = &*compilation_res
-                    {
-                        self.verify_result_response(
+                        && let Err(e) = self.verify_result_response(
                             result,
                             result_hash,
                             result_hash_signature,
-                        )?;
+                        )
+                    {
+                        // Unverifiable result (bad hash or signature):
+                        // same failover as a timeout — the phase drops
+                        // and replaces the compiler at once.
+                        warn!(
+                            msg_type = "NetworkResponse",
+                            error = %e,
+                            sender = %sender,
+                            "Unverifiable compilation result, dropping compiler"
+                        );
+                        self.notify_timeout(ctx).await;
+                        ctx.stop(None).await;
+                        return Ok(());
                     }
 
                     // Compilation actor.

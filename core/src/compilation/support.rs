@@ -234,7 +234,15 @@ impl CompilerSupport {
             BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         ));
         let wasm = pipeline::build_wasm(contract, &build_dir).await;
-        let _ = tokio::fs::remove_dir_all(&build_dir).await;
+        // Best-effort scratch cleanup (the boot sweep collects leftovers);
+        // the build outcome below decides the verdict either way.
+        if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
+            tracing::debug!(
+                error = %e,
+                path = %build_dir.display(),
+                "Failed to remove build scratch directory"
+            );
+        }
         let wasm = wasm?;
         let toolchain_fingerprint =
             pipeline::toolchain_fingerprint(hash).await?;
@@ -249,9 +257,7 @@ impl CompilerSupport {
         _contract: &str,
         _contract_path: &Path,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
-        Err(CompilerError::CompilersUnavailable {
-            details: "node built without the `toolchain` feature".to_owned(),
-        })
+        Err(CompilerError::NoLocalToolchain)
     }
 
     pub(crate) async fn contracts_helper<A: Actor>(
@@ -898,7 +904,7 @@ impl CompilerSupport {
     /// load path does (its module was never verified), the serving path
     /// does not (its module came from a verified load and keeps
     /// evaluating while the artifact is re-obtained).
-    async fn discard_persisted_artifact<A: Actor>(
+    pub(crate) async fn discard_persisted_artifact<A: Actor>(
         ctx: &ActorContext<A>,
         contract_name: &str,
         contract_path: &Path,
@@ -1013,12 +1019,24 @@ impl CompilerSupport {
             match pipeline::load_artifact_wasm(&contract_path).await {
                 Ok(wasm_bytes) => wasm_bytes,
                 Err(error) => {
-                    debug!(
+                    // Unreadable bytes with metadata still registered:
+                    // same handling as a hash mismatch — discard and
+                    // heal — or probes keep advertising `CanServe`
+                    // while every request answers `NotServed`.
+                    warn!(
                         error = %error,
                         contract_name = %contract_name,
-                        "Can not read official artifact to serve it"
+                        "Can not read official artifact to serve it, discarding it"
                     );
-                    return Ok(ServedArtifact::Missing);
+                    Self::discard_persisted_artifact(
+                        ctx,
+                        contract_name,
+                        &contract_path,
+                        &register,
+                        false,
+                    )
+                    .await?;
+                    return Ok(ServedArtifact::Corrupt);
                 }
             };
 
@@ -1212,6 +1230,7 @@ mod tests {
             CompilerError::CompilersUnavailable {
                 details: "d".to_owned(),
             },
+            CompilerError::NoLocalToolchain,
             CompilerError::ToolchainMismatch {
                 expected: "e".to_owned(),
                 actual: "a".to_owned(),
@@ -1310,6 +1329,7 @@ mod tests {
             | CompilerError::EngineCreation { .. }
             | CompilerError::SerializationError { .. }
             | CompilerError::MissingArtifactAnchor { .. }
+            | CompilerError::NoLocalToolchain
             | CompilerError::ArtifactAnchorMismatch { .. } => {
                 (false, true, false)
             }

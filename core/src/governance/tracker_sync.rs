@@ -27,7 +27,7 @@ use crate::helpers::network::{
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::{
-    get_verified_transfer_sn, node::get_subject_data,
+    crash_system, get_verified_transfer_sn, node::get_subject_data,
     subject::get_tracker_sn_owner,
 };
 use crate::node::SubjectData;
@@ -429,7 +429,16 @@ impl TrackerSync {
                 Ok(SubjectAccessResponse::Subjects(list)) => {
                     list.into_iter().collect()
                 }
-                _ => HashSet::new(),
+                // Fail closed: an error here must end the cycle loudly
+                // (and retry on the next tick), never sync banned
+                // trackers behind an empty set.
+                Ok(_) => {
+                    return Err(ActorError::UnexpectedResponse {
+                        path: access_path.clone(),
+                        expected: "SubjectAccessResponse::Subjects".to_owned(),
+                    });
+                }
+                Err(e) => return Err(e),
             }
         };
 
@@ -662,13 +671,40 @@ impl TrackerSync {
 
     async fn finish_cycle(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         self.state = SyncState::Idle;
         self.cancel_fetch_timeout(ctx);
         self.cancel_update_timeout(ctx);
         self.schedule_tick(ctx)?;
         Ok(())
+    }
+
+    /// A timer or response failure must never stall the sync in a dead
+    /// state with its queue silently dropped: local fatal errors crash,
+    /// anything else ends the cycle loudly (the next tick retries).
+    async fn fail_cycle(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        context: &'static str,
+        error: ActorError,
+    ) -> Result<TrackerSyncResponse, ActorError> {
+        match error {
+            ActorError::FunctionalCritical { .. }
+            | ActorError::Helper { .. } => {
+                Err(crash_system(ctx, error).await)
+            }
+            error => {
+                warn!(
+                    governance_id = %self.governance_id,
+                    context = context,
+                    error = %error,
+                    "Tracker sync cycle failed, ending cycle"
+                );
+                self.finish_cycle(ctx).await?;
+                Ok(TrackerSyncResponse::None)
+            }
+        }
     }
 }
 
@@ -734,7 +770,9 @@ impl Handler<Self> for TrackerSync {
                         request_nonce = request_nonce,
                         "Tracker sync fetch timed out"
                     );
-                    self.finish_cycle(ctx).await?;
+                    if let Err(e) = self.finish_cycle(ctx).await {
+                        return self.fail_cycle(ctx, "fetch timeout", e).await;
+                    }
                 }
             }
             TrackerSyncMessage::UpdateTimeout { batch_nonce } => {
@@ -745,8 +783,10 @@ impl Handler<Self> for TrackerSync {
                         if state.batch_nonce == batch_nonce
                 );
 
-                if timed_out {
-                    self.advance_update_phase(ctx).await?;
+                if timed_out
+                    && let Err(e) = self.advance_update_phase(ctx).await
+                {
+                    return self.fail_cycle(ctx, "update timeout", e).await;
                 }
             }
             TrackerSyncMessage::NetworkRequest(request) => {
@@ -784,49 +824,66 @@ impl Handler<Self> for TrackerSync {
                     "Received tracker sync page"
                 );
 
-                let local_governance_version =
-                    self.get_governance_version(ctx).await?;
-                let effective_governance_version =
-                    local_governance_version.max(governance_version);
+                // The fetch timeout is already cancelled above: any
+                // failure from here must end the cycle loudly instead
+                // of stalling without a timeout.
+                let page_result: Result<TrackerSyncResponse, ActorError> =
+                    async {
+                        let local_governance_version = self
+                            .get_governance_version(ctx)
+                            .await?;
+                        let effective_governance_version =
+                            local_governance_version.max(governance_version);
 
-                if effective_governance_version != active_governance_version {
-                    Self::observe_round("gov_changed");
-                    self.start_fetch(
-                        ctx,
-                        active_peer,
-                        effective_governance_version,
-                        None,
-                    )
-                    .await?;
-                    return Ok(TrackerSyncResponse::None);
-                }
+                        if effective_governance_version
+                            != active_governance_version
+                        {
+                            Self::observe_round("gov_changed");
+                            self.start_fetch(
+                                ctx,
+                                active_peer,
+                                effective_governance_version,
+                                None,
+                            )
+                            .await?;
+                            return Ok(TrackerSyncResponse::None);
+                        }
 
-                let pending_items =
-                    self.build_pending_updates(ctx, items).await?;
-                if pending_items.is_empty() {
-                    if let Some(after_subject_id) = next_cursor {
-                        self.start_fetch(
+                        let pending_items = self
+                            .build_pending_updates(ctx, items)
+                            .await?;
+                        if pending_items.is_empty() {
+                            if let Some(after_subject_id) = next_cursor {
+                                self.start_fetch(
+                                    ctx,
+                                    active_peer,
+                                    governance_version,
+                                    Some(after_subject_id),
+                                )
+                                .await?;
+                            } else {
+                                Self::observe_round("completed");
+                                self.finish_cycle(ctx).await?;
+                            }
+                            return Ok(TrackerSyncResponse::None);
+                        }
+
+                        self.start_update_phase(
                             ctx,
                             active_peer,
                             governance_version,
-                            Some(after_subject_id),
+                            pending_items,
+                            next_cursor,
                         )
                         .await?;
-                    } else {
-                        Self::observe_round("completed");
-                        self.finish_cycle(ctx).await?;
+                        Ok(TrackerSyncResponse::None)
                     }
-                    return Ok(TrackerSyncResponse::None);
+                    .await;
+                if let Err(e) = page_result {
+                    return self
+                        .fail_cycle(ctx, "network response", e)
+                        .await;
                 }
-
-                self.start_update_phase(
-                    ctx,
-                    active_peer,
-                    governance_version,
-                    pending_items,
-                    next_cursor,
-                )
-                .await?;
             }
         }
 

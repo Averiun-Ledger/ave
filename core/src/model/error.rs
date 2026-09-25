@@ -47,6 +47,9 @@ pub enum ProtocolsError {
 
     #[error("only tracker fact events can be projected as opaque")]
     InvalidTrackerOpaqueProjection,
+
+    #[error("corrupt ledger event shape: {0}")]
+    CorruptLedgerShape(String),
 }
 
 impl From<ProtocolsError> for ActorError {

@@ -362,28 +362,31 @@ impl Protocols {
         }
     }
 
-    pub fn buidl_event_db(&self) -> (RequestEventDB, DigestIdentifier, u64) {
+    pub fn buidl_event_db(
+        &self,
+    ) -> Result<(RequestEventDB, DigestIdentifier, u64), ProtocolsError> {
         match self {
             Self::Create {
                 validation,
                 event_request,
             } => {
+                // A corrupt ledger (bad sync or DB) must surface as an
+                // error, never panic the node into disagreeing with its
+                // peers about determinism.
                 let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 else {
-                    unreachable!(
-                        "Unreachable combination is a create event request"
-                    )
+                    return Err(ProtocolsError::NotCreateWithMetadata);
                 };
 
                 let EventRequest::Create(create) = event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a create event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "create event without a create request".to_owned(),
+                    ));
                 };
 
-                (
+                Ok((
                     RequestEventDB::Create {
                         name: create.name.clone(),
                         description: create.description.clone(),
@@ -392,7 +395,7 @@ impl Protocols {
                     },
                     metadata.subject_id.clone(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
             Self::TrackerFactFull {
                 evaluation,
@@ -410,12 +413,12 @@ impl Protocols {
 
                 let EventRequest::Fact(fact_request) = event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a fact event request"
-                    )
+                    return Err(
+                        ProtocolsError::InvalidTrackerFactFullEventRequest,
+                    );
                 };
 
-                (
+                Ok((
                     RequestEventDB::TrackerFactFull {
                         payload: fact_request.payload.0.clone(),
                         viewpoints: fact_request
@@ -427,18 +430,18 @@ impl Protocols {
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
             Self::TrackerFactOpaque {
                 evaluation, data, ..
-            } => (
+            } => Ok((
                 RequestEventDB::TrackerFactOpaque {
                     viewpoints: evaluation.viewpoints.iter().cloned().collect(),
                     evaluation_success: evaluation.is_ok(),
                 },
                 data.subject_id.clone(),
                 data.event_request_timestamp.as_nanos(),
-            ),
+            )),
             Self::GovFact {
                 evaluation,
                 approval,
@@ -446,55 +449,58 @@ impl Protocols {
                 event_request,
                 ..
             } => {
-                let (evaluation_response, approval_success) = evaluation.as_ref().map_or_else(|| {
+                let (evaluation_response, approval_success) = match evaluation.as_ref() {
                         // No evaluation means the compilation phase
                         // rejected the contracts.
-                        let compilation_error = compilation.as_ref().map_or_else(|| unreachable!(
-                                "In a fact governance event, if there is no evaluation, there must be compilation"
-                            ), |compilation| match &compilation.response {
-                                CompilationResponse::Error {
-                                    result, ..
-                                } => result.to_string(),
-                                CompilationResponse::Ok { .. } => {
-                                    unreachable!(
-                                        "In a fact governance event without evaluation, the compilation must have failed"
-                                    )
-                                }
-                            });
-
-                        (
-                            EvalResDB::Error(format!(
-                                "compilation: {}",
-                                compilation_error
-                            )),
-                            None,
-                        )
-                    }, |evaluation| match evaluation.response.clone() {
-                        EvaluationResponse::Ok { result, .. } => {
-                            if let Some(appr) = approval {
+                        None => {
+                            let Some(compilation) = compilation.as_ref() else {
+                                return Err(ProtocolsError::CorruptLedgerShape(
+                                    "gov fact without evaluation or compilation"
+                                        .to_owned(),
+                                ));
+                            };
+                            let CompilationResponse::Error { result, .. } =
+                                &compilation.response
+                            else {
+                                return Err(ProtocolsError::CorruptLedgerShape(
+                                    "gov fact without evaluation but successful compilation"
+                                        .to_owned(),
+                                ));
+                            };
+                            (
+                                EvalResDB::Error(format!(
+                                    "compilation: {}",
+                                    result
+                                )),
+                                None,
+                            )
+                        }
+                        Some(evaluation) => match evaluation.response.clone() {
+                            EvaluationResponse::Ok { result, .. } => {
+                                let Some(appr) = approval else {
+                                    return Err(
+                                        ProtocolsError::ApprovalRequired,
+                                    );
+                                };
                                 (
                                     EvalResDB::Patch(result.patch.0),
                                     Some(appr.approved),
                                 )
-                            } else {
-                                unreachable!(
-                                    "In a fact governance event, if the assessment is correct, there should be approval"
-                                )
                             }
-                        }
-                        EvaluationResponse::Error { result, .. } => {
-                            (EvalResDB::Error(result.to_string()), None)
-                        }
-                    });
+                            EvaluationResponse::Error { result, .. } => {
+                                (EvalResDB::Error(result.to_string()), None)
+                            }
+                        },
+                    };
 
                 let EventRequest::Fact(fact_request) = event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a fact event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "gov fact without a fact request".to_owned(),
+                    ));
                 };
 
-                (
+                Ok((
                     RequestEventDB::GovernanceFact {
                         payload: fact_request.payload.0.clone(),
                         evaluation_response,
@@ -502,7 +508,7 @@ impl Protocols {
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
             Self::Transfer {
                 evaluation,
@@ -512,9 +518,9 @@ impl Protocols {
                 let EventRequest::Transfer(transfer_request) =
                     event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a transfer event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "transfer event without a transfer request".to_owned(),
+                    ));
                 };
 
                 let evaluation_error = match evaluation.response.clone() {
@@ -524,20 +530,20 @@ impl Protocols {
                     }
                 };
 
-                (
+                Ok((
                     RequestEventDB::Transfer {
                         new_owner: transfer_request.new_owner.to_string(),
                         evaluation_error,
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
-            Self::TrackerConfirm { event_request, .. } => (
+            Self::TrackerConfirm { event_request, .. } => Ok((
                 RequestEventDB::TrackerConfirm,
                 event_request.content().get_subject_id(),
                 event_request.signature().timestamp.as_nanos(),
-            ),
+            )),
             Self::GovConfirm {
                 evaluation,
                 event_request,
@@ -546,9 +552,9 @@ impl Protocols {
                 let EventRequest::Confirm(confirm_request) =
                     event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a confirm event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "confirm event without a confirm request".to_owned(),
+                    ));
                 };
 
                 let evaluation_response = match evaluation.response.clone() {
@@ -559,25 +565,25 @@ impl Protocols {
                         EvalResDB::Error(result.to_string())
                     }
                 };
-                (
+                Ok((
                     RequestEventDB::GovernanceConfirm {
                         name_old_owner: confirm_request.name_old_owner.clone(),
                         evaluation_response,
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
-            Self::Reject { event_request, .. } => (
+            Self::Reject { event_request, .. } => Ok((
                 RequestEventDB::Reject,
                 event_request.content().get_subject_id(),
                 event_request.signature().timestamp.as_nanos(),
-            ),
-            Self::EOL { event_request, .. } => (
+            )),
+            Self::EOL { event_request, .. } => Ok((
                 RequestEventDB::EOL,
                 event_request.content().get_subject_id(),
                 event_request.signature().timestamp.as_nanos(),
-            ),
+            )),
         }
     }
 
@@ -1088,11 +1094,14 @@ impl Ledger {
         }
     }
 
-    pub fn build_ledger_db(&self, signature_timestamp: u64) -> LedgerDB {
+    pub fn build_ledger_db(
+        &self,
+        signature_timestamp: u64,
+    ) -> Result<LedgerDB, ProtocolsError> {
         let (event, subject_id, event_request_timestamp) =
-            self.protocols.buidl_event_db();
+            self.protocols.buidl_event_db()?;
 
-        LedgerDB {
+        Ok(LedgerDB {
             subject_id: subject_id.to_string(),
             sn: self.sn,
             event_request_timestamp,
@@ -1100,7 +1109,7 @@ impl Ledger {
             sink_timestamp: TimeStamp::now().as_nanos(),
             event_type: event.get_event_type(),
             event,
-        }
+        })
     }
     pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {
         if let Protocols::Create { validation, .. } = &self.protocols

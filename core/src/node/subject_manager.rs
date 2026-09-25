@@ -186,9 +186,14 @@ impl SubjectManager {
             return Ok(());
         }
 
-        let tracker = ctx.get_child::<Tracker>(&subject_id.to_string()).await?;
-        tracker.ask_stop().await?;
+        // Drop the entry first: a missing child must not wedge an empty
+        // entry here forever.
         self.subjects.remove(&subject_id);
+        if let Ok(tracker) =
+            ctx.get_child::<Tracker>(&subject_id.to_string()).await
+        {
+            tracker.ask_stop().await?;
+        }
 
         Ok(())
     }
@@ -198,6 +203,20 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
+        // Purging under live requesters orphans their `Finish`: refuse
+        // and let the caller retry once the subject is idle.
+        if self
+            .subjects
+            .get(&subject_id)
+            .is_some_and(|entry| !entry.requesters.is_empty())
+        {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Can not delete tracker {subject_id} with live requesters"
+                ),
+            });
+        }
+
         let mut cleanup_errors = Vec::new();
 
         let tracker = match ctx
@@ -348,6 +367,19 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
+        // Same guard as trackers: never purge under live requesters.
+        if self
+            .subjects
+            .get(&subject_id)
+            .is_some_and(|entry| !entry.requesters.is_empty())
+        {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Can not delete governance {subject_id} with live requesters"
+                ),
+            });
+        }
+
         let mut cleanup_errors = Vec::new();
 
         let governance = match ctx
@@ -438,7 +470,7 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let tracker_actor: ActorRef<Tracker> = ctx
+        let tracker_actor: ActorRef<Tracker> = match ctx
             .create_child(
                 &subject_id.to_string(),
                 Tracker::initial(InitParamsTracker {
@@ -449,7 +481,15 @@ impl SubjectManager {
                     public_key: self.our_key.clone(),
                 }),
             )
-            .await?;
+            .await
+        {
+            Ok(actor) => actor,
+            // A concurrent `Up` won the race: reuse the winner.
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<Tracker>(&subject_id.to_string()).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         self.run_tracker_sink(ctx, tracker_actor).await
     }
@@ -461,7 +501,7 @@ impl SubjectManager {
         metadata: crate::subject::Metadata,
         ledger: Ledger,
     ) -> Result<(), ActorError> {
-        let tracker_actor: ActorRef<Tracker> = ctx
+        let tracker_actor: ActorRef<Tracker> = match ctx
             .create_child(
                 &subject_id.to_string(),
                 Tracker::initial(InitParamsTracker {
@@ -472,7 +512,14 @@ impl SubjectManager {
                     public_key: self.our_key.clone(),
                 }),
             )
-            .await?;
+            .await
+        {
+            Ok(actor) => actor,
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<Tracker>(&subject_id.to_string()).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         self.run_tracker_sink(ctx, tracker_actor.clone()).await?;
 
@@ -526,7 +573,7 @@ impl SubjectManager {
             return Ok(());
         }
 
-        let governance_actor: ActorRef<Governance> = ctx
+        let governance_actor: ActorRef<Governance> = match ctx
             .create_child(
                 &subject_id.to_string(),
                 Governance::initial((
@@ -536,7 +583,14 @@ impl SubjectManager {
                     self.is_service,
                 )),
             )
-            .await?;
+            .await
+        {
+            Ok(actor) => actor,
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<Governance>(&subject_id.to_string()).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         self.run_governance_sink(ctx, governance_actor.clone())
             .await?;

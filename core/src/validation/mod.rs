@@ -166,12 +166,27 @@ impl Validation {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(ValiCoordinatorMessage::NetworkValidation {
                     validation_req: Box::new(self.request.clone()),
-                    node_key: signer,
+                    node_key: signer.clone(),
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to validation coordinator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan validation coordinator"
+                    );
+                }
+                return Err(e);
+            }
         } else {
             let child = ctx
                 .create_child(
@@ -182,7 +197,7 @@ impl Validation {
                         init_state: self.init_state.clone(),
                         governance_id: self
                             .request
-                            .content().get_governance_id().expect("The build process verified that the event request is valid")
+                            .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?
                             ,
                         gov_version: self.request.content().get_gov_version(),
                         sn: self.request.content().get_sn(),
@@ -207,13 +222,28 @@ impl Validation {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(ValiWorkerMessage::LocalValidation {
                     validation_req: Box::new(self.request.clone()),
                     request_id: self.request_id.to_string(),
                     version: self.version,
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to local validator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan local validator"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -600,7 +630,7 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
+                                        .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?,
                                     RebootType::Normal
                                 )
                                 .await
@@ -629,7 +659,7 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
+                                        .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?,
                                     RebootType::Diff
                                 )
                                 .await
@@ -762,7 +792,7 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
+                                        .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?,
                                     RebootType::TimeOut
                                 )
                                 .await

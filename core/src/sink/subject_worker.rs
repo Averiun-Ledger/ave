@@ -280,7 +280,7 @@ impl Handler<Self> for SinkSubjectWorker {
                             if let Err(e) = self_ref
                                 .tell(
                                     SinkSubjectWorkerMessage::ContinueCatchUp {
-                                        from_sn: sn + 1,
+                                        from_sn: sn.saturating_add(1),
                                         batch_size: self
                                             .server
                                             .catch_up_batch_size,
@@ -536,7 +536,7 @@ impl SinkSubjectWorker {
                     let self_ref = ctx.reference().await?;
                     if let Err(e) = self_ref
                         .tell(SinkSubjectWorkerMessage::ContinueCatchUp {
-                            from_sn: last_sn + 1,
+                            from_sn: last_sn.saturating_add(1),
                             batch_size: self.server.catch_up_batch_size,
                             generation,
                         })

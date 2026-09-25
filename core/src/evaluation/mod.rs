@@ -162,12 +162,29 @@ impl Evaluation {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(EvalCoordinatorMessage::NetworkEvaluation {
                     evaluation_req: Box::new(self.request.clone()),
-                    node_key: signer,
+                    node_key: signer.clone(),
                 })
-                .await?
+                .await
+            {
+                // The child would stay idle forever under the signer
+                // name: stop the orphan before propagating.
+                warn!(
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to evaluation coordinator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan evaluation coordinator"
+                    );
+                }
+                return Err(e);
+            }
         } else {
             let child = ctx
                 .create_child(
@@ -192,11 +209,26 @@ impl Evaluation {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(EvalWorkerMessage::LocalEvaluation {
                     evaluation_req: self.request.clone(),
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to local evaluator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan local evaluator"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         Ok(())

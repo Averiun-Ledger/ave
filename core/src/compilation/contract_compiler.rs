@@ -252,7 +252,9 @@ impl ContractCompiler {
             contract: DigestIdentifier::default(),
             hash,
             our_key,
-            next_nonce: 0,
+            // Random start: sequential nonces from zero are trivially
+            // predictable to any peer watching the wire.
+            next_nonce: fastrand::u64(..),
             gov_version: 0,
             compilers: BTreeSet::new(),
             evaluators: BTreeSet::new(),
@@ -1129,6 +1131,118 @@ impl ContractCompiler {
         Ok(Some(artifact))
     }
 
+    /// Re-verifies persisted bytes against the ledger anchor on the
+    /// reconcile skip path (contract unchanged): a node that never
+    /// serves would otherwise keep corrupt bytes on disk indefinitely
+    /// — execution is unaffected (the in-memory module was verified at
+    /// load) but the next serve or reboot would trip on them. Returns
+    /// whether the artifact is healthy; unhealthy artifacts are
+    /// discarded (anchor kept, module kept) for the caller to heal.
+    async fn reverify_persisted(
+        hash: HashAlgorithm,
+        ctx: &mut ActorContext<Self>,
+        contract_name: &str,
+        contract_path: &std::path::Path,
+    ) -> Result<bool, ActorError> {
+        let register_path = Self::register_path(ctx);
+        let register = match ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+        {
+            Ok(register) => register,
+            Err(e) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not access contract register for anchor: {e}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        let anchor = match register
+            .ask(ContractRegisterMessage::GetAnchor {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Anchor(anchor)) => anchor,
+            Ok(_) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::UnexpectedResponse {
+                        path: register_path.clone(),
+                        expected: "ContractRegisterResponse::Anchor".to_owned(),
+                    },
+                )
+                .await);
+            }
+            Err(e) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read contract anchor: {e}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        let Some(anchor) = anchor else {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "No ledger anchor for committed contract {contract_name}"
+                    ),
+                },
+            )
+            .await);
+        };
+        let healthy = match pipeline::load_artifact_wasm(contract_path).await
+        {
+            Ok(wasm_bytes) => {
+                match pipeline::hash_bytes(hash, &wasm_bytes, "reconcile reverify")
+                {
+                    Ok(wasm_hash) => wasm_hash == anchor,
+                    Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        };
+        if healthy {
+            return Ok(true);
+        }
+        warn!(
+            contract_name = %contract_name,
+            "Persisted artifact failed reconcile re-verification, discarding it"
+        );
+        if let Err(e) = CompilerSupport::discard_persisted_artifact(
+            ctx,
+            contract_name,
+            contract_path,
+            &register,
+            false,
+        )
+        .await
+        {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "Can not discard unverified artifact {contract_name}: {e}"
+                    ),
+                },
+            )
+            .await);
+        }
+        Ok(false)
+    }
+
     /// Terminal handling of a fetch error: fatal local problems (disk,
     /// register, helpers, engine) bring the node down controlled, like
     /// the compile path; anything else ends the fetch — the next
@@ -1158,6 +1272,10 @@ impl ContractCompiler {
             error = %error,
             "Contract artifact fetch failed"
         );
+        // Cancel the timer with the fetch: a late timeout firing on an
+        // empty fetch is ignored by its guards, but one live timer per
+        // fetch is the invariant.
+        self.cancel_fetch_timer(ctx);
         self.fetch = None;
         if let Some(contract_name) = contract_name {
             Self::evict_module(ctx, &contract_name).await?;
@@ -1473,29 +1591,75 @@ impl Handler<Self> for ContractCompiler {
                             self.serving_cache = None;
 
                             let register_path = Self::register_path(ctx);
-                            // The ledger anchor, when recorded, pins
-                            // the wasm bytes this compile must produce
-                            // or load: the anchor is recorded before
-                            // this action runs, so it always belongs to
-                            // the committed contract.
-                            let expected_wasm_hash = match ctx
+                            // The ledger anchor pins the wasm bytes
+                            // this compile must produce or load: it is
+                            // recorded at commit before this action
+                            // runs, so a missing anchor is a local
+                            // register failure, never a miss — fail
+                            // loud instead of persisting unverified
+                            // bytes as official.
+                            let register = match ctx
                                 .system()
                                 .get_actor::<ContractRegister>(&register_path)
                                 .await
                             {
-                                Ok(register) => match register
-                                    .ask(ContractRegisterMessage::GetAnchor {
-                                        contract_name: contract_name.clone(),
-                                    })
-                                    .await
-                                {
-                                    Ok(ContractRegisterResponse::Anchor(
-                                        anchor,
-                                    )) => anchor,
-                                    _ => None,
-                                },
-                                Err(_) => None,
+                                Ok(register) => register,
+                                Err(e) => {
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not access contract register for anchor: {e}"
+                                            ),
+                                        },
+                                    )
+                                    .await);
+                                }
                             };
+                            let expected_wasm_hash = match register
+                                .ask(ContractRegisterMessage::GetAnchor {
+                                    contract_name: contract_name.clone(),
+                                })
+                                .await
+                            {
+                                Ok(ContractRegisterResponse::Anchor(
+                                    anchor,
+                                )) => anchor,
+                                Ok(_) => {
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::UnexpectedResponse {
+                                            path: register_path.clone(),
+                                            expected:
+                                                "ContractRegisterResponse::Anchor"
+                                                    .to_owned(),
+                                        },
+                                    )
+                                    .await);
+                                }
+                                Err(e) => {
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not read contract anchor: {e}"
+                                            ),
+                                        },
+                                    )
+                                    .await);
+                                }
+                            };
+                            if expected_wasm_hash.is_none() {
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "No ledger anchor for committed contract {contract_name}"
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
                             let (module, metadata) =
                                 match CompilerSupport::compile_or_load_registered(
                                     self.hash,
@@ -1548,6 +1712,28 @@ impl Handler<Self> for ContractCompiler {
                                     std::time::Duration::default(),
                                 );
                             }
+                            // The skip guard alone would keep corrupt
+                            // bytes on disk forever on a node that never
+                            // serves: re-verify against the anchor.
+                            if !Self::reverify_persisted(
+                                self.hash,
+                                ctx,
+                                &contract_name,
+                                &contract_path,
+                            )
+                            .await?
+                            {
+                                self.serving_cache = None;
+                                self.contract = DigestIdentifier::default();
+                                if let Err(e) = ctx.schedule_once(
+                                    Duration::ZERO,
+                                    ContractCompilerMessage::HealArtifact {
+                                        attempts: 1,
+                                    },
+                                ) {
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                            }
                             debug!(
                                 msg_type = "Compile",
                                 contract_name = %contract_name,
@@ -1588,6 +1774,28 @@ impl Handler<Self> for ContractCompiler {
                         // Already obtained: an unrelated governance event
                         // must not reset anything.
                         if contract_hash == self.contract {
+                            // Same re-verification as the compile path:
+                            // disk corruption must not linger on a node
+                            // that never serves.
+                            if !Self::reverify_persisted(
+                                self.hash,
+                                ctx,
+                                &contract_name,
+                                &contract_path,
+                            )
+                            .await?
+                            {
+                                self.serving_cache = None;
+                                self.contract = DigestIdentifier::default();
+                                if let Err(e) = ctx.schedule_once(
+                                    Duration::ZERO,
+                                    ContractCompilerMessage::HealArtifact {
+                                        attempts: 1,
+                                    },
+                                ) {
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                            }
                             debug!(
                                 msg_type = "Fetch",
                                 contract_name = %contract_name,
@@ -1919,6 +2127,19 @@ impl Handler<Self> for ContractCompiler {
                 request_nonce,
                 sender,
             } => {
+                // Requests carry a whitelist gate but responses did not:
+                // ignore answers from peers outside the known compiler
+                // and evaluator sets.
+                if !self.compilers.contains(&sender)
+                    && !self.evaluators.contains(&sender)
+                {
+                    debug!(
+                        msg_type = "ArtifactProbeResponse",
+                        sender = %sender,
+                        "Probe response from unknown peer, dropping"
+                    );
+                    return Ok(CompilerResponse::Ok);
+                }
                 // Probe round in flight.
                 let in_probe_round = self.fetch.as_ref().is_some_and(|fetch| {
                     fetch.nonce == request_nonce
@@ -1938,9 +2159,14 @@ impl Handler<Self> for ContractCompiler {
                             else {
                                 return Ok(CompilerResponse::Ok);
                             };
-                            // The chosen peer is being fetched now: it no
-                            // longer counts as a pending answer.
-                            round.pending.remove(&sender);
+                            // Stale, duplicate or already-burned answers
+                            // (the nonce is reused across re-probes) must
+                            // not readmit the peer as fetch origin.
+                            if !round.pending.remove(&sender)
+                                || round.failed.contains(&sender)
+                            {
+                                return Ok(CompilerResponse::Ok);
+                            }
                             let round = std::mem::take(round);
                             self.start_fetch_from(ctx, round, sender).await?;
                         }

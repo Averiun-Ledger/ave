@@ -19,6 +19,11 @@ pub use ave_common::sink::{
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Sane upper bounds: pages and batches above these exhaust memory or
+/// bandwidth long before they help throughput.
+const MAX_LEDGER_BATCH_SIZE: usize = 1_000_000;
+const MAX_SYNC_PAGE_SIZE: usize = 10_000;
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -186,6 +191,19 @@ impl Config {
                 component: "node.approval".to_string(),
                 reason: e.to_string(),
             })?;
+        self.network
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "node.network".to_string(),
+                reason: e.to_string(),
+            })?;
+        #[cfg(feature = "test")]
+        if self.compiler.request_timeout_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "node.compiler.request_timeout_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
 
         if let Some(spec) = &self.spec {
             spec.validate().map_err(|e| Error::InvalidConfiguration {
@@ -227,6 +245,14 @@ impl SyncConfig {
             return Err(Error::InvalidConfiguration {
                 component: "sync.ledger_batch_size".to_string(),
                 reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.ledger_batch_size > MAX_LEDGER_BATCH_SIZE {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.ledger_batch_size".to_string(),
+                reason: format!(
+                    "must not exceed {MAX_LEDGER_BATCH_SIZE}"
+                ),
             });
         }
 
@@ -555,6 +581,12 @@ impl TrackerSyncConfig {
             return Err(Error::InvalidConfiguration {
                 component: "sync.tracker.page_size".to_string(),
                 reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.page_size > MAX_SYNC_PAGE_SIZE {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.page_size".to_string(),
+                reason: format!("must not exceed {MAX_SYNC_PAGE_SIZE}"),
             });
         }
         if self.response_timeout_secs == 0 {

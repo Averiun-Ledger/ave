@@ -424,11 +424,11 @@ impl SinkReplayState {
             public_key.to_owned(),
         );
 
-        Ok(build_data_to_sink(
+        build_data_to_sink(
             data,
             replay_parts.event_request,
             sink_timestamp,
-        ))
+        )
     }
 
     fn apply_success(
@@ -677,8 +677,8 @@ impl EventLedgerDataForSink {
 fn data_to_sink_event(
     data: DataForSink,
     event: Option<EventRequest>,
-) -> DataToSinkEvent {
-    match (event, data.event_data_ledger) {
+) -> Result<DataToSinkEvent, ActorError> {
+    Ok(match (event, data.event_data_ledger) {
         (
             Some(EventRequest::Create(..)),
             EventLedgerDataForSink::Create { state },
@@ -779,26 +779,40 @@ fn data_to_sink_event(
                 gov_version: data.gov_version,
             }
         }
-        _ => {
-            unreachable!(
-                "EventLedgerDataForSink is created according to protocols and protocols according to EventRequest"
-            )
+        (event, ledger_data) => {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Mismatched sink event data: request {request}, ledger {ledger}",
+                    request = event
+                        .as_ref()
+                        .map_or("none", |_| "present"),
+                    ledger = match ledger_data {
+                        EventLedgerDataForSink::Create { .. } => "create",
+                        EventLedgerDataForSink::FactFull { .. } => "fact-full",
+                        EventLedgerDataForSink::FactOpaque { .. } => "fact-opaque",
+                        EventLedgerDataForSink::Transfer { .. } => "transfer",
+                        EventLedgerDataForSink::Confirm { .. } => "confirm",
+                        EventLedgerDataForSink::Reject => "reject",
+                        EventLedgerDataForSink::Eol => "eol",
+                    },
+                ),
+            });
         }
-    }
+    })
 }
 
 pub fn build_data_to_sink(
     data: DataForSink,
     event: Option<EventRequest>,
     sink_timestamp: u64,
-) -> DataToSink {
-    DataToSink {
-        payload: data_to_sink_event(data.clone(), event),
+) -> Result<DataToSink, ActorError> {
+    Ok(DataToSink {
+        payload: data_to_sink_event(data.clone(), event)?,
         public_key: data.public_key,
         event_request_timestamp: data.event_request_timestamp,
         event_ledger_timestamp: data.event_ledger_timestamp,
         sink_timestamp,
-    }
+    })
 }
 
 pub fn replay_sink_events(
@@ -831,7 +845,9 @@ pub fn replay_sink_events(
         }
 
         let Some(state) = replay_state.as_mut() else {
-            unreachable!("replay state is initialized above");
+            return Err(ActorError::Functional {
+                description: "Sink replay state is not initialized".to_owned(),
+            });
         };
 
         let sn = ledger.sn;
@@ -1994,7 +2010,7 @@ where
         event: Option<EventRequest>,
     ) -> Result<(), ActorError> {
         let data_to_sink = DataToSink {
-            payload: data_to_sink_event(data.clone(), event),
+            payload: data_to_sink_event(data.clone(), event)?,
             public_key: data.public_key,
             event_request_timestamp: data.event_request_timestamp,
             event_ledger_timestamp: data.event_ledger_timestamp,
@@ -2007,11 +2023,9 @@ where
 
     async fn notify_reliable_sinks(
         &self,
-        _ctx: &mut ActorContext<Self>,
-        _data: DataToSink,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
+        ctx: &mut ActorContext<Self>,
+        data: DataToSink,
+    ) -> Result<(), ActorError>;
 
     async fn get_ledger(
         &self,
@@ -2020,7 +2034,7 @@ where
         hi_sn: u64,
     ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
         if let Some(lo_sn) = lo_sn {
-            let actual_sn = lo_sn + 1;
+            let actual_sn = lo_sn.saturating_add(1);
             if hi_sn < actual_sn {
                 Ok((Vec::new(), true))
             } else {
@@ -2083,7 +2097,11 @@ where
         batch_size: usize,
     ) -> Result<Vec<DataToSink>, ActorError> {
         let public_key = self.our_key().to_string();
-        let hi_sn = from_sn + batch_size as u64;
+        // Bounded scan from zero: starting at `from_sn` would skip the
+        // create event the replay state folds from, so pagination stays
+        // linear per page (quadratic total on long ledgers — a snapshot
+        // would be needed to do better).
+        let hi_sn = from_sn.saturating_add(batch_size as u64);
         let (ledgers, _is_all) = self.get_ledger(ctx, None, hi_sn).await?;
         let sink_timestamp = TimeStamp::now().as_nanos();
         let page = replay_sink_events(

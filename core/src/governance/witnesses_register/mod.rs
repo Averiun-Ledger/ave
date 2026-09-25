@@ -22,7 +22,7 @@ use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span, warn};
+use tracing::{Span, debug, error, info_span};
 
 use crate::db::Storable;
 
@@ -474,19 +474,30 @@ impl CreatorWitnessGrantHistory {
             (Some(current_from), Some(current_grant), Some(next_grant))
                 if current_grant != next_grant =>
             {
-                self.closed.push(CreatorWitnessGrantRange {
-                    interval: Interval::new(*current_from, version - 1),
-                    grant: current_grant.clone(),
-                });
+                // A grant created and changed in the same version never
+                // held: pushing `[version - 1, version]` would make it
+                // retroactively active.
+                if let Some(interval) =
+                    Interval::closed_before(*current_from, version)
+                {
+                    self.closed.push(CreatorWitnessGrantRange {
+                        interval,
+                        grant: current_grant.clone(),
+                    });
+                }
                 self.current_from = Some(version);
                 self.current_grant = Some(next_grant.clone());
             }
             (Some(_), Some(_), Some(_)) => {}
             (Some(current_from), Some(current_grant), None) => {
-                self.closed.push(CreatorWitnessGrantRange {
-                    interval: Interval::new(*current_from, version - 1),
-                    grant: current_grant.clone(),
-                });
+                if let Some(interval) =
+                    Interval::closed_before(*current_from, version)
+                {
+                    self.closed.push(CreatorWitnessGrantRange {
+                        interval,
+                        grant: current_grant.clone(),
+                    });
+                }
                 self.current_from = None;
                 self.current_grant = None;
             }
@@ -1092,8 +1103,13 @@ impl Handler<Self> for WitnessesRegister {
                     )
                     .await?;
 
+                // Tag with the requested version clamped by the local
+                // ledger tip: `gov_sn` counts every event while versions
+                // count successes, so tagging raw `gov_sn` makes the
+                // requester adopt an sn as its version and refetch
+                // forever once a failed event exists.
                 return Ok(WitnessesRegisterResponse::CurrentWitnessSubjects {
-                    governance_version: self.gov_sn,
+                    governance_version: governance_version.min(self.gov_sn),
                     items,
                     next_cursor,
                 });
@@ -1659,10 +1675,7 @@ impl PersistentActor for WitnessesRegister {
                                 witness_namespace.get_mut(ns)
                                 && let Some(last) = last.take()
                             {
-                                interval.insert(Interval {
-                                    lo: last,
-                                    hi: *version - 1,
-                                });
+                                interval.close_open(last, *version);
                             }
                         }
                     }
@@ -1739,10 +1752,7 @@ impl PersistentActor for WitnessesRegister {
                                 witness_namespace.get_mut(ns)
                                 && let Some(last) = last.take()
                             {
-                                interval.insert(Interval {
-                                    lo: last,
-                                    hi: *version - 1,
-                                });
+                                interval.close_open(last, *version);
                             }
                         }
                     }
@@ -1798,7 +1808,7 @@ impl PersistentActor for WitnessesRegister {
                         event_visibility.clone(),
                     );
                 } else {
-                    warn!(
+                    error!(
                         msg_type = "UpdateTrackerVisibility",
                         event_type = "UpdateTrackerVisibility",
                         subject_id = %subject_id,

@@ -1381,6 +1381,135 @@ impl DistriWorker {
 
         Ok(())
     }
+
+    /// Processes an inbound ledger batch under the shared distribution
+    /// error policy: `FunctionalCritical` fails the node loud (like the
+    /// last-event path) instead of being discarded in the tell handler.
+    async fn handle_ledger_distribution(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        mut ledger: Vec<Ledger>,
+        is_all: bool,
+        transfer_event: Option<Box<Ledger>>,
+        info: ComunicateInfo,
+        sender: PublicKey,
+    ) -> Result<(), ActorError> {
+        if !ledger.windows(2).all(|w| w[0].sn <= w[1].sn) {
+            ledger.sort_by_key(|event| event.sn);
+        }
+
+        let subject_id = ledger[0].get_subject_id();
+        let ledger_count = ledger.len();
+        let first_sn = ledger[0].sn;
+
+        if !self
+            .ensure_next_sn_or_request_update(
+                ctx,
+                &subject_id,
+                first_sn,
+                &info,
+                sender.clone(),
+            )
+            .await?
+        {
+            return Ok(());
+        }
+
+        let common = self
+            .check_auth_common(ctx, sender.clone(), &info, &ledger)
+            .await?;
+        let subject_id = ledger[0].get_subject_id();
+
+        let transfer_simulation = if let Some(ref transfer_event) =
+            transfer_event
+        {
+            if !common.is_gov {
+                match self
+                    .transfer_verifier
+                    .verify_and_simulate(
+                        ctx,
+                        &subject_id,
+                        &ledger,
+                        transfer_event,
+                    )
+                    .await?
+                {
+                    TransferSimulationResult::Witness => {
+                        Some(TransferSimulationResult::Witness)
+                    }
+                    TransferSimulationResult::NotWitness => {
+                        return Err(
+                            DistributorError::ReceiverNoAccess.into()
+                        );
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let verified_transfer_sn = if !common.is_gov {
+            match get_verified_transfer_sn(
+                ctx,
+                &common.governance_id,
+                &subject_id,
+            )
+            .await
+            {
+                Ok(v) => v
+                    .filter(|(_, verified_sender)| {
+                        *verified_sender == sender
+                    })
+                    .map(|(sn, _)| sn),
+                Err(e) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "get_verified_transfer_sn failed"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let pending_ledger = ledger;
+        let sender_is_all = is_all;
+
+        self.process_ledger_chunks(
+            ctx,
+            pending_ledger,
+            &common,
+            TransferBatch {
+                event: transfer_event.as_deref(),
+                simulation: transfer_simulation,
+                verified_sn: verified_transfer_sn,
+            },
+            DistributionContext {
+                info,
+                sender: sender.clone(),
+                subject_id: subject_id.clone(),
+                sender_is_all,
+                ledger_count,
+            },
+        )
+        .await?;
+
+        debug!(
+            msg_type = "LedgerDistribution",
+            subject_id = %subject_id,
+            sender = %sender,
+            ledger_count = ledger_count,
+            is_all = is_all,
+            "Ledger distribution processed successfully"
+        );
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1563,7 +1692,7 @@ impl Handler<Self> for DistriWorker {
                 .await?;
             }
             DistriWorkerMessage::LedgerDistribution {
-                mut ledger,
+                ledger,
                 is_all,
                 transfer_event,
                 info,
@@ -1577,120 +1706,25 @@ impl Handler<Self> for DistriWorker {
                     );
                     return Err(DistributorError::EmptyEvents.into());
                 }
-
-                if !ledger.windows(2).all(|w| w[0].sn <= w[1].sn) {
-                    ledger.sort_by_key(|event| event.sn);
-                }
-
                 let subject_id = ledger[0].get_subject_id();
-                let ledger_count = ledger.len();
-                let first_sn = ledger[0].sn;
-
-                if !self
-                    .ensure_next_sn_or_request_update(
+                let result = self
+                    .handle_ledger_distribution(
                         ctx,
-                        &subject_id,
-                        first_sn,
-                        &info,
+                        ledger,
+                        is_all,
+                        transfer_event,
+                        info,
                         sender.clone(),
                     )
-                    .await?
-                {
-                    return Ok(());
-                }
-
-                let common = self
-                    .check_auth_common(ctx, sender.clone(), &info, &ledger)
-                    .await?;
-                let subject_id = ledger[0].get_subject_id();
-
-                let transfer_simulation = if let Some(ref transfer_event) =
-                    transfer_event
-                {
-                    if !common.is_gov {
-                        match self
-                            .transfer_verifier
-                            .verify_and_simulate(
-                                ctx,
-                                &subject_id,
-                                &ledger,
-                                transfer_event,
-                            )
-                            .await?
-                        {
-                            TransferSimulationResult::Witness => {
-                                Some(TransferSimulationResult::Witness)
-                            }
-                            TransferSimulationResult::NotWitness => {
-                                return Err(
-                                    DistributorError::ReceiverNoAccess.into()
-                                );
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                let verified_transfer_sn = if !common.is_gov {
-                    match get_verified_transfer_sn(
-                        ctx,
-                        &common.governance_id,
-                        &subject_id,
-                    )
-                    .await
-                    {
-                        Ok(v) => v
-                            .filter(|(_, verified_sender)| {
-                                *verified_sender == sender
-                            })
-                            .map(|(sn, _)| sn),
-                        Err(e) => {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "get_verified_transfer_sn failed"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let pending_ledger = ledger;
-                let sender_is_all = is_all;
-
-                self.process_ledger_chunks(
+                    .await;
+                handle_distri_error!(
                     ctx,
-                    pending_ledger,
-                    &common,
-                    TransferBatch {
-                        event: transfer_event.as_deref(),
-                        simulation: transfer_simulation,
-                        verified_sn: verified_transfer_sn,
-                    },
-                    DistributionContext {
-                        info,
-                        sender: sender.clone(),
-                        subject_id: subject_id.clone(),
-                        sender_is_all,
-                        ledger_count,
-                    },
-                )
-                .await?;
-
-                debug!(
-                    msg_type = "LedgerDistribution",
-                    subject_id = %subject_id,
-                    sender = %sender,
-                    ledger_count = ledger_count,
-                    is_all = is_all,
-                    "Ledger distribution processed successfully"
-                );
+                    result,
+                    "LedgerDistribution",
+                    subject_id,
+                    "Ledger distribution failed",
+                    sender = &sender
+                )?;
             }
         };
 

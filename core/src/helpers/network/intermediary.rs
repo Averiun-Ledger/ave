@@ -38,6 +38,7 @@ use super::ActorMessage;
 #[cfg(feature = "test")]
 use super::test_faults;
 use super::{NetworkMessage, service::NetworkSender};
+use crate::metrics::try_core_metrics;
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
 use ave_network::Command as NetworkCommand;
@@ -100,6 +101,14 @@ impl Intermediary {
                                         break;
                                     }
                                     _ => {
+                                        if let Some(metrics) =
+                                            try_core_metrics()
+                                        {
+                                            metrics
+                                                .observe_network_ingress_drop(
+                                                    e.cause(),
+                                                );
+                                        }
                                         warn!(
                                             error = %e,
                                             "Intermediary command failed with non-fatal error"

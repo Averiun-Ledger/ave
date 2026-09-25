@@ -515,7 +515,13 @@ impl GovernanceData {
     }
 
     pub fn to_value_wrapper(&self) -> ValueWrapper {
-        ValueWrapper(serde_json::to_value(self).expect("It cannot fail; it does not contain a map with keys other than strings"))
+        // Serializing the governance itself can not fail (all map keys
+        // are strings); the fallback only keeps the panic-free
+        // invariant and never runs.
+        ValueWrapper(
+            serde_json::to_value(self)
+                .unwrap_or(serde_json::Value::Null),
+        )
     }
 
     pub fn check_basic_gov(&self) -> bool {

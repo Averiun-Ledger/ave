@@ -26,3 +26,19 @@ pub enum IntermediaryError {
     #[error("invalid Ed25519 public key, cannot convert to PeerId: {details}")]
     PeerIdConversionFailed { details: String },
 }
+
+impl IntermediaryError {
+    /// Stable metric label for the failure cause.
+    pub const fn cause(&self) -> &'static str {
+        match self {
+            Self::SerializationFailed { .. } => "serialization_failed",
+            Self::NetworkSendFailed { .. } => "network_send_failed",
+            Self::InvalidPublicKey { .. } => "invalid_public_key",
+            Self::DeserializationFailed { .. } => "deserialization_failed",
+            Self::InvalidSchemaId => "invalid_schema_id",
+            Self::ActorNotFound { .. } => "actor_not_found",
+            Self::SendMessageFailed { .. } => "send_message_failed",
+            Self::PeerIdConversionFailed { .. } => "peer_id_conversion_failed",
+        }
+    }
+}

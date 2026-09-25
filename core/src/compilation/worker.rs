@@ -1202,13 +1202,33 @@ impl Handler<Self> for CompileWorker {
                     )
                     .await?;
 
-                child
+                if let Err(e) = child
                     .tell(CompileWorkerMessage::NetworkCompilation {
                         compilation_req,
                         sender: sender.clone(),
                         info: info.clone(),
                     })
-                    .await?;
+                    .await
+                {
+                    // The child would stay idle forever under the
+                    // request name, blocking retries on the "already
+                    // working" branch: stop it before propagating.
+                    warn!(
+                        msg_type = "NetworkRequest",
+                        request_id = %info.request_id,
+                        error = %e,
+                        "Failed to dispatch to ephemeral worker, stopping orphan"
+                    );
+                    if let Err(stop_err) = child.ask_stop().await {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            request_id = %info.request_id,
+                            error = %stop_err,
+                            "Failed to stop orphan ephemeral worker"
+                        );
+                    }
+                    return Err(e);
+                }
 
                 debug!(
                     msg_type = "NetworkRequest",

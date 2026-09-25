@@ -322,11 +322,20 @@ impl<'de> Deserialize<'de> for CreatorQuantity {
                 Ok(Self::Infinity)
             }
             serde_json::Value::Number(n) if n.is_u64() => {
-                Ok(Self::Quantity(n.as_u64().ok_or_else(|| {
+                let raw = n.as_u64().ok_or_else(|| {
                     serde::de::Error::custom(
                         "Quantity must be a number or 'infinity'",
                     )
-                })? as u32))
+                })?;
+                // Never truncate: a quantity above `u32::MAX` is
+                // rejected so the interpreted value always matches
+                // the signed one.
+                let quantity = u32::try_from(raw).map_err(|_| {
+                    serde::de::Error::custom(
+                        "Quantity exceeds the maximum (u32::MAX)",
+                    )
+                })?;
+                Ok(Self::Quantity(quantity))
             }
             _ => Err(serde::de::Error::custom(
                 "Quantity must be a number or 'infinity'",
@@ -627,6 +636,11 @@ impl Quorum {
     }
 
     pub fn check_quorum(&self, total_members: u32, signers: u32) -> bool {
+        // An empty committee never reaches quorum: approving with zero
+        // signatures (`Fixed(0)`/`0 >= 0`) would bypass the phase.
+        if total_members == 0 {
+            return false;
+        }
         match self {
             Self::Fixed(fixed) => {
                 let min = std::cmp::min(fixed, &total_members);

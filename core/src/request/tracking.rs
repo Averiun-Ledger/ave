@@ -23,8 +23,12 @@ impl RequestTracking {
     pub fn new(size: usize) -> Self {
         let size = if size == 0 { 100 } else { size };
 
+        // `size` is non-zero by construction; the fallback below only
+        // silences the type system and never runs.
+        debug_assert!(size > 0);
+        let size = NonZeroUsize::new(size).unwrap_or(NonZeroUsize::MIN);
         Self {
-            cache: LruCache::new(NonZeroUsize::new(size).expect("size > 0")),
+            cache: LruCache::new(size),
         }
     }
 }

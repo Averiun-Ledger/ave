@@ -177,6 +177,28 @@ fn vendor_dir_for_contract() -> PathBuf {
     PathBuf::from(".").join("..").join("..").join(VENDOR_DIR)
 }
 
+/// Kills a timed-out cargo build with its whole process tree: on Unix
+/// the build runs in its own process group, so one signal reaps cargo
+/// and every rustc/linker child instead of orphaning them.
+async fn kill_build_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: `killpg` with `SIGKILL` touches only the build group
+        // derived from our own child pid.
+        let group_killed =
+            unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) == 0 };
+        if group_killed {
+            return;
+        }
+    }
+    if let Err(error) = child.kill().await {
+        debug!(
+            error = %error,
+            "Failed to kill cargo build process after timeout"
+        );
+    }
+}
+
 fn build_output_wasm_path(contract_path: &Path) -> PathBuf {
     contract_path
         .join(BUILD_TARGET_DIR)
@@ -200,11 +222,17 @@ fn cargo_config(
     fn pattern(name: &str) -> String {
         format!("{{{name}}}")
     }
+    // The placeholders sit inside quoted TOML strings: escape values
+    // so adversarial paths can not break the manifest syntax (or, when
+    // paths differ per machine, break determinism across compilers).
+    fn escape_toml(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    }
     config = config
-        .replace(&pattern("target_dir"), &target_dir.to_string_lossy())
-        .replace(&pattern("cargo_home"), &cargo_home.to_string_lossy())
-        .replace(&pattern("rust_src"), &rust_src.to_string_lossy())
-        .replace(&pattern("rustc_commit"), rustc_commit);
+        .replace(&pattern("target_dir"), &escape_toml(&target_dir.to_string_lossy()))
+        .replace(&pattern("cargo_home"), &escape_toml(&cargo_home.to_string_lossy()))
+        .replace(&pattern("rust_src"), &escape_toml(&rust_src.to_string_lossy()))
+        .replace(&pattern("rustc_commit"), &escape_toml(rustc_commit));
 
     if let Some(vendor_dir) = vendor_dir {
         config.push_str(&format!(
@@ -238,6 +266,13 @@ async fn build_contract(
         command.arg("--offline");
     }
 
+    // Own process group: a timeout kills cargo and every rustc/linker
+    // child with it, instead of orphaning them over a build dir that
+    // is removed right after.
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
     let mut child =
         command
             .spawn()
@@ -250,12 +285,7 @@ async fn build_contract(
             details: e.to_string(),
         })?,
         Err(_) => {
-            if let Err(error) = child.kill().await {
-                debug!(
-                    error = %error,
-                    "Failed to kill cargo build process after timeout"
-                );
-            }
+            kill_build_tree(&mut child).await;
             return Err(CompilerError::BuildTimeout {
                 secs: BUILD_TIMEOUT.as_secs(),
             });
@@ -452,6 +482,20 @@ pub async fn persist_artifact(
             details: e.to_string(),
         }
     })?;
+    // A new directory entry lives in its parent: fsync the parent so a
+    // crash can not lose the whole entry (only a recompile, never
+    // corruption — but avoid even that). Best-effort: persistence of
+    // the files themselves is already fsynced below.
+    if let Some(parent) = contract_path.parent()
+        && let Ok(dir) = fs::File::open(parent).await
+        && let Err(e) = dir.sync_all().await
+    {
+        debug!(
+            error = %e,
+            path = %parent.display(),
+            "Failed to fsync artifact parent directory"
+        );
+    }
 
     // wasm first, precompiled second: the precompiled file marks a
     // complete artifact (readers require it before trusting the wasm).
@@ -580,7 +624,10 @@ pub fn hash_bytes(
     bytes: &[u8],
     context: &'static str,
 ) -> Result<DigestIdentifier, CompilerError> {
-    hash_borsh(&*hash.hasher(), &bytes.to_vec()).map_err(|e| {
+    // Slices serialize exactly like `Vec` in Borsh (length prefix plus raw
+    // bytes), so hashing the slice directly keeps every digest identical
+    // while sparing a multi-megabyte clone on hot paths.
+    hash_borsh(&*hash.hasher(), &bytes).map_err(|e| {
         CompilerError::SerializationError {
             context,
             details: e.to_string(),

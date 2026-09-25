@@ -325,12 +325,42 @@ impl Handler<Self> for Distribution {
                             })?,
                     };
 
-                    if let Err(e) =
-                        self.create_distributor(ctx, ledger, entry.node).await
+                    if let Err(e) = self
+                        .create_distributor(ctx, ledger, entry.node.clone())
+                        .await
                     {
+                        // A failed coordinator would leave its witness
+                        // in the set forever (its response never comes):
+                        // drop the witness and distribute to the rest
+                        // instead of hanging the request.
                         Self::observe_failure("coordinator_creation_failed");
-                        return Err(e);
+                        warn!(
+                            msg_type = "Create",
+                            subject_id = %self.subject_id,
+                            witness = %entry.node,
+                            error = %e,
+                            "Failed to create distributor coordinator, dropping witness"
+                        );
+                        self.check_witness(entry.node.clone());
                     }
+                }
+
+                // Every coordinator failed: nobody will answer, so close
+                // the request instead of waiting forever.
+                if self.witnesses.is_empty() {
+                    Self::observe_failure("all_coordinators_failed");
+                    if let Err(e) = self.end_request(ctx).await {
+                        Self::observe_failure("end_request_failed");
+                        error!(
+                            msg_type = "Create",
+                            subject_id = %self.subject_id,
+                            request_id = %self.request_id,
+                            error = %e,
+                            "Failed to end distribution request"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    }
+                    return Ok(());
                 }
 
                 debug!(

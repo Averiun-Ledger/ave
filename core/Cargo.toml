@@ -50,6 +50,9 @@ subtle = { workspace = true, optional = true }
 config = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 # Self dev-dependency: enables the `test` feature (embedded compiler,
 # short timeouts) whenever test targets are built, so plain

@@ -503,7 +503,14 @@ impl Subject for Governance {
                 self.set_artifact_serving_blocked(ctx, false).await;
             }
 
-            let _ = make_obsolete(ctx, &self.subject_metadata.subject_id).await;
+            if let Err(e) =
+                make_obsolete(ctx, &self.subject_metadata.subject_id).await
+            {
+                debug!(
+                    error = %e,
+                    "Failed to mark approval obsolete on governance update"
+                );
+            }
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
@@ -1182,10 +1189,17 @@ impl Governance {
                     )
                     .await);
                 }
-                let _ = fs::remove_dir_all(
+                if let Err(e) = fs::remove_dir_all(
                     config.contracts_path.join(&staging_name),
                 )
-                .await;
+                .await
+                {
+                    debug!(
+                        error = %e,
+                        staging = %staging_name,
+                        "Failed to remove dropped staging directory (boot sweep collects it)"
+                    );
+                }
                 continue;
             }
 
@@ -1202,7 +1216,13 @@ impl Governance {
                 .join(format!("{official_name}_temp_promote"));
             if official_path.exists() {
                 // Stale backup from an interrupted promotion.
-                let _ = fs::remove_dir_all(&backup_path).await;
+                if let Err(e) = fs::remove_dir_all(&backup_path).await {
+                    debug!(
+                        error = %e,
+                        path = %backup_path.display(),
+                        "Failed to remove stale promotion backup (boot sweep collects it)"
+                    );
+                }
                 if let Err(e) = fs::rename(&official_path, &backup_path).await {
                     return Err(crash_system(
                         ctx,
@@ -1220,8 +1240,15 @@ impl Governance {
             if let Err(e) = fs::rename(&staging_path, &official_path).await {
                 // Restore the previous official artifact if it was
                 // moved aside.
-                if backup_path.exists() {
-                    let _ = fs::rename(&backup_path, &official_path).await;
+                if backup_path.exists()
+                    && let Err(restore_err) =
+                        fs::rename(&backup_path, &official_path).await
+                {
+                    debug!(
+                        error = %restore_err,
+                        path = %backup_path.display(),
+                        "Failed to restore promotion backup after failed rename"
+                    );
                 }
                 return Err(crash_system(
                     ctx,
@@ -1235,7 +1262,13 @@ impl Governance {
                 )
                 .await);
             }
-            let _ = fs::remove_dir_all(&backup_path).await;
+            if let Err(e) = fs::remove_dir_all(&backup_path).await {
+                debug!(
+                    error = %e,
+                    path = %backup_path.display(),
+                    "Failed to remove promotion backup (boot sweep collects it)"
+                );
+            }
             // fsync both parent directories so the rename survives a
             // power cut (best-effort: the anchor + heal paths recover
             // from any residual loss).
@@ -2404,7 +2437,7 @@ impl Governance {
             .await?;
 
         let prefix = format!("{}_", self.subject_metadata.subject_id);
-        let mut allowed: HashSet<String> = schemas
+        let allowed: HashSet<String> = schemas
             .keys()
             .map(|schema_id| {
                 format!("{}_{}", self.subject_metadata.subject_id, schema_id)
@@ -2419,7 +2452,13 @@ impl Governance {
             .await?
         {
             ContractRegisterResponse::Contracts(contracts) => contracts,
-            _ => Vec::new(),
+            unexpected => {
+                warn!(
+                    response = ?unexpected,
+                    "Unexpected contract register response while sweeping, treating as empty"
+                );
+                Vec::new()
+            }
         };
 
         for contract_name in registered {
@@ -2474,9 +2513,12 @@ impl Governance {
             ));
             if is_temp || !allowed.contains(&file_name) {
                 let path = entry.path();
-                let _ = fs::remove_dir_all(path).await;
-                if !is_temp {
-                    allowed.remove(&file_name);
+                if let Err(e) = fs::remove_dir_all(path).await {
+                    debug!(
+                        error = %e,
+                        file_name = %file_name,
+                        "Failed to remove swept contracts entry"
+                    );
                 }
             }
         }
@@ -2513,7 +2555,13 @@ impl Governance {
             .await?
         {
             ContractRegisterResponse::Contracts(contracts) => contracts,
-            _ => Vec::new(),
+            unexpected => {
+                warn!(
+                    response = ?unexpected,
+                    "Unexpected contract register response while sweeping, treating as empty"
+                );
+                Vec::new()
+            }
         };
 
         for contract_name in registered {
@@ -2665,7 +2713,13 @@ impl Governance {
             )
             .await?;
 
-            self.set_artifact_serving_blocked(ctx, false).await;
+            // Schemas with a deferred acquisition still hold the previous
+            // bytes under the new anchor: unblocking now would serve
+            // them as current until the deferred pass runs — stay
+            // blocked, the pass unblocks when it completes.
+            if pending.is_empty() {
+                self.set_artifact_serving_blocked(ctx, false).await;
+            }
 
             schemas
                 .iter()
@@ -4027,6 +4081,17 @@ impl Governance {
                         )
                         .await?;
 
+                        // The governance is inactive from here: no
+                        // deferred acquisition will ever run for it, so
+                        // drop pending markers instead of leaking them.
+                        let pending = Self::list_acquisition_pending(ctx)
+                            .await
+                            .unwrap_or_default();
+                        if !pending.is_empty() {
+                            Self::set_acquisition_pending(ctx, pending, false)
+                                .await?;
+                        }
+
                         self.update_gov_version(ctx).await?;
                     }
                     _ => {}
@@ -4058,9 +4123,23 @@ impl Governance {
                 let update_fact = if let EventRequest::Fact(fact_request) =
                     &event_request
                 {
-                    let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
-                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
-                        })?;
+                    // A committed payload that does not deserialize is
+                    // local corruption: fail loud instead of returning a
+                    // critical error for a tell handler to discard.
+                    let governance_event = match serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()) {
+                            Ok(event) => event,
+                            Err(e) => {
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "Can not convert payload into governance event in governance fact event: {e}"
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
+                        };
 
                     let rm_members = governance_event
                         .members
@@ -5222,8 +5301,18 @@ impl Handler<Self> for Governance {
                 // The certified tip was reached (the catch-up round
                 // completed, or a version-sync round proved no peer is
                 // ahead): the deferred artifact acquisition pass is due.
-                // No-op when no markers are pending.
-                self.run_deferred_acquisition(ctx).await?;
+                // No-op when no markers are pending. A failure is
+                // logged, not propagated: these triggers are tells, so
+                // an error would vanish silently — and the next trigger
+                // retries the pass anyway.
+                if let Err(e) =
+                    self.run_deferred_acquisition(ctx).await
+                {
+                    error!(
+                        error = %e,
+                        "Deferred artifact acquisition failed, retrying on next trigger"
+                    );
+                }
 
                 Ok(GovernanceResponse::Ok)
             }
@@ -5328,8 +5417,11 @@ impl Handler<Self> for Governance {
                 sn = self.subject_metadata.sn,
                 "Failed to persist event"
             );
+            // Stop here: publishing an unpersisted event would confirm
+            // a phantom to sinks before the crash lands.
             crash_system(ctx, e).await;
-        };
+            return;
+        }
 
         ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
         debug!(

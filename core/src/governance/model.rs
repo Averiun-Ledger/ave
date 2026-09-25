@@ -230,10 +230,11 @@ impl RolesTrackerSchemas {
                 .filter(|x| x.name == name)
                 .map(|x| x.namespace.clone())
                 .collect(),
-            RoleTypes::Approver => {
+            // Approver, compiler and future roles hold no schema
+            // namespaces; `Compilation` reaches here today.
+            _ => {
                 vec![]
             }
-            _ => unreachable!("The role is obtained from ProtocolTypes"),
         }
     }
 
@@ -250,8 +251,8 @@ impl RolesTrackerSchemas {
             RoleTypes::Validator => {
                 self.validator.iter().any(|x| x.name == name)
             }
-            RoleTypes::Approver => false,
-            _ => unreachable!("The role is obtained from ProtocolTypes"),
+            // Approver, compiler and future roles never match here.
+            _ => false,
         }
     }
 
@@ -762,10 +763,11 @@ impl RolesSchema {
                 .filter(|x| x.name == name)
                 .map(|x| x.namespace.clone())
                 .collect(),
-            RoleTypes::Approver => {
+            // Approver, compiler and future roles hold no schema
+            // namespaces; `Compilation` reaches here today.
+            _ => {
                 vec![]
             }
-            _ => unreachable!("The role is obtained from ProtocolTypes"),
         }
     }
 
@@ -782,8 +784,8 @@ impl RolesSchema {
             RoleTypes::Validator => {
                 self.validator.iter().any(|x| x.name == name)
             }
-            RoleTypes::Approver => false,
-            _ => unreachable!("The role is obtained from ProtocolTypes"),
+            // Approver, compiler and future roles never match here.
+            _ => false,
         }
     }
 

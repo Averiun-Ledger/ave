@@ -293,31 +293,65 @@ impl Handler<Self> for EvalCoordinator {
                 sender,
             } => {
                 if request_id == self.request_id && version == self.version {
+                    // A forged or misrouted response, or an unverifiable
+                    // result, reports the evaluator as timed out so the
+                    // phase drops and replaces it at once instead of
+                    // burning the slot on a discarded error.
+                    let mut invalid = false;
                     if self.node_key != sender {
-                        error!(
+                        warn!(
                             msg_type = "NetworkResponse",
                             expected_node = %self.node_key,
                             network_sender = %sender,
-                            "Evaluation response sender mismatch"
+                            "Evaluation response sender mismatch, dropping evaluator"
                         );
-                        return Err(ActorError::Functional {
-                            description:
-                                "We received an evaluation response from an unexpected sender"
-                                    .to_string(),
-                        });
-                    }
-
-                    if let EvaluationRes::Response {
+                        invalid = true;
+                    } else if let EvaluationRes::Response {
                         result,
                         result_hash,
                         result_hash_signature,
                     } = &*evaluation_res
-                    {
-                        self.verify_result_response(
+                        && let Err(e) = self.verify_result_response(
                             result,
                             result_hash,
                             result_hash_signature,
-                        )?;
+                        )
+                    {
+                        warn!(
+                            msg_type = "NetworkResponse",
+                            error = %e,
+                            sender = %sender,
+                            "Unverifiable evaluation result, dropping evaluator"
+                        );
+                        invalid = true;
+                    }
+                    if invalid {
+                        match ctx.get_parent::<Evaluation>().await {
+                            Ok(evaluation_actor) => {
+                                if let Err(e) = evaluation_actor
+                                    .tell(EvaluationMessage::Response {
+                                        evaluation_res:
+                                            EvaluationRes::TimeOut,
+                                        sender: self.node_key.clone(),
+                                    })
+                                    .await
+                                {
+                                    debug!(
+                                        error = %e,
+                                        "Evaluation actor gone, dropping timeout response"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                debug!(
+                                    error = %e,
+                                    path = %ctx.path().parent(),
+                                    "Evaluation actor not found, dropping timeout response"
+                                );
+                            }
+                        }
+                        ctx.stop(None).await;
+                        return Ok(());
                     }
 
                     // Evaluation actor.

@@ -139,6 +139,33 @@ pub struct Api {
     system: SystemRef,
 }
 
+/// Holds the subject-deletion guard until the deletion completes: on
+/// normal completion disarm it after `end_subject_deletion`; on
+/// cancellation `Drop` releases it so a later deletion is not blocked
+/// until restart.
+struct SubjectDeletionGuard<'a> {
+    deleting: &'a Arc<tokio::sync::Mutex<Option<DigestIdentifier>>>,
+    subject_id: DigestIdentifier,
+    armed: bool,
+}
+
+impl SubjectDeletionGuard<'_> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SubjectDeletionGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(mut deleting) = self.deleting.try_lock()
+            && deleting.as_ref() == Some(&self.subject_id)
+        {
+            *deleting = None;
+        }
+    }
+}
+
 fn preserve_functional_actor_error<F>(err: ActorError, fallback: F) -> Error
 where
     F: FnOnce(ActorError) -> Error,
@@ -199,6 +226,19 @@ impl Api {
         let mut deleting = self.deleting_subject.lock().await;
         if deleting.as_ref() == Some(subject_id) {
             *deleting = None;
+        }
+    }
+
+    /// RAII counterpart of the begin/end deletion guard: a cancelled
+    /// deletion future would otherwise hold the guard until restart.
+    fn deletion_guard(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> SubjectDeletionGuard<'_> {
+        SubjectDeletionGuard {
+            deleting: &self.deleting_subject,
+            subject_id: subject_id.clone(),
+            armed: true,
         }
     }
 
@@ -1853,6 +1893,7 @@ impl Api {
         self.ensure_safe_mode_required("subject deletion")?;
         validate_subject_id(&subject_id)?;
         self.begin_subject_deletion(&subject_id).await?;
+        let guard = self.deletion_guard(&subject_id);
 
         let result = async {
             let subject_data = self.subject_data(&subject_id).await?;
@@ -1877,6 +1918,9 @@ impl Api {
                     }
                     let mut cleanup_errors = Vec::new();
 
+                    // Order matters: the manager purge reads node
+                    // registration, and the external database goes last
+                    // so no queries observe a half-deleted subject.
                     match self
                         .subject_manager
                         .ask(SubjectManagerMessage::DeleteGovernance {
@@ -1926,12 +1970,6 @@ impl Api {
                     );
                     let mut cleanup_errors = Vec::new();
 
-                    self.purge_common_subject_state(
-                        &subject_id,
-                        &mut cleanup_errors,
-                    )
-                    .await;
-
                     match self
                         .subject_manager
                         .ask(SubjectManagerMessage::DeleteTracker {
@@ -1946,6 +1984,12 @@ impl Api {
                         Err(err) => cleanup_errors
                             .push(format!("subject_manager: {err}")),
                     }
+
+                    self.purge_common_subject_state(
+                        &subject_id,
+                        &mut cleanup_errors,
+                    )
+                    .await;
 
                     self.delete_subject_from_node(
                         &subject_id,
@@ -1972,6 +2016,7 @@ impl Api {
         .await;
 
         self.end_subject_deletion(&subject_id).await;
+        guard.disarm();
         result
     }
 

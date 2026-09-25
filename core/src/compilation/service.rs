@@ -238,6 +238,10 @@ impl ArtifactStore {
         let wasm_hash =
             pipeline::hash_bytes(self.hash, wasm, "artifact store wasm")?;
 
+        // Track before writing: the garbage collection only evicts
+        // tracked entries by age, so an insert in progress is never
+        // collected from under its writer.
+        self.touch(key).await;
         let entry_dir = self.dir.join(key);
         fs::create_dir_all(&entry_dir).await.map_err(|e| {
             CompilerError::DirectoryCreationFailed {
@@ -286,9 +290,10 @@ impl ArtifactStore {
                 let last_access = self.last_access.lock().await;
                 last_access.get(&key).copied()
             };
-            let Some(accessed) = accessed else {
-                continue;
-            };
+            // Untracked entries (crashed between directory creation and
+            // the first touch, or predating the access map) are the
+            // oldest: evictable instead of invisible to the collector.
+            let accessed = accessed.unwrap_or(SystemTime::UNIX_EPOCH);
             total += size;
             entries.push((key, size, accessed));
         }
@@ -655,9 +660,14 @@ impl CompilerService for CompilerServer {
         let started_at = Instant::now();
         let source_b64 = request.into_inner().source_b64;
 
-        if source_b64.len() > self.inner.config.max_source_bytes {
+        // The limit bounds the decoded source, but the payload travels
+        // base64-encoded (4/3 overhead): bound the encoded length or
+        // valid sources near the limit are wrongly rejected.
+        let max_b64_len =
+            self.inner.config.max_source_bytes.div_ceil(3) * 4 + 4;
+        if source_b64.len() > max_b64_len {
             return Err(Status::invalid_argument(format!(
-                "source exceeds the maximum of {} bytes",
+                "source exceeds the maximum of {} decoded bytes",
                 self.inner.config.max_source_bytes
             )));
         }
@@ -833,14 +843,27 @@ async fn load_or_generate_identity(
             }
 
             // Atomic write: a crash mid-write must not leave a corrupt
-            // identity behind.
-            let tmp_path = key_path.with_extension("der.tmp");
-            fs::write(&tmp_path, &der)
-                .await
-                .map_err(|e| ServiceError::Io {
+            // identity behind. Unique temp name so two first boots
+            // never share it; fsyncs so a crash can lose nothing.
+            let tmp_path = key_path.with_extension(format!(
+                "der.tmp.{}",
+                std::process::id()
+            ));
+            let mut tmp = fs::File::create(&tmp_path).await.map_err(|e| {
+                ServiceError::Io {
                     path: tmp_path.to_string_lossy().to_string(),
                     details: e.to_string(),
-                })?;
+                }
+            })?;
+            tmp.write_all(&der).await.map_err(|e| ServiceError::Io {
+                path: tmp_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })?;
+            tmp.sync_all().await.map_err(|e| ServiceError::Io {
+                path: tmp_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })?;
+            drop(tmp);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -860,6 +883,15 @@ async fn load_or_generate_identity(
                     details: e.to_string(),
                 }
             })?;
+            if let Some(parent) = key_path.parent()
+                && let Ok(dir) = fs::File::open(parent).await
+                && let Err(e) = dir.sync_all().await
+            {
+                return Err(ServiceError::Io {
+                    path: parent.to_string_lossy().to_string(),
+                    details: e.to_string(),
+                });
+            }
 
             info!(
                 path = %key_path.display(),

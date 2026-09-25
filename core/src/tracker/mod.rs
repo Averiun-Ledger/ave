@@ -276,6 +276,13 @@ impl Subject for Tracker {
         // governance artifact acquisition.
         _defer_acquisition: bool,
     ) -> Result<(), ActorError> {
+        // Nothing to apply: skip the state publish below (an empty batch
+        // on a fresh subject would force a build and publish with zero
+        // changes).
+        if events.is_empty() {
+            return Ok(());
+        }
+
         let Some(hash) = self.hash else {
             return Err(ActorError::FunctionalCritical {
                 description: "Can not obtain Hash".to_string(),

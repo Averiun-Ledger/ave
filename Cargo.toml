@@ -102,6 +102,7 @@ prost = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 protoc-bin-vendored = "3"
+libc = "0.2"
 
 [dependencies]
 ave-identity = { path = "identity", version = "0.3.0" }

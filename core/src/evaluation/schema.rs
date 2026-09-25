@@ -18,12 +18,18 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
-    helpers::network::service::NetworkSender,
+    helpers::network::{
+        ActorMessage, NetworkMessage, delivery_of,
+        service::NetworkSender,
+    },
     metrics::try_core_metrics,
     model::common::crash_system,
 };
 
-use super::request::{EvalWorkerContext, EvaluationReq};
+use super::{
+    request::{EvalWorkerContext, EvaluationReq},
+    response::EvaluationRes,
+};
 
 #[derive(Clone, Debug)]
 pub struct EvaluationSchema {
@@ -66,6 +72,52 @@ impl Message for EvaluationSchemaMessage {}
 impl NotPersistentActor for EvaluationSchema {}
 
 impl EvaluationSchema {
+    /// Answers `Unavailable` to a request this schema actor rejects
+    /// without a worker: the requester replaces this evaluator from
+    /// its pending pool at once instead of burning retries on silence.
+    async fn answer_unavailable(
+        &self,
+        evaluation_req: &Box<Signed<EvaluationReq>>,
+        info: &ComunicateInfo,
+        sender: &PublicKey,
+    ) {
+        let new_info = ComunicateInfo {
+            receiver: sender.clone(),
+            request_id: info.request_id.clone(),
+            version: info.version,
+            receiver_actor: format!(
+                "/user/request/{}/evaluation/{}",
+                evaluation_req
+                    .content()
+                    .event_request
+                    .content()
+                    .get_subject_id(),
+                self.our_key.clone()
+            ),
+        };
+        let message = ActorMessage::EvaluationRes {
+            res: EvaluationRes::Unavailable,
+        };
+        if let Err(e) = self
+            .network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
+                message: NetworkMessage {
+                    info: new_info,
+                    message,
+                },
+            })
+            .await
+        {
+            warn!(
+                msg_type = "NetworkRequest",
+                error = %e,
+                sender = %sender,
+                "Failed to answer Unavailable to rejected request"
+            );
+        }
+    }
+
     fn context_for_request(
         &self,
         evaluation_req: &EvaluationReq,
@@ -141,6 +193,7 @@ impl Handler<Self> for EvaluationSchema {
                         signer = %evaluation_req.signature().signer,
                         "Signer and sender are not the same"
                     );
+                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
                     return Ok(());
                 }
 
@@ -153,6 +206,7 @@ impl Handler<Self> for EvaluationSchema {
                         received_governance_id = %evaluation_req.content().governance_id,
                         "Invalid governance_id"
                     );
+                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
                     return Ok(());
                 }
 
@@ -164,6 +218,7 @@ impl Handler<Self> for EvaluationSchema {
                         received_schema_id = ?evaluation_req.content().schema_id,
                         "Invalid schema_id"
                     );
+                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
                     return Ok(());
                 }
 
@@ -176,6 +231,7 @@ impl Handler<Self> for EvaluationSchema {
                             namespace = ?evaluation_req.content().namespace,
                             "Invalid sender namespace"
                         );
+                        self.answer_unavailable(&evaluation_req, &info, &sender).await;
                         return Ok(());
                     }
                 } else {
@@ -185,6 +241,7 @@ impl Handler<Self> for EvaluationSchema {
                         sender = %sender,
                         "Sender is not a creator"
                     );
+                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
                     return Ok(());
                 }
 
@@ -198,6 +255,7 @@ impl Handler<Self> for EvaluationSchema {
                         sender = %sender,
                         "Ignoring request with newer governance version; service nodes must update governance through resilience protocols"
                     );
+                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
                     return Ok(());
                 }
 
@@ -225,12 +283,22 @@ impl Handler<Self> for EvaluationSchema {
                     Ok(child) => child,
                     Err(e) => {
                         if let ActorError::Exists { .. } = e {
+                            // A concurrent request of the same signer is
+                            // already being evaluated: answer Unavailable
+                            // so the requester fails over at once instead
+                            // of burning its retries on silence.
                             warn!(
                                 msg_type = "NetworkRequest",
                                 error = %e,
                                 "Evaluator actor already exists"
                             );
                             observe("rejected");
+                            self.answer_unavailable(
+                                &evaluation_req,
+                                &info,
+                                &sender,
+                            )
+                            .await;
                             return Ok(());
                         } else {
                             error!(
@@ -251,11 +319,21 @@ impl Handler<Self> for EvaluationSchema {
                     })
                     .await
                 {
+                    // The worker would stay idle forever under the signer
+                    // name, deflecting retries: stop the orphan.
                     warn!(
                         msg_type = "NetworkRequest",
                         error = %e,
-                        "Failed to send request to evaluator"
+                        "Failed to send request to evaluator, stopping orphan"
                     );
+                    if let Err(stop_err) = evaluator_actor.ask_stop().await
+                    {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            error = %stop_err,
+                            "Failed to stop orphan evaluator actor"
+                        );
+                    }
                 } else {
                     observe("delegated");
                     debug!(

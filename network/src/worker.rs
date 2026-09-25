@@ -47,6 +47,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 const TARGET: &str = "ave::network::worker";
 
@@ -61,35 +62,52 @@ const MAX_PENDING_MESSAGES_PER_PEER: usize = 100;
 struct PendingQueue {
     messages: VecDeque<PendingMessage>,
     pending_bytes: usize,
+    /// Hashes of queued payloads: dedup without comparing up to 100
+    /// megabyte-sized payloads byte by byte on every insert.
+    hashes: HashSet<u64>,
 }
 
 struct PendingMessage {
     payload: Bytes,
+    payload_hash: u64,
     enqueued_at: Instant,
+}
+
+fn payload_hash(message: &Bytes) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    message.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl PendingQueue {
     fn contains(&self, message: &Bytes) -> bool {
-        self.messages.iter().any(|x| x.payload == *message)
+        let hash = payload_hash(message);
+        self.hashes.contains(&hash)
+            && self.messages.iter().any(|x| x.payload == *message)
     }
 
     fn pop_front(&mut self) -> Option<PendingMessage> {
         let popped = self.messages.pop_front()?;
         self.pending_bytes =
             self.pending_bytes.saturating_sub(popped.payload.len());
+        self.hashes.remove(&popped.payload_hash);
         Some(popped)
     }
 
     fn push_back(&mut self, message: Bytes) {
         self.pending_bytes += message.len();
+        let payload_hash = payload_hash(&message);
+        self.hashes.insert(payload_hash);
         self.messages.push_back(PendingMessage {
             payload: message,
+            payload_hash,
             enqueued_at: Instant::now(),
         });
     }
 
     fn drain(&mut self) -> impl Iterator<Item = PendingMessage> + '_ {
         self.pending_bytes = 0;
+        self.hashes.clear();
         self.messages.drain(..)
     }
 

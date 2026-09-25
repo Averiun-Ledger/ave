@@ -78,6 +78,29 @@ impl NetworkSender {
             other => other,
         };
 
+        // Enforce the wire cap at the originator: the network worker
+        // drops oversize payloads without telling the sender, so an
+        // unchecked payload would be retried in a loop. Failing here
+        // is loud (callers crash or fail over); chunked transport for
+        // legitimately large batches is future work.
+        if let Command::SendMessage { message, .. } = &command
+            && let Ok(encoded) = rmp_serde::to_vec(&message)
+            && encoded.len() > ave_network::MAX_APP_MESSAGE_BYTES
+        {
+            error!(
+                size = encoded.len(),
+                max = ave_network::MAX_APP_MESSAGE_BYTES,
+                "Outbound network message exceeds the wire cap"
+            );
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Outbound network message ({} bytes) exceeds the wire cap ({} bytes)",
+                    encoded.len(),
+                    ave_network::MAX_APP_MESSAGE_BYTES
+                ),
+            });
+        }
+
         self.command_sender.send(command).await.map_err(|e| {
             error!(
                 error = %e,

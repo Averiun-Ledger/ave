@@ -294,12 +294,27 @@ impl Approval {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(ApprCoordinatorMessage::NetworkApproval {
                     approval_req: Box::new(self.request.clone()),
-                    node_key: signer,
+                    node_key: signer.clone(),
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to approval coordinator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan approval coordinator"
+                    );
+                }
+                return Err(e);
+            }
         } else {
             let child = ctx
                 .create_child(
@@ -336,13 +351,28 @@ impl Approval {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(ValiWorkerMessage::LocalApprovalCollect {
                     approval_req: Box::new(self.request.clone()),
                     request_id: self.request_id.to_string(),
                     version: self.version,
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to local approval collector, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan local approval collector"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         Ok(())

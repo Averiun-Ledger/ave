@@ -324,7 +324,10 @@ pub struct Config {
     pub max_pending_inbound_bytes_total: usize,
 
     /// Maximum age in seconds of a queued outbound message before it is
-    /// purged. `0` disables the TTL.
+    /// purged. `0` disables the TTL. The TTL is enforced lazily (on
+    /// insert and on flush, no periodic sweep): with the default
+    /// disconnect-retry cap (~8 attempts, tens of seconds) the retry
+    /// cap, not the TTL, normally decides how long a message waits.
     #[serde(default = "default_pending_outbound_ttl_secs")]
     pub pending_outbound_ttl_secs: u64,
 }

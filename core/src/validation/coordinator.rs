@@ -155,8 +155,8 @@ impl Handler<Self> for ValiCoordinator {
                 validation_req,
                 node_key,
             } => {
-                let schema_id = validation_req.content().get_schema_id().expect("The build process verified that the event request is valid");
-                let governance_id = validation_req.content().get_governance_id().expect("The build process verified that the event request is valid");
+                let schema_id = validation_req.content().get_schema_id().map_err(|e| ActorError::Functional { description: e })?;
+                let governance_id = validation_req.content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?;
 
                 let receiver_actor = if schema_id.is_gov() {
                     format!(
