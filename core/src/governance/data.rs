@@ -30,7 +30,6 @@ pub type MemberName = String;
     Eq,
     Serialize,
     Deserialize,
-    Default,
     BorshDeserialize,
     BorshSerialize,
 )]
@@ -43,6 +42,31 @@ pub struct GovernanceData {
     pub roles_schema: BTreeMap<SchemaType, RolesSchema>,
     pub roles_tracker_schemas: RolesTrackerSchemas,
     pub policies_schema: BTreeMap<SchemaType, PolicySchema>,
+    /// Active build toolchain pin: exactly one per governance version.
+    /// New field (breaking change, accepted): JSON without it reads as
+    /// the default, Borsh without it fails loud.
+    #[serde(default = "default_toolchain_pin")]
+    pub toolchain: String,
+}
+
+fn default_toolchain_pin() -> String {
+    ave_common::governance::DEFAULT_PIN.to_owned()
+}
+
+impl Default for GovernanceData {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            members: BTreeMap::new(),
+            roles_gov: RolesGov::default(),
+            policies_gov: PolicyGov::default(),
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            policies_schema: BTreeMap::new(),
+            toolchain: default_toolchain_pin(),
+        }
+    }
 }
 
 impl GovernanceData {
@@ -91,6 +115,7 @@ impl GovernanceData {
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: not_gov_role,
             policies_schema: BTreeMap::new(),
+            toolchain: default_toolchain_pin(),
         }
     }
 

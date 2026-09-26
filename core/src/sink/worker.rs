@@ -247,10 +247,18 @@ impl Actor for SinkWorker {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         // Transport startup logic (HTTP: eager OAuth2 token fetch).
-        // A failure is logged but does not prevent the worker from starting.
-        if let Err(e) = self.client.warm_up().await {
-            error!(msg_type = "TokenRefresh", sink = %self.sink_name, error = %e, "Failed to refresh token on startup");
-        }
+        // Best-effort in background: awaiting it here blocks the whole
+        // node boot on an unreachable broker (the node creation ask
+        // times out while e.g. Kafka metadata retries), while a failure
+        // never prevents the worker from starting anyway. The task dies
+        // with the actor; the healthcheck covers a failed warm-up.
+        let client = self.client.clone();
+        let sink_name = self.sink_name.clone();
+        ctx.spawn(async move {
+            if let Err(e) = client.warm_up().await {
+                error!(msg_type = "TokenRefresh", sink = %sink_name, error = %e, "Failed to refresh token on startup");
+            }
+        });
 
         // Schedule first healthcheck after configurable startup delay + jitter.
         let startup_delay =

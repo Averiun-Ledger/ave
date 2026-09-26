@@ -550,6 +550,7 @@ async fn test_invalid_init_state() {
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
             policies_schema: BTreeMap::new(),
         },
     );
@@ -852,6 +853,7 @@ async fn test_basic_use_case_1b_1e_1a() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected.clone());
@@ -1028,6 +1030,7 @@ async fn test_many_schema_in_one_governance() {
             ),
         ]),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::from([
             (
                 SchemaType::Type("Example1".to_owned()),
@@ -1171,6 +1174,7 @@ async fn test_transfer_event_governance_1() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected);
@@ -1227,6 +1231,7 @@ async fn test_transfer_event_governance_1() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected);
@@ -1495,6 +1500,7 @@ async fn test_transfer_event_governance_2() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected.clone());
@@ -1605,6 +1611,7 @@ async fn test_governance_fail_approve() {
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
             policies_schema: BTreeMap::new(),
         },
     );
@@ -1771,6 +1778,7 @@ async fn test_governance_manual_many_approvers() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -1950,6 +1958,7 @@ async fn test_governance_auto_many_approvers() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2154,6 +2163,7 @@ async fn test_governance_not_quorum_many_approvers() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2316,6 +2326,7 @@ async fn test_change_roles_gov() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2406,6 +2417,7 @@ async fn test_change_roles_gov() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2503,6 +2515,7 @@ async fn test_change_roles_gov() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -3550,6 +3563,7 @@ async fn test_gov_no_all_validators() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -3686,6 +3700,7 @@ async fn test_gov_no_all_evaluators() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -3834,6 +3849,7 @@ async fn test_gov_fail_no_all_evaluators() {
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 

@@ -99,6 +99,28 @@ pub fn schemas_to_compile(
     Some(schemas)
 }
 
+/// Full compilation set for a governance fact against the committed
+/// governance state: the payload set above, plus — when the event
+/// changes the toolchain pin — every existing schema, recompiled under
+/// the new pin with fresh evidence (a pin switch never reuses old-pin's
+/// builds). `None` exactly when `schemas_to_compile` is `None`.
+pub fn compilation_set(
+    payload: &ValueWrapper,
+    pre: &crate::governance::data::GovernanceData,
+) -> Option<BTreeSet<SchemaType>> {
+    let mut schemas = schemas_to_compile(payload)?;
+    let event: GovernanceEvent =
+        serde_json::from_value(payload.0.clone()).ok()?;
+    if event
+        .toolchain
+        .as_ref()
+        .is_some_and(|new_pin| *new_pin != pre.toolchain)
+    {
+        schemas.extend(pre.schemas.keys().cloned());
+    }
+    Some(schemas)
+}
+
 /// Contract sources coming in a governance fact payload, paired with
 /// their schema id.
 ///
@@ -341,6 +363,11 @@ impl Compilation {
                         // (they live outside the well-known serving
                         // path): empty whitelist rejects every probe.
                         evaluators: BTreeMap::new(),
+                        toolchain_pin: self
+                            .request
+                            .content()
+                            .pin
+                            .clone(),
                         serving_blocked: false,
                         serving_cache: HashMap::new(),
                         hash: self.hash,
@@ -622,6 +649,13 @@ impl Handler<Self> for Compilation {
                             // immediate: no coordinator timeout wait.
                             CompilationRes::Unavailable => {
                                 Self::observe_event("unavailable");
+                            }
+                            // Same as unavailable (drop + replace), but
+                            // pin-scoped: the compiler can not build under
+                            // this request's pin, now or ever — the retry
+                            // only helps if another compiler covers it.
+                            CompilationRes::NoToolchain { .. } => {
+                                Self::observe_event("no_toolchain");
                             }
                             CompilationRes::Abort(error) => {
                                 Self::observe_event("abort");

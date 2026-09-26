@@ -134,6 +134,7 @@ impl Evaluation {
                 EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
+                    toolchain: state.toolchain.clone(),
                 }
             }
             request::EvaluateData::TrackerSchemasFact { .. }

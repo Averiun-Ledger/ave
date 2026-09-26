@@ -84,6 +84,12 @@ pub enum EvaluatorError {
     /// answers `EvaluationRes::Unavailable` instead of calling the request
     /// invalid.
     ResourceUnavailable(String),
+    /// Governance toolchain pin the evaluator can not attest: unknown
+    /// to the registry, or a no-op switch to the current pin. Voted as
+    /// a deterministic `Error` (never `Abort`): a unilateral abort
+    /// channel must not decide pin validity. Appended last so existing
+    /// ordinals keep their meaning.
+    InvalidToolchainPin(String),
 }
 
 #[derive(
@@ -126,6 +132,9 @@ impl std::fmt::Display for EvaluatorError {
             Self::InternalError(msg) => write!(f, "internal error: {}", msg),
             Self::ResourceUnavailable(msg) => {
                 write!(f, "resource unavailable: {}", msg)
+            }
+            Self::InvalidToolchainPin(e) => {
+                write!(f, "invalid toolchain pin {}", e)
             }
         }
     }
@@ -329,6 +338,14 @@ mod tests {
         expected.extend_from_slice(&string_bytes("req"));
         assert_wire_shape(
             &EvaluatorError::InvalidEventRequest("req".to_owned()),
+            &expected,
+        );
+
+        // InvalidToolchainPin is appended last: existing ordinals stay.
+        let mut expected = vec![5];
+        expected.extend_from_slice(&string_bytes("pin"));
+        assert_wire_shape(
+            &EvaluatorError::InvalidToolchainPin("pin".to_owned()),
             &expected,
         );
 

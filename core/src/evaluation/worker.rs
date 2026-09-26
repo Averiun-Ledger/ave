@@ -17,14 +17,18 @@ use crate::{
     subject::RequestSubjectData,
 };
 
-use crate::helpers::network::ActorMessage;
+use crate::{
+    helpers::network::ActorMessage,
+};
 
 use async_trait::async_trait;
 use ave_common::{
     ValueWrapper,
+    governance::GovernanceEvent,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
+    request::EventRequest,
 };
 
 use ave_network::ComunicateInfo;
@@ -360,6 +364,15 @@ impl EvalWorker {
         ctx: &mut ActorContext<Self>,
         evaluation_req: &Signed<EvaluationReq>,
     ) -> Result<EvaluationRes, EvaluatorError> {
+        // The pin gate runs here too, not only in `check_data` (the
+        // network path): a node evaluating its own request locally must
+        // reach the same verdict as the network evaluators, or the
+        // requester outvotes them with a divergent patch.
+        if let Err(error) = self.check_toolchain_pin(evaluation_req) {
+            return Ok(self
+                .build_response_error(ctx, error, evaluation_req.clone())
+                .await?);
+        }
         let evaluation =
             match self.evaluate(ctx, evaluation_req.content()).await {
                 Ok(evaluation) => {
@@ -451,6 +464,61 @@ impl EvalWorker {
             }
         }
 
+        // Toolchain pin intake gate (governance facts only): unknown
+        // pins and no-op switches vote a deterministic `Error`, never
+        // `Abort`. It lives in its own check so both the network path
+        // (`check_data`) and the local path (`create_res`) enforce it.
+        self.check_toolchain_pin(evaluation_req)?;
+
+        Ok(())
+    }
+
+    /// Governance toolchain pin gate shared by the network and the
+    /// local evaluation paths. Both checks run against committed data,
+    /// so every honest evaluator reaches the same verdict.
+    fn check_toolchain_pin(
+        &self,
+        evaluation_req: &Signed<EvaluationReq>,
+    ) -> Result<(), EvaluatorError> {
+        let Some(committed_pin) = self.context.toolchain() else {
+            return Ok(());
+        };
+        let EventRequest::Fact(fact_request) = evaluation_req
+            .content()
+            .event_request
+            .content()
+        else {
+            return Ok(());
+        };
+        let event: GovernanceEvent =
+            serde_json::from_value(fact_request.payload.0.clone()).map_err(
+                |e| {
+                    EvaluatorError::InvalidEventRequest(format!(
+                        "Governance fact payload is not a governance event: {e}"
+                    ))
+                },
+            )?;
+        let Some(new_pin) = &event.toolchain else {
+            return Ok(());
+        };
+        if ave_common::governance::toolchain_info(new_pin).is_none() {
+            return Err(EvaluatorError::InvalidToolchainPin(format!(
+                "unknown toolchain pin: {new_pin}"
+            )));
+        }
+        // A switch to the current pin with no other change is a no-op:
+        // `is_empty` counts the toolchain itself, so the four non-pin
+        // concerns are checked directly.
+        if new_pin == committed_pin
+            && event.members.is_none()
+            && event.roles.is_none()
+            && event.schemas.is_none()
+            && event.policies.is_none()
+        {
+            return Err(EvaluatorError::InvalidToolchainPin(
+                "toolchain pin switch to the current pin".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -462,6 +530,7 @@ pub enum EvalWorkerMessage {
         node_key: PublicKey,
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
+        toolchain: String,
     },
     LocalEvaluation {
         evaluation_req: Signed<EvaluationReq>,
@@ -520,12 +589,14 @@ impl Handler<Self> for EvalWorker {
                 node_key,
                 issuers,
                 issuer_any,
+                toolchain,
             } => {
                 self.gov_version = gov_version;
                 self.node_key = node_key;
                 self.context = EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
+                    toolchain,
                 };
             }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {

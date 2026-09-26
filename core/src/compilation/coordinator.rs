@@ -602,6 +602,7 @@ mod tests {
                 governance_id,
                 sn: 0,
                 gov_version: 0,
+                pin: ave_common::governance::DEFAULT_PIN.to_owned(),
             },
             &our_keys,
         )

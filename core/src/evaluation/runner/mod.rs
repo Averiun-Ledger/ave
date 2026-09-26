@@ -473,6 +473,14 @@ impl Runner {
             Self::check_policies(policies_event, &mut governance)?;
         }
 
+        // Toolchain pin switch: one pin per version by construction.
+        // Unknown pins and no-op switches never reach here (the intake
+        // gate votes them `Error` first); this assignment only applies
+        // a pin every evaluator already accepted.
+        if let Some(pin) = event.toolchain {
+            governance.toolchain = pin;
+        }
+
         if !governance.check_basic_gov() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_fact_gov",

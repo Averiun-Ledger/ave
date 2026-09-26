@@ -20,6 +20,10 @@ pub enum EvalWorkerContext {
     Governance {
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
+        /// Committed toolchain pin, pushed by the governance actor: the
+        /// intake gate validates event pins against it (never against
+        /// locally installed toolchains).
+        toolchain: String,
     },
     TrackerFact {
         issuers: BTreeSet<PublicKey>,
@@ -38,6 +42,7 @@ impl EvalWorkerContext {
             Self::Governance {
                 issuers,
                 issuer_any,
+                ..
             }
             | Self::TrackerFact {
                 issuers,
@@ -45,6 +50,15 @@ impl EvalWorkerContext {
                 ..
             } => Some((issuers, *issuer_any)),
             Self::Empty | Self::TrackerTransfer { .. } => None,
+        }
+    }
+
+    /// Committed toolchain pin, if this worker evaluates governance
+    /// facts.
+    pub const fn toolchain(&self) -> Option<&String> {
+        match self {
+            Self::Governance { toolchain, .. } => Some(toolchain),
+            _ => None,
         }
     }
 }

@@ -1686,6 +1686,7 @@ impl Governance {
                 issuer_any,
                 schemas: self.properties.schemas.clone(),
                 evaluators,
+                toolchain_pin: self.properties.toolchain.clone(),
                 // Governance opens the gate only after anchor recovery.
                 serving_blocked: true,
                 serving_cache: HashMap::new(),
@@ -1750,6 +1751,7 @@ impl Governance {
                         initial_value: schema.initial_value.0.clone(),
                     },
                     &register_path,
+                    &self.properties.toolchain,
                 )
                 .await
                 {
@@ -2313,6 +2315,7 @@ impl Governance {
                     node_key: node_key.clone(),
                     issuers: issuers.clone(),
                     issuer_any,
+                    toolchain: self.properties.toolchain.clone(),
                 })
                 .await?;
         }
@@ -2328,6 +2331,7 @@ impl Governance {
                     issuer_any,
                     schemas: self.properties.schemas.clone(),
                     evaluators,
+                    toolchain_pin: self.properties.toolchain.clone(),
                 })
                 .await?;
         }
@@ -2838,6 +2842,7 @@ impl Governance {
                 context: EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
+                    toolchain: self.properties.toolchain.clone(),
                 },
                 init_state: None,
                 hash: *hash,
@@ -2993,6 +2998,7 @@ impl Governance {
                     context: EvalWorkerContext::Governance {
                         issuers,
                         issuer_any,
+                        toolchain: self.properties.toolchain.clone(),
                     },
                     init_state: None,
                     hash: *hash,
@@ -3296,6 +3302,7 @@ impl Governance {
                         contract: contract.clone(),
                         initial_value: initial_value.0.clone(),
                         contract_path: contract_path.clone(),
+                        toolchain_pin: self.properties.toolchain.clone(),
                     },
                 };
                 let terminal_error = Self::ask_compile_with_retries(id, || {
@@ -3452,6 +3459,7 @@ impl Governance {
                         contract: schema.contract.clone(),
                         initial_value: schema.initial_value.0.clone(),
                         contract_path: contract_path.clone(),
+                        toolchain_pin: self.properties.toolchain.clone(),
                     },
                 };
                 let terminal_error =

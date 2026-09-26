@@ -1,6 +1,7 @@
 //! # Configuration module
 
 use std::{
+    collections::BTreeMap,
     fmt::{self, Display},
     path::PathBuf,
     time::Instant,
@@ -85,6 +86,13 @@ pub struct Config {
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
     pub spec: Option<MachineSpec>,
+    /// Locally installed build toolchains, pin ID → rustup toolchain
+    /// name (`""` selects the system cargo). The governance pin
+    /// selects, never the local default: a pin with no entry means
+    /// this node can not build it and stands down. Empty by default,
+    /// which resolves exactly `DEFAULT_PIN` to the system toolchain
+    /// (today's behavior) and nothing else.
+    pub toolchains: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -106,6 +114,7 @@ impl Default for Config {
             #[cfg(feature = "test")]
             compiler: Default::default(),
             spec: None,
+            toolchains: BTreeMap::new(),
         }
     }
 }

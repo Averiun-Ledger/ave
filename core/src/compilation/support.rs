@@ -1,5 +1,9 @@
 use std::time::{Duration, Instant};
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    sync::Arc,
+};
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
@@ -23,6 +27,72 @@ use crate::metrics::try_core_metrics;
 use crate::system::ConfigHelper;
 
 pub use super::pipeline::ContractArtifactRecord;
+
+/// Locally installed build toolchains keyed by governance pin ID. The
+/// pin selects, never the local default: a pin with no entry means this
+/// node can not build it and stands down (`NoToolchain`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Toolchains {
+    entries: BTreeMap<String, String>,
+}
+
+impl Toolchains {
+    pub(crate) fn from_config(entries: &BTreeMap<String, String>) -> Self {
+        Self {
+            entries: entries.clone(),
+        }
+    }
+
+    /// Resolves the rustup toolchain name for a pin (`Some("")` selects
+    /// the system cargo). An empty map resolves exactly `DEFAULT_PIN`
+    /// to system cargo (status quo ante) and nothing else: unknown pins
+    /// always stand down.
+    pub(crate) fn resolve(&self, pin: &str) -> Option<String> {
+        if let Some(name) = self.entries.get(pin) {
+            return Some(name.clone());
+        }
+        if self.entries.is_empty()
+            && pin == ave_common::governance::DEFAULT_PIN
+        {
+            return Some(String::new());
+        }
+        None
+    }
+
+    /// Verifies every configured entry answers as a toolchain. Broken
+    /// entries fail loud at startup (operator misconfiguration); pins
+    /// outside the registry only warn (they can never match anyway).
+    pub(crate) async fn verify(&self) -> Result<(), CompilerError> {
+        for (pin, name) in &self.entries {
+            if ave_common::governance::toolchain_info(pin).is_none() {
+                warn!(
+                    pin = %pin,
+                    "Toolchain entry pins an unknown registry ID, ignoring it"
+                );
+                continue;
+            }
+            let mut command = tokio::process::Command::new("rustc");
+            if !name.is_empty() {
+                command.arg(format!("+{name}"));
+            }
+            let output = command
+                .arg("--version")
+                .output()
+                .await
+                .map_err(|e| CompilerError::ToolchainFingerprintFailed {
+                    details: format!(
+                        "can not run toolchain for pin {pin}: {e}"
+                    ),
+                })?;
+            if !output.status.success() {
+                return Err(CompilerError::ToolchainFingerprintFailed {
+                    details: format!("toolchain for pin {pin} is unusable"),
+                });
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum CompilerResponse {
@@ -64,6 +134,7 @@ pub(crate) const fn is_local_fatal_compiler_error(error: &CompilerError) -> bool
             | CompilerError::SerializationError { .. }
             | CompilerError::MissingArtifactAnchor { .. }
             | CompilerError::NoLocalToolchain
+            | CompilerError::UnknownToolchainPin { .. }
             | CompilerError::ArtifactAnchorMismatch { .. }
     )
 }
@@ -215,6 +286,7 @@ impl CompilerSupport {
         hash: HashAlgorithm,
         contract: &str,
         contract_path: &Path,
+        toolchain: &str,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         // contract_path is `<root>/contracts/<name>`; scratch lives at
         // `<root>` so the boot sweep (root-level only) collects it.
@@ -234,7 +306,7 @@ impl CompilerSupport {
             std::process::id(),
             BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         ));
-        let wasm = pipeline::build_wasm(contract, &build_dir).await;
+        let wasm = pipeline::build_wasm(contract, &build_dir, toolchain).await;
         // Best-effort scratch cleanup (the boot sweep collects leftovers);
         // the build outcome below decides the verdict either way.
         if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
@@ -257,6 +329,7 @@ impl CompilerSupport {
         _hash: HashAlgorithm,
         _contract: &str,
         _contract_path: &Path,
+        _toolchain: &str,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         Err(CompilerError::NoLocalToolchain)
     }
@@ -275,12 +348,47 @@ impl CompilerSupport {
             })
     }
 
+    pub(crate) fn toolchains_helper<A: Actor>(
+        ctx: &ActorContext<A>,
+    ) -> Result<Arc<Toolchains>, ActorError> {
+        ctx.system().get_helper::<Arc<Toolchains>>("toolchains").ok_or_else(
+            || ActorError::Helper {
+                name: "toolchains".to_owned(),
+                reason: "Not found".to_owned(),
+            },
+        )
+    }
+
+    /// Resolves a governance pin to the local toolchain selector passed
+    /// to the build (`rustup run <name>`). Empty means the node predates
+    /// pins: the system cargo. An unknown pin is a permanent local
+    /// misconfiguration, fatal like `NoLocalToolchain`.
+    #[cfg_attr(feature = "test", allow(dead_code))]
+    pub(crate) async fn resolve_toolchain<A: Actor>(
+        ctx: &ActorContext<A>,
+        pin: &str,
+    ) -> Result<String, CompilerError> {
+        if pin.is_empty() {
+            return Ok(String::new());
+        }
+        // Without the helper there is no toolchain to build with, same
+        // as an unknown pin.
+        let unknown = || CompilerError::UnknownToolchainPin {
+            pin: pin.to_owned(),
+        };
+        let toolchains =
+            Self::toolchains_helper(ctx).map_err(|_| unknown())?;
+        toolchains.resolve(pin).ok_or_else(unknown)
+    }
+
     pub(crate) async fn compile_or_load_registered<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
         source: ContractSourceInput<'_>,
         register_path: &ActorPath,
         expected_wasm_hash: Option<&DigestIdentifier>,
+        #[cfg_attr(feature = "test", allow(unused_variables))]
+        toolchain: &str,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
         let ContractSourceInput {
@@ -411,8 +519,15 @@ impl CompilerSupport {
                 (outcome.wasm, outcome.toolchain_fingerprint)
             };
             #[cfg(not(feature = "test"))]
-            let (wasm, toolchain_fingerprint) =
-                Self::build_local(hash, contract, contract_path).await?;
+            let (wasm, toolchain_fingerprint) = {
+                // Resolved only on the build path: a valid cached
+                // artifact never needs the toolchain, so an unknown pin
+                // must not brick a node that can serve from cache.
+                let toolchain_name =
+                    Self::resolve_toolchain(ctx, toolchain).await?;
+                Self::build_local(hash, contract, contract_path, &toolchain_name)
+                    .await?
+            };
 
             let wasm_hash =
                 pipeline::hash_bytes(hash, &wasm, "compiled wasm artifact")?;
@@ -500,6 +615,16 @@ impl CompilerSupport {
                     prepare_result,
                     started_at,
                 );
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_compiler_build(
+                        toolchain,
+                        if prepare_result == "recompiled" {
+                            "built"
+                        } else {
+                            "cached"
+                        },
+                    );
+                }
                 Ok((module, metadata))
             }
             Err(error) => {
@@ -508,6 +633,9 @@ impl CompilerSupport {
                     "error",
                     started_at,
                 );
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_compiler_build(toolchain, "failed");
+                }
                 Err(error)
             }
         }
@@ -805,6 +933,7 @@ impl CompilerSupport {
         ctx: &ActorContext<A>,
         source: ContractSourceInput<'_>,
         register_path: &ActorPath,
+        toolchain: &str,
     ) -> Result<Arc<CompiledModule>, CompilerError> {
         let ContractSourceInput {
             contract_name,
@@ -892,6 +1021,7 @@ impl CompilerSupport {
             },
             register_path,
             Some(&anchor),
+            toolchain,
         )
         .await?;
         Ok(module)
@@ -1331,6 +1461,7 @@ mod tests {
             | CompilerError::SerializationError { .. }
             | CompilerError::MissingArtifactAnchor { .. }
             | CompilerError::NoLocalToolchain
+            | CompilerError::UnknownToolchainPin { .. }
             | CompilerError::ArtifactAnchorMismatch { .. } => {
                 (false, true, false)
             }

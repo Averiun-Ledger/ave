@@ -21,7 +21,9 @@ use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
 use crate::approval::{Approval, ApprovalMessage};
-use crate::compilation::{payload_contract_sources, schemas_to_compile};
+use crate::compilation::{
+    compilation_set, payload_contract_sources, schemas_to_compile,
+};
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
 };
@@ -296,6 +298,10 @@ impl RequestManager {
             governance_id: metadata.governance_id.clone(),
             sn: metadata.sn + 1,
             gov_version: state.version,
+            pin: crate::compilation::request::effective_pin(
+                request.content(),
+                &state.toolchain,
+            ),
         };
 
         let signature = get_sign(
@@ -1985,8 +1991,13 @@ impl RequestManager {
     }
 
     /// The compilation phase only runs for governance facts that add a
-    /// schema or change a contract (or its initial value).
-    fn gov_fact_needs_compilation(&self) -> bool {
+    /// schema, change a contract (or its initial value), or switch the
+    /// toolchain pin while schemas exist (recompile-all under the new
+    /// pin).
+    async fn gov_fact_needs_compilation(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> bool {
         if self.governance_id.is_some() {
             return false;
         }
@@ -1999,8 +2010,23 @@ impl RequestManager {
             return false;
         };
 
-        schemas_to_compile(&fact_request.payload)
-            .is_some_and(|schemas| !schemas.is_empty())
+        // The committed state decides recompile-all; on lookup failure
+        // fall back to the payload-only set (no new failure mode).
+        let pre = get_metadata(ctx, &self.subject_id)
+            .await
+            .ok()
+            .and_then(|metadata| {
+                crate::governance::data::GovernanceData::try_from(
+                    metadata.properties,
+                )
+                .ok()
+            });
+        match pre {
+            Some(pre) => compilation_set(&fact_request.payload, &pre)
+                .is_some_and(|schemas| !schemas.is_empty()),
+            None => schemas_to_compile(&fact_request.payload)
+                .is_some_and(|schemas| !schemas.is_empty()),
+        }
     }
 
     /// Sweeps the staged contract artifacts of an aborted governance
@@ -2009,8 +2035,8 @@ impl RequestManager {
     /// failures are logged, never propagated — the abort must complete,
     /// and a leftover stage is consumed or discarded by the next commit
     /// touching the same contract.
-    async fn sweep_staged_contracts(&self, ctx: &ActorContext<Self>) {
-        if !self.gov_fact_needs_compilation() {
+    async fn sweep_staged_contracts(&self, ctx: &mut ActorContext<Self>) {
+        if !self.gov_fact_needs_compilation(ctx).await {
             return;
         }
 
@@ -2108,7 +2134,7 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         match self.command {
             ReqManInitMessage::Evaluate => {
-                if self.gov_fact_needs_compilation() {
+                if self.gov_fact_needs_compilation(ctx).await {
                     self.build_compilation(ctx).await
                 } else {
                     self.build_evaluation(ctx, None).await

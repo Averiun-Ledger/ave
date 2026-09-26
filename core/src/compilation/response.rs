@@ -42,6 +42,15 @@ pub enum CompilationRes {
     /// budget. Consumed by the coordinator: it is never voted, never
     /// forwarded to the compilation phase actor.
     Working,
+    /// The compiler holds no toolchain for the request's pin: counts
+    /// exactly like `Unavailable` everywhere (quorum ignores it, the
+    /// coordinator replaces from the pool at once). It only exists to
+    /// log, meter per pin and feed future alerts. Appended last so the
+    /// existing ordinals — and every anchored evidence byte — keep
+    /// their meaning for old variants.
+    NoToolchain {
+        pin: String,
+    },
 }
 
 #[derive(
@@ -59,11 +68,18 @@ pub enum CompilationResult {
         response: CompilerResponse,
         compile_req_hash: DigestIdentifier,
         req_subject_data_hash: DigestIdentifier,
+        /// Build pin this result was produced with: divergence becomes
+        /// attributable ("who built with what"). Appended last, keeping
+        /// the existing field order stable.
+        pin: String,
     },
     Error {
         error: CompilationError,
         compile_req_hash: DigestIdentifier,
         req_subject_data_hash: DigestIdentifier,
+        /// Same as above: deterministic failures are pin-scoped too
+        /// (e.g. a same-pin no-op votes `Error` under that pin).
+        pin: String,
     },
 }
 
@@ -174,6 +190,7 @@ mod tests {
             },
             compile_req_hash: DigestIdentifier::default(),
             req_subject_data_hash: DigestIdentifier::default(),
+            pin: ave_common::governance::DEFAULT_PIN.to_owned(),
         }
     }
 
@@ -186,6 +203,9 @@ mod tests {
         bytes.extend_from_slice(&default_digest_bytes()); // wasm hash
         bytes.extend_from_slice(&default_digest_bytes()); // compile_req_hash
         bytes.extend_from_slice(&default_digest_bytes()); // req_subject_data_hash
+        bytes.extend_from_slice(&string_bytes(
+            ave_common::governance::DEFAULT_PIN,
+        )); // pin
         bytes
     }
 
@@ -239,6 +259,17 @@ mod tests {
         assert_wire_shape(&CompilationRes::Unavailable, &[4]);
         assert_wire_shape(&CompilationRes::Working, &[5]);
 
+        // CompilationRes::NoToolchain is appended last: existing
+        // ordinals stay put.
+        let mut expected = vec![6];
+        expected.extend_from_slice(&string_bytes("rust-1.95-wasm32"));
+        assert_wire_shape(
+            &CompilationRes::NoToolchain {
+                pin: "rust-1.95-wasm32".to_owned(),
+            },
+            &expected,
+        );
+
         // CompilationResult::Ok
         assert_wire_shape(&sample_ok_result(), &sample_ok_result_bytes());
 
@@ -248,11 +279,15 @@ mod tests {
         expected.extend_from_slice(&string_bytes("failed"));
         expected.extend_from_slice(&default_digest_bytes());
         expected.extend_from_slice(&default_digest_bytes());
+        expected.extend_from_slice(&string_bytes(
+            ave_common::governance::DEFAULT_PIN,
+        ));
         assert_wire_shape(
             &CompilationResult::Error {
                 error: CompilationError::CompilationFailed("failed".to_owned()),
                 compile_req_hash: DigestIdentifier::default(),
                 req_subject_data_hash: DigestIdentifier::default(),
+                pin: ave_common::governance::DEFAULT_PIN.to_owned(),
             },
             &expected,
         );

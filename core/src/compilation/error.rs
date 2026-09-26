@@ -50,6 +50,12 @@ pub enum CompilerError {
     #[error("node built without the `toolchain` feature")]
     NoLocalToolchain,
 
+    /// The governance pin names a toolchain the node does not know:
+    /// a permanent local misconfiguration (same family as
+    /// `NoLocalToolchain`), never a transient outage.
+    #[error("unknown toolchain pin: {pin}")]
+    UnknownToolchainPin { pin: String },
+
     #[error("compiler toolchain mismatch: expected {expected}, got {actual}")]
     ToolchainMismatch { expected: String, actual: String },
 

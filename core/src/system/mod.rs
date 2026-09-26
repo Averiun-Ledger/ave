@@ -126,6 +126,18 @@ pub async fn system(
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
     system.add_helper("config", config_helper);
 
+    // Local build toolchains selected by governance pin (see the
+    // toolchain-pinning plan): verified once here, read by every
+    // compiler actor afterwards. A broken entry is an operator
+    // misconfiguration and fails the boot loud.
+    let toolchains = crate::compilation::support::Toolchains::from_config(
+        &config.toolchains,
+    );
+    toolchains.verify().await.map_err(|e| {
+        SystemError::CompilerConfig(format!("invalid toolchains: {e}"))
+    })?;
+    system.add_helper("toolchains", Arc::new(toolchains));
+
     #[cfg(feature = "prometheus")]
     let contract_metrics = registry.map(|registry| {
         let metrics = Arc::new(ContractMetrics::new());
@@ -381,6 +393,7 @@ pub mod tests {
             spec: None,
             #[cfg(feature = "test")]
             compiler: Default::default(),
+            toolchains: Default::default(),
         };
 
         #[cfg(feature = "prometheus")]
@@ -468,6 +481,7 @@ pub mod tests {
             spec: None,
             #[cfg(feature = "test")]
             compiler: Default::default(),
+            toolchains: Default::default(),
         };
 
         let result = system(

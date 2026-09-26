@@ -247,10 +247,20 @@ fn cargo_config(
 async fn build_contract(
     contract_path: &Path,
     offline: bool,
+    toolchain: &str,
 ) -> Result<(), CompilerError> {
     let cargo = contract_path.join("Cargo.toml");
     let cargo_home = contracts_root(contract_path)?.join(SHARED_CARGO_HOME_DIR);
-    let mut command = Command::new("cargo");
+    // A named rustup toolchain runs isolated (`rustup run`), never
+    // through process-global env: concurrent builds with different
+    // toolchains can not interfere. Empty selects the system cargo.
+    let mut command = if toolchain.is_empty() {
+        Command::new("cargo")
+    } else {
+        let mut command = Command::new("rustup");
+        command.arg("run").arg(toolchain).arg("cargo");
+        command
+    };
     command
         .arg("build")
         .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
@@ -419,12 +429,17 @@ async fn load_compiled_wasm(
 pub async fn build_wasm(
     contract: &str,
     contract_path: &Path,
+    toolchain: &str,
 ) -> Result<Vec<u8>, CompilerError> {
     prepare_contract_project(contract, contract_path).await?;
 
     let contracts_root = contracts_root(contract_path)?;
-    build_contract(contract_path, contracts_root.join(VENDOR_DIR).exists())
-        .await?;
+    build_contract(
+        contract_path,
+        contracts_root.join(VENDOR_DIR).exists(),
+        toolchain,
+    )
+    .await?;
 
     load_compiled_wasm(contract_path).await
 }

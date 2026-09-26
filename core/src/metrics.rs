@@ -84,6 +84,14 @@ struct FetchFailoverLabels {
     reason: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CompilerBuildLabels {
+    // Registry pin IDs only (closed set): bounded cardinality. The
+    // missing-toolchain alert hooks here.
+    pin: String,
+    result: &'static str,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
@@ -96,6 +104,7 @@ pub struct CoreMetrics {
         Family<ContractPrepareLabels, Histogram, fn() -> Histogram>,
     contract_fetch_failovers: Family<FetchFailoverLabels, Counter>,
     contract_fetch_cycles_exhausted: Counter,
+    compiler_builds: Family<CompilerBuildLabels, Counter>,
     tracker_sync_rounds: Family<TrackerSyncRoundLabels, Counter>,
     tracker_sync_updates: Family<TrackerSyncUpdateLabels, Counter>,
     protocol_events: Family<ProtocolEventLabels, Counter>,
@@ -158,6 +167,7 @@ impl CoreMetrics {
             }),
             contract_fetch_failovers: Family::default(),
             contract_fetch_cycles_exhausted: Counter::default(),
+            compiler_builds: Family::default(),
             tracker_sync_rounds: Family::default(),
             tracker_sync_updates: Family::default(),
             protocol_events: Family::default(),
@@ -242,6 +252,11 @@ impl CoreMetrics {
             "core_contract_fetch_cycles_exhausted",
             "Fetch cycles that found no peer able to serve (governance update plus timeoff before the next cycle).",
             self.contract_fetch_cycles_exhausted.clone(),
+        );
+        registry.register(
+            "core_compiler_builds",
+            "Local contract builds labeled by toolchain pin and result (`built`, `cached`, `failed`, `stood_down`).",
+            self.compiler_builds.clone(),
         );
         registry.register(
             "core_tracker_sync_rounds",
@@ -439,6 +454,18 @@ impl CoreMetrics {
     /// triggered and timeoff armed before the next cycle.
     pub fn observe_fetch_cycle_exhausted(&self) {
         self.contract_fetch_cycles_exhausted.inc();
+    }
+
+    /// A local build finished under a toolchain pin (`built` fresh,
+    /// `cached` from a valid artifact, `failed` contract-side,
+    /// `stood_down` without a local toolchain for the pin).
+    pub fn observe_compiler_build(&self, pin: &str, result: &'static str) {
+        self.compiler_builds
+            .get_or_create(&CompilerBuildLabels {
+                pin: pin.to_owned(),
+                result,
+            })
+            .inc();
     }
 
     pub fn observe_tracker_sync_round(&self, result: &'static str) {

@@ -1427,6 +1427,7 @@ pub enum ContractCompilerAction {
         contract_name: String,
         initial_value: Value,
         contract_path: PathBuf,
+        toolchain_pin: String,
     },
     /// Fetches the official artifact from the network instead of
     /// compiling: this node evaluates the schema but has no compiler
@@ -1570,11 +1571,31 @@ impl Handler<Self> for ContractCompiler {
                         contract_name,
                         initial_value,
                         contract_path,
+                        toolchain_pin,
                     } => {
                         // A local compiler must not let an obsolete fetch
                         // register an artifact after taking over the schema.
                         self.cancel_fetch_timer(ctx);
                         self.fetch = None;
+                        // No local toolchain for the pinned toolchain:
+                        // stay dormant (keep serving retained bytes),
+                        // never crash-loop. The build runs on the next
+                        // `Reconcile` once the toolchain exists.
+                        if !toolchain_pin.is_empty()
+                            && CompilerSupport::resolve_toolchain(
+                                &*ctx,
+                                &toolchain_pin,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            warn!(
+                                toolchain_pin = %toolchain_pin,
+                                contract_name = %contract_name,
+                                "No local toolchain for pin, staying dormant"
+                            );
+                            return Ok(CompilerResponse::Ok);
+                        }
                         let contract_hash =
                             match hash_borsh(&*self.hash.hasher(), &contract) {
                                 Ok(hash) => hash,
@@ -1687,6 +1708,7 @@ impl Handler<Self> for ContractCompiler {
                                     },
                                     &register_path,
                                     expected_wasm_hash.as_ref(),
+                                    &toolchain_pin,
                                 )
                                 .await
                                 {
@@ -1919,10 +1941,28 @@ impl Handler<Self> for ContractCompiler {
                         contract_name,
                         initial_value,
                         contract_path,
+                        toolchain_pin,
                     }) => {
                         if self.contract != DigestIdentifier::default() {
                             // A governance apply already re-provisioned
                             // the artifact.
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        // Same dormancy as `Reconcile`: no toolchain for
+                        // the pin means no rebuild, not a crash.
+                        if !toolchain_pin.is_empty()
+                            && CompilerSupport::resolve_toolchain(
+                                &*ctx,
+                                &toolchain_pin,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            warn!(
+                                toolchain_pin = %toolchain_pin,
+                                contract_name = %contract_name,
+                                "No local toolchain for pin, healing stays dormant"
+                            );
                             return Ok(CompilerResponse::Ok);
                         }
                         match CompilerSupport::recover_official_artifact(
@@ -1935,6 +1975,7 @@ impl Handler<Self> for ContractCompiler {
                                 initial_value,
                             },
                             &Self::register_path(ctx),
+                            &toolchain_pin,
                         )
                         .await
                         {

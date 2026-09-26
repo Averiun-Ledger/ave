@@ -251,6 +251,7 @@ pub async fn try_create_node(
         // compile in-process and have no compiler pool config).
         #[cfg(feature = "test")]
         compiler: compiler.unwrap_or_default(),
+        toolchains: std::collections::BTreeMap::new(),
         spec: None,
     };
 

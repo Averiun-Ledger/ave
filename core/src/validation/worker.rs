@@ -16,8 +16,8 @@ use crate::{
         },
     },
     compilation::{
-        request::CompilationReq, response::CompilationResult,
-        schemas_to_compile,
+        compilation_set, request::CompilationReq,
+        response::CompilationResult,
     },
     config::ApprovalConfig,
     evaluation::{
@@ -1715,18 +1715,27 @@ impl ValiWorker {
         }
 
         // The compilation request is fully determined by the event under
-        // validation (signed event request, governance, sn and governance
-        // version), so it is rebuilt here: the stored request signature
-        // must verify cryptographically over it and the stored request
-        // hash must reproduce exactly. This closes the chain from the
-        // event request to the compiler votes, which sign a result hash
-        // embedding this request hash.
+        // validation (signed event request, governance, sn, governance
+        // version and effective build pin), so it is rebuilt here: the
+        // stored request signature must verify cryptographically over it
+        // and the stored request hash must reproduce exactly. This
+        // closes the chain from the event request to the compiler votes,
+        // which sign a result hash embedding this request hash (and the
+        // pin through it and through the voted result).
+        let pre = GovernanceData::try_from(metadata.properties.clone())
+            .map_err(|_| ValidatorError::InvalidData {
+                value: "governance state",
+            })?;
         let signed_compile_req = Signed::from_parts(
             CompilationReq {
                 event_request: event_request.clone(),
                 governance_id: metadata.governance_id.clone(),
                 sn: metadata.sn.saturating_add(1),
                 gov_version,
+                pin: crate::compilation::request::effective_pin(
+                    event_request.content(),
+                    &pre.toolchain,
+                ),
             },
             compilation.compile_req_signature.clone(),
         );
@@ -1761,6 +1770,13 @@ impl ValiWorker {
             });
         }
 
+        // The voted result is rebuilt with the same effective pin: the
+        // hash check below proves the compilers signed exactly this pin,
+        // making divergence attributable.
+        let pin = crate::compilation::request::effective_pin(
+            event_request.content(),
+            &pre.toolchain,
+        );
         let (compile_result, result_hash) = match compilation.response.clone() {
             CompilationResponse::Ok {
                 result,
@@ -1770,6 +1786,7 @@ impl ValiWorker {
                     response: result,
                     compile_req_hash: compilation.compile_req_hash.clone(),
                     req_subject_data_hash,
+                    pin: pin.clone(),
                 },
                 result_hash,
             ),
@@ -1781,6 +1798,7 @@ impl ValiWorker {
                     error: result,
                     compile_req_hash: compilation.compile_req_hash.clone(),
                     req_subject_data_hash,
+                    pin: pin.clone(),
                 },
                 result_hash,
             ),
@@ -1818,11 +1836,19 @@ impl ValiWorker {
                     value: "event request",
                 });
             };
-            let expected = schemas_to_compile(&fact_request.payload).ok_or(
-                ValidatorError::InvalidData {
-                    value: "compilation schemas",
-                },
-            )?;
+            // Coverage against the committed state: a pin switch
+            // recompiles every existing schema under the new pin.
+            let pre =
+                GovernanceData::try_from(metadata.properties.clone())
+                    .map_err(|_| ValidatorError::InvalidData {
+                        value: "governance state",
+                    })?;
+            let expected =
+                compilation_set(&fact_request.payload, &pre).ok_or(
+                    ValidatorError::InvalidData {
+                        value: "compilation schemas",
+                    },
+                )?;
             let got = result.contracts.keys().collect::<BTreeSet<_>>();
             if got != expected.iter().collect::<BTreeSet<_>>() {
                 return Err(ValidatorError::InvalidData {
@@ -1894,8 +1920,14 @@ impl ValiWorker {
                 });
             };
 
-            let needs_compilation = schemas_to_compile(&fact_request.payload)
-                .is_some_and(|schemas| !schemas.is_empty());
+            let pre =
+                GovernanceData::try_from(metadata.properties.clone())
+                    .map_err(|_| ValidatorError::InvalidData {
+                        value: "governance state",
+                    })?;
+            let needs_compilation =
+                compilation_set(&fact_request.payload, &pre)
+                    .is_some_and(|schemas| !schemas.is_empty());
 
             if needs_compilation != compilation.is_some() {
                 return Err(ValidatorError::InvalidData {
@@ -3408,6 +3440,7 @@ mod tests {
                                 change: None,
                             }),
                             policies: None,
+                            toolchain: None,
                         })
                         .unwrap(),
                     ),
@@ -3489,6 +3522,7 @@ mod tests {
                     governance_id: self.metadata.governance_id.clone(),
                     sn: self.metadata.sn.saturating_add(1),
                     gov_version: self.gov_version,
+                    pin: ave_common::governance::DEFAULT_PIN.to_owned(),
                 },
                 &self.owner,
             )
@@ -3500,6 +3534,7 @@ mod tests {
                 response: response.clone(),
                 compile_req_hash: compile_req_hash.clone(),
                 req_subject_data_hash: self.req_subject_data_hash.clone(),
+                pin: ave_common::governance::DEFAULT_PIN.to_owned(),
             };
             let result_hash = hash_borsh(&*hasher, &result).unwrap();
             let compilers_signatures = self
@@ -3741,6 +3776,7 @@ mod tests {
                 governance_id: fixture.metadata.governance_id.clone(),
                 sn: fixture.metadata.sn.saturating_add(1),
                 gov_version: fixture.gov_version + 1,
+                pin: ave_common::governance::DEFAULT_PIN.to_owned(),
             },
             &fixture.owner,
         )

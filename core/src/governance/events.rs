@@ -1089,6 +1089,7 @@ pub const fn governance_event_is_empty(event: &GovernanceEvent) -> bool {
         && event.roles.is_none()
         && event.schemas.is_none()
         && event.policies.is_none()
+        && event.toolchain.is_none()
 }
 
 ///// Members /////

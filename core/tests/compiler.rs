@@ -143,6 +143,7 @@ async fn test_invalid_contract() {
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
             policies_schema: BTreeMap::new(),
         },
     );

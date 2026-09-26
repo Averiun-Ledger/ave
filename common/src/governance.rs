@@ -22,6 +22,38 @@ use crate::{Namespace, SchemaType};
 
 pub type MemberName = String;
 
+/// Default toolchain pin used when a governance event omits it.
+/// Provisional value: fixed for good with the registry review.
+pub const DEFAULT_PIN: &str = "rust-1.95-wasm32";
+
+/// A known build toolchain: normalized (no host triple, no paths).
+/// The registry only grows between releases: entries are never removed
+/// so old events keep verifying. Unknown IDs simply match nothing —
+/// callers stand down, never reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolchainInfo {
+    pub rustc_version: &'static str,
+    pub cargo_config_hash: &'static str,
+    pub sdk_version: &'static str,
+    pub lock_hash: &'static str,
+    pub builder_image: &'static str,
+}
+
+/// Closed toolchain registry (provisional content: verified last,
+/// once everything else works).
+pub fn toolchain_info(id: &str) -> Option<ToolchainInfo> {
+    match id {
+        "rust-1.95-wasm32" => Some(ToolchainInfo {
+            rustc_version: "1.95.0",
+            cargo_config_hash: "",
+            sdk_version: "0.8.0",
+            lock_hash: "",
+            builder_image: "",
+        }),
+        _ => None,
+    }
+}
+
 /// Governance change set grouped by concern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -31,6 +63,11 @@ pub struct GovernanceEvent {
     pub roles: Option<RolesEvent>,
     pub schemas: Option<SchemasEvent>,
     pub policies: Option<PoliciesEvent>,
+    /// Toolchain pin change. `None` keeps the current pin; the pin
+    /// travels inside the signed payload, so `None` always resolves to
+    /// the deterministic `DEFAULT_PIN` on create.
+    #[serde(default)]
+    pub toolchain: Option<String>,
 }
 
 ///// Members /////
