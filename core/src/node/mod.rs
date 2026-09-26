@@ -1257,7 +1257,8 @@ impl Handler<Self> for Node {
                     ctx,
                 )
                 .await;
-                self.remove_distributor(ctx, &subject_id).await;
+                // No distributor stop here (same as transfers): late
+                // syncers still need the history after end of life.
 
                 debug!(
                     msg_type = "EOLSubject",
@@ -1379,7 +1380,10 @@ impl Handler<Self> for Node {
             NodeMessage::TransferSubject(data) => {
                 let subject_id = data.subject_id.clone();
                 self.on_event(NodeEvent::TransferSubject(data), ctx).await;
-                self.remove_distributor(ctx, &subject_id).await;
+                // No distributor stop here: after transferring out the
+                // node still witnesses and receives distributions for
+                // the subject — stopping it wedges inbound sync with
+                // "actor not found" retries on the senders' side.
 
                 debug!(
                     msg_type = "TransferSubject",

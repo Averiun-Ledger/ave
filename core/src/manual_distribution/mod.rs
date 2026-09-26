@@ -14,14 +14,19 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    governance::model::{RoleTypes, WitnessesData},
+    governance::{
+        model::{RoleTypes, WitnessesData},
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
+    },
     helpers::network::service::NetworkSender,
     model::common::{
         node::i_can_send_last_ledger,
         subject::{
             acquire_subject, get_last_ledger_event, get_members,
-            get_metadata, get_schema_roles, get_tracker_roles,
-            get_witnesses,
+            get_schema_roles, get_tracker_roles, get_witnesses,
         },
     },
     request::types::{DistributionPlanEntry, DistributionPlanMode},
@@ -285,8 +290,17 @@ impl Handler<Self> for ManualDistribution {
                     // Witnesses resolve against the subject owner (like
                     // the automatic plan), not the ledger seal signer:
                     // after transfers the two diverge and the witness
-                    // sets would too.
-                    let owner = get_metadata(ctx, &subject_id)
+                    // sets would too. The owner comes from the witnesses
+                    // register (not the subject actor, which this node
+                    // may not even track — that is the point of manual
+                    // distribution).
+                    let register_path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/witnesses_register",
+                        governance_id
+                    ));
+                    let register = ctx
+                        .system()
+                        .get_actor::<WitnessesRegister>(&register_path)
                         .await
                         .map_err(|e| {
                             error!(
@@ -294,13 +308,41 @@ impl Handler<Self> for ManualDistribution {
                                 subject_id = %subject_id,
                                 governance_id = %governance_id,
                                 error = %e,
-                                "Failed to get subject metadata for tracker manual plan"
+                                "Failed to reach witnesses register for tracker manual plan"
                             );
                             ActorError::Functional {
                                 description: e.to_string(),
                             }
-                        })?
-                        .owner;
+                        })?;
+                    let owner = match register
+                        .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(WitnessesRegisterResponse::TrackerOwnerSn {
+                            data: Some((owner, _)),
+                        }) => owner,
+                        Ok(_) => {
+                            return Err(ActorError::Functional {
+                                description: format!(
+                                    "No tracked owner for subject {subject_id} in manual plan"
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get tracker owner for manual plan"
+                            );
+                            return Err(ActorError::Functional {
+                                description: e.to_string(),
+                            });
+                        }
+                    };
                     let signer = &owner;
 
                     let witnesses = get_witnesses(

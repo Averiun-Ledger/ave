@@ -61,8 +61,10 @@ pub struct RequestData {
 }
 
 /// Maximum queued requests per subject: bounds the memory and disk a
-/// single authorized signer can force the handler to persist.
-const MAX_QUEUED_REQUESTS_PER_SUBJECT: usize = 128;
+/// single authorized signer can force the handler to persist, while
+/// staying well above legitimate bursts (bursts of hundreds of events
+/// are a normal workload).
+const MAX_QUEUED_REQUESTS_PER_SUBJECT: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {

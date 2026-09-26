@@ -6649,22 +6649,38 @@ async fn test_fetch_unavailable_until_server_returns() {
         .unwrap();
 
     // El Owner compiló Foo y Bar pero nadie se los ha pedido jamás: su
-    // caché de serving está vacía. Movemos los directorios de artefacto
-    // (no se corrompen los bytes: esos bytes se servirían y quedarían
-    // 300s en la caché de serving — SERVING_CACHE_TTL — envenenando los
-    // fetches posteriores; con el directorio ausente el serve devuelve
-    // None y NO rellena la caché, así que al restaurar el siguiente
-    // fetch lee los bytes buenos de disco).
+    // caché de serving está vacía. El Owner enmudece (mover los
+    // directorios ya no vale: sanaría solo y serviría; además los bytes
+    // servidos quedarían 300s en la caché de serving —
+    // SERVING_CACHE_TTL — envenenando fetches posteriores).
     let foo_name = format!("{governance_id}_Foo");
     let bar_name = format!("{governance_id}_Bar");
     let foo_dir = node1_contracts.path().join("contracts").join(&foo_name);
     let bar_dir = node1_contracts.path().join("contracts").join(&bar_name);
     let foo_bytes = fs::read(foo_dir.join("contract.wasm")).unwrap();
     let bar_bytes = fs::read(bar_dir.join("contract.wasm")).unwrap();
-    let foo_hidden = foo_dir.with_extension("bak");
-    let bar_hidden = bar_dir.with_extension("bak");
-    fs::rename(&foo_dir, &foo_hidden).unwrap();
-    fs::rename(&bar_dir, &bar_hidden).unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 aplica SN 2: necesita Foo y Bar, pero nadie sirve bytes
     // válidos. El fetch queda en ciclo de reintentos.
@@ -6752,8 +6768,7 @@ async fn test_fetch_unavailable_until_server_returns() {
     // El servidor vuelve a tener los artefactos oficiales: el ciclo de
     // reintentos de AveNode2 completa ambos fetches verificados contra
     // el ancla.
-    fs::rename(&foo_hidden, &foo_dir).unwrap();
-    fs::rename(&bar_hidden, &bar_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     wait_artifact_bytes_eq(node2_contracts.path(), &foo_name, &foo_bytes).await;
     wait_artifact_bytes_eq(node2_contracts.path(), &bar_name, &bar_bytes).await;
@@ -8222,8 +8237,29 @@ async fn test_fetch_survives_unrelated_gov_events() {
         .join(&artifact_name);
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
     assert_ne!(node1_v2, node2_v1);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El Owner enmudece (ocultar el dir ya no vale: sanaría solo).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 aplica SN 2: el fetch de la v2 arranca y queda estancado
     // (el único servidor no sirve).
@@ -8274,7 +8310,7 @@ async fn test_fetch_survives_unrelated_gov_events() {
 
     // El servidor vuelve: el fetch superviviente completa con los bytes
     // de la v2.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v2)
         .await;
@@ -8457,8 +8493,29 @@ async fn test_fetch_survives_irrelevant_role_change() {
         .join("contracts")
         .join(&artifact_name);
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El Owner enmudece (ocultar el dir ya no vale: sanaría solo).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 aplica SN 2: fetch de la v2 en vuelo y estancado.
     node2
@@ -8520,7 +8577,7 @@ async fn test_fetch_survives_irrelevant_role_change() {
         .unwrap();
 
     // El servidor vuelve: el fetch completa con los bytes de la v2.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v2)
         .await;
@@ -8700,8 +8757,29 @@ async fn test_never_evaluates_stale_module_during_fetch() {
         .join("contracts")
         .join(&artifact_name);
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El Owner enmudece (ocultar el dir ya no vale: sanaría solo).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 aplica SN 2: su módulo v1 queda evictado (el contrato
     // cambió) y el fetch de la v2 queda estancado.
@@ -8740,7 +8818,7 @@ async fn test_never_evaluates_stale_module_during_fetch() {
 
     // El servidor vuelve: AveNode2 fetcheada la v2 y la request
     // rebootada commitea con ambos votos OK.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v2)
         .await;
@@ -8908,8 +8986,29 @@ async fn test_fetch_requester_loses_role_mid_cycle() {
         .join("contracts")
         .join(&artifact_name);
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El Owner enmudece (ocultar el dir ya no vale: sanaría solo).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 aplica SN 2: fetch de la v2 en vuelo y estancado.
     node2
@@ -8962,7 +9061,7 @@ async fn test_fetch_requester_loses_role_mid_cycle() {
     // verifican contra el ancla nueva no sobreviven:
     // CompilerSupport::discard_persisted_artifact) y la v2 no puede
     // llegar sin el rol: el artefacto NO existe.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(
@@ -10074,15 +10173,35 @@ async fn test_fetch_role_promotion_to_compiler_cancels_fetch() {
         .await
         .unwrap();
 
-    // El Owner queda sin poder servir la v2 (directorio movido: serve
-    // devuelve None sin rellenar la caché de serving).
+    // El Owner queda sin poder servir la v2 (respuestas retenidas;
+    // mover el directorio ya no vale: sanaría solo y serviría).
     let node1_dir = node1_contracts
         .path()
         .join("contracts")
         .join(&artifact_name);
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 aplica SN 2: descarta la v1 (no verifica contra el ancla
     // nueva) y arranca el fetch de la v2, estancado sin servidor.
@@ -10166,7 +10285,7 @@ async fn test_fetch_role_promotion_to_compiler_cancels_fetch() {
         .unwrap();
     assert_eq!(state.properties, json!({"one": 0, "two": 0, "three": 50}));
 
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
     node_running(&node2.api).await.unwrap();
 }
 #[test(tokio::test)]
@@ -10373,13 +10492,30 @@ async fn test_fetch_server_goes_silent_on_role_loss() {
         .await
         .unwrap();
 
-    // El Owner no puede servir: AveNode3 fetcheará de AveNode2 (plan B).
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El Owner no puede servir (respuestas retenidas; ocultar el dir ya
+    // no vale: sanaría solo): AveNode3 fetcheará de AveNode2 (plan B).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     node3
         .api
@@ -10438,9 +10574,7 @@ async fn test_fetch_server_goes_silent_on_role_loss() {
         .unwrap();
 
     // AveNode3 pierde su artefacto local y REINICIA: la recuperación de
-    // arranque (ancla v1, artefacto ausente) dispara el refetch. (En
-    // caliente no habría trigger: el reconcile con el contrato sin
-    // cambios no re-chequea el disco — "already available, skipping".)
+    // arranque (ancla v1, artefacto ausente) dispara el refetch.
     fs::remove_dir_all(
         node3_contracts
             .path()
@@ -10486,7 +10620,7 @@ async fn test_fetch_server_goes_silent_on_role_loss() {
     );
 
     // El Owner vuelve a poder servir: el refetch completa con la v1.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     let node3_refetch =
         wait_artifact_bytes(node3_contracts.path(), &artifact_name).await;
@@ -10942,9 +11076,31 @@ async fn test_boot_recovery_after_shutdown_with_pending_fetch() {
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
 
     // AveNode2 aplica SN 2 (ancla v2 registrada, v1 descartada) pero su
-    // fetch de la v2 queda pendiente: el Owner no puede servir.
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // fetch de la v2 queda pendiente: sus probes al Owner van retenidos
+    // (ocultar el dir ya no vale: el Owner sanaría solo y serviría).
+    let node1_pk = PublicKey::from_str(node1.api.public_key()).unwrap();
+    node2
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeReq,
+            peer: Some(node1_pk.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node2
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactReq,
+            peer: Some(node1_pk.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     node2
         .api
@@ -10955,11 +11111,10 @@ async fn test_boot_recovery_after_shutdown_with_pending_fetch() {
         .await
         .unwrap();
 
-    // Apagado con el fetch en vuelo; el Owner vuelve a poder servir.
+    // Apagado con el fetch en vuelo (las reglas mueren con el nodo).
     let (mut node2, _node2_dirs) = (node2, _node2_dirs);
     node2.token.cancel();
     join_all(node2.handler.iter_mut()).await;
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
 
     // Arranque: ancla v2 presente, artefacto ausente → refetch anclado.
     let (node2, _node2_dirs) = create_node(CreateNodeConfig {
@@ -11723,8 +11878,9 @@ async fn test_serving_after_boot_recovery_intact_artifact() {
         .await;
 
     // SN 2: AveNode3 gana el rol de evaluador. El Owner no puede servir
-    // (directorio movido): el fetch de AveNode3 va al plan B — AveNode2,
-    // recién reiniciado, debe servir desde el primer momento.
+    // (respuestas retenidas; mover el dir ya no vale: sanaría solo):
+    // el fetch de AveNode3 va al plan B — AveNode2, recién reiniciado,
+    // debe servir desde el primer momento.
     let json = json!({
         "roles": {
             "schema": [
@@ -11757,12 +11913,28 @@ async fn test_serving_after_boot_recovery_intact_artifact() {
         .await
         .unwrap();
 
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     node3
         .api
@@ -11780,7 +11952,7 @@ async fn test_serving_after_boot_recovery_intact_artifact() {
         "AveNode2 sirvió en plan B inmediatamente tras su recuperación de arranque"
     );
 
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
     node_running(&node2.api).await.unwrap();
     node_running(&node3.api).await.unwrap();
 }
@@ -11967,14 +12139,35 @@ async fn test_fetch_failover_from_outdated_server() {
         .await
         .unwrap();
 
-    // El Owner queda sin poder servir la v2.
+    // El Owner queda sin poder servir la v2 (respuestas retenidas;
+    // ocultar el dir ya no vale: sanaría solo y serviría).
     let node1_dir = node1_contracts
         .path()
         .join("contracts")
         .join(&artifact_name);
     let node1_v2 = fs::read(node1_dir.join("contract.wasm")).unwrap();
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode2 NUNCA sincroniza la v2: queda atrasado con la v1.
     // AveNode3 aplica SN 2: descarta la v1 y arranca el fetch de la v2.
@@ -12000,7 +12193,7 @@ async fn test_fetch_failover_from_outdated_server() {
     );
 
     // El Owner vuelve a poder servir: el fetch completa con la v2.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     wait_artifact_bytes_eq(node3_contracts.path(), &artifact_name, &node1_v2)
         .await;
@@ -13039,14 +13232,32 @@ async fn test_contract_change_retargets_inflight_fetch() {
     let node1_v1 =
         wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
 
-    // AveNode1 no puede servir la v1: el fetch de AveNode2 cicla en
-    // NotServed (queda "en vuelo").
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // AveNode1 no recibe los probes de AveNode2 (retenidos): el fetch
+    // de la v1 queda "en vuelo" sin que AveNode1 tenga que perder sus
+    // bytes (si los perdiera, sanaría solo y serviría igual).
+    let node1_pk = PublicKey::from_str(node1.api.public_key()).unwrap();
+    node2
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeReq,
+            peer: Some(node1_pk.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node2
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactReq,
+            peer: Some(node1_pk.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     node2
         .api
@@ -13064,11 +13275,11 @@ async fn test_contract_change_retargets_inflight_fetch() {
             .join("contracts")
             .join(&artifact_name)
             .exists(),
-        "el fetch de la v1 sigue en vuelo (AveNode1 no la sirve)"
+        "el fetch de la v1 sigue en vuelo (probes retenidos)"
     );
 
-    // SN 2: cambio de contrato a la v2. AveNode1 compila la v2 (escribe
-    // un dir oficial nuevo; el oculto con la v1 nunca vuelve).
+    // SN 2: cambio de contrato a la v2. AveNode1 compila la v2 con su
+    // pool vivo.
     let json = json!({
         "schemas": {
             "change": [{
@@ -13091,7 +13302,8 @@ async fn test_contract_change_retargets_inflight_fetch() {
     assert_ne!(node1_v1, node1_v2);
 
     // AveNode2 aplica SN2: el reconcile retargeta el fetch en vuelo de
-    // la v1 a la v2 → completa con los bytes nuevos.
+    // la v1 a la v2 (sigue retenido) → al liberar, completa con los
+    // bytes nuevos.
     node2
         .api
         .update_subject(governance_id.clone())
@@ -13100,6 +13312,8 @@ async fn test_contract_change_retargets_inflight_fetch() {
     get_subject(&node2.api, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
+
+    node2.api.test_clear_faults().await.unwrap();
 
     wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v2)
         .await;
@@ -13254,13 +13468,30 @@ async fn test_fetcher_reboot_mid_fetch_cycle_recovers() {
     let node1_v1 =
         wait_artifact_bytes(node1_contracts.path(), &artifact_name).await;
 
-    // AveNode1 no puede servir: el fetch de AveNode2 cicla en NotServed.
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // AveNode1 no puede servir (respuestas retenidas; ocultar el dir ya
+    // no vale: sanaría solo): el fetch de AveNode2 cicla estancado.
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     node2
         .api
@@ -13320,7 +13551,7 @@ async fn test_fetcher_reboot_mid_fetch_cycle_recovers() {
 
     // AveNode1 vuelve a poder servir: el fetch re-armado completa con
     // los bytes de la v1.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     let node2_v1 =
         wait_artifact_bytes(node2_contracts.path(), &artifact_name).await;
@@ -13569,16 +13800,32 @@ async fn test_plan_b_corrupt_transfer_rejected_then_retry_succeeds() {
         .join("contract.wasm");
     fs::write(&node2_wasm, b"corrupted served artifact bytes").unwrap();
 
-    // El plan A (AveNode1) no puede servir: caché vacía (SN 2) y
-    // directorio oculto → serve None, sin rellenar la caché.
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El plan A (AveNode1) no puede servir (respuestas retenidas;
+    // ocultar el dir ya no vale: sanaría solo).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
-    // AveNode3 sincroniza e inicia el fetch: plan A NotServed y plan B
+    // AveNode3 sincroniza e inicia el fetch: plan A enmudecido y plan B
     // tampoco sirve (descarte pre-serve) → no persiste nada y reintenta
     // (probes+transferencia son instantáneos en memoria y el timeoff
     // base es 1s: en 3s hay ≥1 ciclo fallido completo).
@@ -13601,12 +13848,12 @@ async fn test_plan_b_corrupt_transfer_rejected_then_retry_succeeds() {
         "las transferencias corruptas se rechazan: nada persiste"
     );
 
-    // Recuperación: el Owner vuelve a servir (se deshace el ocultado).
-    // El descarte pre-serve borró el artefacto de AveNode2 del disco y
-    // del register, así que no hay nada que restaurar a mano: su heal
-    // (HealArtifact → fetch, ciclo que nunca abandona) completa en
-    // cuanto el plan A responde, y el fetch de AveNode3 también.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    // Recuperación: el Owner vuelve a servir. El descarte pre-serve
+    // borró el artefacto de AveNode2 del disco y del register, así que
+    // no hay nada que restaurar a mano: su heal (HealArtifact → fetch,
+    // ciclo que nunca abandona) completa en cuanto el plan A responde,
+    // y el fetch de AveNode3 también.
+    node1.api.test_clear_faults().await.unwrap();
 
     let node2_healed =
         wait_artifact_bytes(node2_contracts.path(), &artifact_name).await;
@@ -19064,16 +19311,33 @@ async fn test_fetch_always_corrupt_plan_b_server_cycles_without_persisting() {
         .await
         .unwrap();
 
-    // El plan A no puede servir: caché vacía (SN 2) y directorio oculto
-    // → serve None, sin rellenar la caché. El artefacto de AveNode2 en
-    // disco está ÍNTEGRO: la corrupción se inyecta en la red, en cada
-    // respuesta de artefacto hacia AveNode3, sin límite de ocurrencias.
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    // El plan A no puede servir: sus respuestas van retenidas (ocultar
+    // el directorio ya no vale: el Owner sanaría solo y serviría).
+    // El artefacto de AveNode2 en disco está ÍNTEGRO: la corrupción se
+    // inyecta en la red, en cada respuesta de artefacto hacia AveNode3,
+    // sin límite de ocurrencias.
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     node2
         .api
@@ -19163,6 +19427,8 @@ async fn test_fetch_always_corrupt_plan_b_server_cycles_without_persisting() {
 // anclados (compilación determinista).
 async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
     let node1_contracts = tempfile::tempdir().unwrap();
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
     let node2_contracts = tempfile::tempdir().unwrap();
     let node2_local = tempfile::tempdir().unwrap();
     let node2_ext = tempfile::tempdir().unwrap();
@@ -19177,6 +19443,8 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
             PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
         ),
         contracts_path: Some(node1_contracts.path().to_path_buf()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
         always_accept: true,
         ..Default::default()
     })
@@ -19397,6 +19665,37 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
             .await
             .unwrap();
     }
+
+    // AveNode1 reinicia con el pool de compilación MUERTO (misma
+    // identidad y DBs, puerto fresco: el artefacto está íntegro y el
+    // arranque no compila). Sin esto, al ocultar su directorio el Owner
+    // sanaría solo (recompila anclado con su pool vivo) y serviría a
+    // AveNode3, rompiendo la premisa de esta fase: AveNode2 como única
+    // fuente. Va primero para que AveNode2/3 capturen su dirección nueva
+    // al reiniciar ellos.
+    let (mut node1_stopped, _node1_dirs) = (node1, _node1_dirs);
+    node1_stopped.token.cancel();
+    join_all(node1_stopped.handler.iter_mut()).await;
+
+    let (node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        keys: Some(node1_stopped.keys.clone()),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        compiler: Some(CompilerNodeConfig {
+            endpoints: vec!["http://127.0.0.1:1".to_owned()],
+            ..Default::default()
+        }),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
 
     // AveNode2 reinicia con el pool de compilación MUERTO: el artefacto
     // está íntegro en disco, así que el arranque no necesita compilar.
@@ -19830,9 +20129,10 @@ async fn test_evaluator_serve_corruption_self_heals_by_fetch() {
     }
 
     // Se corrompe el wasm oficial de AveNode2 (su caché de serving está
-    // vacía desde el SN 2: el próximo serve leerá de disco) y el plan A
-    // del Owner queda oculto: AveNode2 será la única fuente posible del
-    // fetch de AveNode3, hasta que se detecte la corrupción.
+    // vacía desde el SN 2: el próximo serve leerá de disco) y el Owner
+    // queda enmudecido (sus respuestas retenidas): AveNode2 será la
+    // única fuente visible del fetch de AveNode3, hasta que se detecte
+    // la corrupción. Ocultar el dir ya no vale: el Owner sanaría solo.
     let node2_wasm = node2_contracts
         .path()
         .join("contracts")
@@ -19840,18 +20140,34 @@ async fn test_evaluator_serve_corruption_self_heals_by_fetch() {
         .join("contract.wasm");
     fs::write(&node2_wasm, b"corrupted served artifact bytes").unwrap();
 
-    let node1_dir = node1_contracts
-        .path()
-        .join("contracts")
-        .join(&artifact_name);
-    let node1_hidden = node1_dir.with_extension("bak");
-    fs::rename(&node1_dir, &node1_hidden).unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // SN 3: AveNode3 gana el rol de evaluador. Al aplicar necesita la
-    // v1: plan A NotServed (oculto) y plan B AveNode2, cuya verificación
+    // v1: plan A enmudecido y plan B AveNode2, cuya verificación
     // pre-serve detecta su propia corrupción → descarta el artefacto y
     // su heal (es evaluador: FETCH) queda ciclando mientras el Owner
-    // siga oculto.
+    // siga enmudecido.
     let json = json!({
         "roles": {
             "schema": [
@@ -19927,7 +20243,7 @@ async fn test_evaluator_serve_corruption_self_heals_by_fetch() {
 
     // El Owner vuelve a servir: el heal-fetch de AveNode2 completa con
     // bytes anclados y AveNode2 vuelve a servir.
-    fs::rename(&node1_hidden, &node1_dir).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
 
     let healed =
         wait_artifact_bytes(node2_contracts.path(), &artifact_name).await;
@@ -20154,13 +20470,32 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
         .unwrap();
     assert_eq!(state.properties, json!({"one": 1, "two": 0, "three": 0}));
 
-    // El Owner deja de servir "Doomed" (directorio oculto; su caché de
-    // serving de ese contrato está vacía: nadie lo ha fetcheado nunca).
+    // El Owner deja de servir "Doomed" (respuestas retenidas; su caché
+    // de serving de ese contrato está vacía: nadie lo ha fetcheado
+    // nunca). Ocultar el dir ya no vale: el Owner sanaría solo.
     let doomed_name = format!("{governance_id}_Doomed");
-    let node1_doomed =
-        node1_contracts.path().join("contracts").join(&doomed_name);
-    let node1_doomed_hidden = node1_doomed.with_extension("bak");
-    fs::rename(&node1_doomed, &node1_doomed_hidden).unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // SN 2: AveNode2 gana el rol de evaluador de "Doomed". Al aplicarlo
     // arranca el fetch del contrato, que cicla: la única fuente (el
@@ -20238,7 +20573,7 @@ async fn test_drop_schema_cancels_inflight_fetch_no_resurrection() {
 
     // El serving del Owner vuelve: si el fetch no se hubiera cancelado,
     // el siguiente ciclo persistiría el artefacto. No aparece nada.
-    fs::rename(&node1_doomed_hidden, &node1_doomed).unwrap();
+    node1.api.test_clear_faults().await.unwrap();
     tokio::time::sleep(Duration::from_secs(4)).await;
 
     let doomed_leftovers = |root: &std::path::Path| -> Vec<String> {

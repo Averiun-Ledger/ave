@@ -63,6 +63,7 @@ pub(crate) const fn is_local_fatal_compiler_error(error: &CompilerError) -> bool
             | CompilerError::EngineCreation { .. }
             | CompilerError::SerializationError { .. }
             | CompilerError::MissingArtifactAnchor { .. }
+            | CompilerError::NoLocalToolchain
             | CompilerError::ArtifactAnchorMismatch { .. }
     )
 }

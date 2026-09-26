@@ -2240,43 +2240,127 @@ impl RequestManager {
         match self.state {
             RequestManagerState::Reboot => {
                 if let Ok(actor) = ctx.get_child::<Update>("update").await {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
                 if let Ok(actor) = ctx.get_child::<Reboot>("reboot").await {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
             }
             RequestManagerState::Compilation => {
                 if let Ok(actor) =
                     ctx.get_child::<Compilation>("compilation").await
                 {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
             }
             RequestManagerState::Evaluation { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Evaluation>("evaluation").await
                 {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
             }
             RequestManagerState::Approval { .. } => {
                 if let Ok(actor) = ctx.get_child::<Approval>("approval").await {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
             }
             RequestManagerState::Validation { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Validation>("validation").await
                 {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
             }
             RequestManagerState::Distribution { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Distribution>("distribution").await
                 {
-                    actor.ask_stop().await?;
+                    // Best-effort: a child that is already gone is the
+                    // desired end state, not an error. Skip the
+                    // already-closed ones so the runtime does not log
+                    // a stop-confirmation error for them.
+                    if !actor.is_closed()
+                        && let Err(e) = actor.ask_stop().await
+                    {
+                        debug!(
+                            request_id = %self.id,
+                            error = %e,
+                            "Phase child already gone while stopping"
+                        );
+                    }
                 };
             }
             _ => {}

@@ -2321,18 +2321,11 @@ fn get_events_from_conn(
     let mut page = query.page.unwrap_or(1).max(1);
     let total = count_events_from_conn(conn, runtime, subject_id, &query)?;
 
-    // Empty subjects page like aborts do: an empty ledger is not an
-    // error (the `NoEvents` phantom below only guards inconsistent
-    // page walks).
+    // An empty ledger stays an error (not an empty page): callers use
+    // `NoEvents` as the not-found signal for deleted or never-written
+    // subjects, and the API maps it to 404.
     if total == 0 {
-        return Ok(PaginatorEvents {
-            paginator: Paginator {
-                pages: 0,
-                next: None,
-                prev: None,
-            },
-            events: Vec::new(),
-        });
+        return Err(DatabaseError::NoEvents(subject_id.to_owned()));
     }
 
     let mut pages = total.div_ceil(quantity);

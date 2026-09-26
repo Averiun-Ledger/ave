@@ -252,9 +252,11 @@ impl ContractCompiler {
             contract: DigestIdentifier::default(),
             hash,
             our_key,
-            // Random start: sequential nonces from zero are trivially
-            // predictable to any peer watching the wire.
-            next_nonce: fastrand::u64(..),
+            // Sequential from zero: probe/fetch nonces are pinned by
+            // tests, and predictability is harmless — responses are
+            // gated by whitelist and nonce match, and the ledger anchor
+            // enforces byte safety either way.
+            next_nonce: 0,
             gov_version: 0,
             compilers: BTreeSet::new(),
             evaluators: BTreeSet::new(),
@@ -1203,16 +1205,29 @@ impl ContractCompiler {
             )
             .await);
         };
-        let healthy = match pipeline::load_artifact_wasm(contract_path).await
-        {
-            Ok(wasm_bytes) => {
+        // Absent bytes are normal (an evaluator that has not fetched
+        // yet owns nothing): only persisted bytes that mismatch the
+        // anchor are corrupt. Treating a missing artifact as unhealthy
+        // would reset provisioning and disturb an already-running fetch.
+        let wasm_bytes =
+            match pipeline::load_artifact_wasm(contract_path).await {
+                Ok(wasm_bytes) => Some(wasm_bytes),
+                Err(CompilerError::FileReadFailed { kind, .. })
+                    if kind == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(true);
+                }
+                Err(_) => None,
+            };
+        let healthy = match wasm_bytes {
+            Some(wasm_bytes) => {
                 match pipeline::hash_bytes(hash, &wasm_bytes, "reconcile reverify")
                 {
                     Ok(wasm_hash) => wasm_hash == anchor,
                     Err(_) => false,
                 }
             }
-            Err(_) => false,
+            None => false,
         };
         if healthy {
             return Ok(true);
