@@ -34,6 +34,9 @@ ave-common = { path = ".", features = ["typescript", "sink-grpc"] }
 default = ["common"]
 common = ["ave-identity", "value-wrapper"]
 value-wrapper = []
+# Test-only second toolchain pin for pin-switch suites. Never enabled
+# in production builds.
+test-pins = []
 # gRPC sink protobuf types. Optional: tonic does not compile for the
 # wasm32 target used by the contract SDK, which depends on this crate.
 sink-grpc = ["tonic", "tonic-prost", "prost", "tonic-prost-build", "protoc-bin-vendored"]

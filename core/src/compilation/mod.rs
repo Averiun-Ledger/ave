@@ -104,6 +104,12 @@ pub fn schemas_to_compile(
 /// changes the toolchain pin — every existing schema, recompiled under
 /// the new pin with fresh evidence (a pin switch never reuses old-pin's
 /// builds). `None` exactly when `schemas_to_compile` is `None`.
+///
+/// An unknown pin short-circuits to the empty set: no node can build
+/// it, so compiling would reboot forever without ever reaching the
+/// evaluation that deterministically rejects it. The registry is
+/// global, hence manager and validators take the identical decision
+/// here, by construction.
 pub fn compilation_set(
     payload: &ValueWrapper,
     pre: &crate::governance::data::GovernanceData,
@@ -111,6 +117,11 @@ pub fn compilation_set(
     let mut schemas = schemas_to_compile(payload)?;
     let event: GovernanceEvent =
         serde_json::from_value(payload.0.clone()).ok()?;
+    if let Some(new_pin) = event.toolchain.as_ref()
+        && ave_common::governance::toolchain_info(new_pin).is_none()
+    {
+        return Some(BTreeSet::new());
+    }
     if event
         .toolchain
         .as_ref()
@@ -175,7 +186,8 @@ pub struct CompileTarget {
 ///
 /// What the event does
 /// not provide comes from the committed state, which is identical at the
-/// same governance version.
+/// same governance version — including a pin switch with no schema
+/// changes, which recompiles every committed schema (see below).
 pub fn resolve_compile_targets(
     payload: &ValueWrapper,
     schemas: &BTreeMap<SchemaType, Schema>,
@@ -230,6 +242,29 @@ pub fn resolve_compile_targets(
                     },
                 );
             }
+        }
+    }
+
+    // No schemas in the payload yet compilation was requested: the
+    // only consistent cause is a pin switch (the manager decides with
+    // `compilation_set`, which extends to every committed schema on a
+    // switch). Recompile them all under the request pin
+    // (`contract_changed: false`: official artifact path with init
+    // check and anchor verification, never a divergent vote). The
+    // worker can not compare against the committed pin here —
+    // request-scoped workers carry the request pin — but it does not
+    // need to: with no payload schemas the manager only asks on a
+    // switch, so this branch is unreachable otherwise.
+    if targets.is_empty() && event.toolchain.is_some() {
+        for (schema_id, schema) in schemas {
+            targets.insert(
+                schema_id.clone(),
+                CompileTarget {
+                    source: schema.contract.clone(),
+                    initial_value: schema.initial_value.0.clone(),
+                    contract_changed: false,
+                },
+            );
         }
     }
 

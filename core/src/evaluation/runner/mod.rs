@@ -182,8 +182,12 @@ impl Runner {
         }
 
         if !creators.get(new_owner).is_some_and(|namespaces| {
+            // Exact match only: Creator grants cover exactly their
+            // namespace (hierarchy is for serving roles). This mirrors
+            // SubjectRegister enforcement, so a transfer that passes
+            // evaluation can not die later in the register check.
             namespaces.iter().any(|creator_namespace| {
-                creator_namespace.is_ancestor_or_equal_of(&namespace)
+                creator_namespace == &namespace
             })
         }) {
             return Err(RunnerError::InvalidEvent {
@@ -1618,5 +1622,73 @@ impl Handler<Self> for Runner {
                 Ok(RunnerResponse::Error(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use ave_common::identity::keys::{Ed25519Signer, KeyPair};
+    use ave_common::{Namespace, SchemaType};
+
+    use super::Runner;
+    use crate::evaluation::runner::error::{
+        InvalidEventKind, RunnerError,
+    };
+
+    fn key() -> ave_common::identity::PublicKey {
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key()
+    }
+
+    fn schema() -> SchemaType {
+        SchemaType::Type("M".to_owned())
+    }
+
+    fn transfer_to(
+        holder: ave_common::identity::PublicKey,
+        grant: Namespace,
+        namespace: Namespace,
+    ) -> Result<super::types::RunnerResult, RunnerError> {
+        let old_owner = key();
+        let members =
+            BTreeSet::from([holder.clone(), old_owner.clone()]);
+        let creators =
+            BTreeMap::from([(holder.clone(), BTreeSet::from([grant]))]);
+        Runner::execute_transfer_not_gov(
+            &members,
+            &creators,
+            &holder,
+            &old_owner,
+            namespace,
+            &schema(),
+        )
+    }
+
+    #[test]
+    fn transfer_creator_grant_is_exact() {
+        // Exact grant: passes the creator gate.
+        assert!(transfer_to(
+            key(),
+            Namespace::from("org.A.records.R1"),
+            Namespace::from("org.A.records.R1"),
+        )
+        .is_ok());
+        // Parent grant for a child subject: rejected (Creator covers
+        // exactly its namespace; hierarchy is for serving roles).
+        let holder = key();
+        let err = transfer_to(
+            holder,
+            Namespace::from("org.A.records"),
+            Namespace::from("org.A.records.R1"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RunnerError::InvalidEvent {
+                kind: InvalidEventKind::MissingRole { .. },
+                ..
+            }
+        ));
     }
 }

@@ -3515,6 +3515,20 @@ mod tests {
             &self,
             contracts: BTreeMap<SchemaType, DigestIdentifier>,
         ) -> CompilationData {
+            self.compilation_with_contracts_and_pin(
+                contracts,
+                &ave_common::governance::DEFAULT_PIN.to_owned(),
+            )
+        }
+
+        /// Same evidence built around an explicit pin: a pin that is
+        /// not the effective one must be rejected (no cross-pin
+        /// evidence replay).
+        fn compilation_with_contracts_and_pin(
+            &self,
+            contracts: BTreeMap<SchemaType, DigestIdentifier>,
+            pin: &str,
+        ) -> CompilationData {
             let hasher = self.worker.hash.hasher();
             let signed_req = Signed::new(
                 CompilationReq {
@@ -3522,7 +3536,7 @@ mod tests {
                     governance_id: self.metadata.governance_id.clone(),
                     sn: self.metadata.sn.saturating_add(1),
                     gov_version: self.gov_version,
-                    pin: ave_common::governance::DEFAULT_PIN.to_owned(),
+                    pin: pin.to_owned(),
                 },
                 &self.owner,
             )
@@ -3534,7 +3548,7 @@ mod tests {
                 response: response.clone(),
                 compile_req_hash: compile_req_hash.clone(),
                 req_subject_data_hash: self.req_subject_data_hash.clone(),
-                pin: ave_common::governance::DEFAULT_PIN.to_owned(),
+                pin: pin.to_owned(),
             };
             let result_hash = hash_borsh(&*hasher, &result).unwrap();
             let compilers_signatures = self
@@ -3765,6 +3779,25 @@ mod tests {
                 .check_compilation(fixture.honest_compilation())
                 .is_ok()
         );
+
+        // VAL-PIN: evidence built around a pin that is not the
+        // effective one is rejected — compiler votes can not be
+        // replayed across pins (the request signature and the result
+        // hash both bind the pin).
+        let contracts = BTreeMap::from([(
+            SchemaType::Type("Example".to_owned()),
+            hash_borsh(&*fixture.worker.hash.hasher(), &b"wasm".to_vec())
+                .unwrap(),
+        )]);
+        assert!(matches!(
+            fixture.check_compilation(
+                fixture.compilation_with_contracts_and_pin(
+                    contracts,
+                    "rust-9.99-ficticio"
+                )
+            ),
+            Err(ValidatorError::InvalidSignature { .. })
+        ));
 
         // The stored request signature does not verify over the rebuilt
         // request (it signs a request with a different governance

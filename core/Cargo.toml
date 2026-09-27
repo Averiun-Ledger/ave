@@ -96,4 +96,4 @@ compiler-service = [
     "tokio/signal",
     "tokio/rt-multi-thread",
 ]
-test = ["compiler-service"]
+test = ["compiler-service", "ave-common/test-pins"]

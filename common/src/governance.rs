@@ -50,9 +50,24 @@ pub fn toolchain_info(id: &str) -> Option<ToolchainInfo> {
             lock_hash: "",
             builder_image: "",
         }),
+        // Test-only second pin (feature `test-pins`, never enabled in
+        // production): lets suites exercise a pin switch through the
+        // identical paths without polluting the production registry.
+        #[cfg(feature = "test-pins")]
+        id if id == TEST_PIN_B => Some(ToolchainInfo {
+            rustc_version: "1.95.0",
+            cargo_config_hash: "",
+            sdk_version: "0.8.0",
+            lock_hash: "",
+            builder_image: "",
+        }),
         _ => None,
     }
 }
+
+/// Second registry pin for suites (`test-pins` feature only).
+#[cfg(feature = "test-pins")]
+pub const TEST_PIN_B: &str = "test-pin-b";
 
 /// Governance change set grouped by concern.
 #[derive(Debug, Clone, Serialize, Deserialize)]

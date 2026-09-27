@@ -1503,4 +1503,37 @@ mod tests {
             );
         }
     }
+
+    // RES-01: pin resolution semantics. Zero-config nodes build the
+    // default pin with the system toolchain; anything else needs an
+    // explicit entry, and unknown pins always stand down.
+    #[test]
+    fn toolchain_resolve_zero_config_and_overrides() {
+        use std::collections::BTreeMap;
+
+        let empty = Toolchains::from_config(&BTreeMap::new());
+        assert_eq!(
+            empty.resolve(ave_common::governance::DEFAULT_PIN),
+            Some(String::new())
+        );
+        assert_eq!(empty.resolve("rust-9.99-ficticio"), None);
+        assert_eq!(empty.resolve(""), None);
+
+        let configured = Toolchains::from_config(&BTreeMap::from([
+            (
+                ave_common::governance::DEFAULT_PIN.to_owned(),
+                "stable".to_owned(),
+            ),
+            ("test-pin-b".to_owned(), String::new()),
+        ]));
+        assert_eq!(
+            configured.resolve(ave_common::governance::DEFAULT_PIN),
+            Some("stable".to_owned())
+        );
+        assert_eq!(
+            configured.resolve("test-pin-b"),
+            Some(String::new())
+        );
+        assert_eq!(configured.resolve("rust-9.99-ficticio"), None);
+    }
 }

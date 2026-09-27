@@ -107,6 +107,9 @@ pub struct CreateNodesAndConnectionsConfig {
     pub is_service: bool,
     pub only_clear_events: bool,
     pub ledger_batch_size: Option<usize>,
+    /// Uniform toolchain map for every node; per-node differences need
+    /// `create_node` directly.
+    pub toolchains: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -132,6 +135,11 @@ pub struct CreateNodeConfig {
     /// by tests that manipulate the on-disk artifacts (permissions,
     /// deletions) to exercise boot-time failures.
     pub contracts_path: Option<PathBuf>,
+    /// Explicit toolchain map pin → local name; `None` leaves the
+    /// registry empty (zero-config: `DEFAULT_PIN` resolves to the
+    /// system toolchain). Needed by tests that simulate partial
+    /// capacity (nodes standing down on unknown pins).
+    pub toolchains: Option<std::collections::BTreeMap<String, String>>,
     /// Explicit governance sync timing; `None` uses the default test
     /// values. Needed by tests that wait on idle sync rounds so they do
     /// not pay the full default interval.
@@ -170,6 +178,7 @@ pub async fn try_create_node(
         contracts_path,
         governance_sync,
         approval,
+        toolchains,
     } = config;
 
     let keys =
@@ -251,7 +260,7 @@ pub async fn try_create_node(
         // compile in-process and have no compiler pool config).
         #[cfg(feature = "test")]
         compiler: compiler.unwrap_or_default(),
-        toolchains: std::collections::BTreeMap::new(),
+        toolchains: toolchains.unwrap_or_default(),
         spec: None,
     };
 
@@ -294,6 +303,7 @@ pub async fn create_nodes_and_connections(
         is_service,
         only_clear_events,
         ledger_batch_size,
+        toolchains,
     } = config;
 
     let mut nodes: Vec<NodeData> = Vec::new();
@@ -324,6 +334,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            toolchains: toolchains.clone(),
             ..Default::default()
         })
         .await;
@@ -353,6 +364,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            toolchains: toolchains.clone(),
             ..Default::default()
         })
         .await;
@@ -382,6 +394,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            toolchains: toolchains.clone(),
             ..Default::default()
         })
         .await;

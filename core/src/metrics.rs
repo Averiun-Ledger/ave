@@ -797,6 +797,45 @@ mod tests {
         );
     }
 
+    // MET-01: per-pin build counters expose (the missing-toolchain
+    // alert hooks here — if this goes blind, the alert is born blind).
+    #[test]
+    fn core_metrics_compiler_builds_by_pin() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        metrics.observe_compiler_build("rust-1.95-wasm32", "built");
+        metrics.observe_compiler_build("rust-1.95-wasm32", "built");
+        metrics.observe_compiler_build("rust-1.95-wasm32", "cached");
+        metrics.observe_compiler_build("test-pin-b", "stood_down");
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"rust-1.95-wasm32\",result=\"built\"}"
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"rust-1.95-wasm32\",result=\"cached\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"test-pin-b\",result=\"stood_down\"}"
+            ),
+            1.0
+        );
+    }
+
     #[test]
     fn core_metrics_expose_expected_histogram_series() {
         let metrics = CoreMetrics::new();

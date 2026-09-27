@@ -858,9 +858,10 @@ impl CompileWorker {
                             return (
                                 index,
                                 SchemaOutcome::Verdict(
-                                    ContractCompilation::Abort(
-                                        error.to_string(),
-                                    ),
+                                    ContractCompilation::Abort(format!(
+                                        "{}: {}",
+                                        schema_id, error
+                                    )),
                                 ),
                             );
                         }
