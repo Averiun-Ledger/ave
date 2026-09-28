@@ -366,7 +366,7 @@ impl CompilerServer {
 
         let hash = HashAlgorithm::Blake3;
 
-        let toolchain_fingerprint = pipeline::toolchain_fingerprint(hash)
+        let toolchain_fingerprint = pipeline::toolchain_fingerprint(hash, "")
             .await
             .map_err(|e| ServiceError::Toolchain(e.to_string()))?;
 
@@ -580,11 +580,10 @@ impl CompilerServer {
         key: &str,
         source_b64: &str,
     ) -> Result<CompileArtifact, Status> {
-        // Per-job build directory under <work_dir>/contracts/<key>: the
-        // pipeline derives the contracts root (and the optional vendor
-        // directory at <work_dir>/vendor) from this layout.
+        // Per-job build directory under <work_dir>/contracts/<key>.
         let build_dir =
             self.inner.config.work_dir.join(CONTRACTS_SUBDIR).join(key);
+        let contracts_root = self.inner.config.work_dir.clone();
 
         // Drop leftovers of a previous crashed attempt with the same key.
         let _ = fs::remove_dir_all(&build_dir).await;
@@ -592,7 +591,8 @@ impl CompilerServer {
         // The standalone service builds with the system toolchain; pin
         // selection lives in the node path.
         let build_result =
-            pipeline::build_wasm(source_b64, &build_dir, "").await;
+            pipeline::build_wasm(source_b64, &build_dir, "", &contracts_root)
+                .await;
 
         if let Err(error) = fs::remove_dir_all(&build_dir).await {
             warn!(

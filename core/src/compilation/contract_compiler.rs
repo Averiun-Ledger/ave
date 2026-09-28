@@ -1709,6 +1709,7 @@ impl Handler<Self> for ContractCompiler {
                                     &register_path,
                                     expected_wasm_hash.as_ref(),
                                     &toolchain_pin,
+                                    false,
                                 )
                                 .await
                                 {

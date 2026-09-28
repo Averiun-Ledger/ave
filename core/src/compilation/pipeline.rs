@@ -22,7 +22,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "test")]
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use tokio::{fs, process::Command};
 use tracing::debug;
@@ -110,19 +110,6 @@ pub fn decode_contract_source(
 /// error, and must not be conflated with "the contract does not compile".
 pub fn validate_contract_source(contract: &str) -> Result<(), CompilerError> {
     decode_contract_source(contract).map(|_| ())
-}
-
-fn contracts_root(contract_path: &Path) -> Result<PathBuf, CompilerError> {
-    contract_path
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| CompilerError::InvalidContractPath {
-            path: contract_path.to_string_lossy().to_string(),
-            details:
-                "expected contract path under <contracts_path>/contracts/<name>"
-                    .to_owned(),
-        })
 }
 
 #[cfg(feature = "test")]
@@ -248,9 +235,10 @@ async fn build_contract(
     contract_path: &Path,
     offline: bool,
     toolchain: &str,
+    contracts_root: &Path,
 ) -> Result<(), CompilerError> {
     let cargo = contract_path.join("Cargo.toml");
-    let cargo_home = contracts_root(contract_path)?.join(SHARED_CARGO_HOME_DIR);
+    let cargo_home = contracts_root.join(SHARED_CARGO_HOME_DIR);
     // A named rustup toolchain runs isolated (`rustup run`), never
     // through process-global env: concurrent builds with different
     // toolchains can not interfere. Empty selects the system cargo.
@@ -270,7 +258,7 @@ async fn build_contract(
         .current_dir(contract_path)
         .env("CARGO_HOME", cargo_home)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
 
     if offline {
         command.arg("--offline");
@@ -290,12 +278,25 @@ async fn build_contract(
                 details: e.to_string(),
             })?;
 
+    // Stderr is collected in the background: on failure its tail
+    // goes to the log (the vote carries no details), on timeout the
+    // reader is dropped with the killed tree.
+    let stderr = child.stderr.take();
+    let reader = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
     let status = match timeout(BUILD_TIMEOUT, child.wait()).await {
         Ok(result) => result.map_err(|e| CompilerError::CargoBuildFailed {
             details: e.to_string(),
         })?,
         Err(_) => {
             kill_build_tree(&mut child).await;
+            reader.abort();
             return Err(CompilerError::BuildTimeout {
                 secs: BUILD_TIMEOUT.as_secs(),
             });
@@ -303,6 +304,25 @@ async fn build_contract(
     };
 
     if !status.success() {
+        // The vote carries no details (stable wire taxonomy); the log
+        // does, or failed builds are undebuggable in production.
+        let stderr = reader.await.unwrap_or_default();
+        let tail = String::from_utf8_lossy(&stderr);
+        let tail = tail
+            .trim()
+            .chars()
+            .rev()
+            .take(2048)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        tracing::warn!(
+            manifest = %cargo.display(),
+            status = %status,
+            stderr = %tail,
+            "Contract build failed"
+        );
         return Err(CompilerError::CompilationFailed);
     }
 
@@ -312,10 +332,10 @@ async fn build_contract(
 async fn prepare_contract_project(
     contract: &str,
     contract_path: &Path,
+    contracts_root: &Path,
 ) -> Result<(), CompilerError> {
     let source = decode_contract_source(contract)?;
 
-    let contracts_root = contracts_root(contract_path)?;
     let dir = contract_path.join("src");
     if !Path::new(&dir).exists() {
         fs::create_dir_all(&dir).await.map_err(|e| {
@@ -430,14 +450,15 @@ pub async fn build_wasm(
     contract: &str,
     contract_path: &Path,
     toolchain: &str,
+    contracts_root: &Path,
 ) -> Result<Vec<u8>, CompilerError> {
-    prepare_contract_project(contract, contract_path).await?;
+    prepare_contract_project(contract, contract_path, contracts_root).await?;
 
-    let contracts_root = contracts_root(contract_path)?;
     build_contract(
         contract_path,
         contracts_root.join(VENDOR_DIR).exists(),
         toolchain,
+        contracts_root,
     )
     .await?;
 
@@ -705,8 +726,19 @@ async fn rustc_sysroot_rust_src() -> Result<(PathBuf, String), CompilerError> {
 
 pub async fn toolchain_fingerprint(
     hash: HashAlgorithm,
+    toolchain: &str,
 ) -> Result<DigestIdentifier, CompilerError> {
-    let output = Command::new("rustc")
+    // Fingerprint the SELECTED toolchain, never the ambient one: the
+    // record must attest what built the bytes. Empty selects the
+    // system rustc.
+    let mut command = if toolchain.is_empty() {
+        Command::new("rustc")
+    } else {
+        let mut command = Command::new("rustup");
+        command.arg("run").arg(toolchain).arg("rustc");
+        command
+    };
+    let output = command
         .arg("--version")
         .arg("--verbose")
         .output()

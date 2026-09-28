@@ -4,6 +4,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::bridge::request::EventRequestType;
+use ave_common::governance::GovernanceEvent;
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
@@ -22,7 +23,8 @@ use tracing::{Span, debug, error, info, info_span, warn};
 use crate::approval::request::ApprovalReq;
 use crate::approval::{Approval, ApprovalMessage};
 use crate::compilation::{
-    compilation_set, payload_contract_sources, schemas_to_compile,
+    needs_compilation_evidence, payload_contract_sources,
+    schemas_to_compile,
 };
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
@@ -2022,8 +2024,10 @@ impl RequestManager {
                 .ok()
             });
         match pre {
-            Some(pre) => compilation_set(&fact_request.payload, &pre)
-                .is_some_and(|schemas| !schemas.is_empty()),
+            Some(pre) => needs_compilation_evidence(
+                &fact_request.payload,
+                &pre,
+            ),
             None => schemas_to_compile(&fact_request.payload)
                 .is_some_and(|schemas| !schemas.is_empty()),
         }
@@ -2046,7 +2050,28 @@ impl RequestManager {
         let EventRequest::Fact(fact_request) = request.content() else {
             return;
         };
-        let sources = payload_contract_sources(&fact_request.payload);
+        let mut sources = payload_contract_sources(&fact_request.payload);
+        // Pin-switch recompiles stage committed sources that the
+        // payload never lists: on abort their staging must be swept
+        // too, or it lingers until the boot sweep. The official
+        // artifact is never touched either way — only staging dies.
+        if serde_json::from_value::<GovernanceEvent>(
+            fact_request.payload.0.clone(),
+        )
+        .ok()
+        .and_then(|event| event.toolchain)
+        .is_some()
+            && let Ok(metadata) = get_metadata(ctx, &self.subject_id).await
+            && let Ok(committed) =
+                GovernanceData::try_from(metadata.properties)
+        {
+            sources.extend(
+                committed
+                    .schemas
+                    .iter()
+                    .map(|(id, schema)| (id.clone(), schema.contract.clone())),
+            );
+        }
         if sources.is_empty() {
             return;
         }

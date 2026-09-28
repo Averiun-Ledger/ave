@@ -1926,8 +1926,10 @@ impl ValiWorker {
                         value: "governance state",
                     })?;
             let needs_compilation =
-                compilation_set(&fact_request.payload, &pre)
-                    .is_some_and(|schemas| !schemas.is_empty());
+                crate::compilation::needs_compilation_evidence(
+                    &fact_request.payload,
+                    &pre,
+                );
 
             if needs_compilation != compilation.is_some() {
                 return Err(ValidatorError::InvalidData {

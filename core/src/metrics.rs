@@ -458,13 +458,17 @@ impl CoreMetrics {
 
     /// A local build finished under a toolchain pin (`built` fresh,
     /// `cached` from a valid artifact, `failed` contract-side,
-    /// `stood_down` without a local toolchain for the pin).
+    /// `stood_down` without a local toolchain for the pin). The pin
+    /// label is clamped to registry IDs: request pins are network
+    /// input and must never expand metric cardinality.
     pub fn observe_compiler_build(&self, pin: &str, result: &'static str) {
+        let pin = if ave_common::governance::toolchain_info(pin).is_some() {
+            pin.to_owned()
+        } else {
+            "unknown".to_owned()
+        };
         self.compiler_builds
-            .get_or_create(&CompilerBuildLabels {
-                pin: pin.to_owned(),
-                result,
-            })
+            .get_or_create(&CompilerBuildLabels { pin, result })
             .inc();
     }
 
@@ -809,6 +813,9 @@ mod tests {
         metrics.observe_compiler_build("rust-1.95-wasm32", "built");
         metrics.observe_compiler_build("rust-1.95-wasm32", "cached");
         metrics.observe_compiler_build("test-pin-b", "stood_down");
+        // Unknown pins collapse into one series: request pins are
+        // network input and must never expand cardinality.
+        metrics.observe_compiler_build("rust-9.99-ficticio", "stood_down");
 
         let mut text = String::new();
         encode(&mut text, &registry).expect("encode metrics");
@@ -831,6 +838,13 @@ mod tests {
             metric_value(
                 &text,
                 "core_compiler_builds_total{pin=\"test-pin-b\",result=\"stood_down\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"unknown\",result=\"stood_down\"}"
             ),
             1.0
         );

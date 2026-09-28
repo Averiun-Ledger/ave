@@ -1675,6 +1675,25 @@ impl Governance {
         // The compile worker serves artifacts: only the evaluator
         // whitelist matters (compilers compile, they never request).
         let (_, evaluators) = self.artifact_whitelists();
+        // Operator-visible pin coverage: whether this node can build
+        // under the committed pin or stays dormant (serving only).
+        // Resolved here, not just per-operation, so a misconfigured
+        // node states its situation once at boot instead of warning
+        // on every request.
+        let pin_held = self.properties.toolchain.is_empty()
+            || CompilerSupport::toolchains_helper(ctx)
+                .ok()
+                .and_then(|toolchains| {
+                    toolchains.resolve(&self.properties.toolchain)
+                })
+                .is_some();
+        tracing::info!(
+            governance_id = %self.subject_metadata.subject_id,
+            gov_version = self.properties.version,
+            toolchain_pin = %self.properties.toolchain,
+            pin_held = pin_held,
+            "Compiler role boot: pin coverage"
+        );
         ctx.create_child(
             "compiler",
             CompileWorker {
@@ -1687,6 +1706,7 @@ impl Governance {
                 schemas: self.properties.schemas.clone(),
                 evaluators,
                 toolchain_pin: self.properties.toolchain.clone(),
+                committed_pin: self.properties.toolchain.clone(),
                 // Governance opens the gate only after anchor recovery.
                 serving_blocked: true,
                 serving_cache: HashMap::new(),
@@ -1694,6 +1714,7 @@ impl Governance {
                 network: network.clone(),
                 stop: false,
                 pending: None,
+                build_children: BTreeSet::new(),
             },
         )
         .await?;

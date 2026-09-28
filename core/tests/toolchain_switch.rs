@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ave_common::SchemaType;
+use ave_common::bridge::request::ApprovalStateRes;
 use ave_common::governance::TEST_PIN_B;
 use ave_common::response::RequestState;
 use ave_core::governance::data::GovernanceData;
@@ -22,7 +23,8 @@ use common::{
     CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
     EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
-    emit_fact, get_events, get_subject, node_running,
+    emit_approve, emit_fact, get_events, get_subject, node_running,
+    wait_artifact_bytes,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -129,6 +131,31 @@ async fn test_pin_switch_no_schemas_commits() {
 
     let props = properties(node, &governance_id, 1).await;
     assert_eq!(props.toolchain, TEST_PIN_B);
+}
+
+#[test(tokio::test)]
+// Capacity vote, negative side: a bare switch nobody can build never
+// commits — reboot with the pin untouched, no crash-loop.
+async fn test_pin_bare_switch_without_capacity_reboots() {
+    let (node, _dirs) =
+        single_node_with(Some(BTreeMap::from([(default_pin(), String::new())])))
+            .await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({ "toolchain": TEST_PIN_B }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_state(node, request_id, "reboot").await;
+
+    let props = properties(node, &governance_id, 0).await;
+    assert_eq!(props.toolchain, default_pin());
 }
 
 #[test(tokio::test)]
@@ -363,6 +390,410 @@ async fn test_pin_rollback_is_symmetric() {
         after.schemas.contains_key(&SchemaType::Type("Example".to_owned())),
         "schemas must survive the round trip"
     );
+}
+
+#[test(tokio::test)]
+// TEST-PIN-06: switch plus modify denied at approval — the previous
+// version is never deleted nor overwritten: official bytes identical,
+// staging swept, pin and schemas untouched.
+async fn test_pin_switch_denied_keeps_previous_version() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+    // No auto-accept: the deny vote below must decide, not lose a race.
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: false,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+    let add = emit_fact(
+        node,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        false,
+    )
+    .await
+    .unwrap();
+    // Votes only count inside the approval phase: approving earlier
+    // loses the vote and stalls the request.
+    wait_request_state(node, add.clone(), Some(RequestState::Approval))
+        .await
+        .unwrap();
+    emit_approve(
+        node,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        add,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let official_name = format!("{governance_id}_Example");
+    let before =
+        wait_artifact_bytes(contracts_dir.path(), &official_name).await;
+
+    // Switch plus modify: staging must exist before denying, or the
+    // sweep below would prove nothing.
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "change": [
+                    {
+                        "actual_id": "Example",
+                        "new_contract": CHANGED_SCHEMA_CONTRACT,
+                        "new_initial_value": { "data": "" }
+                    }
+                ]
+            },
+            "toolchain": TEST_PIN_B,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    for _ in 0..200 {
+        let staged = std::fs::read_dir(contracts_dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.contains("_temp_staging_").then_some(name)
+            })
+            .collect::<Vec<_>>();
+        if !staged.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    // Same for the deny: inside the approval phase, or the vote is lost.
+    wait_request_state(node, request_id.clone(), Some(RequestState::Approval))
+        .await
+        .unwrap();
+
+    emit_approve(node, governance_id.clone(), ApprovalStateRes::Rejected, request_id, true)
+        .await
+        .unwrap();
+
+    // Previous version intact: same bytes, no staging leftovers.
+    assert_eq!(
+        wait_artifact_bytes(contracts_dir.path(), &official_name).await,
+        before
+    );
+    let staged = std::fs::read_dir(contracts_dir.path())
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            name.contains("_temp_staging_").then_some(name)
+        })
+        .collect::<Vec<_>>();
+    assert!(staged.is_empty(), "staging must be swept on abort: {staged:?}");
+
+    // Nothing committed: pin, schemas and contract pin the old ones.
+    let state = get_subject(node, governance_id.clone(), None, true).await.unwrap();
+    let props: GovernanceData = serde_json::from_value(state.properties).unwrap();
+    assert_eq!(props.toolchain, default_pin());
+    assert_eq!(
+        props
+            .schemas
+            .get(&SchemaType::Type("Example".to_owned()))
+            .unwrap()
+            .contract,
+        EXAMPLE_CONTRACT
+    );
+}
+
+#[test(tokio::test)]
+// True divergence (SLOW, minutes): the switch rebuilds with a REAL
+// installed toolchain, so the committed anchor changes bytes for
+// real. DEFAULT builds through the pool (fast), TEST_PIN_B through
+// nightly `rustup run` — different toolchains, different wasm,
+// different anchor. This is the only suite test where hashes move.
+async fn test_pin_switch_diverges_bytes_with_real_toolchains() {
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(BTreeMap::from([
+            (default_pin(), String::new()),
+            (TEST_PIN_B.to_owned(), "nightly".to_owned()),
+        ])),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+    emit_fact(
+        node,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let official_name = format!("{governance_id}_Example");
+    let pool_bytes =
+        wait_artifact_bytes(contracts_dir.path(), &official_name).await;
+
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({ "toolchain": TEST_PIN_B }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_state(node, request_id, "finish").await;
+
+    // Different toolchain, different bytes, promoted over the old
+    // official artifact only at commit.
+    let nightly_bytes =
+        wait_artifact_bytes(contracts_dir.path(), &official_name).await;
+    assert_ne!(
+        pool_bytes, nightly_bytes,
+        "switch must rebuild bytes under the new toolchain"
+    );
+
+    let props = properties(node, &governance_id, 2).await;
+    assert_eq!(props.toolchain, TEST_PIN_B);
+    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+}
+
+#[test(tokio::test)]
+// Matriz: add-only más switch (sin schemas comprometidos) commitea
+// bajo el pin nuevo.
+async fn test_pin_switch_with_add_only() {
+    let (node, _dirs) = single_node().await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    { "id": "Beta", "contract": EXAMPLE_CONTRACT, "initial_value": example_initial() }
+                ]
+            },
+            "toolchain": TEST_PIN_B,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_state(node, request_id, "finish").await;
+
+    let after = properties(node, &governance_id, 1).await;
+    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert!(after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
+}
+
+#[test(tokio::test)]
+// Matriz: change con el MISMO pin commitea normal bajo el pin
+// comprometido (precisión del gate para changes, gemelo del 17).
+async fn test_pin_same_pin_with_change_commits() {
+    let (node, _dirs) = single_node().await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+    emit_fact(
+        node,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let current = default_pin();
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "change": [
+                    {
+                        "actual_id": "Example",
+                        "new_contract": CHANGED_SCHEMA_CONTRACT,
+                        "new_initial_value": { "data": "" }
+                    }
+                ]
+            },
+            "toolchain": current,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_state(node, request_id, "finish").await;
+
+    let after = properties(node, &governance_id, 2).await;
+    assert_eq!(after.toolchain, current);
+    assert_eq!(
+        after
+            .schemas
+            .get(&SchemaType::Type("Example".to_owned()))
+            .unwrap()
+            .contract,
+        CHANGED_SCHEMA_CONTRACT
+    );
+}
+
+#[test(tokio::test)]
+// Matriz: cambio solo de initial-value más switch — el artefacto no
+// depende del init pero sí del toolchain: reconstruye bajo el pin
+// nuevo (force_rebuild) en vez de recargar bytes viejos.
+async fn test_pin_switch_with_init_only_change() {
+    let (node, _dirs) = single_node().await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+    emit_fact(
+        node,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "change": [
+                    {
+                        "actual_id": "Example",
+                        "new_initial_value": { "one": 7, "two": 0, "three": 0 }
+                    }
+                ]
+            },
+            "toolchain": TEST_PIN_B,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_state(node, request_id, "finish").await;
+
+    let after = properties(node, &governance_id, 2).await;
+    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+}
+
+#[test(tokio::test)]
+// Matriz: switch pelado denegado — aborta sin tocar nada (pin,
+// versión y schemas intactos).
+async fn test_pin_bare_switch_denied_changes_nothing() {
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: false,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({ "toolchain": TEST_PIN_B }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node, request_id.clone(), Some(RequestState::Approval))
+        .await
+        .unwrap();
+    emit_approve(
+        node,
+        governance_id.clone(),
+        ApprovalStateRes::Rejected,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(node, governance_id.clone(), None, true).await.unwrap();
+    let props: GovernanceData = serde_json::from_value(state.properties).unwrap();
+    assert_eq!(props.toolchain, default_pin());
+    assert_eq!(props.version, 0);
+    assert!(props.schemas.is_empty());
+}
+
+#[test(tokio::test)]
+// Matriz: switch más remove — el schema eliminado sale con el evento
+// sin compilarse (ni ancla nueva ni bytes servibles para él) y el
+// resto reconstruye bajo el pin nuevo.
+async fn test_pin_switch_with_remove() {
+    let (node, _dirs) = single_node().await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+    emit_fact(
+        node,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    { "id": "Alpha", "contract": EXAMPLE_CONTRACT, "initial_value": example_initial() },
+                    { "id": "Beta", "contract": EXAMPLE_CONTRACT_V2, "initial_value": example_initial() }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({
+            "schemas": { "remove": ["Beta"] },
+            "toolchain": TEST_PIN_B,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_state(node, request_id, "finish").await;
+
+    let after = properties(node, &governance_id, 2).await;
+    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert!(after.schemas.contains_key(&SchemaType::Type("Alpha".to_owned())));
+    assert!(!after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
 }
 
 #[test(tokio::test)]

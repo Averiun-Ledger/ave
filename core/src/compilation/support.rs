@@ -208,8 +208,8 @@ pub(crate) const HEAL_RETRY_MAX_MS: u64 = 5_000;
 pub(crate) const HEAL_RETRY_MAX_MS: u64 = 60_000;
 
 /// Serializes the scratch build directories of in-process compiles
-/// (production path; test builds compile through the embedded pool).
-#[cfg(all(not(feature = "test"), feature = "toolchain"))]
+/// (production path, plus test builds with a named toolchain).
+#[cfg(any(feature = "test", feature = "toolchain"))]
 static BUILD_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -287,17 +287,13 @@ impl CompilerSupport {
         contract: &str,
         contract_path: &Path,
         toolchain: &str,
+        contracts_root: &Path,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
-        // contract_path is `<root>/contracts/<name>`; scratch lives at
-        // `<root>` so the boot sweep (root-level only) collects it.
-        let scratch_root = contract_path
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| CompilerError::InvalidContractPath {
-                path: contract_path.display().to_string(),
-                details: "no contracts root directory".to_owned(),
-            })?;
-        let build_dir = scratch_root.join(format!(
+        // Scratch lives directly at the contracts root so the boot
+        // sweep (root-level only) collects leftovers; the root comes
+        // from config, never derived from the contract path depth
+        // (staging and official layouts differ).
+        let build_dir = contracts_root.join(format!(
             "{}_temp_build_{}_{}",
             contract_path
                 .file_name()
@@ -306,7 +302,13 @@ impl CompilerSupport {
             std::process::id(),
             BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         ));
-        let wasm = pipeline::build_wasm(contract, &build_dir, toolchain).await;
+        let wasm = pipeline::build_wasm(
+            contract,
+            &build_dir,
+            toolchain,
+            contracts_root,
+        )
+        .await;
         // Best-effort scratch cleanup (the boot sweep collects leftovers);
         // the build outcome below decides the verdict either way.
         if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
@@ -318,7 +320,7 @@ impl CompilerSupport {
         }
         let wasm = wasm?;
         let toolchain_fingerprint =
-            pipeline::toolchain_fingerprint(hash).await?;
+            pipeline::toolchain_fingerprint(hash, toolchain).await?;
         Ok((wasm, toolchain_fingerprint))
     }
 
@@ -330,8 +332,47 @@ impl CompilerSupport {
         _contract: &str,
         _contract_path: &Path,
         _toolchain: &str,
+        _contracts_root: &Path,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         Err(CompilerError::NoLocalToolchain)
+    }
+
+    /// Test builds: the real local build, used only when a suite maps
+    /// a pin to a named toolchain installed on the machine (true
+    /// divergence tests). Everything else goes through the pool.
+    #[cfg(feature = "test")]
+    async fn build_local(
+        hash: HashAlgorithm,
+        contract: &str,
+        contract_path: &Path,
+        toolchain: &str,
+        contracts_root: &Path,
+    ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
+        // Scratch lives directly at the contracts root (see the
+        // production variant above for why the root is explicit).
+        let build_dir = contracts_root.join(format!(
+            "{}_temp_build_{}_{}",
+            contract_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            std::process::id(),
+            BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ));
+        let wasm =
+            pipeline::build_wasm(contract, &build_dir, toolchain, contracts_root)
+                .await;
+        if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
+            tracing::debug!(
+                error = %e,
+                path = %build_dir.display(),
+                "Failed to remove build scratch directory"
+            );
+        }
+        let wasm = wasm?;
+        let toolchain_fingerprint =
+            pipeline::toolchain_fingerprint(hash, toolchain).await?;
+        Ok((wasm, toolchain_fingerprint))
     }
 
     pub(crate) async fn contracts_helper<A: Actor>(
@@ -389,6 +430,7 @@ impl CompilerSupport {
         expected_wasm_hash: Option<&DigestIdentifier>,
         #[cfg_attr(feature = "test", allow(unused_variables))]
         toolchain: &str,
+        force_rebuild: bool,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
     {
         let ContractSourceInput {
@@ -424,40 +466,61 @@ impl CompilerSupport {
                 .engine_fingerprint(hash)
                 .map_err(pipeline::map_runtime_error_to_compiler_error)?;
 
-            if let Some((module, record, prepare_result)) =
-                Self::load_registered_artifact(
-                    hash,
-                    ctx,
-                    RegisteredLoadInput {
-                        contract_name,
-                        contract_path,
-                        initial_value: &initial_value,
-                        register_path,
-                        contract_hash: &contract_hash,
-                        manifest_hash: &manifest_hash,
-                        engine_fingerprint: &engine_fingerprint,
-                        expected_toolchain: None,
-                        expected_wasm_hash,
-                    },
-                )
-                .await?
+            if !force_rebuild
+                && let Some((module, record, prepare_result)) =
+                    Self::load_registered_artifact(
+                        hash,
+                        ctx,
+                        RegisteredLoadInput {
+                            contract_name,
+                            contract_path,
+                            initial_value: &initial_value,
+                            register_path,
+                            contract_hash: &contract_hash,
+                            manifest_hash: &manifest_hash,
+                            engine_fingerprint: &engine_fingerprint,
+                            expected_toolchain: None,
+                            expected_wasm_hash,
+                        },
+                    )
+                    .await?
             {
                 return Ok((module, record, prepare_result));
             }
 
             // Test builds compile through the embedded gRPC compiler
-            // (shared content-addressed store across the suite);
-            // production nodes compile in-process with the local
+            // (shared content-addressed store across the suite) unless
+            // the request resolves to a NAMED toolchain installed on
+            // this machine — those suites exercise true divergence.
+            // Production nodes always compile in-process with the local
             // toolchain (`build_local`). Everything after the build —
             // anchor check, precompile, validation, persistence — is
             // identical either way.
+            // Resolved only on the build path: a valid cached
+            // artifact never needs the toolchain, so an unknown pin
+            // must not brick a node that can serve from cache.
+            let toolchain_name =
+                Self::resolve_toolchain(ctx, toolchain).await?;
             #[cfg(feature = "test")]
-            let client = Self::compiler_client(ctx).await?;
+            let use_pool = toolchain_name.is_empty();
+            #[cfg(not(feature = "test"))]
+            let use_pool = false;
+            #[cfg(feature = "test")]
+            let client = if use_pool {
+                Some(Self::compiler_client(ctx).await?)
+            } else {
+                None
+            };
 
             // Global test cache: only usable once the toolchain fingerprint
             // of the pool is known (after the first remote compile).
             #[cfg(feature = "test")]
-            if let Some(toolchain_fingerprint) = client.last_toolchain().await
+            if use_pool
+                && let Some(toolchain_fingerprint) = client
+                    .as_ref()
+                    .expect("pool client present when pooling")
+                    .last_toolchain()
+                    .await
                 && let Some((
                     module,
                     metadata,
@@ -513,21 +576,41 @@ impl CompilerSupport {
             // The build source differs by build kind; the bytes are
             // verified against the ledger anchor (when known) either
             // way.
+            // The contracts root comes from config, never derived
+            // from path depth (staging and official layouts differ —
+            // deriving it wrong once pointed CARGO_HOME at `/`).
+            let contracts_root = || {
+                ctx.system()
+                    .get_helper::<ConfigHelper>("config")
+                    .map(|config| config.contracts_path.clone())
+                    .ok_or(CompilerError::MissingHelper { name: "config" })
+            };
             #[cfg(feature = "test")]
-            let (wasm, toolchain_fingerprint) = {
-                let outcome = client.compile(contract).await?;
+            let (wasm, toolchain_fingerprint) = if use_pool {
+                let outcome = client
+                    .expect("pool client present when pooling")
+                    .compile(contract)
+                    .await?;
                 (outcome.wasm, outcome.toolchain_fingerprint)
+            } else {
+                Self::build_local(
+                    hash,
+                    contract,
+                    contract_path,
+                    &toolchain_name,
+                    &contracts_root()?,
+                )
+                .await?
             };
             #[cfg(not(feature = "test"))]
-            let (wasm, toolchain_fingerprint) = {
-                // Resolved only on the build path: a valid cached
-                // artifact never needs the toolchain, so an unknown pin
-                // must not brick a node that can serve from cache.
-                let toolchain_name =
-                    Self::resolve_toolchain(ctx, toolchain).await?;
-                Self::build_local(hash, contract, contract_path, &toolchain_name)
-                    .await?
-            };
+            let (wasm, toolchain_fingerprint) = Self::build_local(
+                hash,
+                contract,
+                contract_path,
+                &toolchain_name,
+                &contracts_root()?,
+            )
+            .await?;
 
             let wasm_hash =
                 pipeline::hash_bytes(hash, &wasm, "compiled wasm artifact")?;
@@ -1022,6 +1105,7 @@ impl CompilerSupport {
             register_path,
             Some(&anchor),
             toolchain,
+            false,
         )
         .await?;
         Ok(module)

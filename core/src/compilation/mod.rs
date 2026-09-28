@@ -128,6 +128,17 @@ pub fn compilation_set(
         .is_some_and(|new_pin| *new_pin != pre.toolchain)
     {
         schemas.extend(pre.schemas.keys().cloned());
+        // Removed schemas leave with the event: building them would
+        // waste work and anchor bytes nobody can ever serve.
+        if let Some(remove) = event
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.remove.as_ref())
+        {
+            for removed in remove {
+                schemas.remove(removed);
+            }
+        }
     }
     Some(schemas)
 }
@@ -179,6 +190,12 @@ pub struct CompileTarget {
     pub source: String,
     pub initial_value: Value,
     pub contract_changed: bool,
+    /// Pin-switch rebuild: the source comes from the committed state
+    /// (like an unchanged contract) but must be BUILT FRESH under the
+    /// new pin into staging — never reloaded. Reloading would vote the
+    /// old-pin's bytes (and anchor) under the new pin, defeating the
+    /// switch and breaking every later heal against the new anchor.
+    pub force_rebuild: bool,
 }
 
 /// Effective compile target of every schema to compile, resolving
@@ -191,6 +208,7 @@ pub struct CompileTarget {
 pub fn resolve_compile_targets(
     payload: &ValueWrapper,
     schemas: &BTreeMap<SchemaType, Schema>,
+    committed_pin: &str,
 ) -> Result<BTreeMap<SchemaType, CompileTarget>, CompilationError> {
     let event: GovernanceEvent = serde_json::from_value(payload.0.clone())
         .map_err(|e| CompilationError::InvalidEvent(e.to_string()))?;
@@ -205,6 +223,7 @@ pub fn resolve_compile_targets(
                         source: schema.contract.clone(),
                         initial_value: schema.initial_value.clone(),
                         contract_changed: true,
+                        force_rebuild: false,
                     },
                 );
             }
@@ -239,36 +258,76 @@ pub fn resolve_compile_targets(
                             .clone()
                             .unwrap_or_else(|| current.initial_value.0.clone()),
                         contract_changed,
+                        force_rebuild: false,
                     },
                 );
             }
         }
     }
 
-    // No schemas in the payload yet compilation was requested: the
-    // only consistent cause is a pin switch (the manager decides with
-    // `compilation_set`, which extends to every committed schema on a
-    // switch). Recompile them all under the request pin
-    // (`contract_changed: false`: official artifact path with init
-    // check and anchor verification, never a divergent vote). The
-    // worker can not compare against the committed pin here —
-    // request-scoped workers carry the request pin — but it does not
-    // need to: with no payload schemas the manager only asks on a
-    // switch, so this branch is unreachable otherwise.
-    if targets.is_empty() && event.toolchain.is_some() {
+    // Pin switch: every committed schema recompiles under the new pin
+    // on top of whatever the payload carries — the manager decides
+    // with `compilation_set`, which extends identically, so worker,
+    // manager and validators can never disagree on the set (a missing
+    // schema would fail coverage, an extra one would overwrite an
+    // anchor the event did not touch). Payload schemas keep their own
+    // targets; committed-only ones rebuild fresh (`force_rebuild`).
+    // On a switch EVERYTHING rebuilds, including payload schemas and
+    // init-only changes: their load path would otherwise vote old
+    // pin's bytes (init values do not shape builds, toolchains do).
+    // Removed schemas are excluded on both sides: they leave with the
+    // event, building them would anchor bytes nobody can serve.
+    if let Some(new_pin) = &event.toolchain
+        && new_pin != committed_pin
+    {
+        // Everything the switch touches rebuilds: payload targets
+        // included (their load path would vote old pin's bytes).
+        for target in targets.values_mut() {
+            target.force_rebuild = true;
+        }
+        let removed = event
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.remove.as_ref());
         for (schema_id, schema) in schemas {
-            targets.insert(
-                schema_id.clone(),
-                CompileTarget {
-                    source: schema.contract.clone(),
-                    initial_value: schema.initial_value.0.clone(),
-                    contract_changed: false,
-                },
-            );
+            if removed.is_some_and(|remove| remove.contains(schema_id)) {
+                continue;
+            }
+            targets.entry(schema_id.clone()).or_insert(CompileTarget {
+                source: schema.contract.clone(),
+                initial_value: schema.initial_value.0.clone(),
+                contract_changed: false,
+                force_rebuild: true,
+            });
         }
     }
 
     Ok(targets)
+}
+
+/// Whether a governance fact enters the compilation phase: the schema
+/// set above is non-empty, or it is a bare switch to a KNOWN pin with
+/// nothing to build. The bare switch is a capacity vote — compilers
+/// attest by voting, not by building — so a pin can never commit
+/// without a builder quorum behind it. Unknown pins return false here
+/// (evaluation rejects them); same-pin no-ops too (rejected as
+/// no-ops). Manager and validators share this decision, so they can
+/// never disagree on whether evidence must exist.
+pub fn needs_compilation_evidence(
+    payload: &ValueWrapper,
+    pre: &crate::governance::data::GovernanceData,
+) -> bool {
+    if compilation_set(payload, pre).is_some_and(|schemas| !schemas.is_empty())
+    {
+        return true;
+    }
+    serde_json::from_value::<GovernanceEvent>(payload.0.clone())
+        .ok()
+        .and_then(|event| event.toolchain)
+        .is_some_and(|new_pin| {
+            new_pin != pre.toolchain
+                && ave_common::governance::toolchain_info(&new_pin).is_some()
+        })
 }
 
 /// A struct representing a Compilation actor.
@@ -403,12 +462,14 @@ impl Compilation {
                             .content()
                             .pin
                             .clone(),
+                        committed_pin: self.state.toolchain.clone(),
                         serving_blocked: false,
                         serving_cache: HashMap::new(),
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,
                         pending: None,
+                        build_children: BTreeSet::new(),
                     },
                 )
                 .await?;
@@ -925,5 +986,143 @@ impl Handler<Self> for Compilation {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use ave_common::{SchemaType, ValueWrapper};
+
+    use super::resolve_compile_targets;
+    use crate::governance::model::Schema;
+
+    fn committed_schemas() -> BTreeMap<SchemaType, Schema> {
+        BTreeMap::from([(
+            SchemaType::Type("Example".to_owned()),
+            Schema {
+                contract: "contract source".to_owned(),
+                initial_value: ValueWrapper(serde_json::json!({
+                    "one": 0
+                })),
+                viewpoints: Default::default(),
+            },
+        )])
+    }
+
+    #[test]
+    fn pin_switch_recompiles_force_rebuild_into_staging() {
+        // Pin switch with no payload schemas: every committed schema
+        // becomes a target with committed source but forced fresh
+        // build — reloading would vote the old pin's bytes (and
+        // anchor) under the new pin.
+        let targets = resolve_compile_targets(
+            &ValueWrapper(serde_json::json!({ "toolchain": "test-pin-b" })),
+            &committed_schemas(),
+            "rust-1.95-wasm32",
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 1);
+        let target = targets
+            .get(&SchemaType::Type("Example".to_owned()))
+            .unwrap();
+        assert_eq!(target.source, "contract source");
+        assert!(!target.contract_changed);
+        assert!(target.force_rebuild);
+    }
+
+    #[test]
+    fn no_switch_no_force_rebuild() {
+        // Same pin and no schemas: nothing to compile at all (the
+        // manager never asks; the worker would reject as invalid).
+        let targets = resolve_compile_targets(
+            &ValueWrapper(serde_json::json!({ "toolchain": "rust-1.95-wasm32" })),
+            &committed_schemas(),
+            "rust-1.95-wasm32",
+        )
+        .unwrap();
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn pin_switch_unions_payload_and_committed() {
+        // Switch plus one add: the add keeps its changed target and
+        // every OTHER committed schema joins as force-rebuild — the
+        // exact union the manager and validators decide.
+        let targets = resolve_compile_targets(
+            &ValueWrapper(serde_json::json!({
+                "schemas": {
+                    "add": [
+                        {
+                            "id": "Beta",
+                            "contract": "new source",
+                            "initial_value": { "one": 1 }
+                        }
+                    ]
+                },
+                "toolchain": "test-pin-b"
+            })),
+            &committed_schemas(),
+            "rust-1.95-wasm32",
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 2);
+        let beta = targets
+            .get(&SchemaType::Type("Beta".to_owned()))
+            .unwrap();
+        assert!(beta.contract_changed);
+        assert!(beta.force_rebuild);
+        let example = targets
+            .get(&SchemaType::Type("Example".to_owned()))
+            .unwrap();
+        assert!(!example.contract_changed);
+        assert!(example.force_rebuild);
+    }
+
+    #[test]
+    fn same_pin_never_force_rebuilds() {        // Same pin plus an add: the add builds normally, nothing else
+        // is touched — force_rebuild is switch-only.
+        let targets = resolve_compile_targets(
+            &ValueWrapper(serde_json::json!({
+                "schemas": {
+                    "add": [
+                        {
+                            "id": "Beta",
+                            "contract": "new source",
+                            "initial_value": { "one": 1 }
+                        }
+                    ]
+                },
+                "toolchain": "rust-1.95-wasm32"
+            })),
+            &committed_schemas(),
+            "rust-1.95-wasm32",
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 1);
+        let beta = targets
+            .get(&SchemaType::Type("Beta".to_owned()))
+            .unwrap();
+        assert!(beta.contract_changed);
+        assert!(!beta.force_rebuild);
+    }
+
+    #[test]
+    fn switch_skips_removed_schemas() {
+        // Switch plus remove: the removed schema is excluded on both
+        // sides — building it would anchor bytes nobody can serve.
+        let targets = resolve_compile_targets(
+            &ValueWrapper(serde_json::json!({
+                "schemas": {
+                    "remove": ["Example"]
+                },
+                "toolchain": "test-pin-b"
+            })),
+            &committed_schemas(),
+            "rust-1.95-wasm32",
+        )
+        .unwrap();
+        assert!(targets.is_empty());
     }
 }

@@ -109,6 +109,15 @@ pub struct CompileWorker {
     /// Only ever set on the ephemeral build children: the standing
     /// worker answers gates and serves artifacts, it never compiles.
     pub pending: Option<PendingCompilation>,
+    /// Live ephemeral build children by request id. Killed when the
+    /// pin changes underneath them (their votes would be rejected at
+    /// validation anyway); pruned of finished children on `Update`.
+    pub build_children: BTreeSet<String>,
+    /// Committed governance pin at the worker's version. Ephemeral
+    /// children carry the REQUEST pin in `toolchain_pin` (what they
+    /// build under); this one tells recompile-all apart from
+    /// same-pin work when resolving targets.
+    pub committed_pin: String,
 }
 
 /// A network compilation request being processed.
@@ -478,18 +487,44 @@ impl CompileWorker {
         }
 
         let result =
-            match resolve_compile_targets(&fact_request.payload, &self.schemas)
+            match resolve_compile_targets(
+                &fact_request.payload,
+                &self.schemas,
+                &self.committed_pin,
+            )
             {
                 Ok(targets) => {
                     if targets.is_empty() {
-                        CompilationResult::Error {
-                            error: CompilationError::InvalidEvent(
-                                "The event does not add or change any contract"
-                                    .to_owned(),
-                            ),
-                            compile_req_hash,
-                            req_subject_data_hash,
-                            pin: pin.clone(),
+                        // No schemas in the payload yet compilation was
+                        // requested: bare pin switch (the manager only
+                        // asks then). Capacity attestation, no builds —
+                        // the gate above already proved this pin
+                        // resolves locally, so voting empty is exact.
+                        let carries_pin = serde_json::from_value::<
+                            ave_common::governance::GovernanceEvent,
+                        >(fact_request.payload.0.clone())
+                        .ok()
+                        .and_then(|event| event.toolchain)
+                        .is_some();
+                        if carries_pin {
+                            CompilationResult::Ok {
+                                response: CompilerResponse {
+                                    contracts: BTreeMap::new(),
+                                },
+                                compile_req_hash,
+                                req_subject_data_hash,
+                                pin: pin.clone(),
+                            }
+                        } else {
+                            CompilationResult::Error {
+                                error: CompilationError::InvalidEvent(
+                                    "The event does not add or change any contract"
+                                        .to_owned(),
+                                ),
+                                compile_req_hash,
+                                req_subject_data_hash,
+                                pin: pin.clone(),
+                            }
                         }
                     } else {
                         match self
@@ -652,7 +687,9 @@ impl CompileWorker {
                 SchemaOutcome::Verdict(ContractCompilation::Unavailable),
             );
         };
-            let (contract_name, contract_path) = if target.contract_changed {
+            let (contract_name, contract_path) = if target.contract_changed
+                || target.force_rebuild
+            {
                 let contract_hash = match hash_borsh(
                     &*self.hash.hasher(),
                     &target.source,
@@ -691,7 +728,9 @@ impl CompileWorker {
             // bytes exactly — compilation is deterministic with the same
             // toolchain, so a mismatch is a local integrity failure,
             // never a divergent vote or an anchor drift.
-            let expected_wasm_hash = if target.contract_changed {
+            let expected_wasm_hash = if target.contract_changed
+                || target.force_rebuild
+            {
                 None
             } else {
                 let register = match ctx
@@ -780,6 +819,7 @@ impl CompileWorker {
                 // (event pin or committed pin, computed by the
                 // requester): building under it is exact.
                 &compilation_req.content().pin,
+                target.force_rebuild,
             )
             .await
             {
@@ -1111,7 +1151,33 @@ impl Handler<Self> for CompileWorker {
                 self.issuer_any = issuer_any;
                 self.schemas = schemas;
                 self.evaluators = evaluators;
-                self.toolchain_pin = toolchain_pin;
+                // A pin switch orphans in-flight builds: they compile
+                // under the stale pin and their votes would be rejected
+                // at validation anyway, so stop them instead of burning
+                // builds. Finished children are simply pruned.
+                let pin_changed = self.toolchain_pin != toolchain_pin;
+                let mut live = BTreeSet::new();
+                for child_name in std::mem::take(&mut self.build_children) {
+                    match ctx.get_child::<Self>(&child_name).await {
+                        Ok(child) => {
+                            if pin_changed {
+                                child.tell_stop().await;
+                            } else {
+                                live.insert(child_name);
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if pin_changed {
+                    debug!(
+                        toolchain_pin = %toolchain_pin,
+                        "Pin switch applied, stale build children stopped"
+                    );
+                }
+                self.build_children = live;
+                self.toolchain_pin = toolchain_pin.clone();
+                self.committed_pin = toolchain_pin;
             }
             CompileWorkerMessage::ServingBlocked { blocked } => {
                 self.serving_blocked = blocked;
@@ -1350,12 +1416,14 @@ impl Handler<Self> for CompileWorker {
                                 .content()
                                 .pin
                                 .clone(),
+                            committed_pin: self.committed_pin.clone(),
                             serving_blocked: false,
                             serving_cache: HashMap::new(),
                             hash: self.hash,
                             network: self.network.clone(),
                             stop: true,
                             pending: None,
+                            build_children: BTreeSet::new(),
                         },
                     )
                     .await?;
@@ -1395,6 +1463,7 @@ impl Handler<Self> for CompileWorker {
                     sender = %sender,
                     "Network compilation request accepted, build offloaded to ephemeral worker"
                 );
+                self.build_children.insert(child_name);
 
                 if self.stop {
                     ctx.stop(None).await;
@@ -1866,12 +1935,14 @@ mod tests {
             schemas: BTreeMap::new(),
             evaluators: BTreeMap::new(),
             toolchain_pin: ave_common::governance::DEFAULT_PIN.to_owned(),
+            committed_pin: ave_common::governance::DEFAULT_PIN.to_owned(),
             serving_blocked: false,
             serving_cache: HashMap::new(),
             hash: HashAlgorithm::Blake3,
             network,
             stop: true,
             pending: None,
+            build_children: BTreeSet::new(),
         };
         let worker_ref =
             system.create_root_actor("worker", worker).await.unwrap();
