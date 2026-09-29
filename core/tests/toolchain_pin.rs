@@ -70,6 +70,62 @@ async fn test_pin_unknown_votes_error() {
 }
 
 #[test(tokio::test)]
+// Compilers YES + evaluation NO: same pin WITH committed schemas.
+// The compilers build successfully (real votes), yet evaluation
+// votes the no-op `Error` and nothing is applied. Each layer decides
+// its own concern: builders build, evaluators judge validity.
+async fn test_pin_same_pin_with_schemas_votes_error() {
+    let (nodes, _dirs) = three_nodes().await;
+    let node1 = nodes[0].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&node1, vec![&nodes[1].api]).await;
+    emit_fact(
+        &node1,
+        governance_id.clone(),
+        example_schema_fact(serde_json::json!({})),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let current = GovernanceData::default().toolchain;
+    let request_id = emit_fact(
+        &node1,
+        governance_id.clone(),
+        serde_json::json!({ "toolchain": current }),
+        false,
+    )
+    .await
+    .unwrap();
+
+    wait_request_state(&node1, request_id, Some(RequestState::Finish))
+        .await
+        .unwrap();
+
+    // Committed pin and schemas untouched despite successful builds.
+    let state = get_subject(&node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let properties: GovernanceData =
+        serde_json::from_value(state.properties).unwrap();
+    assert_eq!(properties.toolchain, current);
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned())),
+        "schemas must survive the rejected no-op"
+    );
+
+    let events = get_events(&node1, governance_id, 3, true).await.unwrap();
+    let event = serde_json::to_string(events.last().unwrap()).unwrap();
+    assert!(
+        event.contains("toolchain pin switch to the current pin"),
+        "unexpected event outcome: {event}"
+    );
+}
+
+#[test(tokio::test)]
 // TEST-PIN-09: switching to the current pin is a no-op switch and
 // votes a deterministic error, even with no other change in the event.
 async fn test_pin_same_pin_votes_error() {

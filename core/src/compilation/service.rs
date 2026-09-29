@@ -590,9 +590,14 @@ impl CompilerServer {
 
         // The standalone service builds with the system toolchain; pin
         // selection lives in the node path.
-        let build_result =
-            pipeline::build_wasm(source_b64, &build_dir, "", &contracts_root)
-                .await;
+        let build_result = pipeline::build_wasm(
+            source_b64,
+            &build_dir,
+            "",
+            &contracts_root,
+            "",
+        )
+        .await;
 
         if let Err(error) = fs::remove_dir_all(&build_dir).await {
             warn!(

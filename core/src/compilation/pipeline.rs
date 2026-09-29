@@ -160,10 +160,6 @@ fn cargo_config_path(contract_path: &Path) -> PathBuf {
     contract_path.join(".cargo").join("config.toml")
 }
 
-fn vendor_dir_for_contract() -> PathBuf {
-    PathBuf::from(".").join("..").join("..").join(VENDOR_DIR)
-}
-
 /// Kills a timed-out cargo build with its whole process tree: on Unix
 /// the build runs in its own process group, so one signal reaps cargo
 /// and every rustc/linker child instead of orphaning them.
@@ -189,7 +185,7 @@ async fn kill_build_tree(child: &mut tokio::process::Child) {
 fn build_output_wasm_path(contract_path: &Path) -> PathBuf {
     contract_path
         .join(BUILD_TARGET_DIR)
-        .join("wasm32-unknown-unknown")
+        .join(ave_common::build::WASM_TARGET)
         .join("release")
         .join(ARTIFACT_WASM)
 }
@@ -201,34 +197,17 @@ fn cargo_config(
     rust_src: &Path,
     rustc_commit: &str,
 ) -> String {
-    let mut config =
-        ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG.to_owned();
-    // Template placeholders are built programmatically: a `{...}`
-    // literal here would trip the formatting-args lint while being
-    // exactly what the template needs.
-    fn pattern(name: &str) -> String {
-        format!("{{{name}}}")
-    }
-    // The placeholders sit inside quoted TOML strings: escape values
-    // so adversarial paths can not break the manifest syntax (or, when
-    // paths differ per machine, break determinism across compilers).
-    fn escape_toml(value: &str) -> String {
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    }
-    config = config
-        .replace(&pattern("target_dir"), &escape_toml(&target_dir.to_string_lossy()))
-        .replace(&pattern("cargo_home"), &escape_toml(&cargo_home.to_string_lossy()))
-        .replace(&pattern("rust_src"), &escape_toml(&rust_src.to_string_lossy()))
-        .replace(&pattern("rustc_commit"), &escape_toml(rustc_commit));
-
-    if let Some(vendor_dir) = vendor_dir {
-        config.push_str(&format!(
-            "\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
-            vendor_dir.to_string_lossy()
-        ));
-    }
-
-    config
+    // Single renderer (`ave_common::build`, shared with the off-chain
+    // gate): same inputs in, byte-identical config out. Never render
+    // here again.
+    ave_common::build::render_contract_cargo_config(
+        &ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+        target_dir,
+        vendor_dir,
+        cargo_home,
+        rust_src,
+        rustc_commit,
+    )
 }
 
 async fn build_contract(
@@ -236,6 +215,7 @@ async fn build_contract(
     offline: bool,
     toolchain: &str,
     contracts_root: &Path,
+    locked: bool,
 ) -> Result<(), CompilerError> {
     let cargo = contract_path.join("Cargo.toml");
     let cargo_home = contracts_root.join(SHARED_CARGO_HOME_DIR);
@@ -253,15 +233,21 @@ async fn build_contract(
         .arg("build")
         .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
         .arg("--target")
-        .arg("wasm32-unknown-unknown")
+        .arg(ave_common::build::WASM_TARGET)
         .arg("--release")
         .current_dir(contract_path)
         .env("CARGO_HOME", cargo_home)
+        // Single source of truth (`ave_common::build`): no wall-clock
+        // input may shape artifacts.
+        .env("SOURCE_DATE_EPOCH", ave_common::build::SOURCE_DATE_EPOCH)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
     if offline {
         command.arg("--offline");
+    }
+    if locked {
+        command.arg("--locked");
     }
 
     // Own process group: a timeout kills cargo and every rustc/linker
@@ -333,6 +319,8 @@ async fn prepare_contract_project(
     contract: &str,
     contract_path: &Path,
     contracts_root: &Path,
+    pin: &str,
+    toolchain: &str,
 ) -> Result<(), CompilerError> {
     let source = decode_contract_source(contract)?;
 
@@ -373,11 +361,35 @@ async fn prepare_contract_project(
         }
     })?;
 
-    let (rust_src, rustc_commit) = rustc_sysroot_rust_src().await?;
+    // Frozen dependency set for the pin, when the registry defines
+    // one: written next to the manifest so `--locked` below freezes
+    // versions across machines and time. No frozen set (legacy pins
+    // without one) keeps fresh-resolve behavior.
+    if let Some(lockfile) = ave_common::build::pin_lockfile(pin) {
+        let lock = contract_path.join("Cargo.lock");
+        fs::write(&lock, lockfile.content).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: lock.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+    }
+
+    let (rust_src, rustc_commit) =
+        rustc_sysroot_rust_src(toolchain).await?;
+    // The vendor section is emitted only when `<contracts_root>/vendor`
+    // exists, and the path in it is derived from the build directory
+    // depth (never hardcoded): a wrong depth silently points cargo at
+    // a foreign directory.
     let vendor_dir = contracts_root.join(VENDOR_DIR);
+    let vendor = if vendor_dir.exists() {
+        ave_common::build::relative_vendor_dir(contract_path, contracts_root)
+    } else {
+        None
+    };
     let cargo_config = cargo_config(
         Path::new(BUILD_TARGET_DIR),
-        vendor_dir.exists().then(vendor_dir_for_contract).as_deref(),
+        vendor.as_deref(),
         &contracts_root.join(SHARED_CARGO_HOME_DIR),
         &rust_src,
         &rustc_commit,
@@ -445,20 +457,30 @@ async fn load_compiled_wasm(
 /// Prepares the contract project under `contract_path`, runs the cargo
 /// build and returns the compiled artifact. It does not validate the
 /// module (`init_check`) nor persist artifacts: both are the node's
-/// responsibility. Used by the compiler service; the node never compiles.
+/// responsibility. Used by the node's in-process builds and by the
+/// test-only compiler service (the production node never delegates).
 pub async fn build_wasm(
     contract: &str,
     contract_path: &Path,
     toolchain: &str,
     contracts_root: &Path,
+    pin: &str,
 ) -> Result<Vec<u8>, CompilerError> {
-    prepare_contract_project(contract, contract_path, contracts_root).await?;
+    prepare_contract_project(
+        contract,
+        contract_path,
+        contracts_root,
+        pin,
+        toolchain,
+    )
+    .await?;
 
     build_contract(
         contract_path,
         contracts_root.join(VENDOR_DIR).exists(),
         toolchain,
         contracts_root,
+        ave_common::build::pin_lockfile(pin).is_some(),
     )
     .await?;
 
@@ -676,8 +698,19 @@ pub fn hash_bytes(
 /// the absolute sysroot path instead of the canonical /rustc/<commit>
 /// one, breaking byte-reproducibility across machines; the generated
 /// build config remaps it back to the canonical form.
-async fn rustc_sysroot_rust_src() -> Result<(PathBuf, String), CompilerError> {
-    let output = Command::new("rustc")
+async fn rustc_sysroot_rust_src(
+    toolchain: &str,
+) -> Result<(PathBuf, String), CompilerError> {
+    // Query the SELECTED toolchain, never the ambient one: remapping
+    // the wrong sysroot leaks absolute paths into the artifact.
+    let mut sysroot_cmd = if toolchain.is_empty() {
+        Command::new("rustc")
+    } else {
+        let mut command = Command::new("rustup");
+        command.arg("run").arg(toolchain).arg("rustc");
+        command
+    };
+    let output = sysroot_cmd
         .arg("--print")
         .arg("sysroot")
         .output()
@@ -692,7 +725,14 @@ async fn rustc_sysroot_rust_src() -> Result<(PathBuf, String), CompilerError> {
     }
     let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_owned();
 
-    let output = Command::new("rustc")
+    let mut version_cmd = if toolchain.is_empty() {
+        Command::new("rustc")
+    } else {
+        let mut command = Command::new("rustup");
+        command.arg("run").arg(toolchain).arg("rustc");
+        command
+    };
+    let output = version_cmd
         .arg("--version")
         .arg("--verbose")
         .output()
@@ -715,11 +755,7 @@ async fn rustc_sysroot_rust_src() -> Result<(PathBuf, String), CompilerError> {
         })?;
 
     Ok((
-        PathBuf::from(sysroot)
-            .join("lib")
-            .join("rustlib")
-            .join("src")
-            .join("rust"),
+        ave_common::build::rust_src_dir(&PathBuf::from(sysroot)),
         commit,
     ))
 }

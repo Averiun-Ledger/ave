@@ -288,6 +288,7 @@ impl CompilerSupport {
         contract_path: &Path,
         toolchain: &str,
         contracts_root: &Path,
+        pin: &str,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         // Scratch lives directly at the contracts root so the boot
         // sweep (root-level only) collects leftovers; the root comes
@@ -307,6 +308,7 @@ impl CompilerSupport {
             &build_dir,
             toolchain,
             contracts_root,
+            pin,
         )
         .await;
         // Best-effort scratch cleanup (the boot sweep collects leftovers);
@@ -333,6 +335,7 @@ impl CompilerSupport {
         _contract_path: &Path,
         _toolchain: &str,
         _contracts_root: &Path,
+        _pin: &str,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         Err(CompilerError::NoLocalToolchain)
     }
@@ -347,6 +350,7 @@ impl CompilerSupport {
         contract_path: &Path,
         toolchain: &str,
         contracts_root: &Path,
+        pin: &str,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         // Scratch lives directly at the contracts root (see the
         // production variant above for why the root is explicit).
@@ -360,7 +364,7 @@ impl CompilerSupport {
             BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         ));
         let wasm =
-            pipeline::build_wasm(contract, &build_dir, toolchain, contracts_root)
+            pipeline::build_wasm(contract, &build_dir, toolchain, contracts_root, pin)
                 .await;
         if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
             tracing::debug!(
@@ -404,7 +408,6 @@ impl CompilerSupport {
     /// to the build (`rustup run <name>`). Empty means the node predates
     /// pins: the system cargo. An unknown pin is a permanent local
     /// misconfiguration, fatal like `NoLocalToolchain`.
-    #[cfg_attr(feature = "test", allow(dead_code))]
     pub(crate) async fn resolve_toolchain<A: Actor>(
         ctx: &ActorContext<A>,
         pin: &str,
@@ -428,7 +431,6 @@ impl CompilerSupport {
         source: ContractSourceInput<'_>,
         register_path: &ActorPath,
         expected_wasm_hash: Option<&DigestIdentifier>,
-        #[cfg_attr(feature = "test", allow(unused_variables))]
         toolchain: &str,
         force_rebuild: bool,
     ) -> Result<(Arc<CompiledModule>, ContractArtifactRecord), CompilerError>
@@ -504,7 +506,7 @@ impl CompilerSupport {
             #[cfg(feature = "test")]
             let use_pool = toolchain_name.is_empty();
             #[cfg(not(feature = "test"))]
-            let use_pool = false;
+            let _use_pool = false;
             #[cfg(feature = "test")]
             let client = if use_pool {
                 Some(Self::compiler_client(ctx).await?)
@@ -599,6 +601,7 @@ impl CompilerSupport {
                     contract_path,
                     &toolchain_name,
                     &contracts_root()?,
+                    toolchain,
                 )
                 .await?
             };
@@ -609,6 +612,7 @@ impl CompilerSupport {
                 contract_path,
                 &toolchain_name,
                 &contracts_root()?,
+                toolchain,
             )
             .await?;
 
@@ -1608,14 +1612,14 @@ mod tests {
                 ave_common::governance::DEFAULT_PIN.to_owned(),
                 "stable".to_owned(),
             ),
-            ("test-pin-b".to_owned(), String::new()),
+            ("rust-1.98.1_sdk-0.8.0_wasm32".to_owned(), String::new()),
         ]));
         assert_eq!(
             configured.resolve(ave_common::governance::DEFAULT_PIN),
             Some("stable".to_owned())
         );
         assert_eq!(
-            configured.resolve("test-pin-b"),
+            configured.resolve("rust-1.98.1_sdk-0.8.0_wasm32"),
             Some(String::new())
         );
         assert_eq!(configured.resolve("rust-9.99-ficticio"), None);

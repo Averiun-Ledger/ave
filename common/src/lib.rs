@@ -35,6 +35,12 @@
 pub mod governance;
 
 #[cfg(feature = "common")]
+pub mod registry;
+
+#[cfg(feature = "common")]
+pub mod build;
+
+#[cfg(feature = "common")]
 pub mod error;
 
 #[cfg(feature = "common")]

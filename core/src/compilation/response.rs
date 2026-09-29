@@ -262,10 +262,10 @@ mod tests {
         // CompilationRes::NoToolchain is appended last: existing
         // ordinals stay put.
         let mut expected = vec![6];
-        expected.extend_from_slice(&string_bytes("rust-1.95-wasm32"));
+        expected.extend_from_slice(&string_bytes("rust-1.95.0_sdk-0.8.0_wasm32"));
         assert_wire_shape(
             &CompilationRes::NoToolchain {
-                pin: "rust-1.95-wasm32".to_owned(),
+                pin: "rust-1.95.0_sdk-0.8.0_wasm32".to_owned(),
             },
             &expected,
         );

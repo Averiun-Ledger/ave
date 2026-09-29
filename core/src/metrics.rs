@@ -809,10 +809,10 @@ mod tests {
         let mut registry = Registry::default();
         metrics.register_into(&mut registry);
 
-        metrics.observe_compiler_build("rust-1.95-wasm32", "built");
-        metrics.observe_compiler_build("rust-1.95-wasm32", "built");
-        metrics.observe_compiler_build("rust-1.95-wasm32", "cached");
-        metrics.observe_compiler_build("test-pin-b", "stood_down");
+        metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "built");
+        metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "built");
+        metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "cached");
+        metrics.observe_compiler_build("rust-1.98.1_sdk-0.8.0_wasm32", "stood_down");
         // Unknown pins collapse into one series: request pins are
         // network input and must never expand cardinality.
         metrics.observe_compiler_build("rust-9.99-ficticio", "stood_down");
@@ -823,21 +823,21 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "core_compiler_builds_total{pin=\"rust-1.95-wasm32\",result=\"built\"}"
+                "core_compiler_builds_total{pin=\"rust-1.95.0_sdk-0.8.0_wasm32\",result=\"built\"}"
             ),
             2.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "core_compiler_builds_total{pin=\"rust-1.95-wasm32\",result=\"cached\"}"
+                "core_compiler_builds_total{pin=\"rust-1.95.0_sdk-0.8.0_wasm32\",result=\"cached\"}"
             ),
             1.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "core_compiler_builds_total{pin=\"test-pin-b\",result=\"stood_down\"}"
+                "core_compiler_builds_total{pin=\"rust-1.98.1_sdk-0.8.0_wasm32\",result=\"stood_down\"}"
             ),
             1.0
         );

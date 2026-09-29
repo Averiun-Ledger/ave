@@ -13,6 +13,7 @@ rust-version.workspace = true
 
 [dependencies]
 ave-identity = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -32,11 +33,8 @@ ave-common = { path = ".", features = ["typescript", "sink-grpc"] }
 
 [features]
 default = ["common"]
-common = ["ave-identity", "value-wrapper"]
+common = ["ave-identity", "blake3", "value-wrapper"]
 value-wrapper = []
-# Test-only second toolchain pin for pin-switch suites. Never enabled
-# in production builds.
-test-pins = []
 # gRPC sink protobuf types. Optional: tonic does not compile for the
 # wasm32 target used by the contract SDK, which depends on this crate.
 sink-grpc = ["tonic", "tonic-prost", "prost", "tonic-prost-build", "protoc-bin-vendored"]

@@ -136,6 +136,12 @@ pub async fn system(
     toolchains.verify().await.map_err(|e| {
         SystemError::CompilerConfig(format!("invalid toolchains: {e}"))
     })?;
+    // Registry self-integrity: embedded frozen files must match the
+    // registry hashes byte for byte. A swapped file fails the boot
+    // loud instead of silently resolving different dependencies.
+    ave_common::build::verify_registry_integrity().map_err(|e| {
+        SystemError::CompilerConfig(format!("registry integrity: {e}"))
+    })?;
     system.add_helper("toolchains", Arc::new(toolchains));
 
     #[cfg(feature = "prometheus")]

@@ -1018,9 +1018,9 @@ mod tests {
         // build — reloading would vote the old pin's bytes (and
         // anchor) under the new pin.
         let targets = resolve_compile_targets(
-            &ValueWrapper(serde_json::json!({ "toolchain": "test-pin-b" })),
+            &ValueWrapper(serde_json::json!({ "toolchain": "rust-1.98.1_sdk-0.8.0_wasm32" })),
             &committed_schemas(),
-            "rust-1.95-wasm32",
+            "rust-1.95.0_sdk-0.8.0_wasm32",
         )
         .unwrap();
         assert_eq!(targets.len(), 1);
@@ -1037,9 +1037,9 @@ mod tests {
         // Same pin and no schemas: nothing to compile at all (the
         // manager never asks; the worker would reject as invalid).
         let targets = resolve_compile_targets(
-            &ValueWrapper(serde_json::json!({ "toolchain": "rust-1.95-wasm32" })),
+            &ValueWrapper(serde_json::json!({ "toolchain": "rust-1.95.0_sdk-0.8.0_wasm32" })),
             &committed_schemas(),
-            "rust-1.95-wasm32",
+            "rust-1.95.0_sdk-0.8.0_wasm32",
         )
         .unwrap();
         assert!(targets.is_empty());
@@ -1061,10 +1061,10 @@ mod tests {
                         }
                     ]
                 },
-                "toolchain": "test-pin-b"
+                "toolchain": "rust-1.98.1_sdk-0.8.0_wasm32"
             })),
             &committed_schemas(),
-            "rust-1.95-wasm32",
+            "rust-1.95.0_sdk-0.8.0_wasm32",
         )
         .unwrap();
         assert_eq!(targets.len(), 2);
@@ -1094,10 +1094,10 @@ mod tests {
                         }
                     ]
                 },
-                "toolchain": "rust-1.95-wasm32"
+                "toolchain": "rust-1.95.0_sdk-0.8.0_wasm32"
             })),
             &committed_schemas(),
-            "rust-1.95-wasm32",
+            "rust-1.95.0_sdk-0.8.0_wasm32",
         )
         .unwrap();
         assert_eq!(targets.len(), 1);
@@ -1117,10 +1117,10 @@ mod tests {
                 "schemas": {
                     "remove": ["Example"]
                 },
-                "toolchain": "test-pin-b"
+                "toolchain": "rust-1.98.1_sdk-0.8.0_wasm32"
             })),
             &committed_schemas(),
-            "rust-1.95-wasm32",
+            "rust-1.95.0_sdk-0.8.0_wasm32",
         )
         .unwrap();
         assert!(targets.is_empty());

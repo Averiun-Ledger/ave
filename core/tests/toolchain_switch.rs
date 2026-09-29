@@ -1,11 +1,11 @@
-//! TEST-PIN switch paths (P1/P2): these need the second registry pin
-//! (`TEST_PIN_B`, `test-pins` feature, never production) and, for the
-//! capacity tests, per-node toolchain maps.
+//! TEST-PIN switch paths (P1/P2): every switch runs against real
+//! registry IDs, never synthetic ones. For the capacity tests,
+//! per-node toolchain maps.
 //!
 //! Note on hashes: test builds compile through the shared pool, which
 //! ignores pins, so a recompile-all under a new pin reproduces
 //! byte-identical artifacts here. Real byte divergence across pins is
-//! production-only and belongs to the CI gate, not the suite.
+//! covered by the dedicated real-toolchain test, not the suite.
 mod common;
 
 use std::collections::BTreeMap;
@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use ave_common::SchemaType;
 use ave_common::bridge::request::ApprovalStateRes;
-use ave_common::governance::TEST_PIN_B;
 use ave_common::response::RequestState;
 use ave_core::governance::data::GovernanceData;
+use ave_core::test_compiler::{ScriptedCompiler, ScriptedTransform};
 use ave_network::{NodeType, RoutingNode};
 use common::{
     CHANGED_SCHEMA_CONTRACT, CreateNodeConfig,
@@ -32,6 +32,10 @@ use test_log::test;
 
 use crate::common::wait_request_state;
 
+/// Second production pin: every switch test runs against real
+/// registry IDs, never synthetic ones.
+const PIN_198: &str = "rust-1.98.1_sdk-0.8.0_wasm32";
+
 fn default_pin() -> String {
     GovernanceData::default().toolchain
 }
@@ -39,7 +43,7 @@ fn default_pin() -> String {
 fn both_pins() -> BTreeMap<String, String> {
     BTreeMap::from([
         (default_pin(), String::new()),
-        (TEST_PIN_B.to_owned(), String::new()),
+        (PIN_198.to_owned(), String::new()),
     ])
 }
 
@@ -122,7 +126,7 @@ async fn test_pin_switch_no_schemas_commits() {
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -130,7 +134,7 @@ async fn test_pin_switch_no_schemas_commits() {
     wait_state(node, request_id, "finish").await;
 
     let props = properties(node, &governance_id, 1).await;
-    assert_eq!(props.toolchain, TEST_PIN_B);
+    assert_eq!(props.toolchain, PIN_198);
 }
 
 #[test(tokio::test)]
@@ -147,7 +151,7 @@ async fn test_pin_bare_switch_without_capacity_reboots() {
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -188,7 +192,7 @@ async fn test_pin_switch_recompiles_all() {
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -196,7 +200,7 @@ async fn test_pin_switch_recompiles_all() {
     wait_state(node, request_id, "finish").await;
 
     let after = properties(node, &governance_id, 2).await;
-    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert_eq!(after.toolchain, PIN_198);
     assert!(
         after.schemas.contains_key(&SchemaType::Type("Example".to_owned())),
         "schemas must survive the switch"
@@ -233,7 +237,7 @@ async fn test_pin_switch_parallel_recompile() {
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -241,7 +245,7 @@ async fn test_pin_switch_parallel_recompile() {
     wait_state(node, request_id, "finish").await;
 
     let after = properties(node, &governance_id, 2).await;
-    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert_eq!(after.toolchain, PIN_198);
     assert_eq!(after.schemas.len(), 3, "all schemas must survive");
 }
 
@@ -265,7 +269,7 @@ async fn test_pin_switch_parallel_failure_order() {
                     { "id": "Zzz", "contract": EXAMPLE_CONTRACT_V2, "initial_value": example_initial() }
                 ]
             },
-            "toolchain": TEST_PIN_B,
+            "toolchain": PIN_198,
         }),
         false,
     )
@@ -320,7 +324,7 @@ async fn test_pin_switch_with_add_and_modify() {
                     }
                 ]
             },
-            "toolchain": TEST_PIN_B,
+            "toolchain": PIN_198,
         }),
         false,
     )
@@ -329,7 +333,7 @@ async fn test_pin_switch_with_add_and_modify() {
     wait_state(node, request_id, "finish").await;
 
     let after = properties(node, &governance_id, 2).await;
-    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert_eq!(after.toolchain, PIN_198);
     assert!(
         after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())),
         "added schema must commit"
@@ -366,13 +370,13 @@ async fn test_pin_rollback_is_symmetric() {
     let switch = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
     .unwrap();
     wait_state(node, switch, "finish").await;
-    assert_eq!(properties(node, &governance_id, 2).await.toolchain, TEST_PIN_B);
+    assert_eq!(properties(node, &governance_id, 2).await.toolchain, PIN_198);
 
     let back = emit_fact(
         node,
@@ -458,7 +462,7 @@ async fn test_pin_switch_denied_keeps_previous_version() {
                     }
                 ]
             },
-            "toolchain": TEST_PIN_B,
+            "toolchain": PIN_198,
         }),
         false,
     )
@@ -515,11 +519,9 @@ async fn test_pin_switch_denied_keeps_previous_version() {
 }
 
 #[test(tokio::test)]
-// True divergence (SLOW, minutes): the switch rebuilds with a REAL
-// installed toolchain, so the committed anchor changes bytes for
-// real. DEFAULT builds through the pool (fast), TEST_PIN_B through
-// nightly `rustup run` — different toolchains, different wasm,
-// different anchor. This is the only suite test where hashes move.
+// True divergence (SLOW, minutes): both sides build with REAL
+// installed toolchains mapped exactly per registry (1.95 and 1.98.1),
+// so the committed anchor changes bytes for real.
 async fn test_pin_switch_diverges_bytes_with_real_toolchains() {
     let contracts_dir = tempfile::tempdir().unwrap();
     let (node, _dirs) = create_node(CreateNodeConfig {
@@ -532,8 +534,8 @@ async fn test_pin_switch_diverges_bytes_with_real_toolchains() {
         always_accept: true,
         is_service: true,
         toolchains: Some(BTreeMap::from([
-            (default_pin(), String::new()),
-            (TEST_PIN_B.to_owned(), "nightly".to_owned()),
+            (default_pin(), "1.95".to_owned()),
+            (PIN_198.to_owned(), "1.98.1".to_owned()),
         ])),
         ..Default::default()
     })
@@ -552,13 +554,13 @@ async fn test_pin_switch_diverges_bytes_with_real_toolchains() {
     .unwrap();
 
     let official_name = format!("{governance_id}_Example");
-    let pool_bytes =
+    let before_bytes =
         wait_artifact_bytes(contracts_dir.path(), &official_name).await;
 
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -567,15 +569,15 @@ async fn test_pin_switch_diverges_bytes_with_real_toolchains() {
 
     // Different toolchain, different bytes, promoted over the old
     // official artifact only at commit.
-    let nightly_bytes =
+    let rebuilt_bytes =
         wait_artifact_bytes(contracts_dir.path(), &official_name).await;
     assert_ne!(
-        pool_bytes, nightly_bytes,
+        before_bytes, rebuilt_bytes,
         "switch must rebuild bytes under the new toolchain"
     );
 
     let props = properties(node, &governance_id, 2).await;
-    assert_eq!(props.toolchain, TEST_PIN_B);
+    assert_eq!(props.toolchain, PIN_198);
     assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
 }
 
@@ -596,7 +598,7 @@ async fn test_pin_switch_with_add_only() {
                     { "id": "Beta", "contract": EXAMPLE_CONTRACT, "initial_value": example_initial() }
                 ]
             },
-            "toolchain": TEST_PIN_B,
+            "toolchain": PIN_198,
         }),
         false,
     )
@@ -605,7 +607,7 @@ async fn test_pin_switch_with_add_only() {
     wait_state(node, request_id, "finish").await;
 
     let after = properties(node, &governance_id, 1).await;
-    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert_eq!(after.toolchain, PIN_198);
     assert!(after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
 }
 
@@ -690,7 +692,7 @@ async fn test_pin_switch_with_init_only_change() {
                     }
                 ]
             },
-            "toolchain": TEST_PIN_B,
+            "toolchain": PIN_198,
         }),
         false,
     )
@@ -699,7 +701,7 @@ async fn test_pin_switch_with_init_only_change() {
     wait_state(node, request_id, "finish").await;
 
     let after = properties(node, &governance_id, 2).await;
-    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert_eq!(after.toolchain, PIN_198);
     assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
 }
 
@@ -727,7 +729,7 @@ async fn test_pin_bare_switch_denied_changes_nothing() {
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -782,7 +784,7 @@ async fn test_pin_switch_with_remove() {
         governance_id.clone(),
         json!({
             "schemas": { "remove": ["Beta"] },
-            "toolchain": TEST_PIN_B,
+            "toolchain": PIN_198,
         }),
         false,
     )
@@ -791,9 +793,208 @@ async fn test_pin_switch_with_remove() {
     wait_state(node, request_id, "finish").await;
 
     let after = properties(node, &governance_id, 2).await;
-    assert_eq!(after.toolchain, TEST_PIN_B);
+    assert_eq!(after.toolchain, PIN_198);
     assert!(after.schemas.contains_key(&SchemaType::Type("Alpha".to_owned())));
     assert!(!after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
+}
+
+#[test(tokio::test)]
+// TEST-PIN-13: request en vuelo durante el cambio. Un add atascado
+// en compilación (pool en hold) retiene el subject; el switch entra
+// en cola (InQueue, no solapa: un manager por subject) y al liberar
+// commitea el add bajo el pin viejo y el switch reintenta con la
+// versión nueva y commitea bajo el nuevo. Nada stale promociona.
+async fn test_pin_inflight_add_then_switch() {
+    let scripted = ScriptedCompiler::start(ScriptedTransform::Identity);
+    scripted.hold();
+
+    let (node, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        compiler: Some(scripted.node_config()),
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+
+    // Add atascado: el build llega al pool y ahí se queda.
+    let add = emit_fact(
+        node,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        false,
+    )
+    .await
+    .unwrap();
+    for _ in 0..200 {
+        if scripted.compiles_received() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        scripted.compiles_received() >= 1,
+        "add must reach the held pool"
+    );
+
+    // Switch detrás: en cola hasta que el add libere el subject.
+    let switch = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node, switch.clone(), Some(RequestState::InQueue))
+        .await
+        .unwrap();
+
+    scripted.release();
+
+    // El add commitea bajo el pin viejo...
+    wait_state(node, add, "finish").await;
+    let mid = properties(node, &governance_id, 1).await;
+    assert_eq!(mid.toolchain, default_pin());
+    assert!(mid.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+
+    // ...y el switch, tras reintentar con la versión nueva, bajo el nuevo.
+    wait_state(node, switch, "finish").await;
+    let after = properties(node, &governance_id, 2).await;
+    assert_eq!(after.toolchain, PIN_198);
+    assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+}
+
+#[test(tokio::test)]
+// TEST-REC-01: muerte a mitad de build (sin parada graciosa: se
+// cancela y se abandona, como un kill -9 en lo que al disco
+// respecta) y rearranque con las mismas DBs. El evento combina
+// switch con add de una fuente NUEVA —su build hace miss en todas
+// las cachés y queda en vuelo en el pool en hold— . Al volver: sin
+// crash-loop, el switch pendiente termina (commit bajo el pin nuevo
+// con artefactos correctos) o aborta limpio (pin intacto, oficial
+// intacto). Lo que no puede pasar nunca: commit a medias, crash en
+// boot, o servir bytes del pin equivocado.
+async fn test_pin_kill_mid_recompile_then_restart() {
+    let scripted = ScriptedCompiler::start(ScriptedTransform::Identity);
+    scripted.hold();
+
+    let contracts_dir = tempfile::tempdir().unwrap();
+    let local_db = tempfile::tempdir().unwrap();
+    let ext_db = tempfile::tempdir().unwrap();
+
+    let (node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        compiler: Some(scripted.node_config()),
+        local_db: Some(local_db.path().to_path_buf()),
+        ext_db: Some(ext_db.path().to_path_buf()),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    scripted.release();
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Switch más add de fuente nueva con el pool en hold: el build
+    // del add hace miss en todas las cachés y queda en vuelo. Se
+    // mata en ese punto, sin join gracioso.
+    scripted.hold();
+    let switch = emit_fact(
+        &node.api,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    { "id": "Beta", "contract": EXAMPLE_CONTRACT_V2, "initial_value": example_initial() }
+                ]
+            },
+            "toolchain": PIN_198,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    for _ in 0..200 {
+        if scripted.compiles_received() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        scripted.compiles_received() >= 2,
+        "recompile must reach the held pool before the kill"
+    );
+
+    let keys = node.keys.clone();
+    node.token.cancel();
+    // Sin join: muerte súbita, el estado en disco queda tal cual.
+    drop(node.handler);
+
+    let (node2, node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        compiler: Some(scripted.node_config()),
+        keys: Some(keys),
+        local_db: Some(local_db.path().to_path_buf()),
+        ext_db: Some(ext_db.path().to_path_buf()),
+        contracts_path: Some(contracts_dir.path().to_path_buf()),
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    dirs.extend(node2_dirs);
+    // Boot sin crash-loop con staging a medias en disco.
+    node_running(&node2.api).await.unwrap();
+
+    // Al liberar, el switch pendiente termina bajo el pin nuevo con
+    // artefactos correctos.
+    scripted.release();
+    wait_state(&node2.api, switch, "finish").await;
+
+    let after =
+        properties(&node2.api, &governance_id, 2).await;
+    assert_eq!(after.toolchain, PIN_198);
+    assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
+    // Ambos oficiales sirven bytes: los artefactos existen y son legibles.
+    for name in ["Example", "Beta"] {
+        let official_name = format!("{governance_id}_{name}");
+        let bytes =
+            wait_artifact_bytes(contracts_dir.path(), &official_name).await;
+        assert!(!bytes.is_empty());
+    }
 }
 
 #[test(tokio::test)]
@@ -821,7 +1022,7 @@ async fn test_pin_nobody_holds_reboots() {
     let request_id = emit_fact(
         node,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -932,7 +1133,7 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
     let request_id = emit_fact(
         node1,
         governance_id.clone(),
-        json!({ "toolchain": TEST_PIN_B }),
+        json!({ "toolchain": PIN_198 }),
         false,
     )
     .await
@@ -942,7 +1143,7 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
         .unwrap();
 
     let props = properties(node1, &governance_id, 3).await;
-    assert_eq!(props.toolchain, TEST_PIN_B);
+    assert_eq!(props.toolchain, PIN_198);
     assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
 }
 
@@ -1043,7 +1244,7 @@ async fn test_pin_boot_without_pin_stays_dormant() {
         always_accept: true,
         is_service: true,
         toolchains: Some(BTreeMap::from([(
-            TEST_PIN_B.to_owned(),
+            PIN_198.to_owned(),
             String::new(),
         )])),
         ..Default::default()

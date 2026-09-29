@@ -570,7 +570,7 @@ async fn compile_parity_with_local_build() {
     // (and the absent vendor directory) from it identically.
     let root = tempfile::tempdir().expect("failed to create build tempdir");
     let build_dir = root.path().join("contracts").join("parity");
-    let local = pipeline::build_wasm(&source, &build_dir, "", root.path())
+    let local = pipeline::build_wasm(&source, &build_dir, "", root.path(), "")
         .await
         .expect("local build should succeed");
 
@@ -597,10 +597,10 @@ async fn local_build_is_byte_identical_across_contract_roots() {
     let build_a = root_a.path().join("contracts").join("parity");
     let build_b = root_b.path().join("contracts").join("parity");
 
-    let wasm_a = pipeline::build_wasm(&source, &build_a, "", root_a.path())
+    let wasm_a = pipeline::build_wasm(&source, &build_a, "", root_a.path(), "")
         .await
         .expect("build under root A should succeed");
-    let wasm_b = pipeline::build_wasm(&source, &build_b, "", root_b.path())
+    let wasm_b = pipeline::build_wasm(&source, &build_b, "", root_b.path(), "")
         .await
         .expect("build under root B should succeed");
 
