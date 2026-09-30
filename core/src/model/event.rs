@@ -67,10 +67,17 @@ pub enum CompilationResponse {
     Ok {
         result: CompilerResponse,
         result_hash: DigestIdentifier,
+        /// rustc version the quorum built with, voted inside the
+        /// result hash: validators compare it against the registry
+        /// entry for the pin (valid ID, wrong toolchain is
+        /// rejected). Empty only from the test-only pool.
+        toolchain_version: String,
     },
     Error {
         result: CompilationError,
         result_hash: DigestIdentifier,
+        /// Same attestation for deterministic failures.
+        toolchain_version: String,
     },
 }
 

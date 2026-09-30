@@ -136,7 +136,17 @@ fn legacy_artifact_metadata_path(contract_path: &Path) -> PathBuf {
 
 #[cfg(feature = "test")]
 fn global_cache_root() -> PathBuf {
-    env::temp_dir().join(GLOBAL_CACHE_DIR)
+    // Namespaced per test process: the cache key embeds each
+    // ScriptedCompiler instance's fingerprint, whose counter restarts
+    // in every process — a shared dir lets one run serve another
+    // run's transformed bytes (or starve its pool assertions, as
+    // REC-01 learned). Within a process the sharing stays: first
+    // build still serves all tests of the run.
+    env::temp_dir().join(format!(
+        "{}-{}",
+        GLOBAL_CACHE_DIR,
+        std::process::id()
+    ))
 }
 
 #[cfg(feature = "test")]
@@ -758,6 +768,42 @@ async fn rustc_sysroot_rust_src(
         ave_common::build::rust_src_dir(&PathBuf::from(sysroot)),
         commit,
     ))
+}
+
+/// rustc version of the SELECTED toolchain (`1.98.1`, no host
+/// triple): what compilers attest in their votes and validators
+/// compare against the registry entry for the pin. Empty selects the
+/// system rustc. Query the selection, never the ambient toolchain.
+pub async fn toolchain_rustc_version(
+    toolchain: &str,
+) -> Result<String, CompilerError> {
+    let mut command = if toolchain.is_empty() {
+        Command::new("rustc")
+    } else {
+        let mut command = Command::new("rustup");
+        command.arg("run").arg(toolchain).arg("rustc");
+        command
+    };
+    let output = command
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
+            details: e.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(CompilerError::ToolchainFingerprintFailed {
+            details: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
+    }
+    // `rustc 1.98.1 (hash date)`: the version token, normalized.
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| CompilerError::ToolchainFingerprintFailed {
+            details: "unexpected rustc version output".to_owned(),
+        })
 }
 
 pub async fn toolchain_fingerprint(

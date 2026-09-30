@@ -336,7 +336,7 @@ pub struct Compilation {
     // Quorum
     quorum: Quorum,
     // Actual responses
-    compilers_response: Vec<(CompilerResponse, DigestIdentifier)>,
+    compilers_response: Vec<(CompilerResponse, DigestIdentifier, String)>,
     // Compilers quantity
     compilers_quantity: u32,
 
@@ -358,7 +358,7 @@ pub struct Compilation {
 
     version: u64,
 
-    errors: Vec<(CompilationError, DigestIdentifier)>,
+    errors: Vec<(CompilationError, DigestIdentifier, String)>,
 
     compilation_request_hash: DigestIdentifier,
 
@@ -485,9 +485,12 @@ impl Compilation {
     }
 
     fn check_responses(&self) -> ResponseSummary {
-        let res_set: HashSet<(CompilerResponse, DigestIdentifier)> =
+        // Quorum is over identical (response, hash) pairs; the version
+        // rides along (the hash already covers it, so agreement on the
+        // hash IS agreement on the version).
+        let res_set: HashSet<(CompilerResponse, DigestIdentifier, String)> =
             HashSet::from_iter(self.compilers_response.iter().cloned());
-        let error_set: HashSet<(CompilationError, DigestIdentifier)> =
+        let error_set: HashSet<(CompilationError, DigestIdentifier, String)> =
             HashSet::from_iter(self.errors.iter().cloned());
 
         if res_set.len() == 1 && error_set.is_empty() {
@@ -511,6 +514,7 @@ impl Compilation {
                 response: CompilationResponse::Ok {
                     result: self.compilers_response[0].0.clone(),
                     result_hash: self.compilers_response[0].1.clone(),
+                    toolchain_version: self.compilers_response[0].2.clone(),
                 },
             })
         } else {
@@ -521,6 +525,7 @@ impl Compilation {
                 response: CompilationResponse::Error {
                     result: self.errors[0].0.clone(),
                     result_hash: self.errors[0].1.clone(),
+                    toolchain_version: self.errors[0].2.clone(),
                 },
             })
         }
@@ -556,13 +561,17 @@ impl Compilation {
         result_hash: DigestIdentifier,
         result_hash_signature: Signature,
     ) {
-        let compile_req_hash = match &result {
+        let (compile_req_hash, toolchain_version) = match &result {
             response::CompilationResult::Ok {
-                compile_req_hash, ..
-            }
-            | response::CompilationResult::Error {
-                compile_req_hash, ..
-            } => compile_req_hash,
+                compile_req_hash,
+                toolchain_version,
+                ..
+            } => (compile_req_hash, toolchain_version),
+            response::CompilationResult::Error {
+                compile_req_hash,
+                toolchain_version,
+                ..
+            } => (compile_req_hash, toolchain_version),
         };
         if *compile_req_hash != self.compilation_request_hash {
             error!(
@@ -573,13 +582,18 @@ impl Compilation {
             );
             return;
         }
+        let toolchain_version = toolchain_version.clone();
 
         match result {
             response::CompilationResult::Ok { response, .. } => {
-                self.compilers_response.push((response, result_hash));
+                self.compilers_response.push((
+                    response,
+                    result_hash,
+                    toolchain_version,
+                ));
             }
             response::CompilationResult::Error { error, .. } => {
-                self.errors.push((error, result_hash));
+                self.errors.push((error, result_hash, toolchain_version));
             }
         }
 

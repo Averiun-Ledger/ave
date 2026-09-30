@@ -486,6 +486,50 @@ impl CompileWorker {
             return Ok(CompilationRes::NoToolchain { pin });
         }
 
+        // The vote attests the toolchain that built it: validators
+        // compare this version against the registry entry for the pin
+        // (valid ID, wrong toolchain is rejected there). Measured once
+        // per request from the SELECTED toolchain — the gate above
+        // already proved it resolves. Unmeasurable means the toolchain
+        // is broken: stand down, the build would fail the same way.
+        // The test-only pool votes empty (unattested): only test pool
+        // builds can produce those, never production ones.
+        let toolchain_name = if pin.is_empty() {
+            String::new()
+        } else {
+            match toolchains.resolve(&pin) {
+                Some(name) => name,
+                None => return Ok(CompilationRes::NoToolchain { pin }),
+            }
+        };
+        #[cfg(feature = "test")]
+        let toolchain_version = if toolchain_name.is_empty() {
+            String::new()
+        } else {
+            match pipeline::toolchain_rustc_version(&toolchain_name).await
+            {
+                Ok(version) => version,
+                Err(_) => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_compiler_build(&pin, "stood_down");
+                    }
+                    return Ok(CompilationRes::NoToolchain { pin });
+                }
+            }
+        };
+        #[cfg(not(feature = "test"))]
+        let toolchain_version =
+            match pipeline::toolchain_rustc_version(&toolchain_name).await
+            {
+                Ok(version) => version,
+                Err(_) => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_compiler_build(&pin, "stood_down");
+                    }
+                    return Ok(CompilationRes::NoToolchain { pin });
+                }
+            };
+
         let result =
             match resolve_compile_targets(
                 &fact_request.payload,
@@ -514,6 +558,7 @@ impl CompileWorker {
                                 compile_req_hash,
                                 req_subject_data_hash,
                                 pin: pin.clone(),
+                                toolchain_version: toolchain_version.clone(),
                             }
                         } else {
                             CompilationResult::Error {
@@ -524,6 +569,7 @@ impl CompileWorker {
                                 compile_req_hash,
                                 req_subject_data_hash,
                                 pin: pin.clone(),
+                                toolchain_version: toolchain_version.clone(),
                             }
                         }
                     } else {
@@ -537,6 +583,7 @@ impl CompileWorker {
                                     compile_req_hash,
                                     req_subject_data_hash,
                                     pin: pin.clone(),
+                                    toolchain_version: toolchain_version.clone(),
                                 }
                             }
                             Ok(ContractCompilation::Failed(error)) => {
@@ -545,6 +592,7 @@ impl CompileWorker {
                                     compile_req_hash,
                                     req_subject_data_hash,
                                     pin: pin.clone(),
+                                    toolchain_version: toolchain_version.clone(),
                                 }
                             }
                             Ok(ContractCompilation::Abort(reason)) => {
@@ -565,6 +613,7 @@ impl CompileWorker {
                     compile_req_hash,
                     req_subject_data_hash,
                     pin: pin.clone(),
+                    toolchain_version: toolchain_version.clone(),
                 },
             };
 

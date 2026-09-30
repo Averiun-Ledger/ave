@@ -1270,3 +1270,225 @@ async fn test_pin_boot_without_pin_stays_dormant() {
     .unwrap();
     wait_state(&node2.api, request_id, "reboot").await;
 }
+
+#[test(tokio::test)]
+// TEST-PIN-20: valid ID, wrong toolchain. Every compiler maps the
+// 1.98.1 pin at a 1.95.0 toolchain: they build fine and vote `Ok`,
+// but the attested version (1.95.0) is not the entry's (1.98.1), so
+// validators reject the evidence and nothing commits. This is the
+// hole the version check closes: without it the wrong bytes would
+// anchor under a valid ID.
+async fn test_pin_switch_wrong_toolchain_rejected() {
+    let wrong = BTreeMap::from([
+        (default_pin(), "1.95.0".to_owned()),
+        (PIN_198.to_owned(), "1.95.0".to_owned()),
+    ]);
+    let (node, _dirs) = single_node_with(Some(wrong)).await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+
+    // Baseline commits: 1.95.0 bytes under the 1.95.0 pin are honest.
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node, request_id, Some(RequestState::Finish))
+        .await
+        .unwrap();
+
+    // Switch to the 1.98.1 pin, built with 1.95.0 everywhere.
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        false,
+    )
+    .await
+    .unwrap();
+    // Rejected by the version check: the request aborts (fail
+    // closed, no commit), it does not reboot — validators vote
+    // against unanimous-but-wrong evidence.
+    let state = wait_state(node, request_id, "abort").await;
+    let RequestState::Abort { error, .. } = state else {
+        panic!("expected abort, got {state:?}");
+    };
+    assert!(
+        error.contains("toolchain version"),
+        "rejection must come from the version check, got: {error}"
+    );
+
+    // No commit: pin and version did not move.
+    let props = properties(node, &governance_id, 1).await;
+    assert_eq!(props.toolchain, default_pin());
+}
+
+#[test(tokio::test)]
+// TEST-PIN-21: same rejection without builds. A bare switch votes
+// capacity with the measured version attached: a wrong mapping is
+// rejected even when nothing compiles (fast path of TEST-PIN-20).
+async fn test_pin_bare_switch_wrong_toolchain_rejected() {
+    let wrong = BTreeMap::from([
+        (default_pin(), "1.95.0".to_owned()),
+        (PIN_198.to_owned(), "1.95.0".to_owned()),
+    ]);
+    let (node, _dirs) = single_node_with(Some(wrong)).await;
+    let node = &node.api;
+
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
+
+    let request_id = emit_fact(
+        node,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        false,
+    )
+    .await
+    .unwrap();
+    // Same rejection without builds: aborts, does not reboot.
+    let state = wait_state(node, request_id, "abort").await;
+    let RequestState::Abort { error, .. } = state else {
+        panic!("expected abort, got {state:?}");
+    };
+    assert!(
+        error.contains("toolchain version"),
+        "rejection must come from the version check, got: {error}"
+    );
+
+    let props = properties(node, &governance_id, 0).await;
+    assert_eq!(props.toolchain, default_pin());
+}
+
+#[test(tokio::test)]
+// TEST-PIN-22: blind proponent. The owner proposes a switch to a pin
+// it does not hold (not yet installed): its own compiler votes
+// `NoToolchain`, the two capable compilers carry the quorum, and the
+// switch commits everywhere — including on the owner, which goes
+// dormant serving retained artifacts instead of crashing. This is the
+// rollout shape the operator procedure blesses ("no hace falta que
+// TODOS lo tengan"); TEST-PIN-05 covers an incapable peer, never the
+// incapable requester itself.
+async fn test_pin_switch_blind_proponent_commits() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            is_service: true,
+            // Owner holds only the current pin.
+            toolchains: Some(BTreeMap::from([(
+                default_pin(),
+                String::new(),
+            )])),
+            ..Default::default()
+        })
+        .await;
+    let bootstrap = nodes.remove(0);
+    let _ = nodes;
+    let peer = RoutingNode {
+        peer_id: bootstrap.api.peer_id().to_string(),
+        address: vec![bootstrap.listen_address.clone()],
+    };
+
+    // node2 and node3 hold both pins.
+    let (node2, node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![peer.clone()],
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+    let (node3, node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![peer],
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+    dirs.extend(node2_dirs);
+    dirs.extend(node3_dirs);
+
+    let node1 = &bootstrap.api;
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api, &node3.api])
+            .await;
+
+    // Compilers {Owner, AveNode2, AveNode3}, Majority = 2/3.
+    let members = json!({
+        "members": {
+            "add": [
+                { "name": "AveNode2", "key": node2.api.public_key() },
+                { "name": "AveNode3", "key": node3.api.public_key() }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2", "AveNode3"],
+                    "compiler": ["AveNode2", "AveNode3"]
+                }
+            }
+        }
+    });
+    emit_fact(node1, governance_id.clone(), members, true).await.unwrap();
+    for api in [&node2.api, &node3.api] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+    }
+
+    // Schema add compiles with all three (default pin held everywhere).
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Switch to a pin the owner does not hold: the owner stands down
+    // on its own proposal, node2 + node3 carry the quorum.
+    let request_id = emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node1, request_id, Some(RequestState::Finish))
+        .await
+        .unwrap();
+
+    // Committed everywhere, owner included — dormant, not crashed.
+    // (Only peers sync via update_subject; the owner already holds
+    // its own commit.)
+    node_running(node1).await.unwrap();
+    for api in [&node2.api, &node3.api] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+    }
+    let props = properties(node1, &governance_id, 3).await;
+    assert_eq!(props.toolchain, PIN_198);
+    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    for api in [&node2.api, &node3.api] {
+        let props = properties(api, &governance_id, 3).await;
+        assert_eq!(props.toolchain, PIN_198);
+    }
+}

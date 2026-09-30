@@ -72,6 +72,11 @@ pub enum CompilationResult {
         /// attributable ("who built with what"). Appended last, keeping
         /// the existing field order stable.
         pin: String,
+        /// rustc version that produced these bytes, measured from the
+        /// selected toolchain (never the ambient one). Empty only from
+        /// the test-only compiler pool (unattested); production nodes
+        /// always measure or stand down. Hash-covered with the rest.
+        toolchain_version: String,
     },
     Error {
         error: CompilationError,
@@ -80,6 +85,8 @@ pub enum CompilationResult {
         /// Same as above: deterministic failures are pin-scoped too
         /// (e.g. a same-pin no-op votes `Error` under that pin).
         pin: String,
+        /// Same attestation for deterministic failures.
+        toolchain_version: String,
     },
 }
 
@@ -191,6 +198,7 @@ mod tests {
             compile_req_hash: DigestIdentifier::default(),
             req_subject_data_hash: DigestIdentifier::default(),
             pin: ave_common::governance::DEFAULT_PIN.to_owned(),
+            toolchain_version: "1.95.0".to_owned(),
         }
     }
 
@@ -206,6 +214,7 @@ mod tests {
         bytes.extend_from_slice(&string_bytes(
             ave_common::governance::DEFAULT_PIN,
         )); // pin
+        bytes.extend_from_slice(&string_bytes("1.95.0")); // toolchain_version
         bytes
     }
 
@@ -282,12 +291,14 @@ mod tests {
         expected.extend_from_slice(&string_bytes(
             ave_common::governance::DEFAULT_PIN,
         ));
+        expected.extend_from_slice(&string_bytes("1.95.0"));
         assert_wire_shape(
             &CompilationResult::Error {
                 error: CompilationError::CompilationFailed("failed".to_owned()),
                 compile_req_hash: DigestIdentifier::default(),
                 req_subject_data_hash: DigestIdentifier::default(),
                 pin: ave_common::governance::DEFAULT_PIN.to_owned(),
+                toolchain_version: "1.95.0".to_owned(),
             },
             &expected,
         );

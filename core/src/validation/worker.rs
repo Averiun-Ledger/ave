@@ -1777,28 +1777,43 @@ impl ValiWorker {
             event_request.content(),
             &pre.toolchain,
         );
+        // The voted toolchain version rides the evidence the same way:
+        // the hash binds it, and the check below compares it against
+        // the registry entry for the pin.
+        let toolchain_version = match &compilation.response {
+            CompilationResponse::Ok {
+                toolchain_version, ..
+            }
+            | CompilationResponse::Error {
+                toolchain_version, ..
+            } => toolchain_version.clone(),
+        };
         let (compile_result, result_hash) = match compilation.response.clone() {
             CompilationResponse::Ok {
                 result,
                 result_hash,
+                ..
             } => (
                 CompilationResult::Ok {
                     response: result,
                     compile_req_hash: compilation.compile_req_hash.clone(),
                     req_subject_data_hash,
                     pin: pin.clone(),
+                    toolchain_version: toolchain_version.clone(),
                 },
                 result_hash,
             ),
             CompilationResponse::Error {
                 result,
                 result_hash,
+                ..
             } => (
                 CompilationResult::Error {
                     error: result,
                     compile_req_hash: compilation.compile_req_hash.clone(),
                     req_subject_data_hash,
                     pin: pin.clone(),
+                    toolchain_version: toolchain_version.clone(),
                 },
                 result_hash,
             ),
@@ -1821,6 +1836,30 @@ impl ValiWorker {
             if signature.verify(&compile_result_hash).is_err() {
                 return Err(ValidatorError::InvalidSignature {
                     data: "compilation",
+                });
+            }
+        }
+
+        // The toolchain that built the bytes must be the pin's: a valid
+        // ID with another toolchain's bytes is rejected here (no
+        // commit), which an empty version can never smuggle past in
+        // production — only the test-only pool votes empty, and only
+        // test builds accept that.
+        if toolchain_version.is_empty() {
+            #[cfg(not(any(test, feature = "test")))]
+            return Err(ValidatorError::InvalidData {
+                value: "compilation toolchain version",
+            });
+        } else {
+            let entry =
+                ave_common::governance::toolchain_info(&pin).ok_or(
+                    ValidatorError::InvalidData {
+                        value: "compilation toolchain pin",
+                    },
+                )?;
+            if toolchain_version != entry.rustc_version {
+                return Err(ValidatorError::InvalidData {
+                    value: "compilation toolchain version",
                 });
             }
         }
@@ -2647,9 +2686,19 @@ impl Handler<Self> for ValiWorker {
                     match self.create_res(ctx, &validation_req).await {
                         Ok(validation) => validation,
                         Err(e) => {
+                            // Same mapping as the network path below:
+                            // bad evidence is a vote against (fail
+                            // closed, no commit), never a crash. A
+                            // unanimous-but-wrong quorum (every compiler
+                            // misconfigured the same way) must reject
+                            // the request, not crash-loop every
+                            // validating node on re-drive.
                             if matches!(e, ValidatorError::OutOfVersion) {
                                 ValidationRes::Reboot
-                            } else {
+                            } else if matches!(
+                                e,
+                                ValidatorError::InternalError { .. }
+                            ) {
                                 return Err(crash_system(
                                     ctx,
                                     ActorError::FunctionalCritical {
@@ -2657,6 +2706,8 @@ impl Handler<Self> for ValiWorker {
                                     },
                                 )
                                 .await);
+                            } else {
+                                ValidationRes::Abort(e.to_string())
                             }
                         }
                     };
@@ -3551,6 +3602,10 @@ mod tests {
                 compile_req_hash: compile_req_hash.clone(),
                 req_subject_data_hash: self.req_subject_data_hash.clone(),
                 pin: pin.to_owned(),
+                // Honest by construction: the registry version of the
+                // effective pin (VAL-PIN fails earlier, on the request
+                // signature, so this never masks it).
+                toolchain_version: "1.95.0".to_owned(),
             };
             let result_hash = hash_borsh(&*hasher, &result).unwrap();
             let compilers_signatures = self
@@ -3566,6 +3621,7 @@ mod tests {
                 response: CompilationResponse::Ok {
                     result: response,
                     result_hash,
+                    toolchain_version: "1.95.0".to_owned(),
                 },
             }
         }
