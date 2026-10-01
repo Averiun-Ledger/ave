@@ -3576,11 +3576,28 @@ mod tests {
 
         /// Same evidence built around an explicit pin: a pin that is
         /// not the effective one must be rejected (no cross-pin
-        /// evidence replay).
+        /// evidence replay). The attested version travels with it so
+        /// the registry comparison is covered too.
         fn compilation_with_contracts_and_pin(
             &self,
             contracts: BTreeMap<SchemaType, DigestIdentifier>,
             pin: &str,
+        ) -> CompilationData {
+            self.compilation_with_contracts_pin_and_version(
+                contracts,
+                pin,
+                "1.95.0",
+            )
+        }
+
+        /// Full control: pin plus attested toolchain version. A right
+        /// pin with the wrong version must be rejected (valid ID,
+        /// wrong toolchain: post-boot drift or a lazy voter).
+        fn compilation_with_contracts_pin_and_version(
+            &self,
+            contracts: BTreeMap<SchemaType, DigestIdentifier>,
+            pin: &str,
+            toolchain_version: &str,
         ) -> CompilationData {
             let hasher = self.worker.hash.hasher();
             let signed_req = Signed::new(
@@ -3602,10 +3619,7 @@ mod tests {
                 compile_req_hash: compile_req_hash.clone(),
                 req_subject_data_hash: self.req_subject_data_hash.clone(),
                 pin: pin.to_owned(),
-                // Honest by construction: the registry version of the
-                // effective pin (VAL-PIN fails earlier, on the request
-                // signature, so this never masks it).
-                toolchain_version: "1.95.0".to_owned(),
+                toolchain_version: toolchain_version.to_owned(),
             };
             let result_hash = hash_borsh(&*hasher, &result).unwrap();
             let compilers_signatures = self
@@ -3621,7 +3635,7 @@ mod tests {
                 response: CompilationResponse::Ok {
                     result: response,
                     result_hash,
-                    toolchain_version: "1.95.0".to_owned(),
+                    toolchain_version: toolchain_version.to_owned(),
                 },
             }
         }
@@ -3855,6 +3869,28 @@ mod tests {
                 )
             ),
             Err(ValidatorError::InvalidSignature { .. })
+        ));
+
+        // VAL-VERSION: right pin, wrong attested toolchain version.
+        // The hash binds the version and the registry names the
+        // expected one: valid ID with another toolchain's bytes is
+        // rejected here (fail closed, no commit). No E2E can reach
+        // this branch honestly — a lying mapping already fails the
+        // boot loud — so the fixture pins it.
+        let contracts = BTreeMap::from([(
+            SchemaType::Type("Example".to_owned()),
+            hash_borsh(&*fixture.worker.hash.hasher(), &b"wasm".to_vec())
+                .unwrap(),
+        )]);
+        assert!(matches!(
+            fixture.check_compilation(
+                fixture.compilation_with_contracts_pin_and_version(
+                    contracts,
+                    &ave_common::governance::DEFAULT_PIN,
+                    "1.98.1"
+                )
+            ),
+            Err(ValidatorError::InvalidData { .. })
         ));
 
         // The stored request signature does not verify over the rebuilt

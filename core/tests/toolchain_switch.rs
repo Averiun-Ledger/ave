@@ -1272,98 +1272,6 @@ async fn test_pin_boot_without_pin_stays_dormant() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-20: valid ID, wrong toolchain. Every compiler maps the
-// 1.98.1 pin at a 1.95.0 toolchain: they build fine and vote `Ok`,
-// but the attested version (1.95.0) is not the entry's (1.98.1), so
-// validators reject the evidence and nothing commits. This is the
-// hole the version check closes: without it the wrong bytes would
-// anchor under a valid ID.
-async fn test_pin_switch_wrong_toolchain_rejected() {
-    let wrong = BTreeMap::from([
-        (default_pin(), "1.95.0".to_owned()),
-        (PIN_198.to_owned(), "1.95.0".to_owned()),
-    ]);
-    let (node, _dirs) = single_node_with(Some(wrong)).await;
-    let node = &node.api;
-
-    let governance_id = create_and_authorize_governance(node, vec![]).await;
-
-    // Baseline commits: 1.95.0 bytes under the 1.95.0 pin are honest.
-    let request_id = emit_fact(
-        node,
-        governance_id.clone(),
-        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
-        false,
-    )
-    .await
-    .unwrap();
-    wait_request_state(node, request_id, Some(RequestState::Finish))
-        .await
-        .unwrap();
-
-    // Switch to the 1.98.1 pin, built with 1.95.0 everywhere.
-    let request_id = emit_fact(
-        node,
-        governance_id.clone(),
-        json!({ "toolchain": PIN_198 }),
-        false,
-    )
-    .await
-    .unwrap();
-    // Rejected by the version check: the request aborts (fail
-    // closed, no commit), it does not reboot — validators vote
-    // against unanimous-but-wrong evidence.
-    let state = wait_state(node, request_id, "abort").await;
-    let RequestState::Abort { error, .. } = state else {
-        panic!("expected abort, got {state:?}");
-    };
-    assert!(
-        error.contains("toolchain version"),
-        "rejection must come from the version check, got: {error}"
-    );
-
-    // No commit: pin and version did not move.
-    let props = properties(node, &governance_id, 1).await;
-    assert_eq!(props.toolchain, default_pin());
-}
-
-#[test(tokio::test)]
-// TEST-PIN-21: same rejection without builds. A bare switch votes
-// capacity with the measured version attached: a wrong mapping is
-// rejected even when nothing compiles (fast path of TEST-PIN-20).
-async fn test_pin_bare_switch_wrong_toolchain_rejected() {
-    let wrong = BTreeMap::from([
-        (default_pin(), "1.95.0".to_owned()),
-        (PIN_198.to_owned(), "1.95.0".to_owned()),
-    ]);
-    let (node, _dirs) = single_node_with(Some(wrong)).await;
-    let node = &node.api;
-
-    let governance_id = create_and_authorize_governance(node, vec![]).await;
-
-    let request_id = emit_fact(
-        node,
-        governance_id.clone(),
-        json!({ "toolchain": PIN_198 }),
-        false,
-    )
-    .await
-    .unwrap();
-    // Same rejection without builds: aborts, does not reboot.
-    let state = wait_state(node, request_id, "abort").await;
-    let RequestState::Abort { error, .. } = state else {
-        panic!("expected abort, got {state:?}");
-    };
-    assert!(
-        error.contains("toolchain version"),
-        "rejection must come from the version check, got: {error}"
-    );
-
-    let props = properties(node, &governance_id, 0).await;
-    assert_eq!(props.toolchain, default_pin());
-}
-
-#[test(tokio::test)]
 // TEST-PIN-22: blind proponent. The owner proposes a switch to a pin
 // it does not hold (not yet installed): its own compiler votes
 // `NoToolchain`, the two capable compilers carry the quorum, and the
@@ -1491,4 +1399,101 @@ async fn test_pin_switch_blind_proponent_commits() {
         let props = properties(api, &governance_id, 3).await;
         assert_eq!(props.toolchain, PIN_198);
     }
+}
+
+#[test(tokio::test)]
+// TEST-PIN-23: lying mapping fails the boot loud. A pin mapped at a
+// toolchain whose measured version is not the registry entry's never
+// becomes a node: `Api::build` errors instead of voting divergent
+// bytes under a valid ID later. No builds involved (one rustc spawn).
+async fn test_pin_boot_wrong_mapping_fails_loud() {
+    let err = common::try_create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(BTreeMap::from([
+            (default_pin(), "1.95.0".to_owned()),
+            (PIN_198.to_owned(), "1.95.0".to_owned()),
+        ])),
+        ..Default::default()
+    })
+    .await
+    .map(|_| ())
+    .expect_err("a pin mapped at the wrong toolchain must not boot");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains(PIN_198) && msg.contains("1.95.0"),
+        "boot error must name the lying mapping, got: {msg}"
+    );
+}
+
+#[test(tokio::test)]
+// TEST-PIN-24: two governances, two pins, one node. The pin selects
+// per governance version, never a node-global toolchain: gov1 keeps
+// building and committing on the default pin while gov2 lives on
+// 1.98.1, both artifacts served. Guards against any future global
+// toolchain state leaking across governances (today everything is
+// explicit parameters, verified in audit — this pins it).
+async fn test_pin_two_governances_two_pins_coexist() {
+    let (node, _dirs) = single_node().await;
+    let node = &node.api;
+
+    let gov1 = create_and_authorize_governance(node, vec![]).await;
+    let gov2 = create_and_authorize_governance(node, vec![]).await;
+
+    emit_fact(
+        node,
+        gov1.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        node,
+        gov2.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Only gov2 moves.
+    let request_id = emit_fact(
+        node,
+        gov2.clone(),
+        json!({ "toolchain": PIN_198 }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node, request_id, Some(RequestState::Finish))
+        .await
+        .unwrap();
+
+    let props1 = properties(node, &gov1, 1).await;
+    assert_eq!(props1.toolchain, default_pin());
+    assert!(props1.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    let props2 = properties(node, &gov2, 2).await;
+    assert_eq!(props2.toolchain, PIN_198);
+    assert!(props2.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+
+    // gov1 keeps operating under its pin after gov2 moved.
+    emit_fact(
+        node,
+        gov1.clone(),
+        schema_add("Second", EXAMPLE_CONTRACT_V2, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+    let props1 = properties(node, &gov1, 2).await;
+    assert_eq!(props1.toolchain, default_pin());
+    assert!(props1.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(props1.schemas.contains_key(&SchemaType::Type("Second".to_owned())));
+    node_running(node).await.unwrap();
 }

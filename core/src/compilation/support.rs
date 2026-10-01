@@ -62,15 +62,22 @@ impl Toolchains {
     /// Verifies every configured entry answers as a toolchain. Broken
     /// entries fail loud at startup (operator misconfiguration); pins
     /// outside the registry only warn (they can never match anyway).
+    /// Named entries are also measured against the registry row: a pin
+    /// mapped at the wrong toolchain would vote divergent bytes under
+    /// a valid ID, so the boot refuses it instead of discovering it
+    /// in validation. Empty (`""` = system cargo) only has to execute:
+    /// it declares no version, and production votes carry whatever it
+    /// measures for validators to judge.
     pub(crate) async fn verify(&self) -> Result<(), CompilerError> {
         for (pin, name) in &self.entries {
-            if ave_common::governance::toolchain_info(pin).is_none() {
+            let Some(entry) = ave_common::governance::toolchain_info(pin)
+            else {
                 warn!(
                     pin = %pin,
                     "Toolchain entry pins an unknown registry ID, ignoring it"
                 );
                 continue;
-            }
+            };
             let mut command = tokio::process::Command::new("rustc");
             if !name.is_empty() {
                 command.arg(format!("+{name}"));
@@ -87,6 +94,28 @@ impl Toolchains {
             if !output.status.success() {
                 return Err(CompilerError::ToolchainFingerprintFailed {
                     details: format!("toolchain for pin {pin} is unusable"),
+                });
+            }
+            if name.is_empty() {
+                continue;
+            }
+            // Same measurement the vote carries: what builds here must
+            // be what the pin names, or the boot fails before serving.
+            let measured =
+                pipeline::toolchain_rustc_version(name).await.map_err(
+                    |e| CompilerError::ToolchainFingerprintFailed {
+                        details: format!(
+                            "can not measure toolchain for pin {pin}: {e}"
+                        ),
+                    },
+                )?;
+            if measured != entry.rustc_version {
+                return Err(CompilerError::ToolchainFingerprintFailed {
+                    details: format!(
+                        "toolchain for pin {pin} is rustc {measured}, \
+                         registry says {}: fix the mapping",
+                        entry.rustc_version
+                    ),
                 });
             }
         }

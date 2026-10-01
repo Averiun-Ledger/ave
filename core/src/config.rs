@@ -91,7 +91,11 @@ pub struct Config {
     /// selects, never the local default: a pin with no entry means
     /// this node can not build it and stands down. Empty by default,
     /// which resolves exactly `DEFAULT_PIN` to the system toolchain
-    /// (today's behavior) and nothing else.
+    /// (today's behavior) and nothing else. Production consequence:
+    /// the vote always carries the MEASURED system version, so an
+    /// empty map only works while the system rustc IS the pin —
+    /// otherwise validators reject every build (fail closed, never
+    /// silent divergence). Map explicitly in production.
     pub toolchains: BTreeMap<String, String>,
 }
 
