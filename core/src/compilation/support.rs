@@ -34,13 +34,26 @@ pub use super::pipeline::ContractArtifactRecord;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Toolchains {
     entries: BTreeMap<String, String>,
+    cargo_bin: Option<PathBuf>,
 }
 
 impl Toolchains {
     pub(crate) fn from_config(entries: &BTreeMap<String, String>) -> Self {
         Self {
             entries: entries.clone(),
+            cargo_bin: None,
         }
+    }
+
+    /// Pins the reproducible cargo binary every local build runs
+    /// through (see `Config::cargo_bin`). Unset keeps the `rustup`
+    /// cargo (single-architecture networks only).
+    pub(crate) fn with_cargo_bin(
+        mut self,
+        cargo_bin: Option<PathBuf>,
+    ) -> Self {
+        self.cargo_bin = cargo_bin;
+        self
     }
 
     /// Resolves the rustup toolchain name for a pin (`Some("")` selects
@@ -69,6 +82,7 @@ impl Toolchains {
     /// it declares no version, and production votes carry whatever it
     /// measures for validators to judge.
     pub(crate) async fn verify(&self) -> Result<(), CompilerError> {
+        self.verify_cargo_bin().await?;
         for (pin, name) in &self.entries {
             let Some(entry) = ave_common::governance::toolchain_info(pin)
             else {
@@ -78,29 +92,12 @@ impl Toolchains {
                 );
                 continue;
             };
-            let mut command = tokio::process::Command::new("rustc");
-            if !name.is_empty() {
-                command.arg(format!("+{name}"));
-            }
-            let output = command
-                .arg("--version")
-                .output()
-                .await
-                .map_err(|e| CompilerError::ToolchainFingerprintFailed {
-                    details: format!(
-                        "can not run toolchain for pin {pin}: {e}"
-                    ),
-                })?;
-            if !output.status.success() {
-                return Err(CompilerError::ToolchainFingerprintFailed {
-                    details: format!("toolchain for pin {pin} is unusable"),
-                });
-            }
-            if name.is_empty() {
-                continue;
-            }
-            // Same measurement the vote carries: what builds here must
-            // be what the pin names, or the boot fails before serving.
+            // Single probe per entry: what builds here must be what
+            // the pin names, or the boot fails before serving — a
+            // toolchain that does not even execute fails the same
+            // loud way. Empty (`""` = system cargo) only has to
+            // execute: it declares no version, and production votes
+            // carry whatever it measures for validators to judge.
             let measured = ave_build::rustc_version(name)
                 .await
                 .map_err(|e| CompilerError::ToolchainFingerprintFailed {
@@ -108,7 +105,7 @@ impl Toolchains {
                         "can not measure toolchain for pin {pin}: {e}"
                     ),
                 })?;
-            if measured != entry.rustc_version {
+            if !name.is_empty() && measured != entry.rustc_version {
                 return Err(CompilerError::ToolchainFingerprintFailed {
                     details: format!(
                         "toolchain for pin {pin} is rustc {measured}, \
@@ -117,6 +114,72 @@ impl Toolchains {
                     ),
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Configured pinned cargo binary, if any (cloned per build: a
+    /// path clone per compile is noise next to spawning cargo).
+    /// `None` keeps `rustup` cargo. The shared procedure turns it
+    /// into the `Pinned` program with `RUSTC` resolved to the
+    /// selected toolchain.
+    pub(crate) fn cargo_bin(&self) -> Option<PathBuf> {
+        self.cargo_bin.clone()
+    }
+
+    /// Verifies the pinned cargo binary is a registry-blessed one for
+    /// this architecture. A foreign cargo would vote divergent bytes
+    /// under a valid pin ID, so — like a lying toolchain mapping —
+    /// the boot refuses it instead of discovering it in validation.
+    /// Unset means `rustup` cargo: nothing to bless (and nothing
+    /// cross-architecture about it).
+    async fn verify_cargo_bin(&self) -> Result<(), CompilerError> {
+        let Some(binary) = &self.cargo_bin else {
+            return Ok(());
+        };
+        let bytes = tokio::fs::read(binary).await.map_err(|e| {
+            CompilerError::ToolchainFingerprintFailed {
+                details: format!(
+                    "can not read pinned cargo {}: {e}",
+                    binary.display()
+                ),
+            }
+        })?;
+        let actual = ave_common::build::blake3_hex(&bytes);
+        // Every registry-known configured pin must bless this binary:
+        // a pin whose entry names another cargo can not be built here.
+        // Zero-config still resolves `DEFAULT_PIN`, so it still checks
+        // against that entry.
+        let default = ave_common::governance::DEFAULT_PIN.to_owned();
+        let pins: Vec<&String> = if self.entries.is_empty() {
+            vec![&default]
+        } else {
+            self.entries.keys().collect()
+        };
+        let mut blessed = false;
+        for pin in pins {
+            let Some(expected) =
+                ave_common::registry::cargo_bin_blake3(pin)
+            else {
+                continue;
+            };
+            blessed = true;
+            if actual != expected {
+                return Err(CompilerError::ToolchainFingerprintFailed {
+                    details: format!(
+                        "pinned cargo {} does not match the registry \
+                         cargo for pin {pin} on this architecture",
+                        binary.display()
+                    ),
+                });
+            }
+        }
+        if !blessed {
+            warn!(
+                binary = %binary.display(),
+                "Pinned cargo configured but no configured pin blesses \
+                 it on this architecture: builds can not be anchored"
+            );
         }
         Ok(())
     }
@@ -319,6 +382,7 @@ impl CompilerSupport {
         toolchain: &str,
         contracts_root: &Path,
         pin: &str,
+        cargo_bin: Option<PathBuf>,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         // Scratch lives directly at the contracts root so the boot
         // sweep (root-level only) collects leftovers; the root comes
@@ -340,6 +404,7 @@ impl CompilerSupport {
             toolchain,
             contracts_root,
             pin,
+            cargo_bin,
         )
         .await;
         // Best-effort scratch cleanup (the boot sweep collects leftovers);
@@ -368,6 +433,7 @@ impl CompilerSupport {
         toolchain: &str,
         contracts_root: &Path,
         pin: &str,
+        cargo_bin: Option<PathBuf>,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
         let manifest_toml = pipeline::compilation_toml();
@@ -392,7 +458,13 @@ impl CompilerSupport {
             cargo_home: contracts_root
                 .join(pipeline::SHARED_CARGO_HOME_DIR),
             toolchain,
-            cargo: ave_build::CargoProgram::Rustup(toolchain),
+            cargo: match &cargo_bin {
+                // Same binary on every compiler: the registry-blessed
+                // cargo the pins were measured with. `RUSTC` still
+                // resolves to the selected toolchain inside ave-build.
+                Some(binary) => ave_build::CargoProgram::Pinned(binary),
+                None => ave_build::CargoProgram::Rustup(toolchain),
+            },
             rust_src,
             rustc_commit,
             offline: contracts_root.join(pipeline::VENDOR_DIR).exists(),
@@ -436,6 +508,7 @@ impl CompilerSupport {
         toolchain: &str,
         contracts_root: &Path,
         pin: &str,
+        cargo_bin: Option<PathBuf>,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         // Scratch lives directly at the contracts root (see the
         // production variant above for why the root is explicit).
@@ -455,6 +528,7 @@ impl CompilerSupport {
             toolchain,
             contracts_root,
             pin,
+            cargo_bin,
         )
         .await;
         if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
@@ -591,6 +665,13 @@ impl CompilerSupport {
             // must not brick a node that can serve from cache.
             let toolchain_name =
                 Self::resolve_toolchain(ctx, toolchain).await?;
+            // Pinned cargo selection travels with the build: every
+            // compiler must run the same cargo binary or the quorum
+            // diverges across architectures. The helper is present —
+            // resolving the toolchain above already proved it.
+            let cargo_bin = Self::toolchains_helper(ctx)
+                .map(|toolchains| toolchains.cargo_bin())
+                .unwrap_or(None);
             #[cfg(feature = "test")]
             let use_pool = toolchain_name.is_empty();
             #[cfg(not(feature = "test"))]
@@ -690,6 +771,7 @@ impl CompilerSupport {
                     &toolchain_name,
                     &contracts_root()?,
                     toolchain,
+                    cargo_bin.clone(),
                 )
                 .await?
             };
@@ -701,6 +783,7 @@ impl CompilerSupport {
                 &toolchain_name,
                 &contracts_root()?,
                 toolchain,
+                cargo_bin,
             )
             .await?;
 
@@ -1711,5 +1794,109 @@ mod tests {
             Some(String::new())
         );
         assert_eq!(configured.resolve("rust-9.99-ficticio"), None);
+    }
+
+    // A pin mapped at a toolchain that is not installed is a broken
+    // entry: the boot refuses it loud instead of discovering it in
+    // the network (missing, not just lying like the wrong-version
+    // case). Fast: the probe fails without any build.
+    #[tokio::test]
+    async fn toolchain_verify_rejects_uninstalled_toolchain() {
+        use std::collections::BTreeMap;
+
+        let toolchains = Toolchains::from_config(&BTreeMap::from([(
+            "rust-1.98.1_sdk-0.8.0_wasm32".to_owned(),
+            "ave-toolchain-that-does-not-exist".to_owned(),
+        )]));
+        let err = toolchains
+            .verify()
+            .await
+            .expect_err("an uninstalled toolchain must fail loud");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("rust-1.98.1_sdk-0.8.0_wasm32"),
+            "boot error must name the broken mapping, got: {msg}"
+        );
+    }
+
+    // Pinned cargo selection: unset keeps `rustup` cargo, set travels
+    // with the build. The binary itself is blessed by hash at boot
+    // (next test), so this only pins the plumbing.
+    #[test]
+    fn toolchain_cargo_bin_travels_when_configured() {
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let plain = Toolchains::from_config(&BTreeMap::new());
+        assert_eq!(plain.cargo_bin(), None);
+        let pinned = Toolchains::from_config(&BTreeMap::new())
+            .with_cargo_bin(Some(PathBuf::from("/usr/local/bin/cargo")));
+        assert_eq!(
+            pinned.cargo_bin(),
+            Some(PathBuf::from("/usr/local/bin/cargo"))
+        );
+    }
+
+    // A cargo binary the registry does not bless for this pin and
+    // architecture fails the boot loud: it would vote divergent
+    // bytes under a valid ID. Fast: hashing fails nothing, no build.
+    #[tokio::test]
+    async fn toolchain_verify_rejects_foreign_cargo_bin() {
+        use std::collections::BTreeMap;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ave-test-cargo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign = dir.join("cargo-foreign");
+        std::fs::write(&foreign, "not the blessed cargo").unwrap();
+        let toolchains =
+            Toolchains::from_config(&BTreeMap::from([(
+                "rust-1.98.1_sdk-0.8.0_wasm32".to_owned(),
+                String::new(),
+            )]))
+            .with_cargo_bin(Some(foreign.clone()));
+        let err = toolchains
+            .verify()
+            .await
+            .expect_err("a foreign cargo binary must fail loud");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("rust-1.98.1_sdk-0.8.0_wasm32"),
+            "boot error must name the pin, got: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Same for a configured path that does not even exist.
+    #[tokio::test]
+    async fn toolchain_verify_rejects_missing_cargo_bin() {
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let toolchains = Toolchains::from_config(&BTreeMap::new())
+            .with_cargo_bin(Some(PathBuf::from(
+                "/ave-definitely-not-here/cargo",
+            )));
+        toolchains
+            .verify()
+            .await
+            .expect_err("a missing cargo binary must fail loud");
+    }
+
+    // Registry blesses one cargo hash per architecture: this arch
+    // resolves for known pins, unknown pins resolve to nothing.
+    #[test]
+    fn registry_blesses_cargo_per_architecture() {
+        let hash = ave_common::registry::cargo_bin_blake3(
+            "rust-1.98.1_sdk-0.8.0_wasm32",
+        )
+        .expect("known pin blesses a cargo on this architecture");
+        assert_eq!(hash.len(), 64, "blake3 hex, got: {hash}");
+        assert!(
+            ave_common::registry::cargo_bin_blake3("rust-9.99-ficticio")
+                .is_none()
+        );
     }
 }

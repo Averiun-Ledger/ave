@@ -69,6 +69,7 @@ Recorded as `FrozenLockfile { version: 1, .. }` with provenance in
 | SDK version bump | `ave-pin register` (new `sdk_version`) | `audit`: sdk FAIL |
 | Dependencies (new/changed) | freeze `contract-vN+1.Cargo.lock`, new arm in `pin_lockfile()`, new revision | `audit`: lockfile FAIL + builds with `--locked` fail |
 | Rust toolchain for a pin | `ave-pin register --toolchain` (new hash) | `audit --rebuild` FAIL |
+| Reproducible cargo binary (new backport) | blake3 per arch in the registry `cargo_bins` (`register` copies them into `pin.json`); nodes pick it up via `Config.cargo_bin`, the tool via `AVE_CARGO_BIN` | `audit`: cargo_bins FAIL; node boot fails loud |
 | Docker tooling | rebuild image, record new digest in entries + `pin.json` | digest mismatch on verify |
 | Anything above uncommitted | commit first | `audit`: uncommitted-changes warn |
 

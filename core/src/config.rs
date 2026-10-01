@@ -97,6 +97,16 @@ pub struct Config {
     /// otherwise validators reject every build (fail closed, never
     /// silent divergence). Map explicitly in production.
     pub toolchains: BTreeMap<String, String>,
+    /// Pinned reproducible cargo binary: path to a cargo carrying
+    /// the host-metadata fix (rust-lang/cargo#17522 backport) the
+    /// pins were measured with. When set, every local contract build
+    /// runs through it with `RUSTC` pinned to the selected toolchain
+    /// — the only way a mixed-architecture network votes identical
+    /// bytes. Unset means `rustup` cargo (single-architecture
+    /// networks only). The binary hash must match the registry
+    /// `cargo_bins` for this architecture, or the boot fails loud.
+    /// Empty by default (today's behavior).
+    pub cargo_bin: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -119,6 +129,7 @@ impl Default for Config {
             compiler: Default::default(),
             spec: None,
             toolchains: BTreeMap::new(),
+            cargo_bin: None,
         }
     }
 }

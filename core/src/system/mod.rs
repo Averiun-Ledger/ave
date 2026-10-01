@@ -132,7 +132,8 @@ pub async fn system(
     // misconfiguration and fails the boot loud.
     let toolchains = crate::compilation::support::Toolchains::from_config(
         &config.toolchains,
-    );
+    )
+    .with_cargo_bin(config.cargo_bin.clone());
     toolchains.verify().await.map_err(|e| {
         SystemError::CompilerConfig(format!("invalid toolchains: {e}"))
     })?;
@@ -400,6 +401,7 @@ pub mod tests {
             #[cfg(feature = "test")]
             compiler: Default::default(),
             toolchains: Default::default(),
+            cargo_bin: None,
         };
 
         #[cfg(feature = "prometheus")]
@@ -488,6 +490,7 @@ pub mod tests {
             #[cfg(feature = "test")]
             compiler: Default::default(),
             toolchains: Default::default(),
+            cargo_bin: None,
         };
 
         let result = system(

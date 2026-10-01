@@ -28,6 +28,21 @@ use tokio::{fs, process::Command};
 /// (staging, official, scratch, off-chain builds).
 pub const ARTIFACT_WASM: &str = "contract.wasm";
 
+/// Largest contract source a caller may hand to a build. Matches
+/// the node intake bound, so off-chain tooling can never build (and
+/// hash) what the network would refuse to compile.
+pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+
+/// Cap for a captured cargo stderr: failure output is for logs, and
+/// unbounded collection turns a spewing build into an OOM. Past the
+/// cap the pipe is still drained (a blocked pipe would hang the
+/// child) but the excess is discarded.
+const MAX_STDERR_BYTES: usize = 64 * 1024;
+
+/// Default per-build timeout, shared by the node and the off-chain
+/// tooling so both sides give up on a hung build at the same point.
+pub const BUILD_TIMEOUT_SECS: u64 = 600;
+
 /// Failures of the contract build procedure. Callers map these to
 /// their own taxonomy (deterministic contract errors vs local
 /// infrastructure); nothing here decides that.
@@ -105,6 +120,41 @@ pub struct BuildRequest<'a> {
     pub kill_process_group: bool,
 }
 
+/// Command running `rustc` of the SELECTED toolchain: `rustup run`
+/// isolates concurrent builds with different toolchains (no
+/// process-global env), plain `rustc` when empty (system toolchain).
+/// One constructor so probes can never query different compilers.
+fn rustc_command(toolchain: &str) -> Command {
+    if toolchain.is_empty() {
+        Command::new("rustc")
+    } else {
+        let mut command = Command::new("rustup");
+        command.arg("run").arg(toolchain).arg("rustc");
+        command
+    }
+}
+
+/// One probe per toolchain: sysroot plus the full `rustc -vV`
+/// output every attestation derives from (commit hash, version,
+/// fingerprint input). Toolchains are static per boot (no hot-swap
+/// by design), so caching across builds of a process only skips
+/// redundant spawns — every build of the process would measure the
+/// same values.
+struct Probe {
+    sysroot: PathBuf,
+    verbose: String,
+}
+
+fn probe_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, Probe>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Probe>>,
+    > = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Sysroot rust-src path and commit hash of the SELECTED toolchain.
 /// With the rust-src component installed, panic locations in
 /// std/core/alloc embed the absolute sysroot path instead of the
@@ -116,14 +166,51 @@ pub async fn query_sysroot(
 ) -> Result<(PathBuf, String), BuildError> {
     // Query the SELECTED toolchain, never the ambient one: remapping
     // the wrong sysroot leaks absolute paths into the artifact.
-    let mut sysroot_cmd = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = sysroot_cmd
+    let probe = probe_toolchain(toolchain).await?;
+    let commit = probe
+        .verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .map(str::to_owned)
+        .ok_or_else(|| BuildError::ToolchainProbeFailed {
+            details: "rustc -vV output has no commit-hash".to_owned(),
+        })?;
+    Ok((rules::rust_src_dir(&probe.sysroot), commit))
+}
+
+async fn probe_toolchain(toolchain: &str) -> Result<Probe, BuildError> {
+    if let Some(cached) = probe_cache()
+        .lock()
+        .map_err(|_| BuildError::ToolchainProbeFailed {
+            details: "toolchain probe cache poisoned".to_owned(),
+        })?
+        .get(toolchain)
+    {
+        return Ok(Probe {
+            sysroot: cached.sysroot.clone(),
+            verbose: cached.verbose.clone(),
+        });
+    }
+    let measured = probe_toolchain_once(toolchain).await?;
+    probe_cache()
+        .lock()
+        .map_err(|_| BuildError::ToolchainProbeFailed {
+            details: "toolchain probe cache poisoned".to_owned(),
+        })?
+        .insert(
+            toolchain.to_owned(),
+            Probe {
+                sysroot: measured.sysroot.clone(),
+                verbose: measured.verbose.clone(),
+            },
+        );
+    Ok(measured)
+}
+
+async fn probe_toolchain_once(
+    toolchain: &str,
+) -> Result<Probe, BuildError> {
+    let sysroot_output = rustc_command(toolchain)
         .arg("--print")
         .arg("sysroot")
         .output()
@@ -131,21 +218,15 @@ pub async fn query_sysroot(
         .map_err(|e| BuildError::ToolchainProbeFailed {
             details: e.to_string(),
         })?;
-    if !output.status.success() {
+    if !sysroot_output.status.success() {
         return Err(BuildError::ToolchainProbeFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
+            details: String::from_utf8_lossy(&sysroot_output.stderr)
+                .to_string(),
         });
     }
-    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-
-    let mut version_cmd = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = version_cmd
+    let sysroot =
+        String::from_utf8_lossy(&sysroot_output.stdout).trim().to_owned();
+    let verbose_output = rustc_command(toolchain)
         .arg("--version")
         .arg("--verbose")
         .output()
@@ -153,21 +234,16 @@ pub async fn query_sysroot(
         .map_err(|e| BuildError::ToolchainProbeFailed {
             details: e.to_string(),
         })?;
-    if !output.status.success() {
+    if !verbose_output.status.success() {
         return Err(BuildError::ToolchainProbeFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
+            details: String::from_utf8_lossy(&verbose_output.stderr)
+                .to_string(),
         });
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let commit = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("commit-hash: "))
-        .map(str::to_owned)
-        .ok_or_else(|| BuildError::ToolchainProbeFailed {
-            details: "rustc -vV output has no commit-hash".to_owned(),
-        })?;
-
-    Ok((rules::rust_src_dir(Path::new(&sysroot)), commit))
+    Ok(Probe {
+        sysroot: PathBuf::from(sysroot),
+        verbose: String::from_utf8_lossy(&verbose_output.stdout).to_string(),
+    })
 }
 
 /// `rustc 1.95.0 (hash date)` → `1.95.0`: normalized, no host triple.
@@ -176,27 +252,11 @@ pub async fn query_sysroot(
 pub async fn rustc_version(
     toolchain: &str,
 ) -> Result<String, BuildError> {
-    let mut command = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = command
-        .arg("--version")
-        .output()
-        .await
-        .map_err(|e| BuildError::ToolchainProbeFailed {
-            details: e.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(BuildError::ToolchainProbeFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    // `rustc 1.98.1 (hash date)`: the version token, normalized.
-    String::from_utf8_lossy(&output.stdout)
+    // The verbose first line is `rustc 1.98.1 (hash date)`: same
+    // version token as the short output, from the cached probe.
+    let probe = probe_toolchain(toolchain).await?;
+    probe
+        .verbose
         .split_whitespace()
         .nth(1)
         .map(str::to_owned)
@@ -218,36 +278,13 @@ pub async fn toolchain_fingerprint(
     // Fingerprint the SELECTED toolchain, never the ambient one: the
     // record must attest what built the bytes. Empty selects the
     // system rustc.
-    let mut command = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = command
-        .arg("--version")
-        .arg("--verbose")
-        .output()
-        .await
-        .map_err(|e| BuildError::ToolchainProbeFailed {
-            details: e.to_string(),
-        })?;
-
-    if !output.status.success() {
-        return Err(BuildError::ToolchainProbeFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
+    let probe = probe_toolchain(toolchain).await?;
 
     // The build configuration (rustflags and friends) shapes the artifact
     // bytes as much as the rustc version itself, so the raw template is
     // part of the fingerprint: a flag change is a toolchain change.
-    let fingerprint_input = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        config_template
-    );
+    let fingerprint_input =
+        format!("{}{}", probe.verbose, config_template);
     hash_borsh(&*hash.hasher(), &fingerprint_input).map_err(|e| {
         BuildError::SerializationError {
             context: "toolchain fingerprint",
@@ -402,9 +439,24 @@ pub async fn run_cargo_build(
 
     let stderr = child.stderr.take();
     let reader = tokio::spawn(async move {
+        // Bounded capture with endless drain: a spewing build can
+        // not OOM the node, and a full pipe can not hang the child.
         let mut buf = Vec::new();
         if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_end(&mut buf).await;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let room = MAX_STDERR_BYTES
+                            .saturating_sub(buf.len());
+                        buf.extend_from_slice(
+                            &chunk[..n.min(room)],
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
         }
         buf
     });

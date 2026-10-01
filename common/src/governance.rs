@@ -38,6 +38,15 @@ pub struct ToolchainInfo {
     pub sdk_version: &'static str,
     pub lock_hash: &'static str,
     pub builder_image: &'static str,
+    /// Pinned reproducible cargo binaries by architecture key
+    /// (`"amd64"`, `"arm64"`): blake3 of the patched cargo binary
+    /// (rust-lang/cargo#17522 backport) the pin was measured with.
+    /// Annotative like `builder_image` (never voted: binary bytes
+    /// are arch-specific), enforced locally — a node configured
+    /// with a cargo binary whose hash matches no entry for its
+    /// architecture fails the boot loud instead of voting divergent
+    /// bytes.
+    pub cargo_bins: &'static [(&'static str, &'static str)],
 }
 
 /// The registry itself lives in `crate::registry` (generated file,

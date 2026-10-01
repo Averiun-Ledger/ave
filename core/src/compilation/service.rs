@@ -595,6 +595,9 @@ impl CompilerServer {
         // The standalone service builds with the system toolchain; pin
         // selection lives in the node path. Same shared procedure as
         // the node (decode errors stay request errors, as before).
+        // Arbitrary test sources have no frozen set, so no `--locked`
+        // here; the build is still bounded — a hung cargo must not
+        // hold a semaphore slot forever.
         let source = pipeline::decode_contract_source(source_b64)
             .map_err(|e| status_for_build_error(&e))?;
         let (rust_src, rustc_commit) =
@@ -627,8 +630,8 @@ impl CompilerServer {
             rustc_commit,
             offline,
             locked: false,
-            timeout: None,
-            kill_process_group: false,
+            timeout: Some(pipeline::BUILD_TIMEOUT),
+            kill_process_group: true,
         };
         let build_result = ave_build::build_contract_wasm(&build_dir, &request)
             .await

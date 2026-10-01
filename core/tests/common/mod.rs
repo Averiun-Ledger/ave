@@ -140,6 +140,10 @@ pub struct CreateNodeConfig {
     /// system toolchain). Needed by tests that simulate partial
     /// capacity (nodes standing down on unknown pins).
     pub toolchains: Option<std::collections::BTreeMap<String, String>>,
+    /// Pinned reproducible cargo binary; wired straight into
+    /// `Config::cargo_bin`. Needed by tests that prove nodes build
+    /// through the patched cargo (cross-architecture byte identity).
+    pub cargo_bin: Option<PathBuf>,
     /// Explicit governance sync timing; `None` uses the default test
     /// values. Needed by tests that wait on idle sync rounds so they do
     /// not pay the full default interval.
@@ -179,6 +183,7 @@ pub async fn try_create_node(
         governance_sync,
         approval,
         toolchains,
+        cargo_bin,
     } = config;
 
     let keys =
@@ -261,6 +266,7 @@ pub async fn try_create_node(
         #[cfg(feature = "test")]
         compiler: compiler.unwrap_or_default(),
         toolchains: toolchains.unwrap_or_default(),
+        cargo_bin,
         spec: None,
     };
 

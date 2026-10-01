@@ -23,8 +23,8 @@ use common::{
     CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
     EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
-    emit_approve, emit_fact, get_events, get_subject, node_running,
-    wait_artifact_bytes,
+    emit_approve,     emit_fact, get_events, get_subject, node_running,
+    wait_artifact_bytes, wait_artifact_bytes_eq,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -1496,4 +1496,222 @@ async fn test_pin_two_governances_two_pins_coexist() {
     assert!(props1.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
     assert!(props1.schemas.contains_key(&SchemaType::Type("Second".to_owned())));
     node_running(node).await.unwrap();
+}
+
+#[test(tokio::test)]
+// TEST-PIN-25: a compiler that stands down for the new pin still
+// evaluates through it. Node3 holds compiler+evaluator roles but no
+// PIN_198 toolchain: after the switch commits without it, an
+// init-only change forces every evaluator to run the new artifact —
+// node3 fetches the quorum-anchored bytes from its peers and votes
+// instead of going dark. 05 proves the switch commits; this proves
+// the stood-down node stays live (the "stand down, keep serving and
+// evaluating" principle across a switch).
+async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            is_service: true,
+            toolchains: Some(both_pins()),
+            ..Default::default()
+        })
+        .await;
+    let bootstrap = nodes.remove(0);
+    let _ = nodes;
+    let peer = RoutingNode {
+        peer_id: bootstrap.api.peer_id().to_string(),
+        address: vec![bootstrap.listen_address.clone()],
+    };
+
+    // Explicit contracts dirs: node2 is the byte reference, node3
+    // must converge to it through fetch (it can never build them).
+    let node2_contracts = tempfile::tempdir().unwrap();
+    let node3_contracts = tempfile::tempdir().unwrap();
+    let (node2, node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![peer.clone()],
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(node2_contracts.path().to_path_buf()),
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+    let (node3, node3_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![peer],
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(node3_contracts.path().to_path_buf()),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            String::new(),
+        )])),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node3.api).await.unwrap();
+    dirs.extend(node2_dirs);
+    dirs.extend(node3_dirs);
+
+    let node1 = &bootstrap.api;
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api, &node3.api])
+            .await;
+
+    // Compilers AND evaluators {Owner, AveNode2, AveNode3}.
+    let members = json!({
+        "members": {
+            "add": [
+                { "name": "AveNode2", "key": node2.api.public_key() },
+                { "name": "AveNode3", "key": node3.api.public_key() }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2", "AveNode3"],
+                    "evaluator": ["AveNode2", "AveNode3"],
+                    "compiler": ["AveNode2", "AveNode3"]
+                }
+            }
+        }
+    });
+    emit_fact(node1, governance_id.clone(), members, true).await.unwrap();
+    for api in [&node2.api, &node3.api] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+    }
+
+    // Schema add compiles with all three (default pin held everywhere).
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Switch: node3 stands down, owner + node2 carry the quorum.
+    let request_id = emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node1, request_id, Some(RequestState::Finish))
+        .await
+        .unwrap();
+    let props = properties(node1, &governance_id, 3).await;
+    assert_eq!(props.toolchain, PIN_198);
+
+    // Stale reference: every official artifact still holds default-pin
+    // bytes (the switch carried no schemas, nothing rebuilt).
+    let official_name = format!("{governance_id}_Example");
+    let stale = wait_artifact_bytes(node3_contracts.path(), &official_name)
+        .await;
+
+    // Init-only change under the new pin: capable nodes rebuild, node3
+    // can not — its evaluation must fetch the anchored bytes.
+    let request_id = emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "change": [
+                    {
+                        "actual_id": "Example",
+                        "new_initial_value": { "one": 7, "two": 0, "three": 0 }
+                    }
+                ]
+            }
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    wait_request_state(node1, request_id.clone(), Some(RequestState::Finish))
+        .await
+        .unwrap();
+    // Bounded on node3: a stand-down that never lands must fail the
+    // test, not hang it.
+    wait_state(&node3.api, request_id, "finish").await;
+
+    // Reference: a capable peer's rebuilt bytes (retried until they
+    // differ from the stale pre-switch ones, so the equality below
+    // can not pass on old bytes).
+    let reference = {
+        let mut current = wait_artifact_bytes(
+            node2_contracts.path(),
+            &official_name,
+        )
+        .await;
+        for _ in 0..100 {
+            if current != stale {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            current = wait_artifact_bytes(
+                node2_contracts.path(),
+                &official_name,
+            )
+            .await;
+        }
+        assert_ne!(
+            current, stale,
+            "a capable peer must rebuild under the new pin"
+        );
+        current
+    };
+    // Node3 converged to the exact quorum-anchored bytes without ever
+    // holding the toolchain: it fetched and evaluated.
+    wait_artifact_bytes_eq(node3_contracts.path(), &official_name, &reference)
+        .await;
+    let props3 = properties(&node3.api, &governance_id, 4).await;
+    assert_eq!(props3.toolchain, PIN_198);
+    assert!(props3.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+}
+
+#[test(tokio::test)]
+// TEST-PIN-26: a pin mapped at a toolchain that is not installed can
+// not boot either. 23 covers the lying mapping (wrong version); this
+// covers the missing one: the entry is broken either way and the
+// boot fails loud before serving anything. Fast: the probe fails
+// without any build.
+async fn test_pin_boot_missing_toolchain_fails_loud() {
+    let err = common::try_create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        is_service: true,
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            "ave-toolchain-that-does-not-exist".to_owned(),
+        )])),
+        ..Default::default()
+    })
+    .await
+    .map(|_| ())
+    .expect_err("a pin mapped at a missing toolchain must not boot");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains(&default_pin()),
+        "boot error must name the broken mapping, got: {msg}"
+    );
 }

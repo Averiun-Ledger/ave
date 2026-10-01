@@ -28,8 +28,11 @@ use tracing::debug;
 use super::error::CompilerError;
 use ave_build;
 
-/// Maximum time allowed for a single contract build.
-pub(crate) const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Maximum time allowed for a single contract build: the shared
+/// `ave-build` default, so node and off-chain tooling give up on a
+/// hung build at the same point.
+pub(crate) const BUILD_TIMEOUT: Duration =
+    Duration::from_secs(ave_build::BUILD_TIMEOUT_SECS);
 
 pub(crate) const BUILD_TARGET_DIR: &str = ".build-target";
 pub(crate) const SHARED_CARGO_HOME_DIR: &str = ".cargo-home";

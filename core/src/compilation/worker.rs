@@ -502,33 +502,29 @@ impl CompileWorker {
                 None => return Ok(CompilationRes::NoToolchain { pin }),
             }
         };
+        // The test-only pool votes empty (unattested): only test pool
+        // builds can produce those, never production ones. An empty
+        // toolchain name selects the system cargo (legacy request):
+        // production measures it (validators judge whatever it
+        // attests); tests vote empty.
         #[cfg(feature = "test")]
+        let empty_version = String::new();
+        #[cfg(not(feature = "test"))]
+        let empty_version =
+            match Self::measure_toolchain_version("", &pin).await {
+                Ok(version) => version,
+                Err(response) => return Ok(response),
+            };
         let toolchain_version = if toolchain_name.is_empty() {
-            String::new()
+            empty_version
         } else {
-            match ave_build::rustc_version(&toolchain_name).await
+            match Self::measure_toolchain_version(&toolchain_name, &pin)
+                .await
             {
                 Ok(version) => version,
-                Err(_) => {
-                    if let Some(metrics) = try_core_metrics() {
-                        metrics.observe_compiler_build(&pin, "stood_down");
-                    }
-                    return Ok(CompilationRes::NoToolchain { pin });
-                }
+                Err(response) => return Ok(response),
             }
         };
-        #[cfg(not(feature = "test"))]
-        let toolchain_version =
-            match ave_build::rustc_version(&toolchain_name).await
-            {
-                Ok(version) => version,
-                Err(_) => {
-                    if let Some(metrics) = try_core_metrics() {
-                        metrics.observe_compiler_build(&pin, "stood_down");
-                    }
-                    return Ok(CompilationRes::NoToolchain { pin });
-                }
-            };
 
         let result =
             match resolve_compile_targets(
@@ -638,6 +634,27 @@ impl CompileWorker {
             result_hash,
             result_hash_signature,
         })
+    }
+
+    /// Measures the selected toolchain for the vote. Unmeasurable
+    /// means a broken toolchain: stand down exactly like an
+    /// unresolvable pin (same metric, same response) — the build
+    /// would fail the same way.
+    async fn measure_toolchain_version(
+        toolchain_name: &str,
+        pin: &str,
+    ) -> Result<String, CompilationRes> {
+        match ave_build::rustc_version(toolchain_name).await {
+            Ok(version) => Ok(version),
+            Err(_) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_compiler_build(pin, "stood_down");
+                }
+                Err(CompilationRes::NoToolchain {
+                    pin: pin.to_owned(),
+                })
+            }
+        }
     }
 
     /// Compiles every target contract with its init check and returns
