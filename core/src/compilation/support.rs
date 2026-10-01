@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -101,14 +101,13 @@ impl Toolchains {
             }
             // Same measurement the vote carries: what builds here must
             // be what the pin names, or the boot fails before serving.
-            let measured =
-                pipeline::toolchain_rustc_version(name).await.map_err(
-                    |e| CompilerError::ToolchainFingerprintFailed {
-                        details: format!(
-                            "can not measure toolchain for pin {pin}: {e}"
-                        ),
-                    },
-                )?;
+            let measured = ave_build::rustc_version(name)
+                .await
+                .map_err(|e| CompilerError::ToolchainFingerprintFailed {
+                    details: format!(
+                        "can not measure toolchain for pin {pin}: {e}"
+                    ),
+                })?;
             if measured != entry.rustc_version {
                 return Err(CompilerError::ToolchainFingerprintFailed {
                     details: format!(
@@ -309,7 +308,9 @@ impl CompilerSupport {
     /// a crash leftover carries the governance prefix, so the boot sweep
     /// — which only scans the root level — removes it as an unknown
     /// entry. The scratch is always cleaned up after the build; only
-    /// the verified wasm reaches the artifact store.
+    /// the verified wasm reaches the artifact store. The build itself
+    /// runs through the shared `ave-build` procedure (same as the
+    /// off-chain tooling).
     #[cfg(all(not(feature = "test"), feature = "toolchain"))]
     async fn build_local(
         hash: HashAlgorithm,
@@ -332,7 +333,8 @@ impl CompilerSupport {
             std::process::id(),
             BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         ));
-        let wasm = pipeline::build_wasm(
+        let wasm = Self::build_with_shared_procedure(
+            hash,
             contract,
             &build_dir,
             toolchain,
@@ -349,9 +351,62 @@ impl CompilerSupport {
                 "Failed to remove build scratch directory"
             );
         }
-        let wasm = wasm?;
+        wasm
+    }
+
+    /// Shared build procedure for every in-process compile (production
+    /// and named-toolchain test builds): resolve sysroot, build through
+    /// `ave-build`, attest the toolchain. One path, no forks.
+    #[cfg(any(
+        all(not(feature = "test"), feature = "toolchain"),
+        feature = "test"
+    ))]
+    async fn build_with_shared_procedure(
+        hash: HashAlgorithm,
+        contract: &str,
+        build_dir: &Path,
+        toolchain: &str,
+        contracts_root: &Path,
+        pin: &str,
+    ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
+        use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
+        let manifest_toml = pipeline::compilation_toml();
+        let lockfile = ave_common::build::pin_lockfile(pin);
+        let locked = lockfile.is_some();
+        // The payload travels base64 (plain or zstd): decode here, so
+        // the shared procedure always receives raw source bytes.
+        let source = pipeline::decode_contract_source(contract)?;
+        let (rust_src, rustc_commit) =
+            ave_build::query_sysroot(toolchain)
+                .await
+                .map_err(pipeline::map_build_error)?;
+        let vendor_dir =
+            pipeline::vendor_dir_for_build(build_dir, contracts_root);
+        let request = ave_build::BuildRequest {
+            source: &source,
+            manifest_toml: &manifest_toml,
+            config_template: CONTRACT_CARGO_CONFIG,
+            lockfile: lockfile.map(|frozen| frozen.content),
+            target_dir: PathBuf::from(pipeline::BUILD_TARGET_DIR),
+            vendor_dir,
+            cargo_home: contracts_root
+                .join(pipeline::SHARED_CARGO_HOME_DIR),
+            toolchain,
+            cargo: ave_build::CargoProgram::Rustup(toolchain),
+            rust_src,
+            rustc_commit,
+            offline: contracts_root.join(pipeline::VENDOR_DIR).exists(),
+            locked,
+            timeout: Some(pipeline::BUILD_TIMEOUT),
+            kill_process_group: true,
+        };
+        let wasm = ave_build::build_contract_wasm(build_dir, &request)
+            .await
+            .map_err(pipeline::map_build_error)?;
         let toolchain_fingerprint =
-            pipeline::toolchain_fingerprint(hash, toolchain).await?;
+            ave_build::toolchain_fingerprint(hash, toolchain, CONTRACT_CARGO_CONFIG)
+                .await
+                .map_err(pipeline::map_build_error)?;
         Ok((wasm, toolchain_fingerprint))
     }
 
@@ -372,6 +427,7 @@ impl CompilerSupport {
     /// Test builds: the real local build, used only when a suite maps
     /// a pin to a named toolchain installed on the machine (true
     /// divergence tests). Everything else goes through the pool.
+    /// Same shared procedure as production (see above).
     #[cfg(feature = "test")]
     async fn build_local(
         hash: HashAlgorithm,
@@ -392,9 +448,15 @@ impl CompilerSupport {
             std::process::id(),
             BUILD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         ));
-        let wasm =
-            pipeline::build_wasm(contract, &build_dir, toolchain, contracts_root, pin)
-                .await;
+        let wasm = Self::build_with_shared_procedure(
+            hash,
+            contract,
+            &build_dir,
+            toolchain,
+            contracts_root,
+            pin,
+        )
+        .await;
         if let Err(e) = tokio::fs::remove_dir_all(&build_dir).await {
             tracing::debug!(
                 error = %e,
@@ -402,10 +464,7 @@ impl CompilerSupport {
                 "Failed to remove build scratch directory"
             );
         }
-        let wasm = wasm?;
-        let toolchain_fingerprint =
-            pipeline::toolchain_fingerprint(hash, toolchain).await?;
-        Ok((wasm, toolchain_fingerprint))
+        wasm
     }
 
     pub(crate) async fn contracts_helper<A: Actor>(

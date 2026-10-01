@@ -3,7 +3,6 @@ use std::env;
 use std::time::Duration;
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -22,20 +21,19 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "test")]
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::timeout;
-use tokio::{fs, process::Command};
+use tokio::io::AsyncWriteExt;
+use tokio::fs;
 use tracing::debug;
 
 use super::error::CompilerError;
+use ave_build;
 
 /// Maximum time allowed for a single contract build.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
 
-const BUILD_TARGET_DIR: &str = ".build-target";
-const SHARED_CARGO_HOME_DIR: &str = ".cargo-home";
-const VENDOR_DIR: &str = "vendor";
-const ARTIFACT_WASM: &str = "contract.wasm";
+pub(crate) const BUILD_TARGET_DIR: &str = ".build-target";
+pub(crate) const SHARED_CARGO_HOME_DIR: &str = ".cargo-home";
+pub(crate) const VENDOR_DIR: &str = "vendor";
 const ARTIFACT_PRECOMPILED: &str = "contract.cwasm";
 const LEGACY_ARTIFACT_METADATA: &str = "contract.json";
 #[cfg(feature = "test")]
@@ -57,6 +55,65 @@ pub struct ContractArtifactRecord {
 
 pub fn compilation_toml() -> String {
     ave_contract_sdk::runtime::CONTRACT_CARGO_TOML.to_owned()
+}
+
+/// Vendor directory for a build, resolved by depth from the build
+/// directory to `<contracts_root>/vendor` — never hardcoded. `None`
+/// when the vendor dir is absent or the build dir escapes the root:
+/// then no vendor section is emitted, same as before.
+pub(crate) fn vendor_dir_for_build(
+    build_dir: &Path,
+    contracts_root: &Path,
+) -> Option<PathBuf> {
+    if !contracts_root.join(VENDOR_DIR).exists() {
+        return None;
+    }
+    ave_common::build::relative_vendor_dir(build_dir, contracts_root)
+}
+
+/// Maps a shared build failure to the node taxonomy. Infrastructure
+/// problems stay local-fatal here (disk, toolchain probe); the
+/// caller decides verdicts. A failed build also carries its stderr
+/// tail for the log — the vote itself carries no details.
+pub(crate) fn map_build_error(error: ave_build::BuildError) -> CompilerError {
+    use ave_build::BuildError as E;
+    match error {
+        E::DirectoryCreationFailed { path, details } => {
+            CompilerError::DirectoryCreationFailed { path, details }
+        }
+        E::FileWriteFailed { path, details } => {
+            CompilerError::FileWriteFailed { path, details }
+        }
+        E::FileReadFailed { path, details, kind } => {
+            CompilerError::FileReadFailed { path, kind, details }
+        }
+        E::CargoSpawnFailed { details } => {
+            CompilerError::CargoBuildFailed { details }
+        }
+        E::CompilationFailed { stderr } => {
+            let tail = stderr
+                .trim()
+                .chars()
+                .rev()
+                .take(2048)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            tracing::warn!(
+                stderr = %tail,
+                "Contract build failed"
+            );
+            CompilerError::CompilationFailed
+        }
+        E::BuildTimeout { secs } => CompilerError::BuildTimeout { secs },
+        E::ToolchainProbeFailed { details } => {
+            CompilerError::ToolchainFingerprintFailed { details }
+        }
+        E::SerializationError { context, details } => {
+            CompilerError::SerializationError { context, details }
+        }
+    }
 }
 
 /// Largest contract source accepted once decoded and, when it carries the
@@ -114,11 +171,11 @@ pub fn validate_contract_source(contract: &str) -> Result<(), CompilerError> {
 
 #[cfg(feature = "test")]
 fn artifact_wasm_path_in(base_path: &Path) -> PathBuf {
-    base_path.join(ARTIFACT_WASM)
+    base_path.join(ave_build::ARTIFACT_WASM)
 }
 
 fn artifact_wasm_path(contract_path: &Path) -> PathBuf {
-    contract_path.join(ARTIFACT_WASM)
+    contract_path.join(ave_build::ARTIFACT_WASM)
 }
 
 #[cfg(feature = "test")]
@@ -166,337 +223,6 @@ fn global_cache_metadata_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join(GLOBAL_CACHE_METADATA)
 }
 
-fn cargo_config_path(contract_path: &Path) -> PathBuf {
-    contract_path.join(".cargo").join("config.toml")
-}
-
-/// Kills a timed-out cargo build with its whole process tree: on Unix
-/// the build runs in its own process group, so one signal reaps cargo
-/// and every rustc/linker child instead of orphaning them.
-async fn kill_build_tree(child: &mut tokio::process::Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // SAFETY: `killpg` with `SIGKILL` touches only the build group
-        // derived from our own child pid.
-        let group_killed =
-            unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) == 0 };
-        if group_killed {
-            return;
-        }
-    }
-    if let Err(error) = child.kill().await {
-        debug!(
-            error = %error,
-            "Failed to kill cargo build process after timeout"
-        );
-    }
-}
-
-fn build_output_wasm_path(contract_path: &Path) -> PathBuf {
-    contract_path
-        .join(BUILD_TARGET_DIR)
-        .join(ave_common::build::WASM_TARGET)
-        .join("release")
-        .join(ARTIFACT_WASM)
-}
-
-fn cargo_config(
-    target_dir: &Path,
-    vendor_dir: Option<&Path>,
-    cargo_home: &Path,
-    rust_src: &Path,
-    rustc_commit: &str,
-) -> String {
-    // Single renderer (`ave_common::build`, shared with the off-chain
-    // gate): same inputs in, byte-identical config out. Never render
-    // here again.
-    ave_common::build::render_contract_cargo_config(
-        &ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
-        target_dir,
-        vendor_dir,
-        cargo_home,
-        rust_src,
-        rustc_commit,
-    )
-}
-
-async fn build_contract(
-    contract_path: &Path,
-    offline: bool,
-    toolchain: &str,
-    contracts_root: &Path,
-    locked: bool,
-) -> Result<(), CompilerError> {
-    let cargo = contract_path.join("Cargo.toml");
-    let cargo_home = contracts_root.join(SHARED_CARGO_HOME_DIR);
-    // A named rustup toolchain runs isolated (`rustup run`), never
-    // through process-global env: concurrent builds with different
-    // toolchains can not interfere. Empty selects the system cargo.
-    let mut command = if toolchain.is_empty() {
-        Command::new("cargo")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("cargo");
-        command
-    };
-    command
-        .arg("build")
-        .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
-        .arg("--target")
-        .arg(ave_common::build::WASM_TARGET)
-        .arg("--release")
-        .current_dir(contract_path)
-        .env("CARGO_HOME", cargo_home)
-        // Single source of truth (`ave_common::build`): no wall-clock
-        // input may shape artifacts.
-        .env("SOURCE_DATE_EPOCH", ave_common::build::SOURCE_DATE_EPOCH)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    if offline {
-        command.arg("--offline");
-    }
-    if locked {
-        command.arg("--locked");
-    }
-
-    // Own process group: a timeout kills cargo and every rustc/linker
-    // child with it, instead of orphaning them over a build dir that
-    // is removed right after.
-    #[cfg(unix)]
-    {
-        command.process_group(0);
-    }
-    let mut child =
-        command
-            .spawn()
-            .map_err(|e| CompilerError::CargoBuildFailed {
-                details: e.to_string(),
-            })?;
-
-    // Stderr is collected in the background: on failure its tail
-    // goes to the log (the vote carries no details), on timeout the
-    // reader is dropped with the killed tree.
-    let stderr = child.stderr.take();
-    let reader = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-
-    let status = match timeout(BUILD_TIMEOUT, child.wait()).await {
-        Ok(result) => result.map_err(|e| CompilerError::CargoBuildFailed {
-            details: e.to_string(),
-        })?,
-        Err(_) => {
-            kill_build_tree(&mut child).await;
-            reader.abort();
-            return Err(CompilerError::BuildTimeout {
-                secs: BUILD_TIMEOUT.as_secs(),
-            });
-        }
-    };
-
-    if !status.success() {
-        // The vote carries no details (stable wire taxonomy); the log
-        // does, or failed builds are undebuggable in production.
-        let stderr = reader.await.unwrap_or_default();
-        let tail = String::from_utf8_lossy(&stderr);
-        let tail = tail
-            .trim()
-            .chars()
-            .rev()
-            .take(2048)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>();
-        tracing::warn!(
-            manifest = %cargo.display(),
-            status = %status,
-            stderr = %tail,
-            "Contract build failed"
-        );
-        return Err(CompilerError::CompilationFailed);
-    }
-
-    Ok(())
-}
-
-async fn prepare_contract_project(
-    contract: &str,
-    contract_path: &Path,
-    contracts_root: &Path,
-    pin: &str,
-    toolchain: &str,
-) -> Result<(), CompilerError> {
-    let source = decode_contract_source(contract)?;
-
-    let dir = contract_path.join("src");
-    if !Path::new(&dir).exists() {
-        fs::create_dir_all(&dir).await.map_err(|e| {
-            CompilerError::DirectoryCreationFailed {
-                path: dir.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-    }
-
-    let cargo_config_dir = contract_path.join(".cargo");
-    if !Path::new(&cargo_config_dir).exists() {
-        fs::create_dir_all(&cargo_config_dir).await.map_err(|e| {
-            CompilerError::DirectoryCreationFailed {
-                path: cargo_config_dir.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-    }
-
-    let toml = compilation_toml();
-    let cargo = contract_path.join("Cargo.toml");
-    fs::write(&cargo, toml).await.map_err(|e| {
-        CompilerError::FileWriteFailed {
-            path: cargo.to_string_lossy().to_string(),
-            details: e.to_string(),
-        }
-    })?;
-
-    let lib_rs = contract_path.join("src").join("lib.rs");
-    fs::write(&lib_rs, source).await.map_err(|e| {
-        CompilerError::FileWriteFailed {
-            path: lib_rs.to_string_lossy().to_string(),
-            details: e.to_string(),
-        }
-    })?;
-
-    // Frozen dependency set for the pin, when the registry defines
-    // one: written next to the manifest so `--locked` below freezes
-    // versions across machines and time. No frozen set (legacy pins
-    // without one) keeps fresh-resolve behavior.
-    if let Some(lockfile) = ave_common::build::pin_lockfile(pin) {
-        let lock = contract_path.join("Cargo.lock");
-        fs::write(&lock, lockfile.content).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
-                path: lock.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-    }
-
-    let (rust_src, rustc_commit) =
-        rustc_sysroot_rust_src(toolchain).await?;
-    // The vendor section is emitted only when `<contracts_root>/vendor`
-    // exists, and the path in it is derived from the build directory
-    // depth (never hardcoded): a wrong depth silently points cargo at
-    // a foreign directory.
-    let vendor_dir = contracts_root.join(VENDOR_DIR);
-    let vendor = if vendor_dir.exists() {
-        ave_common::build::relative_vendor_dir(contract_path, contracts_root)
-    } else {
-        None
-    };
-    let cargo_config = cargo_config(
-        Path::new(BUILD_TARGET_DIR),
-        vendor.as_deref(),
-        &contracts_root.join(SHARED_CARGO_HOME_DIR),
-        &rust_src,
-        &rustc_commit,
-    );
-    let cargo_config_path = cargo_config_path(contract_path);
-    fs::write(&cargo_config_path, cargo_config)
-        .await
-        .map_err(|e| CompilerError::FileWriteFailed {
-            path: cargo_config_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })?;
-
-    Ok(())
-}
-
-pub async fn load_artifact_wasm(
-    contract_path: &Path,
-) -> Result<Vec<u8>, CompilerError> {
-    let wasm_path = artifact_wasm_path(contract_path);
-    fs::read(&wasm_path)
-        .await
-        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
-}
-
-#[cfg(feature = "test")]
-async fn load_artifact_wasm_from(
-    base_path: &Path,
-) -> Result<Vec<u8>, CompilerError> {
-    let wasm_path = artifact_wasm_path_in(base_path);
-    fs::read(&wasm_path)
-        .await
-        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
-}
-
-pub async fn load_artifact_precompiled(
-    contract_path: &Path,
-) -> Result<Vec<u8>, CompilerError> {
-    let precompiled_path = artifact_precompiled_path(contract_path);
-    fs::read(&precompiled_path).await.map_err(|e| {
-        CompilerError::file_read(precompiled_path.to_string_lossy(), e)
-    })
-}
-
-#[cfg(feature = "test")]
-async fn load_artifact_precompiled_from(
-    base_path: &Path,
-) -> Result<Vec<u8>, CompilerError> {
-    let precompiled_path = artifact_precompiled_path_in(base_path);
-    fs::read(&precompiled_path).await.map_err(|e| {
-        CompilerError::file_read(precompiled_path.to_string_lossy(), e)
-    })
-}
-
-async fn load_compiled_wasm(
-    contract_path: &Path,
-) -> Result<Vec<u8>, CompilerError> {
-    let wasm_path = build_output_wasm_path(contract_path);
-    fs::read(&wasm_path)
-        .await
-        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
-}
-
-/// Builds a base64-encoded contract source into raw wasm bytes.
-///
-/// Prepares the contract project under `contract_path`, runs the cargo
-/// build and returns the compiled artifact. It does not validate the
-/// module (`init_check`) nor persist artifacts: both are the node's
-/// responsibility. Used by the node's in-process builds and by the
-/// test-only compiler service (the production node never delegates).
-pub async fn build_wasm(
-    contract: &str,
-    contract_path: &Path,
-    toolchain: &str,
-    contracts_root: &Path,
-    pin: &str,
-) -> Result<Vec<u8>, CompilerError> {
-    prepare_contract_project(
-        contract,
-        contract_path,
-        contracts_root,
-        pin,
-        toolchain,
-    )
-    .await?;
-
-    build_contract(
-        contract_path,
-        contracts_root.join(VENDOR_DIR).exists(),
-        toolchain,
-        contracts_root,
-        ave_common::build::pin_lockfile(pin).is_some(),
-    )
-    .await?;
-
-    load_compiled_wasm(contract_path).await
-}
-
 /// Unique suffix per atomic write: two writers can persist the same
 /// artifact concurrently (two compile children building the same source
 /// into the same staging directory). A fixed `.tmp` sibling makes one
@@ -539,6 +265,44 @@ async fn write_file_atomic(
     })
 }
 
+pub async fn load_artifact_wasm(
+    contract_path: &Path,
+) -> Result<Vec<u8>, CompilerError> {
+    let wasm_path = artifact_wasm_path(contract_path);
+    fs::read(&wasm_path)
+        .await
+        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
+}
+
+#[cfg(feature = "test")]
+async fn load_artifact_wasm_from(
+    base_path: &Path,
+) -> Result<Vec<u8>, CompilerError> {
+    let wasm_path = artifact_wasm_path_in(base_path);
+    fs::read(&wasm_path)
+        .await
+        .map_err(|e| CompilerError::file_read(wasm_path.to_string_lossy(), e))
+}
+
+pub async fn load_artifact_precompiled(
+    contract_path: &Path,
+) -> Result<Vec<u8>, CompilerError> {
+    let precompiled_path = artifact_precompiled_path(contract_path);
+    fs::read(&precompiled_path).await.map_err(|e| {
+        CompilerError::file_read(precompiled_path.to_string_lossy(), e)
+    })
+}
+
+#[cfg(feature = "test")]
+async fn load_artifact_precompiled_from(
+    base_path: &Path,
+) -> Result<Vec<u8>, CompilerError> {
+    let precompiled_path = artifact_precompiled_path_in(base_path);
+    fs::read(&precompiled_path).await.map_err(|e| {
+        CompilerError::file_read(precompiled_path.to_string_lossy(), e)
+    })
+}
+
 pub async fn persist_artifact(
     contract_path: &Path,
     wasm_bytes: &[u8],
@@ -567,7 +331,7 @@ pub async fn persist_artifact(
 
     // wasm first, precompiled second: the precompiled file marks a
     // complete artifact (readers require it before trusting the wasm).
-    write_file_atomic(contract_path, ARTIFACT_WASM, wasm_bytes).await?;
+    write_file_atomic(contract_path, ave_build::ARTIFACT_WASM, wasm_bytes).await?;
     write_file_atomic(contract_path, ARTIFACT_PRECOMPILED, precompiled_bytes)
         .await?;
 
@@ -698,154 +462,6 @@ pub fn hash_bytes(
     hash_borsh(&*hash.hasher(), &bytes).map_err(|e| {
         CompilerError::SerializationError {
             context,
-            details: e.to_string(),
-        }
-    })
-}
-
-/// Sysroot rust-src path and commit hash of the active rustc. With the
-/// rust-src component installed, panic locations in std/core/alloc embed
-/// the absolute sysroot path instead of the canonical /rustc/<commit>
-/// one, breaking byte-reproducibility across machines; the generated
-/// build config remaps it back to the canonical form.
-async fn rustc_sysroot_rust_src(
-    toolchain: &str,
-) -> Result<(PathBuf, String), CompilerError> {
-    // Query the SELECTED toolchain, never the ambient one: remapping
-    // the wrong sysroot leaks absolute paths into the artifact.
-    let mut sysroot_cmd = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = sysroot_cmd
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .await
-        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
-            details: e.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(CompilerError::ToolchainFingerprintFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-
-    let mut version_cmd = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = version_cmd
-        .arg("--version")
-        .arg("--verbose")
-        .output()
-        .await
-        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
-            details: e.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(CompilerError::ToolchainFingerprintFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let commit = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("commit-hash: "))
-        .map(str::to_owned)
-        .ok_or_else(|| CompilerError::ToolchainFingerprintFailed {
-            details: "rustc -vV output has no commit-hash".to_owned(),
-        })?;
-
-    Ok((
-        ave_common::build::rust_src_dir(&PathBuf::from(sysroot)),
-        commit,
-    ))
-}
-
-/// rustc version of the SELECTED toolchain (`1.98.1`, no host
-/// triple): what compilers attest in their votes and validators
-/// compare against the registry entry for the pin. Empty selects the
-/// system rustc. Query the selection, never the ambient toolchain.
-pub async fn toolchain_rustc_version(
-    toolchain: &str,
-) -> Result<String, CompilerError> {
-    let mut command = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = command
-        .arg("--version")
-        .output()
-        .await
-        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
-            details: e.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(CompilerError::ToolchainFingerprintFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    // `rustc 1.98.1 (hash date)`: the version token, normalized.
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .nth(1)
-        .map(str::to_owned)
-        .ok_or_else(|| CompilerError::ToolchainFingerprintFailed {
-            details: "unexpected rustc version output".to_owned(),
-        })
-}
-
-pub async fn toolchain_fingerprint(
-    hash: HashAlgorithm,
-    toolchain: &str,
-) -> Result<DigestIdentifier, CompilerError> {
-    // Fingerprint the SELECTED toolchain, never the ambient one: the
-    // record must attest what built the bytes. Empty selects the
-    // system rustc.
-    let mut command = if toolchain.is_empty() {
-        Command::new("rustc")
-    } else {
-        let mut command = Command::new("rustup");
-        command.arg("run").arg(toolchain).arg("rustc");
-        command
-    };
-    let output = command
-        .arg("--version")
-        .arg("--verbose")
-        .output()
-        .await
-        .map_err(|e| CompilerError::ToolchainFingerprintFailed {
-            details: e.to_string(),
-        })?;
-
-    if !output.status.success() {
-        return Err(CompilerError::ToolchainFingerprintFailed {
-            details: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-
-    // The build configuration (rustflags and friends) shapes the artifact
-    // bytes as much as the rustc version itself, so the raw template is
-    // part of the fingerprint: a flag change is a toolchain change.
-    let fingerprint_input = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG
-    );
-    hash_borsh(&*hash.hasher(), &fingerprint_input).map_err(|e| {
-        CompilerError::SerializationError {
-            context: "toolchain fingerprint",
             details: e.to_string(),
         }
     })

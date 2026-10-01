@@ -18,7 +18,8 @@ members = [
     "bridge",
     "network",
     "http",
-    "common"
+    "common",
+    "build"
 ]
 default-members = [
     ".",
@@ -27,7 +28,8 @@ default-members = [
     "bridge",
     "network",
     "http",
-    "common"
+    "common",
+    "build"
 ]
 
 resolver = "2"

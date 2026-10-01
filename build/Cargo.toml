@@ -1,0 +1,20 @@
+[package]
+name = "ave-build"
+version = "0.10.0"
+edition.workspace = true
+authors.workspace = true
+description = "Deterministic contract compilation shared by the node and the off-chain pin tooling"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ave-common = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs", "process", "io-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

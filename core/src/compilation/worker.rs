@@ -506,7 +506,7 @@ impl CompileWorker {
         let toolchain_version = if toolchain_name.is_empty() {
             String::new()
         } else {
-            match pipeline::toolchain_rustc_version(&toolchain_name).await
+            match ave_build::rustc_version(&toolchain_name).await
             {
                 Ok(version) => version,
                 Err(_) => {
@@ -519,7 +519,7 @@ impl CompileWorker {
         };
         #[cfg(not(feature = "test"))]
         let toolchain_version =
-            match pipeline::toolchain_rustc_version(&toolchain_name).await
+            match ave_build::rustc_version(&toolchain_name).await
             {
                 Ok(version) => version,
                 Err(_) => {

@@ -14,6 +14,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 borsh = { workspace = true }
+ave-build = { path = "../build", version = "0.10.0" }
 ave-common = { workspace = true, features = ["sink-grpc"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
 json-patch = "4.2.0"
@@ -58,6 +59,7 @@ libc = { workspace = true }
 # short timeouts) whenever test targets are built, so plain
 # `cargo test` gets the test optimization without `--features test`.
 ave-core = { path = ".", features = ["test"] }
+ave-build = { path = "../build" }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }

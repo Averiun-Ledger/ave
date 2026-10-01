@@ -366,9 +366,13 @@ impl CompilerServer {
 
         let hash = HashAlgorithm::Blake3;
 
-        let toolchain_fingerprint = pipeline::toolchain_fingerprint(hash, "")
-            .await
-            .map_err(|e| ServiceError::Toolchain(e.to_string()))?;
+        let toolchain_fingerprint = ave_build::toolchain_fingerprint(
+            hash,
+            "",
+            ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+        )
+        .await
+        .map_err(|e| ServiceError::Toolchain(e.to_string()))?;
 
         let manifest = pipeline::compilation_toml();
         let manifest_hash = hash_borsh(&*hash.hasher(), &manifest)
@@ -589,15 +593,46 @@ impl CompilerServer {
         let _ = fs::remove_dir_all(&build_dir).await;
 
         // The standalone service builds with the system toolchain; pin
-        // selection lives in the node path.
-        let build_result = pipeline::build_wasm(
-            source_b64,
-            &build_dir,
-            "",
-            &contracts_root,
-            "",
-        )
-        .await;
+        // selection lives in the node path. Same shared procedure as
+        // the node (decode errors stay request errors, as before).
+        let source = pipeline::decode_contract_source(source_b64)
+            .map_err(|e| status_for_build_error(&e))?;
+        let (rust_src, rustc_commit) =
+            ave_build::query_sysroot("")
+                .await
+                .map_err(|e| {
+                    Status::internal(
+                        pipeline::map_build_error(e).to_string(),
+                    )
+                })?;
+        let vendor_dir =
+            pipeline::vendor_dir_for_build(&build_dir, &contracts_root);
+        let offline = vendor_dir.is_some();
+        let manifest_toml = pipeline::compilation_toml();
+        let request = ave_build::BuildRequest {
+            source: &source,
+            manifest_toml: &manifest_toml,
+            config_template:
+                ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+            lockfile: None,
+            target_dir: std::path::PathBuf::from(
+                pipeline::BUILD_TARGET_DIR,
+            ),
+            vendor_dir,
+            cargo_home: contracts_root
+                .join(pipeline::SHARED_CARGO_HOME_DIR),
+            toolchain: "",
+            cargo: ave_build::CargoProgram::System,
+            rust_src,
+            rustc_commit,
+            offline,
+            locked: false,
+            timeout: None,
+            kill_process_group: false,
+        };
+        let build_result = ave_build::build_contract_wasm(&build_dir, &request)
+            .await
+            .map_err(pipeline::map_build_error);
 
         if let Err(error) = fs::remove_dir_all(&build_dir).await {
             warn!(

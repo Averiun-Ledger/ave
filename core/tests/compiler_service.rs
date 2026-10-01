@@ -196,6 +196,50 @@ fn source_b64(source: &str) -> String {
     BASE64_STANDARD.encode(source)
 }
 
+/// Local system-cargo build through the shared `ave-build`
+/// procedure (same as the node): decode, resolve sysroot, build,
+/// load. Mirrors the retired `pipeline::build_wasm` exactly.
+async fn local_build_wasm(
+    source: &str,
+    build_dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<u8> {
+    use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
+    let decoded =
+        pipeline::decode_contract_source(source).expect("valid payload");
+    let (rust_src, rustc_commit) =
+        ave_build::query_sysroot("").await.expect("sysroot");
+    let manifest_toml = pipeline::compilation_toml();
+    let vendor_dir = {
+        let vendor_root = root.join("vendor");
+        if !vendor_root.exists() {
+            None
+        } else {
+            ave_common::build::relative_vendor_dir(build_dir, root)
+        }
+    };
+    let request = ave_build::BuildRequest {
+        source: &decoded,
+        manifest_toml: &manifest_toml,
+        config_template: CONTRACT_CARGO_CONFIG,
+        lockfile: None,
+        target_dir: std::path::PathBuf::from(".build-target"),
+        vendor_dir,
+        cargo_home: root.join(".cargo-home"),
+        toolchain: "",
+        cargo: ave_build::CargoProgram::System,
+        rust_src,
+        rustc_commit,
+        offline: root.join("vendor").exists(),
+        locked: false,
+        timeout: None,
+        kill_process_group: false,
+    };
+    ave_build::build_contract_wasm(build_dir, &request)
+        .await
+        .expect("local build should succeed")
+}
+
 fn client_for(endpoint: &str) -> CompilerClient {
     CompilerClient::new(
         vec![endpoint.to_owned()],
@@ -570,9 +614,7 @@ async fn compile_parity_with_local_build() {
     // (and the absent vendor directory) from it identically.
     let root = tempfile::tempdir().expect("failed to create build tempdir");
     let build_dir = root.path().join("contracts").join("parity");
-    let local = pipeline::build_wasm(&source, &build_dir, "", root.path(), "")
-        .await
-        .expect("local build should succeed");
+    let local = local_build_wasm(&source, &build_dir, root.path()).await;
 
     assert_eq!(
         remote.wasm, local,
@@ -597,12 +639,8 @@ async fn local_build_is_byte_identical_across_contract_roots() {
     let build_a = root_a.path().join("contracts").join("parity");
     let build_b = root_b.path().join("contracts").join("parity");
 
-    let wasm_a = pipeline::build_wasm(&source, &build_a, "", root_a.path(), "")
-        .await
-        .expect("build under root A should succeed");
-    let wasm_b = pipeline::build_wasm(&source, &build_b, "", root_b.path(), "")
-        .await
-        .expect("build under root B should succeed");
+    let wasm_a = local_build_wasm(&source, &build_a, root_a.path()).await;
+    let wasm_b = local_build_wasm(&source, &build_b, root_b.path()).await;
 
     assert_eq!(
         wasm_a, wasm_b,
