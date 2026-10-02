@@ -13,8 +13,8 @@ pub use ave_common::{
 use ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery, SinkEventsQuery, SinkReplayRequest,
-        UpdateSubjectQuery,
+        EventRequestType, EventsQuery, IncidentsQuery, SinkEventsQuery,
+        SinkReplayRequest, UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -23,6 +23,7 @@ use ave_common::{
         RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
         RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
         SinkReplayResponse, SubjectDB, SubjsData, TransferSubject,
+        WatchdogIncidentRow,
     },
 };
 pub use ave_core::config::{MachineSpec, resolve_spec};
@@ -618,6 +619,15 @@ impl Bridge {
         ave_core::validate_aborts_query(&query)?;
 
         Ok(self.api.get_aborts(subject_id, query).await?)
+    }
+
+    pub async fn get_watchdog_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, BridgeError> {
+        ave_core::validate_incidents_query(&query)?;
+
+        Ok(self.api.get_recent_incidents(query).await?)
     }
 
     pub async fn get_event_sn(

@@ -11,10 +11,13 @@ use ave_actors::rusqlite;
 use ave_actors::rusqlite::types::Type;
 use ave_actors::{ActorError, ActorRef, Subscriber};
 use ave_common::SchemaType;
-use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
+use ave_common::bridge::request::{
+    AbortsQuery, EventRequestType, EventsQuery, IncidentsQuery,
+};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, SubjsData, TimeRange, TrackerVisibilityStateDB,
+    WatchdogIncidentRow,
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -288,6 +291,27 @@ const SQL_UPSERT_ABORT: &str = r#"
         abort_type = excluded.abort_type
 "#;
 
+const SQL_INSERT_INCIDENT: &str = r#"
+    INSERT INTO watchdog_incidents (
+        timestamp_nanos, phase, expected_secs, elapsed_secs,
+        request_id, gov_version, node_version, detail
+    ) VALUES (
+        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+    )
+"#;
+
+const SQL_GET_INCIDENTS_DESC: &str = r#"
+    SELECT
+        timestamp_nanos, phase, expected_secs, elapsed_secs,
+        request_id, gov_version, node_version, detail
+    FROM watchdog_incidents
+    WHERE (?1 IS NULL OR phase = ?1)
+        AND (?2 IS NULL OR timestamp_nanos >= ?2)
+        AND (?3 IS NULL OR timestamp_nanos <= ?3)
+    ORDER BY timestamp_nanos DESC
+    LIMIT ?4
+"#;
+
 const SQL_UPSERT_REGISTER_GOV: &str = r#"
     INSERT INTO register_govs (
         governance_id, active, name, description
@@ -476,6 +500,7 @@ enum WriteCommand {
     Ledger(Box<Ledger>),
     SubjectState(SubjectDB),
     Abort(RequestTrackingEvent),
+    Incident(RequestTrackingEvent),
     Register(RegisterEvent),
     DeleteSubject(String),
 }
@@ -1113,6 +1138,13 @@ impl ReadStore for SqliteLocal {
         self.reader.get_aborts(subject_id, query).await
     }
 
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+        self.reader.get_recent_incidents(query).await
+    }
+
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -1179,6 +1211,16 @@ impl ReadStore for SqliteReadStore {
 
         self.with_reader("aborts", move |conn| {
             get_aborts_from_conn(conn, runtime.as_ref(), &subject_id, query)
+        })
+        .await
+    }
+
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+        self.with_reader("incidents", move |conn| {
+            get_incidents_from_conn(conn, &query)
         })
         .await
     }
@@ -1407,6 +1449,13 @@ impl SqliteWriteStore {
         self.enqueue(WriteCommand::Abort(event)).await
     }
 
+    async fn persist_incident(
+        &self,
+        event: RequestTrackingEvent,
+    ) -> Result<(), DatabaseError> {
+        self.enqueue(WriteCommand::Incident(event)).await
+    }
+
     async fn persist_register(
         &self,
         event: RegisterEvent,
@@ -1621,6 +1670,9 @@ fn persist_write_batch(
     let mut upsert_abort_stmt = tx
         .prepare_cached(SQL_UPSERT_ABORT)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut insert_incident_stmt = tx
+        .prepare_cached(SQL_INSERT_INCIDENT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
     let mut upsert_register_gov_stmt = tx
         .prepare_cached(SQL_UPSERT_REGISTER_GOV)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1658,6 +1710,19 @@ fn persist_write_batch(
             WriteCommand::SubjectState(metadata) => {
                 touched_subjects.push(metadata.subject_id.to_string());
                 upsert_subject_with_stmt(&mut upsert_subject_stmt, metadata)?
+            }
+            WriteCommand::Incident(event) => {
+                insert_incident_with_stmt(
+                    &mut insert_incident_stmt,
+                    event.watchdog_timestamp_nanos.unwrap_or(0),
+                    event.watchdog_phase.clone().unwrap_or_default(),
+                    event.watchdog_expected_secs.unwrap_or(0),
+                    event.watchdog_elapsed_secs.unwrap_or(0),
+                    event.request_id.clone(),
+                    event.sn.unwrap_or(0),
+                    event.watchdog_node_version.clone().unwrap_or_default(),
+                    event.error.clone(),
+                )?
             }
             WriteCommand::Abort(event) => upsert_abort_with_stmt(
                 &mut upsert_abort_stmt,
@@ -1750,6 +1815,7 @@ fn persist_write_batch(
     drop(eol_register_gov_stmt);
     drop(upsert_register_gov_stmt);
     drop(upsert_abort_stmt);
+    drop(insert_incident_stmt);
     drop(upsert_subject_stmt);
     drop(insert_event_stmt);
 
@@ -2157,6 +2223,83 @@ fn get_aborts_from_conn(
         paginator: build_page_paginator(page, pages),
         events,
     })
+}
+
+fn get_incidents_from_conn(
+    conn: &Connection,
+    query: &IncidentsQuery,
+) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let limit = i64::try_from(limit).map_err(|_| {
+        DatabaseError::IntegerConversion(format!(
+            "limit out of range for SQLite INTEGER (i64): {limit}"
+        ))
+    })?;
+    let mut stmt = conn
+        .prepare(SQL_GET_INCIDENTS_DESC)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let as_u64 = |value: i64, field: &str| {
+        u64::try_from(value).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "{field} out of range for u64: {value}"
+            ))
+        })
+    };
+    let from_nanos: Option<i64> = query.from_nanos.map(|v| {
+        i64::try_from(v).unwrap_or(i64::MAX)
+    });
+    let to_nanos: Option<i64> = query.to_nanos.map(|v| {
+        i64::try_from(v).unwrap_or(i64::MAX)
+    });
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                query.phase.clone(),
+                from_nanos,
+                to_nanos,
+                limit
+            ],
+            |row| {
+            let timestamp_nanos: i64 = row.get(0)?;
+            let expected_secs: i64 = row.get(2)?;
+            let elapsed_secs: i64 = row.get(3)?;
+            let gov_version: i64 = row.get(5)?;
+            Ok((
+                timestamp_nanos,
+                expected_secs,
+                elapsed_secs,
+                gov_version,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            timestamp_nanos,
+            expected_secs,
+            elapsed_secs,
+            gov_version,
+            phase,
+            request_id,
+            node_version,
+            detail,
+        ) = row.map_err(|e| DatabaseError::Query(e.to_string()))?;
+        out.push(WatchdogIncidentRow {
+            timestamp_nanos: as_u64(timestamp_nanos, "timestamp_nanos")?,
+            phase,
+            expected_secs: as_u64(expected_secs, "expected_secs")?,
+            elapsed_secs: as_u64(elapsed_secs, "elapsed_secs")?,
+            request_id,
+            gov_version: as_u64(gov_version, "gov_version")?,
+            node_version,
+            detail,
+        });
+    }
+    Ok(out)
 }
 
 fn get_subject_state_from_conn(
@@ -3625,6 +3768,42 @@ fn upsert_subject_with_stmt(
     Ok(())
 }
 
+/// Stores a watchdog incident: plain insert, no upsert — every
+/// firing is its own row (unlike aborts, incidents never update).
+#[allow(clippy::too_many_arguments)]
+fn insert_incident_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    timestamp_nanos: u64,
+    phase: String,
+    expected_secs: u64,
+    elapsed_secs: u64,
+    request_id: String,
+    gov_version: u64,
+    node_version: String,
+    detail: String,
+) -> Result<(), DatabaseError> {
+    let as_i64 = |value: u64, field: &str| {
+        i64::try_from(value).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "{field} out of range for SQLite INTEGER (i64): {value}"
+            ))
+        })
+    };
+    stmt.execute(params![
+        as_i64(timestamp_nanos, "timestamp_nanos")?,
+        phase,
+        as_i64(expected_secs, "expected_secs")?,
+        as_i64(elapsed_secs, "elapsed_secs")?,
+        request_id,
+        as_i64(gov_version, "gov_version")?,
+        node_version,
+        detail
+    ])
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
 fn upsert_abort_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
     request_id: String,
@@ -3828,7 +4007,20 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
         &self,
         event: Arc<RequestTrackingEvent>,
     ) -> Result<(), ActorError> {
+        use crate::request::tracking::WATCHDOG_ABORT_TYPE;
         let event = (*event).clone();
+        // Watchdog incidents are node-monitoring records, not request
+        // verdicts: separate table, warn-only persistence (monitoring
+        // must never crash the node it watches).
+        if event.abort_type == WATCHDOG_ABORT_TYPE {
+            if let Err(e) = self.persist_incident(event).await {
+                error!(
+                    error = %e,
+                    "Failed to save watchdog incident to SQLite"
+                );
+            }
+            return Ok(());
+        }
         let request_id = event.request_id.clone();
         let subject_id = event.subject_id.clone();
         let sn = event.sn;

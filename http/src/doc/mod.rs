@@ -171,6 +171,7 @@ impl Modify for FeatureGatedPathsAddon {
         // ── Ledger ──────────────────────────────────────────────
         server::get_events,
         server::get_aborts,
+        server::get_watchdog_incidents,
         server::get_event_sn,
         server::get_first_or_end_events,
         server::get_subject_state,
@@ -420,6 +421,7 @@ impl Modify for FeatureGatedPathsAddon {
         (name = "System", description = "System resources, actions, and configuration (admin only)."),
         (name = "Audit Logs", description = "Query and analyze audit log entries (admin only)."),
         (name = "Sink", description = "Manage and inspect external sinks (HTTP, Kafka, gRPC)."),
+        (name = "Monitoring", description = "Node monitoring: watchdog incidents outside the ledger."),
     )
 )]
 pub struct ApiDoc;

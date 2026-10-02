@@ -26,12 +26,27 @@ use super::{
 
 /// A struct representing a ValiCoordinator actor.
 #[derive(Clone, Debug)]
-pub struct ValiCoordinator {
-    node_key: PublicKey,
+pub struct ValiCoordinator {    node_key: PublicKey,
     request_id: String,
     version: u64,
     network: Arc<NetworkSender>,
 }
+
+/// Send-retry budget per remote attempt (test/prod profiles
+/// differ like every other timeout here): the watchdog derives its
+/// envelope from this, so retuning the retry strategy moves the
+/// watchdog with it.
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 1;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 10;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 3;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 30;
 
 impl ValiCoordinator {
     pub const fn new(
@@ -185,15 +200,9 @@ impl Handler<Self> for ValiCoordinator {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
-                    1,
-                    Duration::from_secs(10),
-                ));
-                #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(IntervalStrategy::new(
-                    3,
-                    Duration::from_secs(30),
+                    SEND_RETRY_ATTEMPTS,
+                    Duration::from_secs(SEND_RETRY_INTERVAL_SECS),
                 ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(

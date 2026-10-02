@@ -23,6 +23,7 @@ pub mod system;
 pub mod tracker;
 pub mod update;
 pub mod validation;
+pub mod watchdog;
 
 /// Embedded compiler service for tests (lib tests and integration tests
 /// built with the `test` feature).
@@ -43,7 +44,8 @@ use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
 use ave_common::Error as CommonError;
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
-    EventsQuery, SinkEventsQuery, SinkReplayItem, SinkReplayRequest,
+    EventsQuery, IncidentsQuery, SinkEventsQuery, SinkReplayItem,
+    SinkReplayRequest,
 };
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
@@ -52,7 +54,7 @@ use ave_common::response::{
     GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents,
     RequestInfo, RequestInfoExtend, RequestsInManager,
     RequestsInManagerSubject, SinkEventsPage, SinkReplayError,
-    SinkReplayResponse, SubjectDB, SubjsData,
+    SinkReplayResponse, SubjectDB, SubjsData, WatchdogIncidentRow,
 };
 use ave_common::{
     bridge::request::SinksQuery,
@@ -86,6 +88,7 @@ use validation::{Validation, ValidationMessage};
 pub use crate::api_input_validation::{
     parse_request_id, require_non_empty_str, require_positive_u64,
     require_query_limit, validate_aborts_query, validate_event_request,
+    validate_incidents_query,
     validate_events_query, validate_governance_id, validate_request_id,
     validate_sink_events_query, validate_sink_replay_request,
     validate_sinks_query, validate_subject_id,
@@ -2147,6 +2150,20 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get aborts");
+                Error::QueryFailed(e.to_string())
+            })
+    }
+
+    pub async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, Error> {
+        validate_incidents_query(&query)?;
+        self.db
+            .get_recent_incidents(query)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get watchdog incidents");
                 Error::QueryFailed(e.to_string())
             })
     }

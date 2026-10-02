@@ -31,7 +31,7 @@ use super::{
 /// fires, the compiler is dropped as a timeout — exactly like an
 /// exhausted ACK retry.
 #[cfg(any(test, feature = "test"))]
-const RESULT_DEADLINE: Duration = Duration::from_secs(300);
+pub(crate) const RESULT_DEADLINE: Duration = Duration::from_secs(300);
 /// Deadline for the final result once a compiler has ACKed the request
 /// (`CompilationRes::Working`): compiling a large contract legitimately
 /// exceeds the ACK retry budget, so after the ACK the request is no
@@ -39,7 +39,22 @@ const RESULT_DEADLINE: Duration = Duration::from_secs(300);
 /// fires, the compiler is dropped as a timeout — exactly like an
 /// exhausted ACK retry.
 #[cfg(not(any(test, feature = "test")))]
-const RESULT_DEADLINE: Duration = Duration::from_secs(600);
+pub(crate) const RESULT_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Send-retry budget per remote attempt: attempts × interval. The
+/// node watchdog derives its envelope from these, so retuning the
+/// retry strategy moves the watchdog with it.
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 1;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 5;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 3;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 60;
 
 /// A struct representing a CompileCoordinator actor.
 #[derive(Clone, Debug)]
@@ -287,15 +302,9 @@ impl Handler<Self> for CompileCoordinator {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
-                    1,
-                    Duration::from_secs(5),
-                ));
-                #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(IntervalStrategy::new(
-                    3,
-                    Duration::from_secs(60),
+                    SEND_RETRY_ATTEMPTS,
+                    Duration::from_secs(SEND_RETRY_INTERVAL_SECS),
                 ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(

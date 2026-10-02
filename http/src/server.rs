@@ -18,8 +18,8 @@ use crate::{
 use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SinkEventsQuery, SinkReplayRequest,
-        SubjectQuery, UpdateSubjectQuery,
+        FirstEndEvents, GovQuery, IncidentsQuery, SinkEventsQuery,
+        SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
     },
     response::{
         ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
@@ -33,6 +33,7 @@ use ave_bridge::{
             GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
             RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
             SinkInfo, SinkStatusInfo, SubjectDB, SubjsData, TransferSubject,
+            WatchdogIncidentRow,
         },
     },
     http::ProxyConfig,
@@ -1225,6 +1226,34 @@ pub async fn get_aborts(
     Ok(Json(bridge.get_aborts(subject_id, parameters).await?))
 }
 
+/// Get watchdog incidents
+///
+/// Returns node-monitoring incident records (a request phase that
+/// produced nothing for its whole worst-case budget), newest first.
+/// Empty when the impossible never happened.
+#[utoipa::path(
+    get,
+    path = "/watchdog/incidents",
+    operation_id = "getWatchdogIncidents",
+    tag = "Monitoring",
+    params(
+        IncidentsQuery
+    ),
+    responses(
+        (status = 200, description = "Watchdog incidents, newest first", body = Vec<WatchdogIncidentRow>),
+        (status = 400, description = "Invalid query filters", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_watchdog_incidents(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<IncidentsQuery>,
+) -> Result<Json<Vec<WatchdogIncidentRow>>, HttpError> {
+    Ok(Json(bridge.get_watchdog_incidents(parameters).await?))
+}
+
 /// Get event by sequence number
 ///
 /// Returns a specific event by its sequence number within a subject's ledger.
@@ -1493,6 +1522,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/subjects/{subject_id}/sink-events", get_sink_events, require NodeSink Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events/{sn}", get_event_sn, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/aborts", get_aborts, require NodeSubject Get);
+        $callback!($($args)*, get, "/watchdog/incidents", get_watchdog_incidents, require NodeManagement Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events-first-last", get_first_or_end_events, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/state", get_subject_state, require NodeSubject Get);
         $callback!($($args)*, external_get, "/metrics", metrics_endpoint, require NodeManagement Get);

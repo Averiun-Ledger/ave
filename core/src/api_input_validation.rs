@@ -8,7 +8,8 @@
 use std::str::FromStr;
 
 use ave_common::bridge::request::{
-    AbortsQuery, EventsQuery, SinkEventsQuery, SinkReplayRequest, SinksQuery,
+    AbortsQuery, EventsQuery, IncidentsQuery, SinkEventsQuery,
+    SinkReplayRequest, SinksQuery,
 };
 use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
@@ -173,6 +174,21 @@ pub fn validate_aborts_query(query: &AbortsQuery) -> Result<(), Error> {
         require_query_limit("quantity", quantity)?;
     }
     // Page numbering starts at 0, so no positive-only check is needed.
+    Ok(())
+}
+
+/// Validates filters of an [`IncidentsQuery`].
+pub fn validate_incidents_query(query: &IncidentsQuery) -> Result<(), Error> {
+    if let Some(limit) = query.limit {
+        require_query_limit("limit", limit)?;
+    }
+    if let (Some(from), Some(to)) = (query.from_nanos, query.to_nanos)
+        && from > to
+    {
+        return Err(Error::InvalidQueryParams(
+            "from_nanos must not exceed to_nanos".to_owned(),
+        ));
+    }
     Ok(())
 }
 

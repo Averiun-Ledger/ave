@@ -34,6 +34,22 @@ pub struct EvalCoordinator {
     hash: HashAlgorithm,
 }
 
+/// Send-retry budget per remote attempt (test/prod profiles
+/// differ like every other timeout here): the watchdog derives its
+/// envelope from this, so retuning the retry strategy moves the
+/// watchdog with it.
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 1;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 20;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 3;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 10;
+
 impl EvalCoordinator {
     pub const fn new(
         node_key: PublicKey,
@@ -233,15 +249,9 @@ impl Handler<Self> for EvalCoordinator {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
-                    1,
-                    Duration::from_secs(20),
-                ));
-                #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(IntervalStrategy::new(
-                    3,
-                    Duration::from_secs(10),
+                    SEND_RETRY_ATTEMPTS,
+                    Duration::from_secs(SEND_RETRY_INTERVAL_SECS),
                 ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(

@@ -6,7 +6,7 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    identity::DigestIdentifier,
+    identity::{DigestIdentifier, PublicKey},
     response::{RequestInfo, RequestInfoExtend, RequestState},
 };
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -40,6 +40,22 @@ pub enum RequestTrackingMessage {
     UpdateState {
         request_id: DigestIdentifier,
         state: RequestState,
+    },
+    /// System watchdog incident (node monitoring, NOT a request
+    /// verdict): published to sinks (the query database records it
+    /// in `aborts` with `abort_type` "Watchdog") without touching
+    /// the request cache below.
+    WatchdogIncident {
+        request_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        gov_version: u64,
+        who: PublicKey,
+        detail: String,
+        phase: &'static str,
+        expected_secs: u64,
+        elapsed_secs: u64,
+        node_version: String,
+        timestamp_nanos: u64,
     },
     UpdateVersion {
         request_id: DigestIdentifier,
@@ -88,7 +104,23 @@ pub struct RequestTrackingEvent {
     pub error: String,
     pub who: String,
     pub abort_type: String,
+    /// Watchdog incidents only (`None` for request aborts): phase
+    /// that stopped producing.
+    pub watchdog_phase: Option<String>,
+    /// Watchdog incidents only: budget seconds the phase was given.
+    pub watchdog_expected_secs: Option<u64>,
+    /// Watchdog incidents only: seconds actually elapsed.
+    pub watchdog_elapsed_secs: Option<u64>,
+    /// Watchdog incidents only: binary version that fired.
+    pub watchdog_node_version: Option<String>,
+    /// Watchdog incidents only: wall-clock fire time.
+    pub watchdog_timestamp_nanos: Option<u64>,
 }
+
+/// Marker telling the query database to file the record in
+/// `watchdog_incidents` instead of `aborts`: a node-monitoring
+/// event is not a request verdict and must never mix with them.
+pub const WATCHDOG_ABORT_TYPE: &str = "Watchdog";
 
 impl Event for RequestTrackingEvent {}
 
@@ -160,6 +192,11 @@ impl Handler<Self> for RequestTracking {
                         sn,
                         subject_id,
                         who,
+                        watchdog_phase: None,
+                        watchdog_expected_secs: None,
+                        watchdog_elapsed_secs: None,
+                        watchdog_node_version: None,
+                        watchdog_timestamp_nanos: None,
                     }),
                     RequestState::Abort {
                         subject_id,
@@ -173,6 +210,11 @@ impl Handler<Self> for RequestTracking {
                         sn,
                         subject_id,
                         who,
+                        watchdog_phase: None,
+                        watchdog_expected_secs: None,
+                        watchdog_elapsed_secs: None,
+                        watchdog_node_version: None,
+                        watchdog_timestamp_nanos: None,
                     }),
                     _ => None,
                 };
@@ -180,6 +222,41 @@ impl Handler<Self> for RequestTracking {
                 if let Some(event) = event {
                     self.on_event(event, ctx).await;
                 }
+
+                Ok(RequestTrackingResponse::Ok)
+            }
+            RequestTrackingMessage::WatchdogIncident {
+                request_id,
+                subject_id,
+                gov_version,
+                who,
+                detail,
+                phase,
+                expected_secs,
+                elapsed_secs,
+                node_version,
+                timestamp_nanos,
+            } => {
+                // System incident, not a request verdict: straight to
+                // sinks (query database `watchdog_incidents` table)
+                // without touching the request cache.
+                self.on_event(
+                    RequestTrackingEvent {
+                        request_id: request_id.to_string(),
+                        abort_type: WATCHDOG_ABORT_TYPE.to_owned(),
+                        error: detail,
+                        sn: Some(gov_version),
+                        subject_id: subject_id.to_string(),
+                        who: who.to_string(),
+                        watchdog_phase: Some(phase.to_owned()),
+                        watchdog_expected_secs: Some(expected_secs),
+                        watchdog_elapsed_secs: Some(elapsed_secs),
+                        watchdog_node_version: Some(node_version),
+                        watchdog_timestamp_nanos: Some(timestamp_nanos),
+                    },
+                    ctx,
+                )
+                .await;
 
                 Ok(RequestTrackingResponse::Ok)
             }

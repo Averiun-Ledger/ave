@@ -624,6 +624,24 @@ pub struct PaginatorAborts {
     pub events: Vec<AbortDB>,
 }
 
+/// One watchdog incident row: a request phase that produced nothing
+/// for its whole worst-case budget. System monitoring, never ledger
+/// evidence; newest first from the query side.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct WatchdogIncidentRow {
+    pub timestamp_nanos: u64,
+    pub phase: String,
+    pub expected_secs: u64,
+    pub elapsed_secs: u64,
+    pub request_id: String,
+    pub gov_version: u64,
+    pub node_version: String,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

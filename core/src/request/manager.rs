@@ -103,6 +103,14 @@ pub struct RequestManager {
     current_phase: Option<&'static str>,
     #[serde(skip)]
     current_phase_started_at: Option<Instant>,
+    /// Watchdog generation: bumped on every phase arming so stale
+    /// timers die quietly. Never persisted (runtime only).
+    #[serde(skip)]
+    watchdog_generation: u64,
+    /// Budget seconds of the currently armed watchdog, for the
+    /// incident record. Never persisted (runtime only).
+    #[serde(skip)]
+    watchdog_budget_secs: u64,
     command: ReqManInitMessage,
     request: Option<Signed<EventRequest>>,
     state: RequestManagerState,
@@ -158,6 +166,8 @@ impl BorshDeserialize for RequestManager {
             request_started_at: None,
             current_phase: None,
             current_phase_started_at: None,
+            watchdog_generation: 0,
+            watchdog_budget_secs: 0,
             helpers: None,
             our_key,
             id,
@@ -199,6 +209,109 @@ impl RequestManager {
         self.finish_phase_metrics();
         self.current_phase = Some(phase);
         self.current_phase_started_at = Some(Instant::now());
+    }
+
+    /// Arms the phase watchdog: a generation-guarded timer that fires
+    /// after `budget` to catch a silently stuck phase. Every arming
+    /// invalidates previous timers (no disarm calls needed anywhere),
+    /// and the fire handler re-checks generation plus phase state, so
+    /// a slow-but-advancing request can never trip it spuriously —
+    /// only a phase that produced nothing for its whole worst-case
+    /// budget fires, and then it only diagnoses + reboots.
+    fn arm_watchdog(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        phase: &'static str,
+        budget: std::time::Duration,
+    ) -> Result<(), RequestManagerError> {
+        self.watchdog_generation =
+            self.watchdog_generation.wrapping_add(1);
+        self.watchdog_budget_secs = budget.as_secs();
+        ctx.schedule_once(
+            budget,
+            RequestManagerMessage::WatchdogFire {
+                generation: self.watchdog_generation,
+                phase,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Handles an expired watchdog timer: stale generations and
+    /// already-moved-on phases die quietly; a live one records a
+    /// system incident OUTSIDE the ledger and reboots visibly. Never
+    /// commits, never aborts with a verdict.
+    async fn handle_watchdog_fire(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        generation: u64,
+        phase: &'static str,
+    ) -> Result<(), ActorError> {
+        if generation != self.watchdog_generation {
+            return Ok(());
+        }
+        if self.current_phase != Some(phase) {
+            return Ok(());
+        }
+        let elapsed = self
+            .current_phase_started_at
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let governance_id = self
+            .governance_id
+            .as_ref()
+            .unwrap_or(&self.subject_id)
+            .clone();
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("watchdog", phase);
+        }
+        tracing::warn!(
+            msg_type = "WatchdogFire",
+            request_id = %self.id,
+            phase = %phase,
+            elapsed_secs = elapsed.as_secs(),
+            "Request phase produced nothing for its whole worst-case budget; recording incident and rebooting"
+        );
+        if let Err(error) = send_to_tracking(
+            ctx,
+            crate::request::tracking::RequestTrackingMessage::WatchdogIncident {
+                request_id: self.id.clone(),
+                subject_id: self
+                    .governance_id
+                    .as_ref()
+                    .unwrap_or(&self.subject_id)
+                    .clone(),
+                gov_version: self.version,
+                who: (*self.our_key).clone(),
+                detail: crate::watchdog::incident_detail(
+                    phase,
+                    self.watchdog_budget_secs,
+                    elapsed.as_secs(),
+                    &self.id,
+                    self.version,
+                ),
+                phase,
+                expected_secs: self.watchdog_budget_secs,
+                elapsed_secs: elapsed.as_secs(),
+                node_version: env!("CARGO_PKG_VERSION").to_owned(),
+                timestamp_nanos: ave_common::identity::TimeStamp::now()
+                    .as_nanos(),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                msg_type = "WatchdogFire",
+                error = %error,
+                "Failed to publish watchdog incident"
+            );
+        }
+        self.reboot(ctx, RebootType::TimeOut, governance_id)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!("watchdog reboot failed: {e}"),
+            })?;
+        Ok(())
     }
 
     fn finish_phase_metrics(&mut self) {
@@ -330,7 +443,20 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
-        self.start_phase_metrics("compilation");
+        self.start_phase_metrics(crate::watchdog::PHASE_COMPILATION);
+        // Watchdog from this phase's own worst case: stuck builds
+        // can not outlive it silently.
+        let schemas = match request.content().event_request.content() {
+            EventRequest::Fact(fact) => schemas_to_compile(&fact.payload)
+                .map(|set| set.len())
+                .unwrap_or(1) as u32,
+            _ => 1,
+        };
+        self.arm_watchdog(
+            ctx,
+            crate::watchdog::PHASE_COMPILATION,
+            crate::watchdog::budget_for_compilation(schemas),
+        )?;
         info!("Init compilation {}", self.id);
         let child = ctx
             .create_child(
@@ -754,7 +880,12 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
-        self.start_phase_metrics("evaluation");
+        self.start_phase_metrics(crate::watchdog::PHASE_EVALUATION);
+        self.arm_watchdog(
+            ctx,
+            crate::watchdog::PHASE_EVALUATION,
+            crate::watchdog::budget_for_evaluation(signers.len() as u32),
+        )?;
         info!("Init evaluation {}", self.id);
         let child = ctx
             .create_child(
@@ -1248,7 +1379,15 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
-        self.start_phase_metrics("approval");
+        self.start_phase_metrics(crate::watchdog::PHASE_APPROVAL);
+        self.arm_watchdog(
+            ctx,
+            crate::watchdog::PHASE_APPROVAL,
+            crate::watchdog::budget_for_approval(
+                signed_approval_req.content().deadline,
+                ave_common::identity::TimeStamp::now(),
+            ),
+        )?;
         info!("Init approval {}", self.id);
         let child = ctx
             .create_child(
@@ -1297,7 +1436,12 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
-        self.start_phase_metrics("validation");
+        self.start_phase_metrics(crate::watchdog::PHASE_VALIDATION);
+        self.arm_watchdog(
+            ctx,
+            crate::watchdog::PHASE_VALIDATION,
+            crate::watchdog::budget_for_validation(signers.len() as u32),
+        )?;
         info!("Init validation {}", self.id);
         let child = ctx
             .create_child(
@@ -2517,6 +2661,13 @@ pub enum RequestManagerMessage {
     },
     ManualAbort,
     PurgeStorage,
+    /// Watchdog timer for the running phase (see `arm_watchdog`):
+    /// stale generations die quietly; a live one with the phase
+    /// still running records a system incident and reboots.
+    WatchdogFire {
+        generation: u64,
+        phase: &'static str,
+    },
     Reboot {
         request_id: DigestIdentifier,
         governance_id: DigestIdentifier,
@@ -2920,6 +3071,14 @@ impl Handler<Self> for RequestManager {
                     subject_id = %self.subject_id,
                     "Purged request manager storage"
                 );
+
+                return Ok(());
+            }
+            RequestManagerMessage::WatchdogFire {
+                generation,
+                phase,
+            } => {
+                self.handle_watchdog_fire(ctx, generation, phase).await?;
 
                 return Ok(());
             }
@@ -3864,6 +4023,8 @@ impl PersistentActor for RequestManager {
             request_started_at: None,
             current_phase: None,
             current_phase_started_at: None,
+            watchdog_generation: 0,
+            watchdog_budget_secs: 0,
             our_key: params.our_key,
             id: DigestIdentifier::default(),
             subject_id: params.subject_id,

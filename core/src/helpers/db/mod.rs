@@ -12,10 +12,12 @@ use ave_actors::{ActorRef, Subscriber};
 use prometheus_client::registry::Registry;
 
 use ave_common::{
-    bridge::request::{AbortsQuery, EventRequestType, EventsQuery},
+    bridge::request::{
+        AbortsQuery, EventRequestType, EventsQuery, IncidentsQuery,
+    },
     response::{
         GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB,
-        SubjsData,
+        SubjsData, WatchdogIncidentRow,
     },
 };
 pub use error::DatabaseError;
@@ -42,6 +44,13 @@ pub trait ReadStore {
         subject_id: &str,
         query: AbortsQuery,
     ) -> Result<PaginatorAborts, DatabaseError>;
+
+    /// Newest watchdog incidents first (system monitoring, not
+    /// request verdicts). Empty when the impossible never happened.
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError>;
 
     // events sn
     async fn get_event_sn(
@@ -218,6 +227,18 @@ impl ReadStore for ExternalDB {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_aborts(subject_id, query).await
+            }
+        }
+    }
+
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.get_recent_incidents(query).await
             }
         }
     }

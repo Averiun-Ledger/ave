@@ -143,6 +143,20 @@ pub struct AbortsQuery {
     pub reverse: Option<bool>,
 }
 
+/// Filters for watchdog incident queries (all optional; newest
+/// first, capped server-side).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct IncidentsQuery {
+    pub phase: Option<String>,
+    pub from_nanos: Option<u64>,
+    pub to_nanos: Option<u64>,
+    pub limit: Option<u64>,
+}
+
 /// Query for retrieving the first or last events of a subject.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]

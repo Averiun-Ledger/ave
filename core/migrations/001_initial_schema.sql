@@ -99,5 +99,28 @@ ON register_subjects(governance_id, schema_id, subject_id);
 CREATE INDEX IF NOT EXISTS idx_register_subjects_governance_active_schema_subject
 ON register_subjects(governance_id, active, schema_id, subject_id);
 -- =============================================================================
+-- WATCHDOG INCIDENTS TABLE
+-- =============================================================================
+-- System-level "impossible" events recorded by the node watchdog:
+-- a request phase produced nothing for its whole worst-case budget.
+-- This is node monitoring, NOT request verdicts: abort records live
+-- in `aborts`, incidents live here. Never mixed, never joined.
+-- Writes are vanishingly rare (nominal operation never fires), so no
+-- pruning lives here — operators purge by timestamp when needed.
+CREATE TABLE IF NOT EXISTS watchdog_incidents (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    timestamp_nanos INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    expected_secs INTEGER NOT NULL,
+    elapsed_secs INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    gov_version INTEGER NOT NULL,
+    node_version TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchdog_incidents_ts
+ON watchdog_incidents(timestamp_nanos DESC);
+-- =============================================================================
 -- END OF MIGRATION
 -- =============================================================================
