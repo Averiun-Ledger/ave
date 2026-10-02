@@ -22424,3 +22424,200 @@ async fn test_fetch_single_download_with_all_servers_serving() {
         node_running(&node.api).await.unwrap();
     }
 }
+
+#[test(tokio::test)]
+// ABORT-01: stale-owner gov fact with a contract aborts in
+// compilation, no reboot-loop. Owner rebuilt stale (v1) while a
+// compiler holds v2: the ahead compiler votes Abort
+// (RequesterBehind on a governance subject) and the coordinator
+// kills the request immediately — a stale governance intent must
+// die, never commit nor loop. Tracker subjects keep Reboot (sync +
+// retry) instead.
+async fn test_compilation_stale_gov_owner_aborts() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let anchor = nodes.remove(0);
+    let owner_data = nodes.remove(0);
+    let node3 = nodes.remove(0);
+    let _ = nodes;
+    let peer_anchor = RoutingNode {
+        peer_id: anchor.api.peer_id().to_string(),
+        address: vec![anchor.listen_address.clone()],
+    };
+    for node in [&owner_data, &node3] {
+        node_running(&node.api).await.unwrap();
+    }
+    let owner_keys = owner_data.keys.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner_data.api,
+        vec![&node3.api, &anchor.api],
+    )
+    .await;
+
+    // v1: node3 witness + compiler. Anchor stays at v1 forever after.
+    let members = json!({
+        "members": {
+            "add": [
+                { "name": "AveNode3", "key": node3.api.public_key() },
+                { "name": "Anchor", "key": anchor.api.public_key() }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode3", "Anchor"],
+                    "compiler": ["AveNode3"]
+                }
+            }
+        }
+    });
+    emit_fact(&owner_data.api, governance_id.clone(), members, true)
+        .await
+        .unwrap();
+    for api in [&node3.api, &anchor.api] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+    }
+
+    // The anchor stops receiving distribution pushes: it stays at v1
+    // forever, so the rebuilt owner can resync stale from it later.
+    anchor
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Inbound,
+            message: FaultMessage::DistributionLastEventReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+
+    // v2: schema add (owner + node3 build it).
+    emit_fact(
+        &owner_data.api,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": { "one": 0, "two": 0, "three": 0 }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    node3.api.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&node3.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Owner loses its ledger: same keys, fresh DBs, resyncs from the
+    // stale anchor and lands back at v1 while node3 holds v2.
+    owner_data.token.cancel();
+    drop(owner_data.handler);
+    let owner_contracts = tempfile::tempdir().unwrap();
+    let owner_db = tempfile::tempdir().unwrap();
+    let owner_ext = tempfile::tempdir().unwrap();
+    let (owner_new, _owner_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![peer_anchor.clone()],
+        keys: Some(owner_keys),
+        local_db: Some(owner_db.path().to_path_buf()),
+        ext_db: Some(owner_ext.path().to_path_buf()),
+        contracts_path: Some(owner_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner_new.api).await.unwrap();
+    let owner = &owner_new.api;
+    owner
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                anchor.api.public_key().parse().unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    owner.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(owner, governance_id.clone(), Some(1), true).await.unwrap();
+
+    // Stale owner emits a contract-carrying gov fact: node3 (ahead)
+    // aborts in compilation and the request dies here — no commit,
+    // no reboot loop.
+    let request_id = emit_fact(
+        owner,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Beta",
+                        "contract": EXAMPLE_CONTRACT_V2,
+                        "initial_value": { "one": 0, "two": 0, "three": 0 }
+                    }
+                ]
+            }
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    // Bounded: a regression (reboot instead of abort) must fail with
+    // the last state visible, never hang.
+    let state = wait_request_state_bounded(
+        owner,
+        request_id.clone(),
+        200,
+        &|state| {
+            matches!(
+                state,
+                RequestState::Abort {
+                    subject_id: _,
+                    who: _,
+                    sn: _,
+                    error: _
+                }
+            )
+        },
+        "abort",
+    )
+    .await;
+    let RequestState::Abort { error, .. } = state else {
+        panic!("expected abort state");
+    };
+
+    let aborts = get_abort_request(owner, governance_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert!(
+        aborts.events[0].error.contains("behind"),
+        "abort must blame the stale version, got: {}",
+        aborts.events[0].error
+    );
+
+    // Nothing applied anywhere: node3 still at v2, owner still at v1.
+    get_subject(&node3.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    get_subject(owner, governance_id.clone(), Some(1), true).await.unwrap();
+}

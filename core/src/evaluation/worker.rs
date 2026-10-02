@@ -736,10 +736,28 @@ impl Handler<Self> for EvalWorker {
                             );
                             EvaluationRes::Unavailable
                         }
-                        // The requester is behind: it must sync its
-                        // governance and retry the request.
+                        // The requester is behind: on tracker subjects
+                        // it must sync its governance and retry the
+                        // request; on the governance itself it must
+                        // abort instead, so no stale governance intent
+                        // commits or reboot-loops (fork prevention in
+                        // small quorums).
                         GovVersionSync::RequesterBehind => {
-                            EvaluationRes::Reboot
+                            if evaluation_req
+                                .content()
+                                .event_request
+                                .content()
+                                .get_subject_id()
+                                == self.governance_id
+                            {
+                                EvaluationRes::Abort(format!(
+                                    "requester governance is behind: local={}, request={}",
+                                    self.gov_version,
+                                    evaluation_req.content().gov_version
+                                ))
+                            } else {
+                                EvaluationRes::Reboot
+                            }
                         }
                         GovVersionSync::Current => {
                             match self.create_res(ctx, &evaluation_req).await {

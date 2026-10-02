@@ -32,6 +32,7 @@ use ave_common::{
         CryptoError, DigestIdentifier, HashAlgorithm, PublicKey, Signature,
         Signed, hash_borsh,
     },
+    request::EventRequest,
 };
 
 use request::{ActualProtocols, ValidationReq};
@@ -60,6 +61,13 @@ pub struct Validation {
     validators_response: Vec<ValidationMetadata>,
 
     validators_quantity: u32,
+
+    /// Abort votes by signer (reason attached for the abort detail
+    /// only — tally is by outcome-kind, never by reason string). An
+    /// abort wins only at quorum; below it the aborter is already out
+    /// of the round (dropped by `check_validator` like `Unavailable`)
+    /// and replaced from the pool.
+    aborts: Vec<(PublicKey, String)>,
 
     request: Signed<ValidationReq>,
 
@@ -121,6 +129,7 @@ impl Validation {
             validators_response: vec![],
             validators_signatures: vec![],
             validators_quantity: 0,
+            aborts: vec![],
             request,
             hash,
             network,
@@ -141,6 +150,25 @@ impl Validation {
 
     fn check_validator(&mut self, validator: PublicKey) -> bool {
         self.current_validators.remove(&validator)
+    }
+
+    /// True when the request targets the governance itself (as
+    /// opposed to a tracker subject): abort votes on governance
+    /// requests fire immediately (fork prevention), while tracker
+    /// requests tally aborts to quorum.
+    fn request_is_governance(request: &Signed<ValidationReq>) -> bool {
+        match request.content() {
+            ValidationReq::Create { event_request, .. } => {
+                matches!(
+                    event_request.content(),
+                    EventRequest::Create(create)
+                        if create.schema_id.is_gov()
+                )
+            }
+            ValidationReq::Event { metadata, .. } => {
+                metadata.subject_id == metadata.governance_id
+            }
+        }
     }
 
     /// Validators still expected to answer.
@@ -602,27 +630,70 @@ impl Handler<Self> for Validation {
                             }
                             ValidationRes::Abort(error) => {
                                 Self::observe_event("abort");
-                                if let Err(e) = abort_req(
-                                    ctx,
-                                    self.request_id.clone(),
-                                    sender.clone(),
-                                    error,
-                                    self.request.content().get_sn(),
-                                )
-                                .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        sender = %sender,
-                                        "Failed to abort request"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
+                                // Governance requests abort at the first
+                                // vote (stale governance intent must die,
+                                // not reboot-loop); tracker requests
+                                // tally below.
+                                if Self::request_is_governance(
+                                    &self.request,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error,
+                                        self.request.content().get_sn(),
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            sender = %sender,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
+
+                                    self.closed = true;
+
+                                    return Ok(());
                                 }
+                                self.aborts.push((
+                                    sender.clone(),
+                                    error.clone(),
+                                ));
+                                if self.quorum.check_quorum(
+                                    self.validators_quantity,
+                                    self.aborts.len() as u32,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error,
+                                        self.request.content().get_sn(),
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            sender = %sender,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
 
-                                self.closed = true;
+                                    self.closed = true;
 
-                                return Ok(());
+                                    return Ok(());
+                                }
+                                // Below quorum: the aborter is already out
+                                // of the round — fall through so the
+                                // remaining set still resolves, replaces
+                                // and times out exactly like any other
+                                // non-response.
                             }
                             ValidationRes::Reboot => {
                                 Self::observe_event("reboot");

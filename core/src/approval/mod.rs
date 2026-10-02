@@ -1109,6 +1109,13 @@ impl Handler<Self> for Approval {
 
                 // An approver ahead of the request's governance version
                 // aborts it: the requester built on a stale governance.
+                // Deliberately immediate, exempt from abort-quorum (see
+                // the other phase coordinators): the sole producer of
+                // this vote is the Ahead version check, an objective
+                // version fact that usually has exactly one witness in
+                // small networks — quorum-gating it would trade fork
+                // prevention for liveness. A forged Ahead claim only
+                // costs the victim a reboot (it resyncs and retries).
                 if let ApprovalRes::Abort(reason) = vote.content() {
                     if !self
                         .approvers

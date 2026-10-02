@@ -252,13 +252,31 @@ impl Handler<Self> for ValidationSchema {
                     Ok(child) => child,
                     Err(e) => {
                         if let ActorError::Exists { .. } = e {
-                            observe("rejected");
-                            warn!(
-                                msg_type = "NetworkRequest",
-                                error = %e,
-                                "Validator actor already exists"
-                            );
-                            return Ok(());
+                            // Teardown window (same family as the
+                            // RequestHandler race): the previous worker
+                            // is stopping while a newcomer arrives.
+                            // Forward to the live worker instead of
+                            // dropping the requester without response —
+                            // the worker queues/delegates internally
+                            // exactly like the created path below.
+                            match ctx
+                                .get_child::<ValiWorker>(&format!(
+                                    "{}",
+                                    validation_req.signature().signer
+                                ))
+                                .await
+                            {
+                                Ok(live) => live,
+                                Err(_) => {
+                                    observe("rejected");
+                                    warn!(
+                                        msg_type = "NetworkRequest",
+                                        error = %e,
+                                        "Validator actor already exists"
+                                    );
+                                    return Ok(());
+                                }
+                            }
                         } else {
                             error!(
                                 msg_type = "NetworkRequest",

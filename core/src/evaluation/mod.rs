@@ -68,6 +68,13 @@ pub struct Evaluation {
 
     errors: Vec<(EvaluatorError, DigestIdentifier)>,
 
+    /// Abort votes by signer (reason attached for the abort detail
+    /// only — tally is by outcome-kind, never by reason string). An
+    /// abort wins only at quorum; below it the aborter is already out
+    /// of the round (dropped by `check_evaluator` like `Unavailable`)
+    /// and replaced from the pool.
+    aborts: Vec<(PublicKey, String)>,
+
     evaluation_request_hash: DigestIdentifier,
 
     /// The round is closed (result, reboot or abort already sent): late
@@ -110,6 +117,7 @@ impl Evaluation {
             context,
             current_evaluators: HashSet::new(),
             errors: vec![],
+            aborts: vec![],
             evaluation_request_hash: DigestIdentifier::default(),
             evaluators_quantity: 0,
             evaluators_response: vec![],
@@ -123,6 +131,15 @@ impl Evaluation {
 
     fn check_evaluator(&mut self, evaluator: PublicKey) -> bool {
         self.current_evaluators.remove(&evaluator)
+    }
+
+    /// True when the request targets the governance itself (as
+    /// opposed to a tracker subject): abort votes on governance
+    /// requests fire immediately (fork prevention), while tracker
+    /// requests tally aborts to quorum.
+    fn request_is_governance(request: &Signed<EvaluationReq>) -> bool {
+        request.content().event_request.content().get_subject_id()
+            == request.content().governance_id
     }
 
     fn worker_context(&self) -> EvalWorkerContext {
@@ -498,18 +515,65 @@ impl Handler<Self> for Evaluation {
                             }
                             EvaluationRes::Abort(error) => {
                                 Self::observe_event("abort");
-                                if let Err(e) = abort_req(
-                                    ctx,
-                                    self.request_id.clone(),
-                                    sender.clone(),
-                                    error.clone(),
-                                    self.request.content().sn,
-                                )
-                                .await
-                                {
-                                    error!(
+                                // Governance requests abort at the first
+                                // vote (stale governance intent must die,
+                                // not reboot-loop); tracker requests
+                                // tally below.
+                                if Self::request_is_governance(
+                                    &self.request,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error.clone(),
+                                        self.request.content().sn,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            request_id = %self.request_id,
+                                            sender = %sender,
+                                            abort_reason = %error,
+                                            error = %e,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
+
+                                    debug!(
                                         msg_type = "Response",
                                         request_id = %self.request_id,
+                                        sender = %sender,
+                                        abort_reason = %error,
+                                        "Evaluation aborted (governance)"
+                                    );
+
+                                    self.closed = true;
+
+                                    return Ok(());
+                                }
+                                self.aborts.push((
+                                    sender.clone(),
+                                    error.clone(),
+                                ));
+                                if self.quorum.check_quorum(
+                                    self.evaluators_quantity,
+                                    self.aborts.len() as u32,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error.clone(),
+                                        self.request.content().sn,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            request_id = %self.request_id,
                                         sender = %sender,
                                         abort_reason = %error,
                                         error = %e,
@@ -523,12 +587,18 @@ impl Handler<Self> for Evaluation {
                                     request_id = %self.request_id,
                                     sender = %sender,
                                     abort_reason = %error,
-                                    "Evaluation aborted"
+                                    "Evaluation aborted by quorum"
                                 );
 
                                 self.closed = true;
 
                                 return Ok(());
+                                }
+                                // Below quorum: the aborter is already out
+                                // of the round — fall through so the
+                                // remaining set still resolves, replaces
+                                // and times out exactly like any other
+                                // non-response.
                             }
                             EvaluationRes::Reboot => {
                                 Self::observe_event("reboot");

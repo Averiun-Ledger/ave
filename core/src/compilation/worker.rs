@@ -1387,10 +1387,17 @@ impl Handler<Self> for CompileWorker {
                             );
                             Some(CompilationRes::Unavailable)
                         }
-                        // The requester is behind: it must sync its
-                        // governance and retry the request.
+                        // The requester is behind on a governance
+                        // request: it must abort (not reboot-retry) so
+                        // no stale governance intent commits or loops.
+                        // Compilation requests are always governance
+                        // scoped, so this arm is the governance rule.
                         GovVersionSync::RequesterBehind => {
-                            Some(CompilationRes::Reboot)
+                            Some(CompilationRes::Abort(format!(
+                                "requester governance is behind: local={}, request={}",
+                                self.gov_version,
+                                compilation_req.content().gov_version
+                            )))
                         }
                         GovVersionSync::Current => None,
                     }

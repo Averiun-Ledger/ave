@@ -2837,10 +2837,24 @@ impl Handler<Self> for ValiWorker {
                             );
                             ValidationRes::Unavailable
                         }
-                        // The requester is behind: it must sync its
-                        // governance and retry the request.
+                        // The requester is behind: on tracker subjects
+                        // it must sync its governance and retry the
+                        // request; on the governance itself it must
+                        // abort instead, so no stale governance intent
+                        // commits or reboot-loops (fork prevention in
+                        // small quorums).
                         GovVersionSync::RequesterBehind => {
-                            ValidationRes::Reboot
+                            if validation_req.content().get_subject_id()
+                                == self.governance_id
+                            {
+                                ValidationRes::Abort(format!(
+                                    "requester governance is behind: local={}, request={}",
+                                    self.gov_version,
+                                    validation_req.content().get_gov_version()
+                                ))
+                            } else {
+                                ValidationRes::Reboot
+                            }
                         }
                         GovVersionSync::Current => {
                             match self.create_res(ctx, &validation_req).await {

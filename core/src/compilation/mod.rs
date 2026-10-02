@@ -360,6 +360,14 @@ pub struct Compilation {
 
     errors: Vec<(CompilationError, DigestIdentifier, String)>,
 
+    /// Abort votes by signer (reason attached for the abort detail
+    /// only — tally is by outcome-kind, never by reason string). An
+    /// abort wins only at quorum; below it the aborter is already out
+    /// of the round (dropped by `check_compiler` like `Unavailable`)
+    /// and replaced from the pool, so the round keeps liveness in
+    /// both directions.
+    aborts: Vec<(PublicKey, String)>,
+
     compilation_request_hash: DigestIdentifier,
 
     /// The round is closed (result, reboot or abort already sent): late
@@ -396,6 +404,7 @@ impl Compilation {
             state,
             current_compilers: HashSet::new(),
             errors: vec![],
+            aborts: vec![],
             compilation_request_hash: DigestIdentifier::default(),
             compilers_quantity: 0,
             compilers_response: vec![],
@@ -409,6 +418,15 @@ impl Compilation {
 
     fn check_compiler(&mut self, compiler: PublicKey) -> bool {
         self.current_compilers.remove(&compiler)
+    }
+
+    /// True when the request targets the governance itself (as
+    /// opposed to a tracker subject): abort votes on governance
+    /// requests fire immediately (fork prevention), while tracker
+    /// requests tally aborts to quorum.
+    fn request_is_governance(request: &Signed<CompilationReq>) -> bool {
+        request.content().event_request.content().get_subject_id()
+            == request.content().governance_id
     }
 
     async fn create_compilers(
@@ -769,37 +787,93 @@ impl Handler<Self> for Compilation {
                             }
                             CompilationRes::Abort(error) => {
                                 Self::observe_event("abort");
-                                if let Err(e) = abort_req(
-                                    ctx,
-                                    self.request_id.clone(),
-                                    sender.clone(),
-                                    error.clone(),
-                                    self.request.content().sn,
-                                )
-                                .await
-                                {
-                                    error!(
+                                // Governance requests abort at the first
+                                // vote: a stale governance intent must die
+                                // instead of reboot-looping (fork
+                                // prevention in small quorums), and
+                                // compilation requests are always
+                                // governance scoped by construction.
+                                // Tracker-subject requests tally below.
+                                if Self::request_is_governance(
+                                    &self.request,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error.clone(),
+                                        self.request.content().sn,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            request_id = %self.request_id,
+                                            sender = %sender,
+                                            abort_reason = %error,
+                                            error = %e,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
+
+                                    debug!(
                                         msg_type = "Response",
                                         request_id = %self.request_id,
                                         sender = %sender,
                                         abort_reason = %error,
-                                        error = %e,
-                                        "Failed to abort request"
+                                        "Compilation aborted (governance)"
                                     );
-                                    return Err(crash_system(ctx, e).await);
-                                };
 
-                                debug!(
-                                    msg_type = "Response",
-                                    request_id = %self.request_id,
-                                    sender = %sender,
-                                    abort_reason = %error,
-                                    "Compilation aborted"
-                                );
+                                    self.closed = true;
 
-                                self.closed = true;
+                                    return Ok(());
+                                }
+                                self.aborts.push((
+                                    sender.clone(),
+                                    error.clone(),
+                                ));
+                                if self.quorum.check_quorum(
+                                    self.compilers_quantity,
+                                    self.aborts.len() as u32,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error.clone(),
+                                        self.request.content().sn,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            request_id = %self.request_id,
+                                            sender = %sender,
+                                            abort_reason = %error,
+                                            error = %e,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
 
-                                return Ok(());
+                                    debug!(
+                                        msg_type = "Response",
+                                        request_id = %self.request_id,
+                                        sender = %sender,
+                                        abort_reason = %error,
+                                        "Compilation aborted by quorum"
+                                    );
+
+                                    self.closed = true;
+
+                                    return Ok(());
+                                }
+                                // Below quorum: the aborter is already out
+                                // of the round — fall through so the
+                                // remaining set still resolves, replaces
+                                // and times out exactly like any other
+                                // non-response.
                             }
                             CompilationRes::Reboot => {
                                 Self::observe_event("reboot");
