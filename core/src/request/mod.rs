@@ -66,6 +66,16 @@ pub struct RequestData {
 /// are a normal workload).
 const MAX_QUEUED_REQUESTS_PER_SUBJECT: usize = 1024;
 
+/// Create attempts per request before failing loud. Each failed
+/// attempt re-checks the maps, so arrivals colliding on a stopping
+/// child serialize into owner + queued instead of erroring.
+const MAX_CHILD_CREATE_ATTEMPTS: usize = 3;
+
+/// Teardown wait budget: polls × step (5 s total). Teardown is
+/// milliseconds; a longer hold means the stop itself is stuck.
+const MAX_CHILD_TEARDOWN_POLLS: usize = 250;
+const CHILD_TEARDOWN_POLL_MS: u64 = 20;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
     #[serde(skip)]
@@ -689,10 +699,55 @@ impl RequestHandler {
             return Err(ActorError::FunctionalCritical { description: e });
         };
 
-        let in_handling = self.handling.contains_key(subject_id);
-        let in_queue = self.in_queue.contains_key(subject_id);
+        // Retried creation: the maps say free while a stopping child
+        // may still hold its actor name (teardown lags the
+        // FinishHandling bookkeeping by milliseconds). On `Exists`,
+        // wait bounded for the release and re-check from the top — a
+        // concurrent arrival that won the name in the meantime shows
+        // up as in_handling and queues normally. The request is never
+        // lost to the window.
+        for _ in 0..MAX_CHILD_CREATE_ATTEMPTS {
+            let in_handling = self.handling.contains_key(subject_id);
+            let in_queue = self.in_queue.contains_key(subject_id);
 
-        if !in_handling && !in_queue {
+            if in_handling || in_queue {
+                // Bounded queue: an authorized signer must not enqueue
+                // without limit (the payload is persisted per entry).
+                if self
+                    .in_queue
+                    .get(subject_id)
+                    .is_some_and(|queue| {
+                        queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
+                    })
+                {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Request queue for subject {subject_id} is full"
+                        ),
+                    });
+                }
+                self.on_event(
+                    RequestHandlerEvent::EventToQueue {
+                        subject_id: subject_id.clone(),
+                        event: request,
+                        request_id: request_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: request_id.clone(),
+                        state: RequestState::InQueue,
+                    },
+                )
+                .await?;
+
+                return Ok(());
+            }
+
             let command = Self::build_req_manager_init_msg(
                 &EventRequestType::from(request.content()),
                 is_gov,
@@ -700,76 +755,96 @@ impl RequestHandler {
             let init_data = InitRequestManager {
                 our_key: self.our_key.clone(),
                 subject_id: subject_id.clone(),
-                governance_id,
-                helpers,
+                governance_id: governance_id.clone(),
+                helpers: helpers.clone(),
             };
 
-            let actor = ctx
+            match ctx
                 .create_child(
                     &subject_id.to_string(),
                     RequestManager::initial(init_data),
                 )
-                .await?;
-            actor
-                .tell(RequestManagerMessage::FirstRun {
-                    command,
-                    request,
-                    request_id: request_id.clone(),
-                })
-                .await?;
-
-            self.on_event(
-                RequestHandlerEvent::EventToHandling {
-                    subject_id: subject_id.clone(),
-                    request_id: request_id.clone(),
-                },
-                ctx,
-            )
-            .await;
-
-            send_to_tracking(
-                ctx,
-                RequestTrackingMessage::UpdateState {
-                    request_id: request_id.clone(),
-                    state: RequestState::Handling,
-                },
-            )
-            .await?;
-        } else {
-            // Bounded queue: an authorized signer must not enqueue
-            // without limit (the payload is persisted per entry).
-            if self
-                .in_queue
-                .get(subject_id)
-                .is_some_and(|queue| queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT)
+                .await
             {
-                return Err(ActorError::Functional {
-                    description: format!(
-                        "Request queue for subject {subject_id} is full"
-                    ),
-                });
-            }
-            self.on_event(
-                RequestHandlerEvent::EventToQueue {
-                    subject_id: subject_id.clone(),
-                    event: request,
-                    request_id: request_id.clone(),
-                },
-                ctx,
-            )
-            .await;
+                Ok(actor) => {
+                    actor
+                        .tell(RequestManagerMessage::FirstRun {
+                            command,
+                            request,
+                            request_id: request_id.clone(),
+                        })
+                        .await?;
 
-            send_to_tracking(
-                ctx,
-                RequestTrackingMessage::UpdateState {
-                    request_id: request_id.clone(),
-                    state: RequestState::InQueue,
-                },
-            )
-            .await?;
+                    self.on_event(
+                        RequestHandlerEvent::EventToHandling {
+                            subject_id: subject_id.clone(),
+                            request_id: request_id.clone(),
+                        },
+                        ctx,
+                    )
+                    .await;
+
+                    send_to_tracking(
+                        ctx,
+                        RequestTrackingMessage::UpdateState {
+                            request_id: request_id.clone(),
+                            state: RequestState::Handling,
+                        },
+                    )
+                    .await?;
+
+                    return Ok(());
+                }
+                Err(ActorError::Exists { .. }) => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics
+                            .observe_request_handler_child_collision();
+                    }
+                    Self::await_child_gone(ctx, subject_id).await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
-        Ok(())
+        Err(ActorError::Functional {
+            description: format!(
+                "Request child for subject {subject_id} still exists \
+                 after retries"
+            ),
+        })
+    }
+
+    /// Waits (bounded) for a stopping subject child to release its
+    /// actor name. A newcomer arriving in the teardown window must
+    /// wait for the release instead of failing on `Exists`: teardown
+    /// is milliseconds, and anything longer means the stop itself is
+    /// stuck — failing loud then is correct.
+    async fn await_child_gone(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let name = subject_id.to_string();
+        for _ in 0..MAX_CHILD_TEARDOWN_POLLS {
+            match ctx.get_child::<RequestManager>(&name).await {
+                // Name released (or registry hiccup): the retry
+                // decides — a still-present child just fails creation
+                // again, loud.
+                Err(_) => return Ok(()),
+                Ok(_) => {
+                    tokio::time::sleep(
+                        std::time::Duration::from_millis(
+                            CHILD_TEARDOWN_POLL_MS,
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+        Err(ActorError::Functional {
+            description: format!(
+                "Request child for subject {subject_id} did not stop"
+            ),
+        })
     }
 
     const fn build_req_manager_init_msg(

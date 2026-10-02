@@ -6086,3 +6086,239 @@ async fn test_subject_evaluation_request_aborted_manually() {
         .unwrap();
     assert_eq!(state.sn, 0);
 }
+
+/// NS setup: owner bootstrap + one creator with a schema-level
+/// Creator grant at `grant_ns` (segments, e.g. `["ventas"]`).
+/// Returns (owner, creator, governance_id) synced at v1.
+async fn ns_setup_with_creator(
+    grant_ns: serde_json::Value,
+    quantity: serde_json::Value,
+) -> (
+    common::NodeData,
+    common::NodeData,
+    ave_common::identity::DigestIdentifier,
+) {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes.remove(0);
+    let creator = nodes.remove(0);
+    let _ = nodes;
+    node_running(&owner.api).await.unwrap();
+    node_running(&creator.api).await.unwrap();
+
+    let governance_id = create_and_authorize_governance(
+        &owner.api,
+        vec![&creator.api],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                { "name": "AveNode2", "key": creator.api.public_key() }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": { "one": 0, "two": 0, "three": 0 }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": { "witness": ["AveNode2"] }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "validator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "witness": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "creator": [
+                            {
+                                "name": "AveNode2",
+                                "namespace": grant_ns,
+                                "quantity": quantity
+                            }
+                        ],
+                        "issuer": [
+                            { "name": "Any", "namespace": [] }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    creator
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    (owner, creator, governance_id)
+}
+
+#[test(tokio::test)]
+// QA-001 NS-01: exact namespace grants create. Baseline proving
+// non-empty namespaces work end to end (every other creation test
+// uses the root namespace).
+async fn test_namespace_exact_grant_creates() {
+    let (owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas"]), json!("infinity")).await;
+
+    let (subject_id, ..) = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        true,
+    )
+    .await
+    .unwrap();
+    // Committed and readable by both nodes: the creation holds.
+    for api in [&owner.api, &creator.api] {
+        get_subject(api, subject_id.clone(), None, true).await.unwrap();
+    }
+}
+
+#[test(tokio::test)]
+// QA-001 NS-02: parent grant does NOT cover child creation today.
+// The intake gate is hierarchical (ancestor grants pass) but the
+// creation quota register keys exact namespaces, so building under
+// `ventas.europa` with only a `ventas` grant aborts deterministically
+// and nothing is applied. Pinned as-is: flipping to hierarchical
+// quota must flip this test first.
+async fn test_namespace_parent_grant_rejects_child() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas"]), json!("infinity")).await;
+
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas.europa",
+        false,
+    )
+    .await
+    .expect_err("parent grant must not cover child creation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Is not a Creator"),
+        "rejection must come from the quota register, got: {msg}"
+    );
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// QA-001 NS-03: child grant never covers the parent. A creator
+// holding only `ventas.europa` can not create directly under
+// `ventas`: the hierarchical intake gate (`ancestor_or_equal`)
+// rejects it synchronously, nothing applied.
+async fn test_namespace_child_grant_rejects_parent() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas", "europa"]), json!("infinity"))
+            .await;
+
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        false,
+    )
+    .await
+    .expect_err("child grant must not cover the parent");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("has to be a creator"),
+        "rejection must come from the hierarchical gate, got: {msg}"
+    );
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// QA-001 NS-04: root grant does NOT cover nested creation today.
+// Root is an ancestor of everything so the gate passes, but the
+// quota register holds only the root key and the nested creation
+// aborts deterministically, nothing applied. Same pinning rationale
+// as NS-02.
+async fn test_namespace_root_grant_rejects_nested() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!([]), json!("infinity")).await;
+
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        false,
+    )
+    .await
+    .expect_err("root grant must not cover nested creation today");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Is not a Creator"),
+        "rejection must come from the quota register, got: {msg}"
+    );
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// QA-001 NS-05: quota counts per exact namespace. One creation
+// under `ventas` with quantity 1 commits; the second aborts while
+// the first stays committed.
+async fn test_namespace_quota_counts_per_namespace() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas"]), json!(1)).await;
+
+    create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        true,
+    )
+    .await
+    .unwrap();
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        false,
+    )
+    .await
+    .expect_err("second creation must exceed the quota");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Maximum number of subjects"),
+        "rejection must name the quota, got: {msg}"
+    );
+}

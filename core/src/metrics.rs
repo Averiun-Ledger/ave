@@ -406,6 +406,19 @@ impl CoreMetrics {
             .inc();
     }
 
+    /// A newcomer arrived while the previous subject child was still
+    /// stopping (name taken, maps free) and waited out the release
+    /// instead of failing on `Exists`. Pre-fix every hit was a lost
+    /// request (HTTP 500); counting hits proves the save in the next
+    /// campaign.
+    pub fn observe_request_handler_child_collision(&self) {
+        self.requests
+            .get_or_create(&RequestResultLabels {
+                result: "handler_child_collision",
+            })
+            .inc();
+    }
+
     pub fn observe_request_terminal(
         &self,
         result: &'static str,
