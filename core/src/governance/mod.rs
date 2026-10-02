@@ -1801,6 +1801,19 @@ impl Governance {
                         contracts.write().await.insert(contract_name, module);
                     }
                 }
+                Err(CompilerError::UnknownToolchainPin { pin }) => {
+                    // No local toolchain for the committed pin: stand
+                    // down for this schema (keep serving retained
+                    // bytes), never crash-loop. Healing resumes on the
+                    // next Update/Reconcile with a resolvable pin —
+                    // same dormant policy as HealArtifact and the
+                    // contract-compiler healing path.
+                    warn!(
+                        schema_id = %schema_id,
+                        pin = %pin,
+                        "No local toolchain for pin, apply-time recovery stays dormant"
+                    );
+                }
                 Err(error) => {
                     return Err(crash_system(
                         ctx,

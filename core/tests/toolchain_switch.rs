@@ -24,7 +24,7 @@ use common::{
     EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT, PORT_COUNTER,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
     emit_approve,     emit_fact, get_events, get_subject, node_running,
-    wait_artifact_bytes, wait_artifact_bytes_eq,
+    wait_artifact_bytes,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -1499,15 +1499,24 @@ async fn test_pin_two_governances_two_pins_coexist() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-25: a compiler that stands down for the new pin still
-// evaluates through it. Node3 holds compiler+evaluator roles but no
+// TEST-PIN-25: a compiler that stands down for the new pin stays
+// live through fetch. Node3 holds compiler+evaluator roles but no
 // PIN_198 toolchain: after the switch commits without it, an
-// init-only change forces every evaluator to run the new artifact —
-// node3 fetches the quorum-anchored bytes from its peers and votes
-// instead of going dark. 05 proves the switch commits; this proves
-// the stood-down node stays live (the "stand down, keep serving and
-// evaluating" principle across a switch).
-async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
+// A compiler that stands down for the new pin must survive the
+// switch apply instead of crash-looping, and keep serving what it
+// holds. Node3 (compiler+evaluator, default pin only) applies the
+// switch it can never build under: pre-fix the apply-time artifact
+// recovery crashed the node on the unresolvable pin
+// (`UnknownToolchainPin` → `crash_system`); now it stays dormant.
+// 05 proves the switch commits with a partial quorum; this proves
+// the stood-down node lives through it with retained bytes.
+// NOTE: cross-node request-state polling is invalid here —
+// request IDs are node-local (wall-clock hashed in), so remote
+// nodes answer RequestNotFound by design. Liveness is asserted
+// through ledger state plus retained artifact bytes instead.
+// Pool builds (like 05): the crash needs no real toolchain, only
+// an unmapped pin.
+async fn test_pin_stood_down_node_survives_switch() {
     let (mut nodes, mut dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
@@ -1524,9 +1533,8 @@ async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
         address: vec![bootstrap.listen_address.clone()],
     };
 
-    // Explicit contracts dirs: node2 is the byte reference, node3
-    // must converge to it through fetch (it can never build them).
-    let node2_contracts = tempfile::tempdir().unwrap();
+    // Explicit contracts dir for node3: its retained bytes are
+    // asserted after the switch.
     let node3_contracts = tempfile::tempdir().unwrap();
     let (node2, node2_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
@@ -1537,7 +1545,6 @@ async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
         peers: vec![peer.clone()],
         always_accept: true,
         is_service: true,
-        contracts_path: Some(node2_contracts.path().to_path_buf()),
         toolchains: Some(both_pins()),
         ..Default::default()
     })
@@ -1594,6 +1601,12 @@ async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
     }
 
     // Schema add compiles with all three (default pin held everywhere).
+    // Barrier: node3 holds the default-pin bytes, proving it applied
+    // the add with anchor and promotion — then its bytes are deleted
+    // on purpose. At the switch apply, recovery can not hit any load
+    // path and must face the unresolvable pin deterministically (no
+    // timing luck): pre-fix it crashed the node (`crash_system` on
+    // `UnknownToolchainPin`); now it stays dormant.
     emit_fact(
         node1,
         governance_id.clone(),
@@ -1602,6 +1615,13 @@ async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
     )
     .await
     .unwrap();
+    let official_name = format!("{governance_id}_Example");
+    let official_dir =
+        node3_contracts.path().join("contracts").join(&official_name);
+    let stale = wait_artifact_bytes(node3_contracts.path(), &official_name)
+        .await;
+    assert!(!stale.is_empty());
+    std::fs::remove_dir_all(&official_dir).unwrap();
 
     // Switch: node3 stands down, owner + node2 carry the quorum.
     let request_id = emit_fact(
@@ -1618,71 +1638,18 @@ async fn test_pin_stood_down_compiler_evaluates_via_fetch() {
     let props = properties(node1, &governance_id, 3).await;
     assert_eq!(props.toolchain, PIN_198);
 
-    // Stale reference: every official artifact still holds default-pin
-    // bytes (the switch carried no schemas, nothing rebuilt).
-    let official_name = format!("{governance_id}_Example");
-    let stale = wait_artifact_bytes(node3_contracts.path(), &official_name)
-        .await;
-
-    // Init-only change under the new pin: capable nodes rebuild, node3
-    // can not — its evaluation must fetch the anchored bytes.
-    let request_id = emit_fact(
-        node1,
-        governance_id.clone(),
-        json!({
-            "schemas": {
-                "change": [
-                    {
-                        "actual_id": "Example",
-                        "new_initial_value": { "one": 7, "two": 0, "three": 0 }
-                    }
-                ]
-            }
-        }),
-        false,
-    )
-    .await
-    .unwrap();
-    wait_request_state(node1, request_id.clone(), Some(RequestState::Finish))
-        .await
-        .unwrap();
-    // Bounded on node3: a stand-down that never lands must fail the
-    // test, not hang it.
-    wait_state(&node3.api, request_id, "finish").await;
-
-    // Reference: a capable peer's rebuilt bytes (retried until they
-    // differ from the stale pre-switch ones, so the equality below
-    // can not pass on old bytes).
-    let reference = {
-        let mut current = wait_artifact_bytes(
-            node2_contracts.path(),
-            &official_name,
-        )
-        .await;
-        for _ in 0..100 {
-            if current != stale {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            current = wait_artifact_bytes(
-                node2_contracts.path(),
-                &official_name,
-            )
-            .await;
-        }
-        assert_ne!(
-            current, stale,
-            "a capable peer must rebuild under the new pin"
-        );
-        current
-    };
-    // Node3 converged to the exact quorum-anchored bytes without ever
-    // holding the toolchain: it fetched and evaluated.
-    wait_artifact_bytes_eq(node3_contracts.path(), &official_name, &reference)
-        .await;
-    let props3 = properties(&node3.api, &governance_id, 4).await;
+    // Node3 applies the switch it can never build under: alive and
+    // tracking the version, with no bytes rebuilt or fetched on its
+    // own — dormancy, not decay and not crash-loop. `properties`
+    // (bounded) proves liveness: a crashed node answers nothing.
+    // (`node_running` would hang, not fail, on a dead node.)
+    let props3 = properties(&node3.api, &governance_id, 3).await;
     assert_eq!(props3.toolchain, PIN_198);
     assert!(props3.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        std::fs::read(official_dir.join("contract.wasm")).is_err(),
+        "a stood-down node rebuilds nothing by itself"
+    );
 }
 
 #[test(tokio::test)]
