@@ -991,8 +991,9 @@ impl Api {
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         validate_subject_id(&subject_id)?;
-        self.subject_access
-            .tell(SubjectAccessMessage::AuthorizeGov {
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::AuthorizeGov {
                 subject_id,
                 witnesses,
             })
@@ -1004,7 +1005,17 @@ impl Api {
                 })
             })?;
 
-        Ok("Ok".to_owned())
+        match response {
+            SubjectAccessResponse::None => Ok("Ok".to_owned()),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "None".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
     }
 
     pub async fn disauthorize_governance(
@@ -1013,8 +1024,9 @@ impl Api {
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         validate_subject_id(&subject_id)?;
-        self.subject_access
-            .tell(SubjectAccessMessage::DisauthorizeGov { subject_id })
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::DisauthorizeGov { subject_id })
             .await
             .map_err(|e| {
                 warn!(error = %e, "Disauthorize governance operation failed");
@@ -1023,7 +1035,17 @@ impl Api {
                 })
             })?;
 
-        Ok("Ok".to_owned())
+        match response {
+            SubjectAccessResponse::None => Ok("Ok".to_owned()),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "None".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
     }
 
     pub async fn authorized_governances(
@@ -1084,8 +1106,9 @@ impl Api {
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         validate_subject_id(&subject_id)?;
-        self.subject_access
-            .tell(SubjectAccessMessage::BanTracker { subject_id })
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::BanTracker { subject_id })
             .await
             .map_err(|e| {
                 warn!(error = %e, "Ban tracker operation failed");
@@ -1094,7 +1117,17 @@ impl Api {
                 })
             })?;
 
-        Ok("Ok".to_owned())
+        match response {
+            SubjectAccessResponse::None => Ok("Ok".to_owned()),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "None".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
     }
 
     pub async fn unban_tracker(
@@ -1103,8 +1136,9 @@ impl Api {
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         validate_subject_id(&subject_id)?;
-        self.subject_access
-            .tell(SubjectAccessMessage::UnbanTracker { subject_id })
+        let response = self
+            .subject_access
+            .ask(SubjectAccessMessage::UnbanTracker { subject_id })
             .await
             .map_err(|e| {
                 warn!(error = %e, "Unban tracker operation failed");
@@ -1113,7 +1147,17 @@ impl Api {
                 })
             })?;
 
-        Ok("Ok".to_owned())
+        match response {
+            SubjectAccessResponse::None => Ok("Ok".to_owned()),
+            _ => {
+                warn!("Unexpected response from subject_access");
+                Err(Error::UnexpectedResponse {
+                    actor: "subject_access".to_string(),
+                    expected: "None".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
     }
 
     pub async fn banned_trackers(

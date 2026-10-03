@@ -1,12 +1,14 @@
 use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
+use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::slice;
-use tracing::error;
+use tracing::{error, warn};
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
@@ -975,6 +977,60 @@ pub fn take_random_signers(
     (random_signers, signers)
 }
 
+fn seed_u64(seed: &DigestIdentifier) -> u64 {
+    borsh::to_vec(seed).unwrap_or_default().iter().rev().take(8).enumerate().fold(
+        0u64,
+        |acc, (i, &byte)| acc | (u64::from(byte) << (8 * i)),
+    )
+}
+
+/// Deterministic variant of `take_random_signers` for owner-side
+/// initial picks: every participant can recompute the subset from
+/// `seed` (a phase request hash), so the draw is auditable instead of
+/// trusting the picker's RNG. Failover replacements and probe batches
+/// keep the local CSPRNG (`take_random_signers`).
+pub fn take_seeded_signers(
+    signers: HashSet<PublicKey>,
+    quantity: usize,
+    seed: &DigestIdentifier,
+) -> (HashSet<PublicKey>, HashSet<PublicKey>) {
+    if quantity >= signers.len() {
+        if quantity > signers.len() {
+            warn!(
+                quantity = quantity,
+                signers = signers.len(),
+                "Signer draw quantity exceeds eligible signers; taking all"
+            );
+        }
+        return (signers, HashSet::new());
+    }
+
+    // HashSet iteration order is per-process random: sort first so the
+    // same seed always draws the same subset on every node.
+    let mut ordered: Vec<PublicKey> = signers.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        borsh::to_vec(a)
+            .unwrap_or_default()
+            .cmp(&borsh::to_vec(b).unwrap_or_default())
+    });
+
+    let mut rng = StdRng::seed_from_u64(seed_u64(seed));
+
+    let chosen: HashSet<PublicKey> = ordered
+        .iter()
+        .sample(&mut rng, quantity)
+        .into_iter()
+        .cloned()
+        .collect();
+
+    let rest = ordered
+        .into_iter()
+        .filter(|signer| !chosen.contains(signer))
+        .collect::<HashSet<PublicKey>>();
+
+    (chosen, rest)
+}
+
 pub async fn send_reboot_to_req<A>(
     ctx: &mut ActorContext<A>,
     request_id: DigestIdentifier,
@@ -992,6 +1048,40 @@ where
             request_id,
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use ave_common::identity::{KeyPair, keys::Ed25519Signer};
+
+    use super::*;
+
+    fn sample_keys(n: usize) -> HashSet<PublicKey> {
+        (0..n)
+            .map(|_| {
+                KeyPair::Ed25519(Ed25519Signer::generate().expect("keygen"))
+                    .public_key()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn seeded_draw_is_deterministic_and_partitions() {
+        let seed = DigestIdentifier::default();
+        let all = sample_keys(5);
+        let (chosen_a, rest_a) =
+            take_seeded_signers(all.clone(), 2, &seed);
+        let (chosen_b, rest_b) =
+            take_seeded_signers(all.clone(), 2, &seed);
+        assert_eq!(chosen_a, chosen_b);
+        assert_eq!(rest_a, rest_b);
+        assert_eq!(chosen_a.len(), 2);
+        assert_eq!(rest_a.len(), 3);
+        assert!(chosen_a.is_disjoint(&rest_a));
+        let union: HashSet<PublicKey> =
+            chosen_a.union(&rest_a).cloned().collect();
+        assert_eq!(union, all);
+    }
 }
 
 pub async fn abort_req<A>(

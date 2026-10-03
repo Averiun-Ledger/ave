@@ -13,6 +13,7 @@ use crate::{
     model::{
         common::{
             abort_req, crash_system, send_reboot_to_req, take_random_signers,
+            take_seeded_signers,
         },
         event::{EvaluationData, EvaluationResponse},
     },
@@ -432,8 +433,11 @@ impl Handler<Self> for Evaluation {
                     signers.len() as u32,
                 );
 
-                let (current_eval, pending_eval) =
-                    take_random_signers(signers, evaluators_quantity as usize);
+                let (current_eval, pending_eval) = take_seeded_signers(
+                    signers,
+                    evaluators_quantity as usize,
+                    &self.evaluation_request_hash,
+                );
                 self.current_evaluators.clone_from(&current_eval);
                 self.pending_evaluators.clone_from(&pending_eval);
 

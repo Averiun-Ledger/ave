@@ -7,6 +7,7 @@ use crate::{
     model::{
         common::{
             abort_req, crash_system, send_reboot_to_req, take_random_signers,
+            take_seeded_signers,
         },
         event::{ValidationData, ValidationMetadata},
     },
@@ -420,8 +421,11 @@ impl Handler<Self> for Validation {
                     signers.len() as u32,
                 );
 
-                let (current_vali, pending_vali) =
-                    take_random_signers(signers, validators_quantity as usize);
+                let (current_vali, pending_vali) = take_seeded_signers(
+                    signers,
+                    validators_quantity as usize,
+                    &self.validation_request_hash,
+                );
                 self.current_validators.clone_from(&current_vali);
                 self.pending_validators.clone_from(&pending_vali);
 

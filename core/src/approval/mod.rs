@@ -23,7 +23,7 @@ use crate::{
     },
     metrics::try_core_metrics,
     model::common::{
-        abort_req, crash_system, send_reboot_to_req, take_random_signers,
+        abort_req, crash_system, send_reboot_to_req, take_seeded_signers,
     },
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
     subject::RequestSubjectData,
@@ -889,8 +889,11 @@ impl Handler<Self> for Approval {
                     signers.len() as u32,
                 );
 
-                let (current_vali, pending_vali) =
-                    take_random_signers(signers, validators_quantity as usize);
+                let (current_vali, pending_vali) = take_seeded_signers(
+                    signers,
+                    validators_quantity as usize,
+                    &self.approval_req_hash,
+                );
                 self.current_validators.clone_from(&current_vali);
                 self.pending_validators.clone_from(&pending_vali);
 

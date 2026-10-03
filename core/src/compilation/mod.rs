@@ -22,6 +22,7 @@ use crate::{
     model::{
         common::{
             abort_req, crash_system, send_reboot_to_req, take_random_signers,
+            take_seeded_signers,
         },
         event::{CompilationData, CompilationResponse},
     },
@@ -697,8 +698,11 @@ impl Handler<Self> for Compilation {
                     .quorum
                     .get_signers(self.compilers_quantity, signers.len() as u32);
 
-                let (current_comp, pending_comp) =
-                    take_random_signers(signers, compilers_quantity as usize);
+                let (current_comp, pending_comp) = take_seeded_signers(
+                    signers,
+                    compilers_quantity as usize,
+                    &self.compilation_request_hash,
+                );
                 self.current_compilers.clone_from(&current_comp);
                 self.pending_compilers.clone_from(&pending_comp);
 

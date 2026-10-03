@@ -815,16 +815,18 @@ impl SinkTransport for HttpTransport {
         request = self.apply_healthcheck_headers(request);
         request = request.header(REQUEST_ID_HEADER, &request_id);
 
-        // Add auth header if available
+        // Add auth header if available. When auth is configured but
+        // the header cannot be built, fail instead of probing without
+        // auth: a public health endpoint would report healthy while
+        // every authenticated delivery fails.
         if self.config.auth.is_some() {
             match self.build_auth_header().await {
                 Ok(Some(header)) => {
                     request = request.header("Authorization", header);
                 }
                 Ok(None) => {}
-                Err(_e) => {
-                    // If auth is required but we can't build a header, still try without auth
-                    // Some sinks have public health endpoints even when delivery requires auth
+                Err(e) => {
+                    return Err(e);
                 }
             }
         }
