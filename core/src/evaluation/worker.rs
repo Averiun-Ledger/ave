@@ -112,7 +112,7 @@ impl EvalWorker {
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage { info, message },
+                message: NetworkMessage::new(info, message),
             })
             .await
         {
@@ -801,10 +801,7 @@ impl Handler<Self> for EvalWorker {
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage {
-                            info: new_info,
-                            message,
-                        },
+                        message: NetworkMessage::new(new_info, message),
                     })
                     .await
                 {

@@ -234,10 +234,7 @@ pub async fn update_ledger_network(
     network
         .send_command(ave_network::CommandHelper::SendMessage {
             delivery: delivery_of(&request),
-            message: NetworkMessage {
-                info,
-                message: request,
-            },
+            message: NetworkMessage::new(info, request),
         })
         .await
 }

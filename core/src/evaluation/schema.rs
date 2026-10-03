@@ -102,10 +102,7 @@ impl EvaluationSchema {
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage {
-                    info: new_info,
-                    message,
-                },
+                message: NetworkMessage::new(new_info, message),
             })
             .await
         {

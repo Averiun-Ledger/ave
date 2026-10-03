@@ -435,8 +435,8 @@ impl Approval {
             self.network
                 .send_command(ave_network::CommandHelper::SendMessage {
                     delivery: delivery_of(&message),
-                    message: NetworkMessage {
-                        info: ComunicateInfo {
+                    message: NetworkMessage::new(
+                        ComunicateInfo {
                             request_id: self.request_id.to_string(),
                             version: self.version,
                             receiver: validator.clone(),
@@ -446,7 +446,7 @@ impl Approval {
                             ),
                         },
                         message,
-                    },
+                    ),
                 })
                 .await?;
         }

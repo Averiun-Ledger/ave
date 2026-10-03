@@ -193,7 +193,7 @@ impl GovernanceVersionSync {
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage { info, message },
+                message: NetworkMessage::new(info, message),
             })
             .await
     }
@@ -325,8 +325,8 @@ impl GovernanceVersionSync {
         self.round_open = !self.pending_peers.is_empty();
 
         for peer in self.pending_peers.clone() {
-            let message = NetworkMessage {
-                info: ComunicateInfo {
+            let message = NetworkMessage::new(
+                ComunicateInfo {
                     receiver: peer.clone(),
                     request_id: String::default(),
                     version: 0,
@@ -335,11 +335,11 @@ impl GovernanceVersionSync {
                         self.governance_id
                     ),
                 },
-                message: ActorMessage::GovernanceVersionReq {
+                ActorMessage::GovernanceVersionReq {
                     subject_id: self.governance_id.clone(),
                     receiver_actor: ctx.path().to_string(),
                 },
-            };
+            );
 
             if let Err(error) = self
                 .network

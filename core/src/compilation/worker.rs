@@ -212,7 +212,7 @@ impl CompileWorker {
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage { info, message },
+                message: NetworkMessage::new(info, message),
             })
             .await
         {
@@ -388,10 +388,7 @@ impl CompileWorker {
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery,
-                message: NetworkMessage {
-                    info: new_info,
-                    message,
-                },
+                message: NetworkMessage::new(new_info, message),
             })
             .await
         {
@@ -1410,10 +1407,10 @@ impl Handler<Self> for CompileWorker {
                         .network
                         .send_command(ave_network::CommandHelper::SendMessage {
                             delivery: delivery_of(&message),
-                            message: NetworkMessage {
-                                info: new_info,
+                            message: NetworkMessage::new(
+                                new_info,
                                 message,
-                            },
+                            ),
                         })
                         .await
                     {
@@ -1447,10 +1444,10 @@ impl Handler<Self> for CompileWorker {
                         .network
                         .send_command(ave_network::CommandHelper::SendMessage {
                             delivery: delivery_of(&message),
-                            message: NetworkMessage {
-                                info: new_info,
+                            message: NetworkMessage::new(
+                                new_info,
                                 message,
-                            },
+                            ),
                         })
                         .await
                     {
@@ -1586,10 +1583,10 @@ impl Handler<Self> for CompileWorker {
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage {
-                            info: new_info.clone(),
+                        message: NetworkMessage::new(
+                            new_info.clone(),
                             message,
-                        },
+                        ),
                     })
                     .await
                 {
@@ -1625,10 +1622,7 @@ impl Handler<Self> for CompileWorker {
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage {
-                            info: new_info,
-                            message,
-                        },
+                        message: NetworkMessage::new(new_info, message),
                     })
                     .await
                 {

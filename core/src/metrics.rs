@@ -64,6 +64,11 @@ struct NetworkIngressDropLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct NetworkWireVersionLabels {
+    peer: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct DistributionDurationLabels {
     kind: &'static str,
 }
@@ -136,6 +141,7 @@ pub struct CoreMetrics {
         Family<GovernanceVersionSyncFailureLabels, Counter>,
     http_server_errors: Counter,
     network_ingress_drops: Family<NetworkIngressDropLabels, Counter>,
+    network_wire_versions: Family<NetworkWireVersionLabels, Counter>,
 }
 
 static CORE_METRICS: OnceLock<Arc<CoreMetrics>> = OnceLock::new();
@@ -214,6 +220,7 @@ impl CoreMetrics {
             governance_version_sync_failures: Family::default(),
             http_server_errors: Counter::default(),
             network_ingress_drops: Family::default(),
+            network_wire_versions: Family::default(),
         }
     }
 
@@ -387,6 +394,11 @@ impl CoreMetrics {
             "core_network_ingress_drops",
             "Total inbound network messages dropped after libp2p delivery, labeled by cause.",
             self.network_ingress_drops.clone(),
+        );
+        registry.register(
+            "core_network_wire_versions",
+            "Total inbound network messages by sender wire version relative to ours, labeled by peer (older/newer).",
+            self.network_wire_versions.clone(),
         );
     }
 
@@ -717,6 +729,12 @@ impl CoreMetrics {
     pub fn observe_network_ingress_drop(&self, cause: &'static str) {
         self.network_ingress_drops
             .get_or_create(&NetworkIngressDropLabels { cause })
+            .inc();
+    }
+
+    pub fn observe_network_wire_version(&self, peer: &'static str) {
+        self.network_wire_versions
+            .get_or_create(&NetworkWireVersionLabels { peer })
             .inc();
     }
 }

@@ -37,7 +37,7 @@ use super::error::IntermediaryError;
 use super::ActorMessage;
 #[cfg(feature = "test")]
 use super::test_faults;
-use super::{NetworkMessage, service::NetworkSender};
+use super::{NetworkMessage, WIRE_VERSION, service::NetworkSender};
 use crate::metrics::try_core_metrics;
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
@@ -233,6 +233,24 @@ impl Intermediary {
                             );
                         }
                     };
+
+                if message.wire_version != WIRE_VERSION {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_network_wire_version(
+                            if message.wire_version < WIRE_VERSION {
+                                "older"
+                            } else {
+                                "newer"
+                            },
+                        );
+                    }
+                    warn!(
+                        sender = %sender,
+                        wire_version = message.wire_version,
+                        current = WIRE_VERSION,
+                        "Peer speaks a different wire version"
+                    );
+                }
 
                 // Test-only fault injection: drop/hold/corrupt inbound
                 // messages by rule before they reach any actor.

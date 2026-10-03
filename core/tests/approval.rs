@@ -298,8 +298,8 @@ async fn inject_vote(
 ) {
     validator
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: request_id.to_string(),
                     version,
                     receiver: validator_key.clone(),
@@ -307,10 +307,10 @@ async fn inject_vote(
                         "/user/node/subject_manager/{governance_id}/validator"
                     ),
                 },
-                message: ActorMessage::ApprovalRes {
+                ActorMessage::ApprovalRes {
                     res: Box::new(vote),
                 },
-            },
+            ),
             from,
         )
         .await
@@ -360,8 +360,8 @@ async fn inject_ask(
 ) {
     approver
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: request_id.to_string(),
                     version,
                     receiver: approver_key.clone(),
@@ -369,13 +369,13 @@ async fn inject_ask(
                         "/user/node/subject_manager/{governance_id}/approver"
                     ),
                 },
-                message: ActorMessage::ApprovalReq {
+                ActorMessage::ApprovalReq {
                     req: signed_req,
                     asker_actor: format!(
                         "/user/node/subject_manager/{governance_id}/validator"
                     ),
                 },
-            },
+            ),
             from,
         )
         .await
@@ -4412,8 +4412,8 @@ async fn test_validation_response_missing_approval_hash_rejected() {
         .version;
     owner
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: request_id.to_string(),
                     version,
                     receiver: owner_pk,
@@ -4421,8 +4421,8 @@ async fn test_validation_response_missing_approval_hash_rejected() {
                         "/user/request/{governance_id}/validation/{fake_pk}"
                     ),
                 },
-                message: ActorMessage::ValidationRes { res: forgery },
-            },
+                ActorMessage::ValidationRes { res: forgery },
+            ),
             &fake_pk,
         )
         .await
@@ -4613,8 +4613,8 @@ async fn test_validation_unexpected_approval_hash_rejected() {
     .unwrap();
     owner
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: request_id.to_string(),
                     version,
                     receiver: owner_pk,
@@ -4622,8 +4622,8 @@ async fn test_validation_unexpected_approval_hash_rejected() {
                         "/user/request/{subject_id}/validation/{fake_pk}"
                     ),
                 },
-                message: ActorMessage::ValidationRes { res: forgery },
-            },
+                ActorMessage::ValidationRes { res: forgery },
+            ),
             &fake_pk,
         )
         .await
@@ -5385,8 +5385,8 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
     nodes[2]
         .api()
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: request_id.to_string(),
                     version,
                     receiver: val1_pk.clone(),
@@ -5394,8 +5394,8 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
                         "/user/node/subject_manager/{governance_id}/validator"
                     ),
                 },
-                message: ActorMessage::ApprovalCollectReq { req: stale_signed },
-            },
+                ActorMessage::ApprovalCollectReq { req: stale_signed },
+            ),
             &nodes[1].public_key(),
         )
         .await
@@ -5432,8 +5432,8 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
     nodes[2]
         .api()
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: request_id.to_string(),
                     version,
                     receiver: val1_pk.clone(),
@@ -5441,11 +5441,11 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
                         "/user/node/subject_manager/{governance_id}/validator"
                     ),
                 },
-                message: ActorMessage::ApprovalStatusReq {
+                ActorMessage::ApprovalStatusReq {
                     approval_req_hash: live_hash,
                     wanted: None,
                 },
-            },
+            ),
             &nodes[1].public_key(),
         )
         .await

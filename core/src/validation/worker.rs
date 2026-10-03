@@ -379,7 +379,7 @@ impl ValiWorker {
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage { info, message },
+                message: NetworkMessage::new(info, message),
             })
             .await
         {
@@ -978,7 +978,7 @@ impl ValiWorker {
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage { info, message },
+                message: NetworkMessage::new(info, message),
             })
             .await?;
         Ok(())
@@ -1095,7 +1095,7 @@ impl ValiWorker {
                 .network
                 .send_command(ave_network::CommandHelper::SendMessage {
                     delivery: delivery_of(&message),
-                    message: NetworkMessage { info, message },
+                    message: NetworkMessage::new(info, message),
                 })
                 .await
             {
@@ -1195,7 +1195,7 @@ impl ValiWorker {
                 self.network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage { info, message },
+                        message: NetworkMessage::new(info, message),
                     })
                     .await?;
             }
@@ -1247,7 +1247,7 @@ impl ValiWorker {
                 self.network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage { info, message },
+                        message: NetworkMessage::new(info, message),
                     })
                     .await?;
             }
@@ -1494,7 +1494,7 @@ impl ValiWorker {
                 self.network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage { info, message },
+                        message: NetworkMessage::new(info, message),
                     })
                     .await?;
             }
@@ -2928,10 +2928,10 @@ impl Handler<Self> for ValiWorker {
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage {
-                            info: new_info.clone(),
+                        message: NetworkMessage::new(
+                            new_info.clone(),
                             message,
-                        },
+                        ),
                     })
                     .await
                 {

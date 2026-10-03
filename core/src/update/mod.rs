@@ -285,7 +285,7 @@ impl Update {
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage { info, message },
+                message: NetworkMessage::new(info, message),
             })
             .await
     }

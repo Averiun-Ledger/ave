@@ -163,10 +163,41 @@ pub enum ActorMessage {
     },
 }
 
+/// Wire version spoken by this node. Bumped only when a new
+/// `ActorMessage` variant without a legacy fallback ships; every
+/// variant today requires v1. Messages carry the sender version so a
+/// newer node can degrade to the peer version instead of silencing an
+/// older one. The peer-version map ships with the first v2 variant.
+pub const WIRE_VERSION: u32 = 1;
+
+const fn default_wire_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NetworkMessage {
     pub info: ComunicateInfo,
     pub message: ActorMessage,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
+
+impl NetworkMessage {
+    pub const fn new(info: ComunicateInfo, message: ActorMessage) -> Self {
+        Self {
+            info,
+            message,
+            wire_version: WIRE_VERSION,
+        }
+    }
+
+    /// Minimum wire version understanding this message. Every variant
+    /// today is v1; a future variant without a legacy fallback returns
+    /// a higher version and the sender degrades for older peers.
+    pub const fn required_wire_version(message: &ActorMessage) -> u32 {
+        let _ = message;
+        1
+    }
 }
 
 impl Message for NetworkMessage {}
@@ -178,9 +209,65 @@ impl Message for NetworkMessage {}
 /// periodic sync tick) retransmits by design, so its messages are
 /// `Direct` and never buffered; only one-shot pushes whose sole backup
 /// is a slow cycle are `Queued`.
+///
+/// The network is a best-effort async boundary: `Ok` on send means the
+/// attempt was accepted, not that the peer received it. A `Direct`
+/// message to an unknown/unidentified peer is dropped (counted, redial
+/// kicked) and the domain retry owns recovery.
 pub const fn delivery_of(message: &ActorMessage) -> Delivery {
     match message {
         ActorMessage::ApprovalVoteReport { .. } => Delivery::Queued,
         _ => Delivery::Direct,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ave_common::identity::DSAlgorithm;
+
+    use super::*;
+
+    #[derive(Serialize)]
+    struct LegacyMessage<'a> {
+        info: &'a ComunicateInfo,
+        message: &'a ActorMessage,
+    }
+
+    fn sample() -> (ComunicateInfo, ActorMessage) {
+        let receiver = PublicKey::new(DSAlgorithm::Ed25519, vec![1u8; 32])
+            .expect("sample key");
+        (
+            ComunicateInfo {
+                request_id: String::from("req"),
+                version: 0,
+                receiver,
+                receiver_actor: String::from("actor"),
+            },
+            ActorMessage::DistributionLastEventRes,
+        )
+    }
+
+    #[test]
+    fn wire_version_defaults_to_one_for_legacy_bytes() {
+        let (info, message) = sample();
+        let bytes = rmp_serde::to_vec(&LegacyMessage {
+            info: &info,
+            message: &message,
+        })
+        .expect("encode legacy");
+        let decoded: NetworkMessage =
+            rmp_serde::from_slice(&bytes).expect("decode legacy");
+        assert_eq!(decoded.wire_version, 1);
+    }
+
+    #[test]
+    fn new_messages_stamp_current_wire_version() {
+        let (info, message) = sample();
+        assert_eq!(NetworkMessage::required_wire_version(&message), 1);
+        let bytes = rmp_serde::to_vec(&NetworkMessage::new(info, message))
+            .expect("encode");
+        let decoded: NetworkMessage =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded.wire_version, WIRE_VERSION);
     }
 }

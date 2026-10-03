@@ -333,8 +333,8 @@ impl TrackerSync {
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: peer.clone(),
                         request_id: String::default(),
                         version: 0,
@@ -344,7 +344,7 @@ impl TrackerSync {
                         ),
                     },
                     message,
-                },
+                ),
             })
             .await?;
 
@@ -398,8 +398,8 @@ impl TrackerSync {
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: peer.clone(),
                         request_id: String::default(),
                         version: 0,
@@ -409,7 +409,7 @@ impl TrackerSync {
                         ),
                     },
                     message,
-                },
+                ),
             })
             .await
     }
@@ -656,15 +656,15 @@ impl TrackerSync {
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: request.sender,
                         request_id: request.info.request_id,
                         version: request.info.version,
                         receiver_actor: request.receiver_actor,
                     },
                     message,
-                },
+                ),
             })
             .await
     }

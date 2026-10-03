@@ -136,8 +136,8 @@ impl Handler<Self> for Updater {
                 subject_id,
                 actual_sn,
             } => {
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
+                let message = NetworkMessage::new(
+                    ComunicateInfo {
                         request_id: String::default(),
                         version: 0,
                         receiver: self.node_key.clone(),
@@ -146,12 +146,12 @@ impl Handler<Self> for Updater {
                             subject_id
                         ),
                     },
-                    message: ActorMessage::DistributionGetLastSn {
+                    ActorMessage::DistributionGetLastSn {
                         subject_id: subject_id.clone(),
                         actual_sn,
                         receiver_actor: ctx.path().to_string(),
                     },
-                };
+                );
 
                 let target = RetryNetwork::new(self.network.clone());
 

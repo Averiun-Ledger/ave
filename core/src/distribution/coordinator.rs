@@ -127,15 +127,15 @@ impl Handler<Self> for DistriCoordinator {
                 let receiver_actor =
                     format!("/user/node/distributor_{}", subject_id);
 
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
+                let message = NetworkMessage::new(
+                    ComunicateInfo {
                         request_id: request_id.to_string(),
                         version: 0,
                         receiver: self.node_key.clone(),
                         receiver_actor,
                     },
-                    message: ActorMessage::DistributionLastEventReq { ledger },
-                };
+                    ActorMessage::DistributionLastEventReq { ledger },
+                );
 
                 let target = RetryNetwork::new(self.network.clone());
 

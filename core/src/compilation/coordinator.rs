@@ -288,17 +288,17 @@ impl Handler<Self> for CompileCoordinator {
                 );
 
                 // Fire the event that starts the retries.
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
+                let message = NetworkMessage::new(
+                    ComunicateInfo {
                         request_id: self.request_id.clone(),
                         version: self.version,
                         receiver: node_key.clone(),
                         receiver_actor,
                     },
-                    message: ActorMessage::CompilationReq {
+                    ActorMessage::CompilationReq {
                         req: compilation_req,
                     },
-                };
+                );
 
                 let target = RetryNetwork::new(self.network.clone());
 

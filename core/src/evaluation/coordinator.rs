@@ -235,17 +235,17 @@ impl Handler<Self> for EvalCoordinator {
                     };
 
                 // Lanzar evento donde lanzar los retrys
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
+                let message = NetworkMessage::new(
+                    ComunicateInfo {
                         request_id: self.request_id.clone(),
                         version: self.version,
                         receiver: node_key.clone(),
                         receiver_actor,
                     },
-                    message: ActorMessage::EvaluationReq {
+                    ActorMessage::EvaluationReq {
                         req: evaluation_req,
                     },
-                };
+                );
 
                 let target = RetryNetwork::new(self.network.clone());
 

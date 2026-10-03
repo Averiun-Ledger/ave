@@ -14538,8 +14538,8 @@ async fn test_fetch_busy_mid_fetch_failover_preserves_busy_peer() {
     node3
         .api
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: String::new(),
                     version: 0,
                     receiver: node3_pk.clone(),
@@ -14547,11 +14547,11 @@ async fn test_fetch_busy_mid_fetch_failover_preserves_busy_peer() {
                         "/user/node/subject_manager/{governance_id}/Example_contract_compiler"
                     ),
                 },
-                message: ActorMessage::ArtifactRes {
+                ActorMessage::ArtifactRes {
                     request_nonce: 1,
                     result: ArtifactFetchResult::Busy,
                 },
-            },
+            ),
             &node2_pk,
         )
         .await
@@ -14878,8 +14878,8 @@ async fn test_fetch_late_duplicate_can_serve_does_not_readmit_burned_peer() {
     node3
         .api
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: String::new(),
                     version: 0,
                     receiver: node3_pk.clone(),
@@ -14887,11 +14887,11 @@ async fn test_fetch_late_duplicate_can_serve_does_not_readmit_burned_peer() {
                         "/user/node/subject_manager/{governance_id}/Example_contract_compiler"
                     ),
                 },
-                message: ActorMessage::ArtifactProbeRes {
+                ActorMessage::ArtifactProbeRes {
                     request_nonce: 0,
                     result: ArtifactProbeResult::CanServe,
                 },
-            },
+            ),
             &node2_pk,
         )
         .await
@@ -22108,8 +22108,8 @@ async fn test_fetch_busy_probe_waits_and_reprobes_same_peer() {
     node2
         .api
         .test_inject_inbound(
-            NetworkMessage {
-                info: ComunicateInfo {
+            NetworkMessage::new(
+                ComunicateInfo {
                     request_id: String::new(),
                     version: 0,
                     receiver: node2_pk.clone(),
@@ -22117,11 +22117,11 @@ async fn test_fetch_busy_probe_waits_and_reprobes_same_peer() {
                         "/user/node/subject_manager/{governance_id}/Example_contract_compiler"
                     ),
                 },
-                message: ActorMessage::ArtifactProbeRes {
+                ActorMessage::ArtifactProbeRes {
                     request_nonce: 0,
                     result: ArtifactProbeResult::Busy,
                 },
-            },
+            ),
             &node1_pk,
         )
         .await

@@ -415,15 +415,15 @@ impl ContractCompiler {
             if let Err(e) = network
                 .send_command(ave_network::CommandHelper::SendMessage {
                     delivery: delivery_of(&message),
-                    message: NetworkMessage {
-                        info: ComunicateInfo {
+                    message: NetworkMessage::new(
+                        ComunicateInfo {
                             receiver: peer.clone(),
                             request_id: String::default(),
                             version: 0,
                             receiver_actor: target_path,
                         },
                         message,
-                    },
+                    ),
                 })
                 .await
             {
@@ -681,15 +681,15 @@ impl ContractCompiler {
         if let Err(e) = network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery: delivery_of(&message),
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: peer.clone(),
                         request_id: String::default(),
                         version: 0,
                         receiver_actor: target_path,
                     },
                     message,
-                },
+                ),
             })
             .await
         {
@@ -1382,10 +1382,7 @@ impl ContractCompiler {
         if let Err(e) = network
             .send_command(ave_network::CommandHelper::SendMessage {
                 delivery,
-                message: NetworkMessage {
-                    info: new_info,
-                    message,
-                },
+                message: NetworkMessage::new(new_info, message),
             })
             .await
         {
