@@ -931,7 +931,6 @@ impl Governance {
                         .get(schema_id)
                         .map(|schema| schema.viewpoints.clone())
                         .unwrap_or_default(),
-                    sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
                     init_state: init_state.clone(),
                 })
@@ -1007,7 +1006,6 @@ impl Governance {
                 our_key: self.our_key.clone(),
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
-                sn: self.subject_metadata.sn,
                 members: self.properties.members.values().cloned().collect(),
                 creators: schema_roles
                     .creators_eval
@@ -2932,7 +2930,6 @@ impl Governance {
                 our_key: self.our_key.clone(),
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
-                sn: self.subject_metadata.sn,
                 context: EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
@@ -3088,7 +3085,6 @@ impl Governance {
                     our_key: self.our_key.clone(),
                     governance_id: self.subject_metadata.subject_id.clone(),
                     gov_version: self.properties.version,
-                    sn: self.subject_metadata.sn,
                     context: EvalWorkerContext::Governance {
                         issuers,
                         issuer_any,

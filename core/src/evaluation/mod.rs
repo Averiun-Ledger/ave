@@ -218,7 +218,6 @@ impl Evaluation {
                             .governance_id
                             .clone(),
                         gov_version: self.request.content().gov_version,
-                        sn: self.request.content().sn,
                         context: self.worker_context(),
                         hash: self.hash,
                         network: self.network.clone(),

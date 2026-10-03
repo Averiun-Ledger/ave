@@ -56,7 +56,6 @@ pub struct EvalWorker {
     pub our_key: Arc<PublicKey>,
     pub governance_id: DigestIdentifier,
     pub gov_version: u64,
-    pub sn: u64,
     pub context: EvalWorkerContext,
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,

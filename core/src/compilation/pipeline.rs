@@ -412,14 +412,11 @@ pub fn precompile_module(
     contract_runtime: &ContractRuntime,
     wasm_bytes: &[u8],
 ) -> Result<(Vec<u8>, Arc<CompiledModule>), CompilerError> {
-    let module = contract_runtime
+    let (module, precompiled_bytes) = contract_runtime
         .compile(wasm_bytes)
         .map_err(map_runtime_error_to_compiler_error)?;
 
-    let precompiled_bytes = module.precompiled_bytes().to_vec();
-    let module = Arc::new(module);
-
-    Ok((precompiled_bytes, module))
+    Ok((precompiled_bytes, Arc::new(module)))
 }
 
 pub fn validate_module(

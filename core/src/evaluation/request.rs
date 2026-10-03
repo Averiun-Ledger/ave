@@ -226,24 +226,6 @@ impl EvaluateData {
 }
 
 /// A struct representing the context in which the evaluation is being performed.
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    Eq,
-    PartialEq,
-    BorshSerialize,
-    BorshDeserialize,
-)]
-pub struct SubjectContext {
-    pub subject_id: DigestIdentifier,
-    pub governance_id: DigestIdentifier,
-    pub schema_id: SchemaType,
-    pub is_owner: bool,
-    pub namespace: Namespace,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

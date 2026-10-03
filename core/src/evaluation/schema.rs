@@ -37,7 +37,6 @@ pub struct EvaluationSchema {
     pub governance_id: DigestIdentifier,
     pub gov_version: u64,
     pub schema_id: SchemaType,
-    pub sn: u64,
     pub members: BTreeSet<PublicKey>,
     pub creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
     pub issuers: BTreeMap<PublicKey, BTreeSet<Namespace>>,
@@ -61,7 +60,6 @@ pub enum EvaluationSchemaMessage {
         issuers: BTreeMap<PublicKey, BTreeSet<Namespace>>,
         issuer_any: bool,
         schema_viewpoints: BTreeSet<String>,
-        sn: u64,
         gov_version: u64,
         init_state: ValueWrapper,
     },
@@ -265,7 +263,6 @@ impl Handler<Self> for EvaluationSchema {
                             init_state: Some(self.init_state.clone()),
                             governance_id: self.governance_id.clone(),
                             gov_version: self.gov_version,
-                            sn: self.sn,
                             context: self
                                 .context_for_request(evaluation_req.content()),
                             hash: self.hash,
@@ -346,7 +343,6 @@ impl Handler<Self> for EvaluationSchema {
                 issuers,
                 issuer_any,
                 schema_viewpoints,
-                sn,
                 gov_version,
                 init_state,
             } => {
@@ -359,12 +355,10 @@ impl Handler<Self> for EvaluationSchema {
                 self.issuer_any = issuer_any;
                 self.schema_viewpoints = schema_viewpoints;
                 self.gov_version = gov_version;
-                self.sn = sn;
                 self.init_state = init_state;
 
                 debug!(
                     msg_type = "Update",
-                    sn = self.sn,
                     gov_version = self.gov_version,
                     "Schema updated successfully"
                 );

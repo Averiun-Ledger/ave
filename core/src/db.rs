@@ -6,7 +6,9 @@ use crate::config::{AveInternalDBConfig, AveInternalDBFeatureConfig};
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
 use ave_actors::{Actor, ActorContext, ActorError, EncryptedKey, MachineSpec};
-use ave_actors::{Collection, DbManager, PersistentActor, State, StoreError};
+use ave_actors::{
+    Collection, DbManager, Durability, PersistentActor, State, StoreError,
+};
 #[cfg(feature = "rocksdb")]
 use ave_actors::{RocksDbManager, RocksDbStore};
 
@@ -43,14 +45,28 @@ impl Database {
         match &config.db {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { path } => {
-                let manager =
-                    RocksDbManager::new(path, config.durability, spec)?;
+                let manager = RocksDbManager::new(
+                    path,
+                    if config.durability {
+                        Durability::Sync
+                    } else {
+                        Durability::Relaxed
+                    },
+                    spec,
+                )?;
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
             AveInternalDBFeatureConfig::Sqlite { path } => {
-                let manager =
-                    SqliteManager::new(path, config.durability, spec)?;
+                let manager = SqliteManager::new(
+                    path,
+                    if config.durability {
+                        Durability::Sync
+                    } else {
+                        Durability::Relaxed
+                    },
+                    spec,
+                )?;
                 Ok(Self::SQLite(manager))
             }
         }

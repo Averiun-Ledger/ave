@@ -8,10 +8,7 @@ use ave_common::{
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use std::{
-    collections::{BTreeSet, HashSet},
-    vec,
-};
+use std::{collections::BTreeSet, vec};
 
 pub type MemberName = String;
 
@@ -36,23 +33,6 @@ pub struct Schema {
     pub initial_value: ValueWrapper,
     pub contract: String,
     pub viewpoints: BTreeSet<String>,
-}
-
-pub struct NameCreators {
-    pub validation: Option<HashSet<String>>,
-    pub evaluation: Option<HashSet<String>>,
-}
-
-impl NameCreators {
-    pub const fn is_empty(&self) -> bool {
-        self.validation.is_none() && self.evaluation.is_none()
-    }
-}
-
-pub struct SchemaKeyCreators {
-    pub schema_id: SchemaType,
-    pub validation: Option<HashSet<PublicKey>>,
-    pub evaluation: Option<HashSet<PublicKey>>,
 }
 
 #[derive(
@@ -96,32 +76,6 @@ impl RolesGov {
             self.witness.remove(remove);
             self.issuer.signers.remove(remove);
             self.compiler.remove(remove);
-        }
-    }
-
-    pub fn change_name_role(
-        &mut self,
-        chang_name_members: &Vec<(String, String)>,
-    ) {
-        for (old_name, new_name) in chang_name_members {
-            if self.approver.remove(old_name) {
-                self.approver.insert(new_name.clone());
-            };
-            if self.evaluator.remove(old_name) {
-                self.evaluator.insert(new_name.clone());
-            };
-            if self.validator.remove(old_name) {
-                self.validator.insert(new_name.clone());
-            };
-            if self.witness.remove(old_name) {
-                self.witness.insert(new_name.clone());
-            };
-            if self.issuer.signers.remove(old_name) {
-                self.issuer.signers.insert(new_name.clone());
-            };
-            if self.compiler.remove(old_name) {
-                self.compiler.insert(new_name.clone());
-            };
         }
     }
 
@@ -256,112 +210,12 @@ impl RolesTrackerSchemas {
         }
     }
 
-    pub fn roles_namespace(
-        &self,
-        name: &str,
-    ) -> (Option<Vec<Namespace>>, Option<Vec<Namespace>>) {
-        let val_namespace = self
-            .validator
-            .iter()
-            .filter(|x| x.name == name)
-            .map(|x| x.namespace.clone())
-            .collect::<Vec<Namespace>>();
-        let eval_namespace = self
-            .evaluator
-            .iter()
-            .filter(|x| x.name == name)
-            .map(|x| x.namespace.clone())
-            .collect::<Vec<Namespace>>();
-
-        let val_namespace = if val_namespace.is_empty() {
-            None
-        } else {
-            Some(val_namespace)
-        };
-
-        let eval_namespace = if eval_namespace.is_empty() {
-            None
-        } else {
-            Some(eval_namespace)
-        };
-
-        (val_namespace, eval_namespace)
-    }
-
     pub fn remove_member_role(&mut self, remove_members: &Vec<String>) {
         for remove in remove_members {
             self.evaluator.retain(|x| x.name != *remove);
             self.validator.retain(|x| x.name != *remove);
             self.witness.retain(|x| x.name != *remove);
             self.issuer.signers.retain(|x| x.name != *remove);
-        }
-    }
-
-    pub fn change_name_role(
-        &mut self,
-        chang_name_members: &Vec<(String, String)>,
-    ) {
-        for (old_name, new_name) in chang_name_members {
-            self.evaluator = self
-                .evaluator
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-
-            self.validator = self
-                .validator
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-
-            self.witness = self
-                .witness
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-
-            self.issuer.signers = self
-                .issuer
-                .signers
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
         }
     }
 
@@ -515,193 +369,6 @@ impl RolesSchema {
         }
     }
 
-    pub fn change_name_role(
-        &mut self,
-        chang_name_members: &Vec<(String, String)>,
-    ) {
-        for (old_name, new_name) in chang_name_members {
-            self.evaluator = self
-                .evaluator
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-
-            self.validator = self
-                .validator
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-
-            self.witness = self
-                .witness
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-
-            self.creator = self
-                .creator
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        RoleCreator {
-                            quantity: x.quantity.clone(),
-                            name: new_name.clone(),
-                            witnesses: x
-                                .witnesses
-                                .iter()
-                                .map(|w| {
-                                    if w.name == *old_name {
-                                        CreatorWitness {
-                                            name: new_name.clone(),
-                                            viewpoints: w.viewpoints.clone(),
-                                        }
-                                    } else {
-                                        w.clone()
-                                    }
-                                })
-                                .collect(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        let mut role = x.clone();
-                        role.witnesses = role
-                            .witnesses
-                            .iter()
-                            .map(|w| {
-                                if w.name == *old_name {
-                                    CreatorWitness {
-                                        name: new_name.clone(),
-                                        viewpoints: w.viewpoints.clone(),
-                                    }
-                                } else {
-                                    w.clone()
-                                }
-                            })
-                            .collect();
-                        role
-                    }
-                })
-                .collect();
-
-            self.issuer.signers = self
-                .issuer
-                .signers
-                .iter()
-                .map(|x| {
-                    if x.name == *old_name {
-                        Role {
-                            name: new_name.clone(),
-                            namespace: x.namespace.clone(),
-                        }
-                    } else {
-                        x.clone()
-                    }
-                })
-                .collect();
-        }
-    }
-
-    pub fn roles_creators(
-        &self,
-        name: &str,
-        not_gov_val: Option<Vec<Namespace>>,
-        not_gov_eval: Option<Vec<Namespace>>,
-    ) -> NameCreators {
-        let mut val_namespace = self
-            .validator
-            .iter()
-            .filter(|x| x.name == name)
-            .map(|x| x.namespace.clone())
-            .collect::<Vec<Namespace>>();
-        if let Some(mut not_gov_val) = not_gov_val {
-            val_namespace.append(&mut not_gov_val);
-        }
-
-        let mut eval_namespace = self
-            .evaluator
-            .iter()
-            .filter(|x| x.name == name)
-            .map(|x| x.namespace.clone())
-            .collect::<Vec<Namespace>>();
-        if let Some(mut not_gov_eval) = not_gov_eval {
-            eval_namespace.append(&mut not_gov_eval);
-        }
-
-        let mut creators_val: Vec<String> = vec![];
-        for namespace in val_namespace.clone() {
-            let mut creators = self
-                .creator
-                .iter()
-                .filter(|x| {
-                    let namespace_role = x.namespace.clone();
-                    namespace.is_ancestor_or_equal_of(&namespace_role)
-                })
-                .map(|x| x.name.clone())
-                .collect::<Vec<String>>();
-
-            creators_val.append(&mut creators);
-        }
-
-        let mut creators_eval: Vec<String> = vec![];
-        for namespace in eval_namespace.clone() {
-            let mut creators = self
-                .creator
-                .iter()
-                .filter(|x| {
-                    let namespace_role = x.namespace.clone();
-                    namespace.is_ancestor_or_equal_of(&namespace_role)
-                })
-                .map(|x| x.name.clone())
-                .collect::<Vec<String>>();
-
-            creators_eval.append(&mut creators);
-        }
-
-        let hash_val: Option<HashSet<String>> = if val_namespace.is_empty() {
-            None
-        } else {
-            Some(HashSet::from_iter(creators_val.iter().cloned()))
-        };
-
-        let hash_eval: Option<HashSet<String>> = if eval_namespace.is_empty() {
-            None
-        } else {
-            Some(HashSet::from_iter(creators_eval.iter().cloned()))
-        };
-
-        NameCreators {
-            validation: hash_val,
-            evaluation: hash_eval,
-        }
-    }
-
     pub const fn issuer_any(&self) -> bool {
         self.issuer.any
     }
@@ -787,21 +454,6 @@ impl RolesSchema {
             // Approver, compiler and future roles never match here.
             _ => false,
         }
-    }
-
-    pub fn max_creations(
-        &self,
-        namespace: Namespace,
-        name: &str,
-    ) -> Option<CreatorQuantity> {
-        self.creator
-            .get(&RoleCreator {
-                name: name.to_string(),
-                namespace,
-                witnesses: BTreeSet::default(),
-                quantity: CreatorQuantity::Infinity,
-            })
-            .map(|x| x.quantity.clone())
     }
 
     pub fn get_signers(
@@ -901,24 +553,6 @@ pub enum WitnessesData {
         schema_id: SchemaType,
         namespace: Namespace,
     },
-}
-
-impl WitnessesData {
-    pub fn build(
-        schema_id: SchemaType,
-        namespace: Namespace,
-        creator: PublicKey,
-    ) -> Self {
-        if schema_id.is_gov() {
-            Self::Gov
-        } else {
-            Self::Schema {
-                creator,
-                schema_id,
-                namespace,
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
