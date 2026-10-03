@@ -1617,6 +1617,162 @@ async fn test_governance_fail_approve() {
     );
 }
 #[test(tokio::test)]
+// A rejected governance fact commits to the ledger but must not touch
+// properties or registers: what failed only leaves its ledger record.
+// A later approved fact proves the apply path still advances.
+async fn test_failed_fact_writes_no_registers() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+    let node1 = &nodes[0].api;
+
+    let governance_id = create_and_authorize_governance(node1, vec![]).await;
+
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(evaluators, vec![owner_key.clone()]);
+
+    let fake_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": fake_key.clone()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["AveNode1"],
+                }
+            }
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Rejected,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Ledger record exists, properties untouched.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(state.owner, node1.public_key());
+    assert_governance_properties_eq(
+        state.properties,
+        GovernanceData {
+            version: 0,
+            members: BTreeMap::from([(
+                "Owner".to_owned(),
+                owner_key.clone(),
+            )]),
+            roles_gov: RolesGov {
+                approver: BTreeSet::from(["Owner".to_owned()]),
+                evaluator: BTreeSet::from(["Owner".to_owned()]),
+                validator: BTreeSet::from(["Owner".to_owned()]),
+                witness: BTreeSet::from(["Owner".to_owned()]),
+                issuer: RoleGovIssuer {
+                    signers: BTreeSet::from(["Owner".to_owned()]),
+                    any: false,
+                },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
+            },
+            policies_gov: PolicyGov {
+                approve: Quorum::Majority,
+                evaluate: Quorum::Majority,
+                validate: Quorum::Majority,
+                compile: Quorum::Majority,
+            },
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
+            policies_schema: BTreeMap::new(),
+        },
+    );
+
+    // Registers untouched: the rejected grant never landed.
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(evaluators, vec![owner_key.clone()]);
+
+    // An approved follow-up still applies and advances markers.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": fake_key
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["AveNode1"],
+                }
+            }
+        }
+    });
+
+    let request_id_followup =
+        emit_fact(node1, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_followup,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_eq!(governance_properties(state.properties).version, 1);
+
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+    assert!(
+        evaluators
+            .contains(&PublicKey::from_str(&fake_key).unwrap())
+    );
+
+    node_running(node1).await.unwrap();
+}
+#[test(tokio::test)]
 // Varios approvers y todos dicen que sí, se cumple el quorum.
 async fn test_governance_manual_many_approvers() {
     // Bootstrap ≤- Addressable
@@ -5042,4 +5198,511 @@ async fn test_update_offer_gov() {
     get_subject(witness, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
+}
+#[test(tokio::test)]
+// Wiping derived state is strictly worse than any crash window: if
+// the boot replay heals a purged register back to the ledger tip, it
+// heals any crash loss too.
+async fn test_reconcile_heals_role_wipe() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+    let node2 = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&node1, vec![&node2]).await;
+
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+    let node2_key = PublicKey::from_str(node2.public_key()).unwrap();
+
+    // v1: add N2 as evaluator (both nodes live, so quorum votes arrive).
+    // Fixed evaluation quorum: N2 must never be on the critical path
+    // of later votes.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "N2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "policies": {
+            "governance": {
+                "change": {
+                    "evaluate": {
+                        "fixed": 1
+                    }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["N2"],
+                }
+            }
+        }
+    });
+    let request_id_v1 =
+        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_v1,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // v2: remove N2 (cascade drops its evaluator grant).
+    let json = json!({
+        "members": {
+            "remove": ["N2"]
+        }
+    });
+    let request_id_v2 =
+        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_v2,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // v3: re-add N2 as evaluator.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "N2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["N2"],
+                }
+            }
+        }
+    });
+    let request_id_v3 =
+        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_v3,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 3);
+    assert!(properties.members.contains_key("N2"));
+
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+    assert!(evaluators.contains(&node2_key));
+
+    // Wipe derived state and reboot: the replay must converge back.
+    node1
+        .test_purge_register(governance_id.clone(), "role")
+        .await
+        .unwrap();
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 3);
+    assert!(properties.members.contains_key("N2"));
+
+    let evaluators =
+        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    assert!(evaluators.contains(&owner_key));
+    assert!(evaluators.contains(&node2_key));
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// Ownership rotation must survive derived-state loss: after wiping
+// the registers and rebooting, the new owner is in charge and the
+// old owner key holds no roles.
+async fn test_reconcile_heals_rotation() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let future_owner = nodes[0].api.clone();
+    let owner_governance = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&future_owner])
+            .await;
+
+    let old_key =
+        PublicKey::from_str(owner_governance.public_key()).unwrap();
+    let new_key = PublicKey::from_str(future_owner.public_key()).unwrap();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": future_owner.public_key()
+                }
+            ]
+        },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": ["AveNode1"],
+                        "compiler": ["AveNode1"],
+                    }
+                }
+            }
+    });
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &owner_governance,
+        governance_id.clone(),
+        new_key.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_confirm(&future_owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(&future_owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+
+    let evaluators = future_owner
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&new_key));
+    assert!(!evaluators.contains(&old_key));
+
+    // Wipe rotation state and reboot the new owner.
+    future_owner
+        .test_purge_register(governance_id.clone(), "role")
+        .await
+        .unwrap();
+    future_owner
+        .test_purge_register(governance_id.clone(), "subject")
+        .await
+        .unwrap();
+    future_owner
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+
+    let evaluators =
+        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    assert!(evaluators.contains(&new_key));
+    assert!(!evaluators.contains(&old_key));
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// A graceful shutdown marks the boot clean, so the reboot skips the
+// replay and still converges: same ledger, same properties, same
+// register state.
+async fn test_clean_boot_skips_replay() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&node1, vec![]).await;
+
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "M1",
+                    "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                        .public_key()
+                        .to_string()
+                }
+            ]
+        }
+    });
+    let request_id_f1 =
+        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_f1,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    // Graceful-shutdown handshake, then reboot on the same stores.
+    node1.prepare_clean_shutdown().await;
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(governance_properties(state.properties).version, 1);
+
+    let evaluators =
+        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    // The rebooted node accepts traffic: readiness flipped, so the
+    // skip path reported instead of wedging the gate.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "M2",
+                    "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                        .public_key()
+                        .to_string()
+                }
+            ]
+        }
+    });
+    let request_id_f2 =
+        emit_fact(&api, governance_id.clone(), json, true).await.unwrap();
+    emit_approve(
+        &api,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_f2,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_eq!(governance_properties(state.properties).version, 2);
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// An in-flight request at shutdown completes after reboot, either
+// way: applied before death (replay heals registers, resume finds
+// nothing) or re-driven by resume (dirty replay plus deferred Run).
+// Both branches converge on the same assertions.
+async fn test_inflight_resume_after_reboot() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&node1, vec![]).await;
+
+    let fake_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "M1",
+                    "key": fake_key.to_string()
+                }
+            ]
+        }
+    });
+    let request_id =
+        emit_fact(&node1, governance_id.clone(), json, false).await.unwrap();
+
+    // Wait until the handler registered the request: killing before
+    // registration would leave nothing to resume or replay anywhere.
+    for _ in 0..100 {
+        if node1.get_request_state(request_id.clone()).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Vote without waiting, then wait until the vote lands (the
+    // request leaves Approval): either the event applies before
+    // death or resume plus replay complete it after reboot. Both
+    // branches converge on the same assertions.
+    emit_approve(&node1, governance_id.clone(), ApprovalStateRes::Accepted, request_id.clone(), false)
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let voted = node1
+            .get_request_state(request_id.clone())
+            .await
+            .is_ok_and(|state| {
+                !matches!(
+                    state.state,
+                    RequestState::InQueue
+                        | RequestState::Handling
+                        | RequestState::Approval
+                )
+            });
+        if voted {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so the assertions below observe post-boot state
+    // instead of pre-reboot ext_db rows.
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+    let evaluators =
+        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    let state = get_subject(&api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 1);
+    assert!(properties.members.contains_key("M1"));
+
+    node_running(&api).await.unwrap();
 }

@@ -933,10 +933,35 @@ impl Api {
     ///////// Node
     ////////////////////////////
 
+    /// Clean-shutdown handshake: persists the clean marker on the
+    /// node so the next boot skips reconciliation. Best-effort with
+    /// a bound: shutdown must proceed even if the node never answers
+    /// (the next boot then syncs, which is always safe).
+    pub async fn prepare_clean_shutdown(&self) {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.node.ask(NodeMessage::PrepareCleanShutdown),
+        )
+        .await
+        {
+            Ok(Ok(_)) => debug!("Clean shutdown marker persisted"),
+            Ok(Err(e)) => {
+                warn!(
+                    error = %e,
+                    "Failed to persist clean shutdown marker; next boot will reconcile"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out persisting clean shutdown marker; next boot will reconcile"
+                );
+            }
+        }
+    }
+
     pub async fn get_pending_transfers(
         &self,
-    ) -> Result<Vec<TransferSubject>, Error> {
-        let response =
+    ) -> Result<Vec<TransferSubject>, Error> {        let response =
             self.node.ask(NodeMessage::PendingTransfers).await.map_err(
                 |e| {
                     warn!(error = %e, "Failed to get pending transfers");
@@ -2573,6 +2598,191 @@ impl Api {
                 actor: "governance".to_owned(),
                 expected: "Ledger".to_owned(),
                 received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Purges one governance register store, for crash-recovery
+    /// tests: wiping derived state is strictly worse than any crash
+    /// window, so healing from a purge proves healing from a crash.
+    /// `register` is one of: role, subject, witnesses, sn, contract,
+    /// transfer_verification.
+    pub async fn test_purge_register(
+        &self,
+        governance_id: DigestIdentifier,
+        register: &str,
+    ) -> Result<(), Error> {
+        use ave_actors::ActorPath;
+        let base = format!("/user/node/subject_manager/{governance_id}");
+        match register {
+            "role" => {
+                use crate::governance::role_register::{
+                    RoleRegister, RoleRegisterMessage,
+                };
+                let actor: ActorRef<RoleRegister> = self
+                    .system
+                    .get_actor(&ActorPath::from(format!(
+                        "{base}/role_register"
+                    )))
+                    .await?;
+                actor
+                    .ask(RoleRegisterMessage::PurgeStorage)
+                    .await
+                    .map_err(|e| {
+                        actor_communication_error("role_register", e)
+                    })?;
+            }
+            "subject" => {
+                use crate::governance::subject_register::{
+                    SubjectRegister, SubjectRegisterMessage,
+                };
+                let actor: ActorRef<SubjectRegister> = self
+                    .system
+                    .get_actor(&ActorPath::from(format!(
+                        "{base}/subject_register"
+                    )))
+                    .await?;
+                actor
+                    .ask(SubjectRegisterMessage::PurgeStorage)
+                    .await
+                    .map_err(|e| {
+                        actor_communication_error("subject_register", e)
+                    })?;
+            }
+            "witnesses" => {
+                use crate::governance::witnesses_register::{
+                    WitnessesRegister, WitnessesRegisterMessage,
+                };
+                let actor: ActorRef<WitnessesRegister> = self
+                    .system
+                    .get_actor(&ActorPath::from(format!(
+                        "{base}/witnesses_register"
+                    )))
+                    .await?;
+                actor
+                    .ask(WitnessesRegisterMessage::PurgeStorage)
+                    .await
+                    .map_err(|e| {
+                        actor_communication_error("witnesses_register", e)
+                    })?;
+            }
+            "sn" => {
+                use crate::governance::sn_register::{
+                    SnRegister, SnRegisterMessage,
+                };
+                let actor: ActorRef<SnRegister> = self
+                    .system
+                    .get_actor(&ActorPath::from(format!(
+                        "{base}/sn_register"
+                    )))
+                    .await?;
+                actor
+                    .ask(SnRegisterMessage::PurgeStorage)
+                    .await
+                    .map_err(|e| {
+                        actor_communication_error("sn_register", e)
+                    })?;
+            }
+            "contract" => {
+                use crate::governance::contract_register::{
+                    ContractRegister, ContractRegisterMessage,
+                };
+                let actor: ActorRef<ContractRegister> = self
+                    .system
+                    .get_actor(&ActorPath::from(format!(
+                        "{base}/contract_register"
+                    )))
+                    .await?;
+                actor
+                    .ask(ContractRegisterMessage::PurgeStorage)
+                    .await
+                    .map_err(|e| {
+                        actor_communication_error("contract_register", e)
+                    })?;
+            }
+            "transfer_verification" => {
+                use crate::governance::transfer_verification_register::{
+                    TransferVerificationRegister,
+                    TransferVerificationRegisterMessage,
+                };
+                let actor: ActorRef<TransferVerificationRegister> = self
+                    .system
+                    .get_actor(&ActorPath::from(format!(
+                        "{base}/transfer_verification_register"
+                    )))
+                    .await?;
+                actor
+                    .ask(TransferVerificationRegisterMessage::PurgeStorage)
+                    .await
+                    .map_err(|e| {
+                        actor_communication_error(
+                            "transfer_verification_register",
+                            e,
+                        )
+                    })?;
+            }
+            other => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "test_purge_register".to_string(),
+                    expected: "known register name".to_string(),
+                    received: other.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Governance-schema evaluator keys in the role register, for
+    /// test assertions on what UpdateLedger applied.
+    pub async fn test_gov_evaluators(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<Vec<PublicKey>, Error> {
+        use crate::governance::role_register::{
+            RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
+            SearchRole,
+        };
+        use ave_common::{Namespace, SchemaType};
+        let actor: ActorRef<RoleRegister> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/role_register"
+            )))
+            .await?;
+        let version = match actor
+            .ask(RoleRegisterMessage::GetVersion)
+            .await
+            .map_err(|e| actor_communication_error("role_register", e))?
+        {
+            RoleRegisterResponse::Version(version) => version,
+            _ => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "role_register".to_string(),
+                    expected: "Version".to_string(),
+                    received: "other".to_string(),
+                });
+            }
+        };
+        let response = actor
+            .ask(RoleRegisterMessage::SearchActualRoles {
+                version,
+                evaluation: SearchRole {
+                    schema_id: SchemaType::Governance,
+                    namespace: Namespace::new(),
+                },
+                approval: false,
+                compilation: false,
+            })
+            .await
+            .map_err(|e| actor_communication_error("role_register", e))?;
+        match response {
+            RoleRegisterResponse::ActualRoles { evaluation, .. } => {
+                Ok(evaluation.workers.into_iter().collect())
+            }
+            _ => Err(Error::UnexpectedResponse {
+                actor: "role_register".to_string(),
+                expected: "ActualRoles".to_string(),
+                received: "other".to_string(),
             }),
         }
     }

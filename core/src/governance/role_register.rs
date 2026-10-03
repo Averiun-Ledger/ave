@@ -98,6 +98,8 @@ pub struct CurrentValidationRoles {
 #[derive(Debug, Clone)]
 pub enum RoleRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding.
+    GetVersion,
     GetCurrentValidationRoles {
         schema_id: SchemaType,
     },
@@ -173,6 +175,7 @@ pub enum RoleRegisterResponse {
     Validation(RoleDataRegister),
     MissingData,
     OutOfVersion,
+    Version(u64),
     Ok,
 }
 
@@ -281,6 +284,9 @@ impl Handler<Self> for RoleRegister {
                 );
 
                 Ok(RoleRegisterResponse::Ok)
+            }
+            RoleRegisterMessage::GetVersion => {
+                Ok(RoleRegisterResponse::Version(self.version))
             }
             RoleRegisterMessage::GetCurrentValidationRoles { schema_id } => {
                 let approval = RoleDataRegister {

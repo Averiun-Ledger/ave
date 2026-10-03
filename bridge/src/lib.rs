@@ -124,7 +124,7 @@ impl Bridge {
         )
         .await?;
 
-        Self::bind_with_shutdown(graceful_token.clone())?;
+        Self::bind_with_shutdown(graceful_token.clone(), api.clone())?;
 
         #[cfg(feature = "prometheus")]
         let registry = std::sync::Arc::new(tokio::sync::Mutex::new(registry));
@@ -158,7 +158,10 @@ impl Bridge {
         self.registry.clone()
     }
 
-    fn bind_with_shutdown(token: CancellationToken) -> Result<(), BridgeError> {
+    fn bind_with_shutdown(
+        token: CancellationToken,
+        api: AveApi,
+    ) -> Result<(), BridgeError> {
         let cancellation_token = token;
         let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
             tracing::error!(error = %e, "Failed to register SIGTERM handler");
@@ -174,6 +177,12 @@ impl Bridge {
                 // nothing left to do — exit instead of leaking the task.
                 _ = cancellation_token.cancelled() => return,
             }
+
+            // Clean-shutdown handshake BEFORE stopping the system: the
+            // node persists the clean marker while still alive, so the
+            // next boot skips reconciliation. Bounded inside; a failure
+            // just means the next boot syncs (always safe).
+            api.prepare_clean_shutdown().await;
 
             cancellation_token.cancel();
         });

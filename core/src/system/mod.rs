@@ -1,7 +1,11 @@
 pub use error::SystemError;
 #[cfg(feature = "test")]
 use std::time::Duration;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use crate::{
     config::{
@@ -15,6 +19,7 @@ use crate::{
 use ave_actors::{
     ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef,
 };
+use ave_common::identity::DigestIdentifier;
 use ave_common::identity::hash_borsh;
 #[cfg(feature = "prometheus")]
 use ave_contract_sdk::runtime::ContractMetrics;
@@ -50,6 +55,46 @@ pub struct ConfigHelper {
     /// entry pairs a [`SinkTarget`] with the list of servers that deliver
     /// events for that target.
     pub sinks: Vec<SinkConfigEntry>,
+}
+
+/// Boot governances still to report reconciliation, shared lock-free
+/// so every actor gates per subject without messaging: a subject is
+/// ready when its governance is absent from this set. `Node` seeds
+/// it at boot and removes on each `GovernanceReconciled`. Missing
+/// helper (tests that never register it) reads as ready — `system()`
+/// always registers it in production.
+#[derive(Debug, Clone, Default)]
+pub struct PendingReconcile {
+    pending: Arc<std::sync::RwLock<HashSet<DigestIdentifier>>>,
+}
+
+impl PendingReconcile {
+    /// Whether this governance still has to report (false when the
+    /// helper is missing). Lock poison reads as pending: fail loud
+    /// instead of letting traffic into unknown state.
+    pub fn is_pending(&self, governance_id: &DigestIdentifier) -> bool {
+        self.pending
+            .read()
+            .map(|pending| pending.contains(governance_id))
+            .unwrap_or(true)
+    }
+
+    /// Whether every boot governance reported.
+    pub fn is_empty(&self) -> bool {
+        self.pending.read().map(|pending| pending.is_empty()).unwrap_or(true)
+    }
+
+    pub fn insert(&self, governance_id: DigestIdentifier) {
+        if let Ok(mut pending) = self.pending.write() {
+            pending.insert(governance_id);
+        }
+    }
+
+    pub fn remove(&self, governance_id: &DigestIdentifier) {
+        if let Ok(mut pending) = self.pending.write() {
+            pending.remove(governance_id);
+        }
+    }
 }
 
 impl ConfigHelper {
@@ -125,6 +170,7 @@ pub async fn system(
 
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
     system.add_helper("config", config_helper);
+    system.add_helper("pending_reconcile", PendingReconcile::default());
 
     // Local build toolchains selected by governance pin (see the
     // toolchain-pinning plan): verified once here, read by every
@@ -518,5 +564,28 @@ pub mod tests {
                 panic!("a message cap below the artifact budget must not start")
             }
         }
+    }
+
+    #[test]
+    fn pending_reconcile_gates_per_subject() {
+        use ave_common::identity::DigestIdentifier;
+        let pending = PendingReconcile::default();
+        assert!(pending.is_empty());
+        let gov_a = DigestIdentifier::default();
+        let gov_b = DigestIdentifier::new(
+            HashAlgorithm::Blake3,
+            vec![7; 32],
+        )
+        .unwrap();
+        pending.insert(gov_a.clone());
+        pending.insert(gov_b.clone());
+        assert!(!pending.is_empty());
+        assert!(pending.is_pending(&gov_a));
+        assert!(pending.is_pending(&gov_b));
+        pending.remove(&gov_a);
+        assert!(!pending.is_pending(&gov_a));
+        assert!(pending.is_pending(&gov_b));
+        pending.remove(&gov_b);
+        assert!(pending.is_empty());
     }
 }

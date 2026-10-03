@@ -200,6 +200,8 @@ pub struct CreatorWitnessEntry {
 #[derive(Debug, Clone)]
 pub enum WitnessesRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding.
+    GetMaxVersion,
     GetSnGov,
     GetTrackerSnOwner {
         subject_id: DigestIdentifier,
@@ -430,6 +432,7 @@ pub enum WitnessesRegisterResponse {
         ranges: Vec<TrackerDeliveryRange>,
     },
     WitnessStatus(WitnessStatus),
+    MaxVersion(u64),
     Ok,
 }
 
@@ -1138,6 +1141,31 @@ impl Handler<Self> for WitnessesRegister {
                 return Ok(WitnessesRegisterResponse::GovSn {
                     sn: self.gov_sn,
                 });
+            }
+            WitnessesRegisterMessage::GetMaxVersion => {
+                // Highest version present across witness/creator
+                // interval maps: a processed prefix marker (single
+                // ordered sender, so everything below it landed;
+                // removals only lower it, which widens the replay
+                // tail — safe direction). Transfer-state entries are
+                // ask-confirmed live and excluded from replay, so
+                // they stay out of the walk.
+                let mut max = 0u64;
+                for namespaces in self.witnesses.values() {
+                    for (intervals, _) in namespaces.values() {
+                        if let Some(hi) = intervals.max_hi() {
+                            max = max.max(hi);
+                        }
+                    }
+                }
+                for entry in self.creator_witnesses.values() {
+                    for (intervals, _) in entry.intervals.values() {
+                        if let Some(hi) = intervals.max_hi() {
+                            max = max.max(hi);
+                        }
+                    }
+                }
+                return Ok(WitnessesRegisterResponse::MaxVersion(max));
             }
             WitnessesRegisterMessage::UpdateSnGov { sn } => {
                 self.on_event(WitnessesRegisterEvent::UpdateSnGov { sn }, ctx)

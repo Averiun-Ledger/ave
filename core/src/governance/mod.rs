@@ -71,7 +71,10 @@ use crate::{
         },
         event::{CompilationResponse, Ledger, Protocols, ValidationMetadata},
     },
-    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    node::{
+        Node, NodeMessage, NodeResponse, TransferSubject,
+        register::RegisterMessage,
+    },
     sink::{
         SinkManager, SinkManagerInitParams, SinkManagerMessage, retry_delay_ms,
     },
@@ -120,6 +123,7 @@ pub mod data;
 pub mod error;
 pub mod events;
 pub mod model;
+pub mod reconcile;
 pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
@@ -227,6 +231,9 @@ pub struct Governance {
     pub our_key: Arc<PublicKey>,
     pub service: bool,
     pub hash: Option<HashAlgorithm>,
+    /// Skip boot reconciliation (clean boot or already reconciled
+    /// this boot): the subject manager decides once per boot.
+    pub skip_reconcile: bool,
     pub state: Arc<GovernanceState>,
 }
 
@@ -236,6 +243,7 @@ impl Clone for Governance {
             our_key: self.our_key.clone(),
             service: self.service,
             hash: self.hash,
+            skip_reconcile: self.skip_reconcile,
             state: self.state.clone(),
         }
     }
@@ -277,11 +285,22 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::EOLSubject {
-            subject_id: self.subject_metadata.subject_id.clone(),
-            i_owner: *self.our_key == self.subject_metadata.owner,
-        })
-        .await
+        // Ask, not tell: the node journals before replying, so an Ok
+        // means the write is durable and boot reconciliation never
+        // needs to replay it.
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::EOLSubject {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                i_owner: *self.our_key == self.subject_metadata.owner,
+            })
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn reject(
@@ -291,10 +310,18 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::RejectTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await
+        let NodeResponse::Ok =
+            node.ask(NodeMessage::RejectTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn confirm(
@@ -305,10 +332,18 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::ConfirmTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await
+        let NodeResponse::Ok =
+            node.ask(NodeMessage::ConfirmTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn transfer(
@@ -319,13 +354,22 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::TransferSubject(TransferSubject {
-            name: self.subject_metadata.name.clone(),
-            subject_id: self.subject_metadata.subject_id.clone(),
-            new_owner: new_owner.clone(),
-            actual_owner: self.subject_metadata.owner.clone(),
-        }))
-        .await
+        // Ask, not tell: durable on Ok (see `eol`).
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::TransferSubject(TransferSubject {
+                name: self.subject_metadata.name.clone(),
+                subject_id: self.subject_metadata.subject_id.clone(),
+                new_owner: new_owner.clone(),
+                actual_owner: self.subject_metadata.owner.clone(),
+            }))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn get_last_ledger(
@@ -2231,6 +2275,22 @@ impl Governance {
         }
     }
 
+    /// Drops deferred-acquisition markers when a governance goes
+    /// EOL (no deferred acquisition will ever run for it).
+    async fn clear_acquisition_pending(
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // The governance is inactive from here: no deferred
+        // acquisition will ever run for it, so drop pending markers
+        // instead of leaking them.
+        let pending =
+            Self::list_acquisition_pending(ctx).await.unwrap_or_default();
+        if !pending.is_empty() {
+            Self::set_acquisition_pending(ctx, pending, false).await?;
+        }
+        Ok(())
+    }
+
     /// Single artifact acquisition pass, fired when a catch-up
     /// round reaches the witness-certified tip (`RunDeferredAcquisition`)
     /// or a version-sync round proves this node is already at it
@@ -3560,6 +3620,7 @@ impl Governance {
 
     fn build_creators_register_fact(
         &self,
+        version: u64,
         new_creator: HashMap<
             (SchemaType, String, PublicKey),
             (CreatorQuantity, Vec<WitnessesType>),
@@ -3740,11 +3801,11 @@ impl Governance {
 
         (
             SubjectRegisterMessage::RegisterData {
-                gov_version: self.properties.version,
+                gov_version: version,
                 data,
             },
             WitnessesRegisterMessage::UpdateCreatorsWitnessesFact {
-                version: self.properties.version,
+                version,
                 new_creator: new_creator_data,
                 remove_creator,
                 update_creator_witnesses: update_creator_witnesses_data,
@@ -3788,6 +3849,18 @@ impl Governance {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        self.first_role_register_with(ctx, &self.subject_metadata.owner)
+            .await
+    }
+
+    /// Seeds the role register with the genesis owner grants.
+    /// Takes the owner explicitly so boot reconciliation replays
+    /// genesis with era state instead of tip state.
+    async fn first_role_register_with(
+        &self,
+        ctx: &ActorContext<Self>,
+        owner: &PublicKey,
+    ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
 
         actor
@@ -3799,19 +3872,19 @@ impl Governance {
                     SchemaType::Governance,
                     Quorum::Majority,
                 )]),
-                new_approvers: vec![self.subject_metadata.owner.clone()],
-                new_compilers: vec![self.subject_metadata.owner.clone()],
+                new_approvers: vec![owner.clone()],
+                new_compilers: vec![owner.clone()],
                 new_evaluators: HashMap::from([(
                     (
                         SchemaType::Governance,
-                        self.subject_metadata.owner.clone(),
+                        owner.clone(),
                     ),
                     vec![Namespace::new()],
                 )]),
                 new_validators: HashMap::from([(
                     (
                         SchemaType::Governance,
-                        self.subject_metadata.owner.clone(),
+                        owner.clone(),
                     ),
                     vec![Namespace::new()],
                 )]),
@@ -3843,6 +3916,7 @@ impl Governance {
     async fn update_registers_fact(
         &self,
         ctx: &ActorContext<Self>,
+        version: u64,
         update: RolesUpdate,
         creator_update: CreatorRoleUpdate,
     ) -> Result<(), ActorError> {
@@ -3868,7 +3942,7 @@ impl Governance {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
         actor
             .tell(RoleRegisterMessage::UpdateFact {
-                version: self.properties.version,
+                version,
                 appr_quorum,
                 comp_quorum,
                 eval_quorum,
@@ -3885,6 +3959,7 @@ impl Governance {
             .await?;
 
         let (subj_msg, wit_msg) = self.build_creators_register_fact(
+            version,
             new_creator,
             remove_creator,
             creator_update,
@@ -3907,6 +3982,7 @@ impl Governance {
     async fn update_registers_confirm(
         &self,
         ctx: &ActorContext<Self>,
+        version: u64,
         update: RolesUpdateConfirm,
     ) -> Result<(), ActorError> {
         let RolesUpdateConfirm {
@@ -3925,7 +4001,7 @@ impl Governance {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
         actor
             .tell(RoleRegisterMessage::UpdateConfirm {
-                version: self.properties.version,
+                version,
                 new_approver,
                 remove_approver,
                 new_compiler,
@@ -4093,8 +4169,40 @@ impl Governance {
             };
 
             let (update_fact, update_confirm) = if last_event_is_ok {
+                // Failed events only leave their ledger record: every
+                // derived write below mirrors exactly what `apply`
+                // mutates (eval-ok, and approval for facts). Anything
+                // else would store state the properties never had.
+                let transfer_ok = matches!(
+                    &event.protocols,
+                    Protocols::Transfer { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
+                let confirm_ok = matches!(
+                    &event.protocols,
+                    Protocols::GovConfirm { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
+                let fact_ok = matches!(
+                    &event.protocols,
+                    Protocols::GovFact {
+                        evaluation,
+                        approval,
+                        ..
+                    }
+                    if evaluation
+                        .as_ref()
+                        .and_then(|evaluation| evaluation
+                            .evaluator_response_ok())
+                        .is_some()
+                        && approval.as_ref().is_some_and(|approval| {
+                            approval.approved
+                        })
+                );
                 match &event_request {
-                    EventRequest::Transfer(transfer_request) => {
+                    EventRequest::Transfer(transfer_request)
+                        if transfer_ok =>
+                    {
                         self.transfer(
                             ctx,
                             transfer_request.new_owner.clone(),
@@ -4104,6 +4212,7 @@ impl Governance {
 
                         self.update_gov_version(ctx).await?;
                     }
+                    EventRequest::Transfer(..) => {}
                     EventRequest::Reject(..) => {
                         self.reject(ctx, 0).await?;
 
@@ -4123,24 +4232,16 @@ impl Governance {
                         )
                         .await?;
 
-                        // The governance is inactive from here: no
-                        // deferred acquisition will ever run for it, so
-                        // drop pending markers instead of leaking them.
-                        let pending = Self::list_acquisition_pending(ctx)
-                            .await
-                            .unwrap_or_default();
-                        if !pending.is_empty() {
-                            Self::set_acquisition_pending(ctx, pending, false)
-                                .await?;
-                        }
+                        Self::clear_acquisition_pending(ctx).await?;
 
                         self.update_gov_version(ctx).await?;
                     }
                     _ => {}
                 };
-
                 let update_confirm =
-                    if let EventRequest::Confirm(..) = &event_request {
+                    if let EventRequest::Confirm(..) = &event_request
+                        && confirm_ok
+                    {
                         self.confirm(
                             ctx,
                             event.ledger_seal_signature.signer.clone(),
@@ -4164,6 +4265,7 @@ impl Governance {
 
                 let update_fact = if let EventRequest::Fact(fact_request) =
                     &event_request
+                    && fact_ok
                 {
                     // A committed payload that does not deserialize is
                     // local corruption: fail loud instead of returning a
@@ -4255,12 +4357,22 @@ impl Governance {
                     rm_roles,
                 );
 
-                self.update_registers_fact(ctx, update, creator_update)
-                    .await?;
+                self.update_registers_fact(
+                    ctx,
+                    self.properties.version,
+                    update,
+                    creator_update,
+                )
+                .await?;
             }
 
             if let Some(update_confirm) = update_confirm {
-                self.update_registers_confirm(ctx, update_confirm).await?;
+                self.update_registers_confirm(
+                    ctx,
+                    self.properties.version,
+                    update_confirm,
+                )
+                .await?;
             }
 
             // Acutalizar último evento.
@@ -5158,6 +5270,20 @@ impl Actor for Governance {
             return Err(e);
         }
 
+        // Boot reconciliation: replay register updates from the
+        // ledger so derived state catches up to the persisted tip
+        // before this actor processes anything (race-free: the
+        // mailbox is still closed) and before sync actors start
+        // below. A failure here is a broken node, not a degraded
+        // one: fail the boot loud.
+        if let Err(e) = self.reconcile_registers(ctx).await {
+            error!(
+                error = %e,
+                "Failed to reconcile registers at boot"
+            );
+            return Err(e);
+        }
+
         if self.service {
             let Some(config): Option<ConfigHelper> =
                 ctx.system().get_helper("config")
@@ -5482,6 +5608,7 @@ impl PersistentActor for Governance {
         Arc<PublicKey>,
         HashAlgorithm,
         bool,
+        bool,
     );
     type State = GovernanceState;
 
@@ -5496,6 +5623,7 @@ impl PersistentActor for Governance {
             hash: Some(params.2),
             our_key: params.1,
             service: params.3,
+            skip_reconcile: params.4,
             state: Arc::new(GovernanceState {
                 subject_metadata,
                 properties,

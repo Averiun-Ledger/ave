@@ -30,6 +30,9 @@ use crate::{
 pub enum SubjectManagerMessage {
     UpGovernances {
         governance_ids: Vec<DigestIdentifier>,
+        /// Whether the last shutdown was dirty: subjects reconcile
+        /// only then (and once per boot, see `reconciled`).
+        dirty_boot: bool,
     },
     Up {
         subject_id: DigestIdentifier,
@@ -71,6 +74,13 @@ pub struct SubjectManager {
     is_service: bool,
     only_clear_events: bool,
     subjects: HashMap<DigestIdentifier, SubjectEntry>,
+    /// Last-shutdown dirtiness, cached from `UpGovernances`
+    /// (unknown reads as dirty: safe direction). Transient: this
+    /// actor is not persistent, so every boot starts unknown.
+    dirty_boot: Option<bool>,
+    /// Subjects already reconciled this boot: booting the same
+    /// subject twenty times replays once. Transient like above.
+    reconciled: HashSet<DigestIdentifier>,
 }
 
 impl SubjectManager {
@@ -86,11 +96,26 @@ impl SubjectManager {
             is_service,
             only_clear_events,
             subjects: HashMap::new(),
+            dirty_boot: None,
+            reconciled: HashSet::new(),
         }
     }
 
+    /// Whether this subject must reconcile now: dirty boot and not
+    /// yet reconciled this boot. Records the decision, so repeated
+    /// boots replay once.
+    fn needs_sync(&mut self, subject_id: &DigestIdentifier) -> bool {
+        if self.dirty_boot.unwrap_or(true)
+            && !self.reconciled.contains(subject_id)
+        {
+            self.reconciled.insert(subject_id.clone());
+            return true;
+        }
+        false
+    }
+
     async fn up_governances(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         governance_ids: Vec<DigestIdentifier>,
     ) -> Result<(), ActorError> {
@@ -107,6 +132,7 @@ impl SubjectManager {
         };
 
         for governance_id in governance_ids {
+            let skip_reconcile = !self.needs_sync(&governance_id);
             let actor: ActorRef<Governance> = ctx
                 .create_child(
                     &governance_id.to_string(),
@@ -115,6 +141,7 @@ impl SubjectManager {
                         self.our_key.clone(),
                         self.hash,
                         self.is_service,
+                        skip_reconcile,
                     )),
                 )
                 .await?;
@@ -219,6 +246,8 @@ impl SubjectManager {
 
         let mut cleanup_errors = Vec::new();
 
+        // Purge path: the subject (ledger included) is being deleted,
+        // so there is nothing to heal. Skip without marking.
         let tracker = match ctx
             .create_child(
                 &subject_id.to_string(),
@@ -228,6 +257,7 @@ impl SubjectManager {
                     is_service: self.is_service,
                     only_clear_events: self.only_clear_events,
                     public_key: self.our_key.clone(),
+                    skip_reconcile: true,
                 }),
             )
             .await
@@ -243,12 +273,14 @@ impl SubjectManager {
                 }
             }
             Err(error) => {
+    
                 cleanup_errors.push(format!("tracker: {error}"));
                 None
             }
         };
 
         if let Some(tracker) = tracker {
+
             match tracker.ask(TrackerMessage::PurgeStorage).await {
                 Ok(TrackerResponse::Ok) => {}
                 Ok(other) => cleanup_errors
@@ -382,6 +414,9 @@ impl SubjectManager {
 
         let mut cleanup_errors = Vec::new();
 
+        // Purge path: the subject (ledger included) is being deleted,
+        // so there is nothing to heal. Skip without marking.
+        let skip_reconcile = true;
         let governance = match ctx
             .create_child(
                 &subject_id.to_string(),
@@ -390,6 +425,7 @@ impl SubjectManager {
                     self.our_key.clone(),
                     self.hash,
                     self.is_service,
+                    skip_reconcile,
                 )),
             )
             .await
@@ -466,10 +502,11 @@ impl SubjectManager {
     }
 
     async fn load_tracker(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
+        let skip_reconcile = !self.needs_sync(subject_id);
         let tracker_actor: ActorRef<Tracker> = match ctx
             .create_child(
                 &subject_id.to_string(),
@@ -479,6 +516,7 @@ impl SubjectManager {
                     is_service: self.is_service,
                     only_clear_events: self.only_clear_events,
                     public_key: self.our_key.clone(),
+                    skip_reconcile,
                 }),
             )
             .await
@@ -488,19 +526,26 @@ impl SubjectManager {
             Err(ActorError::Exists { .. }) => {
                 ctx.get_child::<Tracker>(&subject_id.to_string()).await?
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Creation failed: unmark so a retry still syncs.
+                self.reconciled.remove(subject_id);
+                return Err(e);
+            }
         };
 
         self.run_tracker_sink(ctx, tracker_actor).await
     }
 
     async fn create_tracker(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         metadata: crate::subject::Metadata,
         ledger: Ledger,
     ) -> Result<(), ActorError> {
+        // Fresh tracker: no history to heal, the create flow writes
+        // everything live. Skip without marking (future boots with
+        // history decide via `needs_sync`).
         let tracker_actor: ActorRef<Tracker> = match ctx
             .create_child(
                 &subject_id.to_string(),
@@ -510,6 +555,7 @@ impl SubjectManager {
                     is_service: self.is_service,
                     only_clear_events: self.only_clear_events,
                     public_key: self.our_key.clone(),
+                    skip_reconcile: true,
                 }),
             )
             .await
@@ -550,7 +596,7 @@ impl SubjectManager {
     }
 
     async fn create_governance(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         metadata: crate::subject::Metadata,
@@ -573,6 +619,10 @@ impl SubjectManager {
             return Ok(());
         }
 
+        // Fresh governance: no history to heal, the create flow
+        // writes everything live. Skip without marking (future boots
+        // with history decide via `needs_sync`).
+        let skip_reconcile = true;
         let governance_actor: ActorRef<Governance> = match ctx
             .create_child(
                 &subject_id.to_string(),
@@ -581,6 +631,7 @@ impl SubjectManager {
                     self.our_key.clone(),
                     self.hash,
                     self.is_service,
+                    skip_reconcile,
                 )),
             )
             .await
@@ -768,11 +819,15 @@ impl Handler<Self> for SubjectManager {
         ctx: &mut ActorContext<Self>,
     ) -> Result<SubjectManagerResponse, ActorError> {
         match msg {
-            SubjectManagerMessage::UpGovernances { governance_ids } => {
+            SubjectManagerMessage::UpGovernances {
+                governance_ids,
+                dirty_boot,
+            } => {
                 debug!(
                     governance_count = governance_ids.len(),
                     "Governance bootstrap requested"
                 );
+                self.dirty_boot = Some(dirty_boot);
                 self.up_governances(ctx, governance_ids).await?;
                 Ok(SubjectManagerResponse::Up)
             }
@@ -818,5 +873,43 @@ impl Handler<Self> for SubjectManager {
                 Ok(SubjectManagerResponse::DeleteGovernance)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_common::identity::HashAlgorithm;
+
+    fn manager() -> SubjectManager {
+        SubjectManager::new(
+            Arc::new(PublicKey::default()),
+            HashAlgorithm::Blake3,
+            false,
+            false,
+        )
+    }
+
+    fn subject(n: u8) -> DigestIdentifier {
+        DigestIdentifier::new(HashAlgorithm::Blake3, vec![n; 32]).unwrap()
+    }
+
+    #[test]
+    fn needs_sync_once_per_boot() {
+        let mut manager = manager();
+        // Unknown dirtiness reads as dirty: safe direction.
+        assert!(manager.needs_sync(&subject(1)));
+        // Second boot of the same subject skips.
+        assert!(!manager.needs_sync(&subject(1)));
+        // Other subjects still sync.
+        assert!(manager.needs_sync(&subject(2)));
+    }
+
+    #[test]
+    fn needs_sync_never_on_clean_boot() {
+        let mut manager = manager();
+        manager.dirty_boot = Some(false);
+        assert!(!manager.needs_sync(&subject(1)));
+        assert!(!manager.needs_sync(&subject(1)));
     }
 }

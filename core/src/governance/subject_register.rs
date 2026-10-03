@@ -82,6 +82,8 @@ impl SubjectRegister {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding.
+    GetMaxVersion,
     Check {
         creator: PublicKey,
         gov_version: u64,
@@ -123,9 +125,9 @@ impl Message for SubjectRegisterMessage {
             | Self::CreateSubject { .. }
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
-            Self::Check { .. } | Self::GetSubjectsByOwnerSchemaBatch { .. } => {
-                false
-            }
+            Self::Check { .. }
+            | Self::GetSubjectsByOwnerSchemaBatch { .. }
+            | Self::GetMaxVersion => false,
         }
     }
 }
@@ -134,6 +136,7 @@ impl Message for SubjectRegisterMessage {
 pub enum SubjectRegisterResponse {
     Ok,
     SubjectsBatch(Vec<Vec<DigestIdentifier>>),
+    MaxVersion(u64),
 }
 
 impl Response for SubjectRegisterResponse {}
@@ -245,6 +248,21 @@ impl Handler<Self> for SubjectRegister {
                     .collect();
 
                 return Ok(SubjectRegisterResponse::SubjectsBatch(results));
+            }
+            SubjectRegisterMessage::GetMaxVersion => {
+                // Highest version present across creator maps: a
+                // processed prefix marker (single ordered sender, so
+                // everything below it landed; removals only lower it,
+                // which widens the replay tail — safe direction).
+                let max = self
+                    .register
+                    .values()
+                    .filter_map(|(creations, _)| {
+                        creations.last().map(|(version, _)| *version)
+                    })
+                    .max()
+                    .unwrap_or(0);
+                return Ok(SubjectRegisterResponse::MaxVersion(max));
             }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
                 let data_count = data.len();

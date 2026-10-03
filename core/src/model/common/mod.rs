@@ -396,6 +396,12 @@ impl IntervalSet {
         }
     }
 
+    /// Highest closed end across intervals, if any. Read-only helper
+    /// for boot reconciliation tail bounding.
+    pub fn max_hi(&self) -> Option<u64> {
+        self.intervals.iter().map(|iv| iv.hi).max()
+    }
+
     // Devuelve true si `x` está dentro de algún intervalo (extremos inclusivos).
     pub fn contains(&self, x: u64) -> bool {
         if self.intervals.is_empty() {

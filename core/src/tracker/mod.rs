@@ -19,7 +19,10 @@ use crate::{
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
-    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    node::{
+        Node, NodeMessage, NodeResponse, TransferSubject,
+        register::RegisterMessage,
+    },
     sink::{SinkManager, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
@@ -45,6 +48,8 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
+pub mod reconcile;
+
 #[derive(
     Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize,
 )]
@@ -66,6 +71,9 @@ pub struct Tracker {
     pub service: bool,
     pub only_clear_events: bool,
     pub hash: Option<HashAlgorithm>,
+    /// Skip boot reconciliation (clean boot or already reconciled
+    /// this boot): the subject manager decides once per boot.
+    pub skip_reconcile: bool,
     pub state: Arc<TrackerState>,
 }
 
@@ -76,6 +84,7 @@ impl Clone for Tracker {
             service: self.service,
             only_clear_events: self.only_clear_events,
             hash: self.hash,
+            skip_reconcile: self.skip_reconcile,
             state: self.state.clone(),
         }
     }
@@ -144,11 +153,21 @@ impl Subject for Tracker {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::EOLSubject {
-            subject_id: self.subject_metadata.subject_id.clone(),
-            i_owner: *self.our_key == self.subject_metadata.owner,
-        })
-        .await
+        // Ask, not tell: the node journals before replying, so an
+        // Ok means the write is durable.
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::EOLSubject {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                i_owner: *self.our_key == self.subject_metadata.owner,
+            })
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn reject(
@@ -158,10 +177,17 @@ impl Subject for Tracker {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::RejectTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await?;
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::RejectTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
 
         let witnesses_register = ctx
             .system()
@@ -170,13 +196,23 @@ impl Subject for Tracker {
                 self.governance_id
             )))
             .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::Reject {
+        let WitnessesRegisterResponse::Ok = witnesses_register
+            .ask(WitnessesRegisterMessage::Reject {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 sn: self.subject_metadata.sn + 1,
                 gov_version,
             })
-            .await
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected: "WitnessesRegisterResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn confirm(
@@ -187,10 +223,17 @@ impl Subject for Tracker {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::ConfirmTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await?;
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::ConfirmTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
 
         if self.service || *self.our_key == self.subject_metadata.owner {
             let subject_register = ctx
@@ -220,13 +263,23 @@ impl Subject for Tracker {
                 self.governance_id
             )))
             .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::Confirm {
+        let WitnessesRegisterResponse::Ok = witnesses_register
+            .ask(WitnessesRegisterMessage::Confirm {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 sn: self.subject_metadata.sn + 1,
                 gov_version,
             })
-            .await
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected: "WitnessesRegisterResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn transfer(
@@ -237,13 +290,20 @@ impl Subject for Tracker {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::TransferSubject(TransferSubject {
-            name: self.subject_metadata.name.clone(),
-            subject_id: self.subject_metadata.subject_id.clone(),
-            new_owner: new_owner.clone(),
-            actual_owner: self.subject_metadata.owner.clone(),
-        }))
-        .await?;
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::TransferSubject(TransferSubject {
+                name: self.subject_metadata.name.clone(),
+                subject_id: self.subject_metadata.subject_id.clone(),
+                new_owner: new_owner.clone(),
+                actual_owner: self.subject_metadata.owner.clone(),
+            }))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
 
         let witnesses_register = ctx
             .system()
@@ -252,13 +312,23 @@ impl Subject for Tracker {
                 self.governance_id
             )))
             .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::Transfer {
+        let WitnessesRegisterResponse::Ok = witnesses_register
+            .ask(WitnessesRegisterMessage::Transfer {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 new_owner,
                 gov_version,
             })
-            .await
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected: "WitnessesRegisterResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn get_last_ledger(
@@ -436,6 +506,7 @@ impl Tracker {
         &self,
         ctx: &ActorContext<Self>,
         event: &Ledger,
+        era_mode: TrackerVisibilityMode,
     ) -> Result<(), ActorError> {
         let (stored_visibility, event_visibility, mode) = match &event.protocols
         {
@@ -459,17 +530,17 @@ impl Tracker {
                 };
                 let (stored_visibility, event_visibility) =
                     Self::fact_visibilities(&fact_request.viewpoints, false);
-                (stored_visibility, event_visibility, self.visibility_mode)
+                (stored_visibility, event_visibility, era_mode)
             }
             Protocols::TrackerFactOpaque { evaluation, .. } => {
                 let (stored_visibility, event_visibility) =
                     Self::fact_visibilities(&evaluation.viewpoints, true);
-                let mode = if evaluation.is_ok() {
+                let resolved = if evaluation.is_ok() {
                     TrackerVisibilityMode::Opaque
                 } else {
-                    self.visibility_mode
+                    era_mode
                 };
-                (stored_visibility, event_visibility, mode)
+                (stored_visibility, event_visibility, resolved)
             }
             Protocols::Transfer { .. }
             | Protocols::TrackerConfirm { .. }
@@ -477,7 +548,7 @@ impl Tracker {
             | Protocols::EOL { .. } => {
                 let (stored_visibility, event_visibility) =
                     Self::public_visibilities();
-                (stored_visibility, event_visibility, self.visibility_mode)
+                (stored_visibility, event_visibility, era_mode)
             }
             _ => {
                 return Err(ActorError::Functional {
@@ -626,12 +697,13 @@ impl Tracker {
             .await?;
 
         witnesses_register
-            .tell(WitnessesRegisterMessage::Create {
+            .ask(WitnessesRegisterMessage::Create {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 gov_version,
                 owner: self.subject_metadata.owner.clone(),
             })
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn register_gov_version_sn(
@@ -691,7 +763,12 @@ impl Tracker {
             self.create(ctx, first.gov_version).await?;
 
             self.on_event(first.clone(), ctx).await;
-            self.record_visibility_event(ctx, &first).await?;
+            self.record_visibility_event(
+                ctx,
+                &first,
+                self.visibility_mode,
+            )
+            .await?;
 
             Self::register(
                 ctx,
@@ -801,12 +878,23 @@ impl Tracker {
             let event_request = event.get_event_request();
 
             if last_event_is_ok {
+                // Failed events only leave their ledger record: every
+                // derived write below mirrors exactly what `apply`
+                // mutates. Visibility and sn describe the ledger event
+                // itself, so they always record.
+                let transfer_ok = matches!(
+                    &event.protocols,
+                    Protocols::Transfer { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
                 if last_gov_version != event_gov_version {
                     self.register_gov_version_sn(ctx, last_gov_version).await?;
                 }
                 if let Some(event_request) = &event_request {
                     match event_request {
-                        EventRequest::Transfer(transfer_request) => {
+                        EventRequest::Transfer(transfer_request)
+                            if transfer_ok =>
+                        {
                             self.transfer(
                                 ctx,
                                 transfer_request.new_owner.clone(),
@@ -820,6 +908,7 @@ impl Tracker {
                             )
                             .await?;
                         }
+                        EventRequest::Transfer(..) => {}
                         EventRequest::Reject(..) => {
                             self.reject(ctx, event.gov_version).await?;
                         }
@@ -853,7 +942,12 @@ impl Tracker {
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
-            self.record_visibility_event(ctx, &event).await?;
+            self.record_visibility_event(
+                ctx,
+                &event,
+                self.visibility_mode,
+            )
+            .await?;
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
@@ -963,8 +1057,28 @@ impl Actor for Tracker {
             });
         };
 
+        // Safe mode performs no boot healing (like governances and
+        // resumed requests): diagnostics and deletes run against
+        // persisted state as is.
         if config.safe_mode {
             return Ok(());
+        }
+
+        // Boot reconciliation: replay sn registrations and visibility
+        // records so governance registers catch up to the persisted
+        // tip before this actor processes anything (race-free: the
+        // mailbox is still closed). Skipped on clean boots and
+        // repeat boots (the subject manager decides once per boot).
+        // Target writes are key-anchored and idempotent, so
+        // interleaving with the governance's own reconcile is safe.
+        // A failure here is a broken node, not a degraded one: fail
+        // the boot loud.
+        if let Err(e) = self.reconcile_registers(ctx).await {
+            error!(
+                error = %e,
+                "Failed to reconcile tracker registers at boot"
+            );
+            return Err(e);
         }
 
         Ok(())
@@ -1072,6 +1186,7 @@ pub struct InitParamsTracker {
     pub hash: HashAlgorithm,
     pub is_service: bool,
     pub only_clear_events: bool,
+    pub skip_reconcile: bool,
 }
 
 #[async_trait]
@@ -1088,6 +1203,7 @@ impl PersistentActor for Tracker {
             only_clear_events: params.only_clear_events,
             hash: Some(params.hash),
             our_key: params.public_key,
+            skip_reconcile: params.skip_reconcile,
             state: Arc::new(TrackerState {
                 subject_metadata: init.subject_metadata,
                 properties: init.properties,

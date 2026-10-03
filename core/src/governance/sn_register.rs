@@ -58,6 +58,11 @@ impl SnRegister {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding:
+    /// highest sn recorded for the subject, if any.
+    GetMaxSn {
+        subject_id: DigestIdentifier,
+    },
     DeleteSubject {
         subject_id: DigestIdentifier,
     },
@@ -100,6 +105,7 @@ pub enum SnRegisterResponse {
     Ok,
     Sns(Vec<SnLimit>),
     GovVersionWindow(Vec<SnGovVersionRange>),
+    MaxSn(Option<u64>),
 }
 
 impl Response for SnRegisterResponse {}
@@ -216,6 +222,20 @@ impl Handler<Self> for SnRegister {
                 );
 
                 Ok(SnRegisterResponse::Sns(results))
+            }
+            SnRegisterMessage::GetMaxSn { subject_id } => {
+                // Highest sn recorded for this subject (values grow
+                // with event order; a missing tail means an empty map
+                // here, which reads as unknown and scans fully —
+                // safe direction).
+                let max = self
+                    .register
+                    .get(&subject_id)
+                    .and_then(|versions| {
+                        versions.iter().map(|(_, sn)| *sn).max()
+                    });
+
+                return Ok(SnRegisterResponse::MaxSn(max));
             }
             SnRegisterMessage::RegisterSn {
                 subject_id,

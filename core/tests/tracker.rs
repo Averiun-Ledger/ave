@@ -6322,3 +6322,492 @@ async fn test_namespace_quota_counts_per_namespace() {
         "rejection must name the quota, got: {msg}"
     );
 }
+#[test(tokio::test)]
+// Wiping sn and visibility state is strictly worse than any crash
+// window: if the boot replay heals them back, it heals any crash
+// loss too.
+async fn test_reconcile_heals_sn_visibility() {
+    use ave_common::bridge::response::{
+        TrackerEventVisibilityDB, TrackerEventVisibilityRangeDB,
+        TrackerStoredVisibilityDB, TrackerStoredVisibilityRangeDB,
+        TrackerVisibilityModeDB,
+    };
+    use common::assert_tracker_visibility;
+
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner_governance = nodes[0].api.clone();
+    let emit_events = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&emit_events])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": emit_events.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode2",
+                                    "namespace": [],
+                                    "quantity": 1
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Any",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id_1, ..) =
+        create_subject(&emit_events, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for data in [100, 200] {
+        let json = json!({
+            "ModOne": {
+                "data": data,
+            }
+        });
+        let issuer_keys =
+            KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        emit_fact_signed(
+            &emit_events,
+            &issuer_keys,
+            subject_id_1.clone(),
+            json,
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let assert_visibility = |state: &ave_common::response::SubjectDB| {
+        assert_tracker_visibility(
+            state,
+            TrackerVisibilityModeDB::Full,
+            vec![TrackerStoredVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: None,
+                visibility: TrackerStoredVisibilityDB::Full,
+            }],
+            vec![TrackerEventVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(0),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 1,
+                to_sn: None,
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec![],
+                },
+            }],
+        )
+        .unwrap()
+    };
+
+    let state =
+        get_subject(&emit_events, subject_id_1.clone(), Some(2), true)
+            .await
+            .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_visibility(&state);
+
+    // Wipe derived state and reboot: the replay must converge back.
+    emit_events
+        .test_purge_register(governance_id.clone(), "sn")
+        .await
+        .unwrap();
+    emit_events
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so everything below observes post-boot state.
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.iter().any(|key| {
+        key.to_string() == owner_governance.public_key()
+    }));
+
+    // One more fact after the reboot: its snapshot is built live from
+    // the healed registers (never from the pre-reboot ext_db rows),
+    // and merged ranges must equal the pre-purge snapshot.
+    let json = json!({
+        "ModOne": {
+            "data": 300,
+        }
+    });
+    let issuer_keys =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    emit_fact_signed(
+        &api,
+        &issuer_keys,
+        subject_id_1.clone(),
+        json,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&api, subject_id_1.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3);
+    assert_visibility(&state);
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// Tracker ownership rotation must survive witnesses loss: after
+// wiping the witnesses register and rebooting, visibility heals
+// (entry recreated, ranges converged) and the new owner operates.
+async fn test_reconcile_heals_tracker_rotation() {
+    use ave_common::bridge::response::{
+        TrackerEventVisibilityDB, TrackerEventVisibilityRangeDB,
+        TrackerStoredVisibilityDB, TrackerStoredVisibilityRangeDB,
+        TrackerVisibilityModeDB,
+    };
+    use common::assert_tracker_visibility;
+
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let future_owner = nodes[0].api.clone();
+    let owner_governance = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&future_owner])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": future_owner.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode1"
+                    ]
+                }
+            },
+            "tracker_schemas": {
+                "add": {
+                    "issuer": [
+                        {
+                            "name": "AveNode1",
+                            "namespace": []
+                        },
+                        {
+                            "name": "Owner",
+                            "namespace": []
+                        }
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode1",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        },
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&owner_governance, subject_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    future_owner
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &owner_governance,
+        subject_id.clone(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    future_owner.update_subject(subject_id.clone()).await.unwrap();
+
+    emit_confirm(&future_owner, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(&future_owner, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+
+    // Wipe witnesses (visibility + transfer state) and reboot the new
+    // owner back into the network: replay recreates the entry and
+    // converges visibility.
+    future_owner
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: nodes[1].api.peer_id().to_string(),
+            address: vec![nodes[1].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so the emit below observes post-boot state.
+    let owner_key =
+        PublicKey::from_str(owner_governance.public_key()).unwrap();
+    let evaluators =
+        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    // The new owner operates: fresh snapshot built live from healed
+    // registers, with merged ranges equal to a clean run.
+    let json = json!({
+        "ModOne": {
+            "data": 150,
+        }
+    });
+    emit_fact(&api, subject_id.clone(), json, true).await.unwrap();
+
+    let state = get_subject(&api, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+    assert_tracker_visibility(
+        &state,
+        TrackerVisibilityModeDB::Full,
+        vec![TrackerStoredVisibilityRangeDB {
+            from_sn: 0,
+            to_sn: None,
+            visibility: TrackerStoredVisibilityDB::Full,
+        }],
+        vec![
+            TrackerEventVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(0),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 1,
+                to_sn: Some(1),
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec![],
+                },
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 2,
+                to_sn: Some(3),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 4,
+                to_sn: None,
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec![],
+                },
+            },
+        ],
+    )
+    .unwrap();
+
+    node_running(&api).await.unwrap();
+}

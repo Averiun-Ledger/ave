@@ -35,7 +35,9 @@ use crate::governance::model::{HashThisRole, RoleTypes};
 use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
-use crate::model::common::node::{get_subject_data, i_owner_new_owner};
+use crate::model::common::node::{
+    get_subject_data, i_owner_new_owner, wait_governance_ready,
+};
 use crate::model::common::subject::{
     get_schema_viewpoints, get_tracker_visibility_state, get_version, has_role,
 };
@@ -1200,10 +1202,21 @@ impl Actor for RequestHandler {
             return Ok(());
         }
 
+        // Deferred resume: each rehydrated in-flight request
+        // re-drives once its own governance reconciled, never
+        // mid-reconcile. Governance ids resolve from node state like
+        // the live path; unknown targets proceed ungated.
         for (subject_id, request_id) in self.handling.clone() {
             let governance_id = get_subject_data(ctx, &subject_id)
                 .await?
                 .and_then(|data| data.get_governance_id());
+            if let Some(governance_id) = &governance_id
+                && let Err(e) =
+                    wait_governance_ready(ctx, governance_id).await
+            {
+                error!("Request handler pre_start timed out waiting for governance readiness");
+                return Err(e);
+            }
             let request_manager_init = InitRequestManager {
                 our_key: self.our_key.clone(),
                 subject_id: subject_id.clone(),
@@ -1345,6 +1358,11 @@ impl Handler<Self> for RequestHandler {
                 Ok(RequestHandlerResponse::Approvals(res))
             }
             RequestHandlerMessage::NewRequest { request } => {
+                // No gate here by design: intake accepts everything
+                // and routes internally. Target subjects serialize in
+                // their own mailbox (closed while reconciling) and
+                // stale reads resolve through deterministic protocol
+                // errors and retries, like any network race.
                 if let Err(e) = request.verify() {
                     let err = RequestHandlerError::SignatureVerification(
                         e.to_string(),

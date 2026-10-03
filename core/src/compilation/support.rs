@@ -492,6 +492,7 @@ impl CompilerSupport {
         _toolchain: &str,
         _contracts_root: &Path,
         _pin: &str,
+        _cargo_bin: Option<PathBuf>,
     ) -> Result<(Vec<u8>, DigestIdentifier), CompilerError> {
         Err(CompilerError::NoLocalToolchain)
     }

@@ -24,7 +24,7 @@ use crate::{
         },
         sink::SubjectSinkEvent,
     },
-    node::register::{Register, RegisterMessage},
+    node::register::{Register, RegisterMessage, RegisterResponse},
     tracker::Tracker,
     validation::{
         request::{ActualProtocols, LastData, ValidationReq},
@@ -1984,12 +1984,17 @@ where
         let register_path = ActorPath::from("/user/node/register");
         match ctx.system().get_actor::<Register>(&register_path).await {
             Ok(register) => {
-                register.tell(message.clone()).await?;
-
-                debug!(
-                    message = ?message,
-                    "Register message sent successfully"
-                );
+                // Ask, not tell: the register journals before replying,
+                // so a reply means the write is durable and boot
+                // reconciliation never needs to replay it.
+                match register.ask(message.clone()).await? {
+                    RegisterResponse::None => {
+                        debug!(
+                            message = ?message,
+                            "Register message applied successfully"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 error!(

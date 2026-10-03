@@ -161,6 +161,17 @@ pub struct Node {
     transfer_subjects: HashMap<DigestIdentifier, TransferData>,
 
     reject_subjects: HashSet<DigestIdentifier>,
+
+    /// Whether the last shutdown was dirty (crash, power loss) or
+    /// unknown. Subjects skip boot reconciliation only when this is
+    /// false, which solely the explicit clean-shutdown handshake
+    /// (`PrepareCleanShutdown`) persists. Safe default: sync.
+    dirty_shutdown: bool,
+
+    /// Boot governances still to report reconciliation. Runtime
+    /// only: restarts re-derive it from persisted subjects.
+    #[serde(skip)]
+    pending_reconcile: HashSet<DigestIdentifier>,
 }
 
 // Manual Borsh implementation to skip the 'owner' field
@@ -174,6 +185,7 @@ impl BorshSerialize for Node {
         BorshSerialize::serialize(&self.known_subjects, writer)?;
         BorshSerialize::serialize(&self.transfer_subjects, writer)?;
         BorshSerialize::serialize(&self.reject_subjects, writer)?;
+        BorshSerialize::serialize(&self.dirty_shutdown, writer)?;
         Ok(())
     }
 }
@@ -197,6 +209,10 @@ impl BorshDeserialize for Node {
             )?;
         let reject_subjects =
             HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
+        // The flag did not exist before boot reconciliation: old
+        // snapshots decode to dirty (safe direction: sync).
+        let dirty_shutdown =
+            bool::deserialize_reader(reader).unwrap_or(true);
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
@@ -213,8 +229,10 @@ impl BorshDeserialize for Node {
             known_subjects,
             transfer_subjects,
             reject_subjects,
+            dirty_shutdown,
             is_service: false,
             only_clear_events: false,
+            pending_reconcile: HashSet::new(),
         })
     }
 }
@@ -821,10 +839,23 @@ pub enum NodeMessage {
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
+    /// A governance finished its boot reconciliation (derived state
+    /// caught up to the ledger tip). The node counts them to order
+    /// resume and tracker waits; nothing is ever rejected.
+    /// Late reports (governances created after boot, or double
+    /// reports) are harmless.
+    GovernanceReconciled {
+        governance_id: DigestIdentifier,
+    },
     EOLSubject {
         subject_id: DigestIdentifier,
         i_owner: bool,
     },
+    /// Clean-shutdown handshake (binary calls it before stopping
+    /// the system on graceful shutdown): persists the clean marker
+    /// so the next boot skips reconciliation. Never sent on crash
+    /// paths, so a missing marker always means dirty.
+    PrepareCleanShutdown,
 }
 
 impl Message for NodeMessage {
@@ -836,6 +867,7 @@ impl Message for NodeMessage {
                 | Self::RejectTransfer(..)
                 | Self::ConfirmTransfer(..)
                 | Self::EOLSubject { .. }
+                | Self::PrepareCleanShutdown
         )
     }
 }
@@ -881,6 +913,10 @@ pub enum NodeEvent {
         subject_id: DigestIdentifier,
         i_owner: bool,
     },
+    /// Clean-shutdown handshake marker: the last shutdown completed
+    /// gracefully, so the next boot may skip reconciliation. Appended
+    /// last: old journals decode without it.
+    MarkCleanShutdown,
 }
 
 impl Event for NodeEvent {}
@@ -1118,11 +1154,31 @@ impl Actor for Node {
         if let Err(e) = subject_manager
             .ask(SubjectManagerMessage::UpGovernances {
                 governance_ids: self.governance_ids(),
+                dirty_boot: self.dirty_shutdown,
             })
             .await
         {
             error!(error = %e, "Failed to bootstrap governances");
             return Err(e);
+        }
+
+        // Boot reconciliation gate: governances reconcile derived
+        // state in their own pre_start and report back; ingress stays
+        // gated until every boot governance does. Empty set (fresh
+        // node) stays ready: there is nothing to reconcile. The
+        // shared helper mirrors the set so gates check per subject
+        // without messaging.
+        self.pending_reconcile =
+            self.governance_ids().into_iter().collect();
+        if let Some(pending) = ctx
+            .system()
+            .get_helper::<crate::system::PendingReconcile>(
+                "pending_reconcile",
+            )
+        {
+            for governance_id in &self.pending_reconcile {
+                pending.insert(governance_id.clone());
+            }
         }
 
         let hash = self.hash()?;
@@ -1408,6 +1464,39 @@ impl Handler<Self> for Node {
 
                 Ok(NodeResponse::Ok)
             }
+            NodeMessage::PrepareCleanShutdown => {
+                self.on_event(NodeEvent::MarkCleanShutdown, ctx).await;
+
+                debug!(
+                    msg_type = "PrepareCleanShutdown",
+                    "Clean shutdown marker persisted"
+                );
+
+                Ok(NodeResponse::Ok)
+            }
+            NodeMessage::GovernanceReconciled { governance_id } => {
+                // Late reports (governances created after boot, or
+                // double reports) are harmless: only the boot set
+                // gates per-subject traffic.
+                self.pending_reconcile.remove(&governance_id);
+                if let Some(pending) = ctx
+                    .system()
+                    .get_helper::<crate::system::PendingReconcile>(
+                        "pending_reconcile",
+                    )
+                {
+                    pending.remove(&governance_id);
+                }
+                if self.pending_reconcile.is_empty() {
+                    debug!(
+                        msg_type = "GovernanceReconciled",
+                        governance_id = %governance_id,
+                        "All boot governances reconciled"
+                    );
+                }
+
+                Ok(NodeResponse::Ok)
+            }
             NodeMessage::SignRequest(content) => {
                 let content = *content;
                 let content_type = match &content {
@@ -1618,6 +1707,8 @@ impl PersistentActor for Node {
             known_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),
             reject_subjects: HashSet::new(),
+            dirty_shutdown: true,
+            pending_reconcile: HashSet::new(),
         }
     }
 
@@ -1691,6 +1782,13 @@ impl PersistentActor for Node {
                     "Applied subject transfer"
                 );
             }
+            NodeEvent::MarkCleanShutdown => {
+                inner.dirty_shutdown = false;
+                debug!(
+                    event_type = "MarkCleanShutdown",
+                    "Applied clean shutdown marker"
+                );
+            }
         };
 
         Ok(state)
@@ -1706,6 +1804,7 @@ impl PersistentActor for Node {
         self.known_subjects.clone_from(&state.known_subjects);
         self.transfer_subjects.clone_from(&state.transfer_subjects);
         self.reject_subjects.clone_from(&state.reject_subjects);
+        self.dirty_shutdown = state.dirty_shutdown;
     }
 }
 
