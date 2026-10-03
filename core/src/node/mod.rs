@@ -18,7 +18,7 @@ use crate::{
         SubjectAccessResponse,
     },
     config::SinkTarget,
-    db::Storable,
+    db::{Storable, check_dir_writable},
     distribution::worker::DistriWorker,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
@@ -1810,52 +1810,6 @@ impl PersistentActor for Node {
 
 #[async_trait]
 impl Storable for Node {}
-
-/// Check that a directory exists and is writable.
-/// If it does not exist, check the nearest existing ancestor.
-fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
-    let target = if path.exists() {
-        if !path.is_dir() {
-            return Err(format!(
-                "'{}' exists but is not a directory",
-                path.display()
-            ));
-        }
-        path
-    } else {
-        let mut ancestor = path;
-        while !ancestor.exists() {
-            match ancestor.parent() {
-                Some(p) => ancestor = p,
-                None => {
-                    return Err(format!(
-                        "'{}' does not exist and has no existing parent",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        if !ancestor.is_dir() {
-            return Err(format!(
-                "ancestor '{}' exists but is not a directory",
-                ancestor.display()
-            ));
-        }
-        ancestor
-    };
-
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&test_file);
-        }
-        Err(e) => {
-            return Err(format!("'{}' is not writable: {e}", target.display()));
-        }
-    }
-
-    Ok(())
-}
 
 async fn populate_sink_registry(
     registry: &ActorRef<SinkRegistry>,

@@ -217,9 +217,9 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     let transfers = owner.get_pending_transfers().await.unwrap();
     assert!(!transfers.iter().any(|t| t.subject_id == tracker_id));
 
-    // After deletion the DBs are purged; both endpoints may return NoEventsFound
-    // or SubjectNotFound/MissingResource depending on whether the actor is gone.
-    let events_err = owner
+    // After deletion the DBs are purged; the events list reads empty
+    // (list endpoints answer `[]`, only single-item lookups 404).
+    let events = owner
         .get_events(
             tracker_id.clone(),
             EventsQuery {
@@ -228,16 +228,11 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             },
         )
         .await
-        .unwrap_err();
+        .unwrap();
     assert!(
-        matches!(
-            events_err,
-            Error::NoEventsFound(_)
-                | Error::SubjectNotFound(_)
-                | Error::MissingResource { .. }
-        ),
-        "unexpected events error: {:?}",
-        events_err
+        events.events.is_empty(),
+        "unexpected events after deletion: {:?}",
+        events.events.len()
     );
 
     let sink_err = owner

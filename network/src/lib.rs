@@ -610,6 +610,12 @@ impl fmt::Display for NodeType {
 
 /// Delivery policy for an outbound message that can not be sent
 /// immediately.
+///
+/// `Queued` is deliberately the default: without an explicit policy
+/// the message is buffered (bounded, with TTL) instead of silently
+/// dropped. Every production sender sets this explicitly via
+/// `delivery_of`; the default only covers deserialized messages
+/// missing the field.
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default,
 )]

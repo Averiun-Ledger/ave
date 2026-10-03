@@ -24,6 +24,11 @@ struct DialFailureLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RetryScheduleLabels {
+    kind: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct MessageDropLabels {
     direction: &'static str,
     reason: &'static str,
@@ -84,6 +89,7 @@ pub struct NetworkMetrics {
     control_list_apply_total: Family<ControlListLabels, Counter>,
     control_list_denied_total: Family<ControlListDeniedLabels, Counter>,
     retry_queue_len: Gauge,
+    retry_scheduled_total: Family<RetryScheduleLabels, Counter>,
     pending_outbound_peers: Gauge,
     pending_outbound_messages: Gauge,
     pending_outbound_bytes: Gauge,
@@ -116,6 +122,7 @@ impl NetworkMetrics {
             control_list_apply_total: Family::default(),
             control_list_denied_total: Family::default(),
             retry_queue_len: Gauge::default(),
+            retry_scheduled_total: Family::default(),
             pending_outbound_peers: Gauge::default(),
             pending_outbound_messages: Gauge::default(),
             pending_outbound_bytes: Gauge::default(),
@@ -193,6 +200,11 @@ impl NetworkMetrics {
             "network_retry_queue_len",
             "Current retry queue length.",
             self.retry_queue_len.clone(),
+        );
+        registry.register(
+            "network_retry_scheduled_total",
+            "Total scheduled connection retries, labeled by kind.",
+            self.retry_scheduled_total.clone(),
         );
         registry.register(
             "network_pending_outbound_peers",
@@ -547,6 +559,12 @@ impl NetworkMetrics {
 
     pub(crate) fn set_retry_queue_len(&self, value: i64) {
         self.retry_queue_len.set(value);
+    }
+
+    pub(crate) fn observe_retry_scheduled(&self, kind: &'static str) {
+        self.retry_scheduled_total
+            .get_or_create(&RetryScheduleLabels { kind })
+            .inc();
     }
 
     pub(crate) fn set_pending_outbound_peers(&self, value: i64) {

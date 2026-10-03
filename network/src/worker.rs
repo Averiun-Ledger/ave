@@ -716,10 +716,18 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         entry.when = when;
         entry.kind = kind;
         entry.addrs = addrs;
+        let due = Due(peer, entry.when);
+        let kind_label = match kind {
+            RetryKind::Discover => "discover",
+            RetryKind::Dial => "dial",
+        };
 
         self.peer_action.insert(peer, Action::from(kind));
 
-        self.retry_queue.push(Due(peer, entry.when));
+        self.retry_queue.push(due);
+        if let Some(metrics) = self.metric_handle() {
+            metrics.observe_retry_scheduled(kind_label);
+        }
         self.arm_retry_timer();
         self.refresh_runtime_metrics();
     }
@@ -843,8 +851,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         // the sender has its own retry machine and will retransmit —
         // and the connection is kicked so the retransmission finds it
         // open.
+        // A freshly identified peer is sendable even before the DHT
+        // lists it: dropping its first messages would burn a retry
+        // cycle for a connection that is already open.
+        let sendable = matches!(
+            self.peer_action.get(&peer),
+            Some(Action::Identified(..))
+        ) || self.swarm.behaviour_mut().is_known_peer(&peer);
+
         if delivery == Delivery::Direct {
-            if self.swarm.behaviour_mut().is_known_peer(&peer) {
+            if sendable {
                 if let Some(Action::Identified(..)) =
                     self.peer_action.get(&peer)
                 {
@@ -881,7 +897,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         self.add_pending_outbound_message(peer, message);
 
-        if self.swarm.behaviour_mut().is_known_peer(&peer) {
+        if sendable {
             if let Some(Action::Identified(..)) = self.peer_action.get(&peer) {
                 self.send_pending_outbound_messages(peer);
             } else {
@@ -1475,8 +1491,19 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, cause = %cause, "dial denied by behaviour");
+                    return Some((false, vec![]));
                 }
-                Some((false, vec![]))
+
+                // Terminal: an allow-list denial never heals by
+                // redialing. Evict at once instead of burning three
+                // discovery strikes.
+                warn!(target: TARGET, peer_id = %peer_id, cause = %cause, "dial denied by behaviour; evicting peer");
+                self.retry_by_peer.remove(peer_id);
+                self.clear_pending_messages(peer_id);
+                self.swarm
+                    .behaviour_mut()
+                    .clean_hard_peer_to_remove(peer_id);
+                None
             }
             DialError::Aborted => {
                 if let Some(metrics) = self.metric_handle() {
@@ -3342,6 +3369,35 @@ mod tests {
     }
 
     #[test]
+    fn send_message_to_identified_peer_skips_discovery() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3412".to_owned(),
+        );
+        let peer = PeerId::random();
+        // Identified but not yet in the DHT k-buckets: the open
+        // connection must be used instead of dropping to discovery.
+        worker.peer_action.insert(
+            peer,
+            Action::Identified(ConnectionId::new_unchecked(41)),
+        );
+        let result = worker.send_message(
+            peer,
+            Bytes::from_static(b"hello"),
+            Delivery::Direct,
+        );
+        assert!(result.is_ok());
+        assert!(matches!(
+            worker.peer_action.get(&peer),
+            Some(Action::Identified(_))
+        ));
+    }
+
+    #[test]
     fn add_pending_inbound_message_duplicate_and_limits() {
         let mut worker = build_worker(
             vec![],
@@ -3379,7 +3435,7 @@ mod tests {
             "/memory/3405".to_owned(),
         );
         let peer = PeerId::random();
-        // MAX_PENDING_MESSAGES_PER_PEER is typically 1024
+        // Default max_pending_messages_per_peer is 100.
         for i in 0..1030u16 {
             worker.add_pending_inbound_message(
                 peer,
@@ -3387,7 +3443,7 @@ mod tests {
             );
         }
         let queue = worker.pending_inbound_messages.get(&peer).unwrap();
-        assert!(queue.len() <= 1024, "queue len was {}", queue.len());
+        assert_eq!(queue.len(), 100, "queue len was {}", queue.len());
     }
 
     #[test]

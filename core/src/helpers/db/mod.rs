@@ -1,8 +1,9 @@
 mod error;
 
 use crate::{
-    external_db::DBManager, model::sink::SubjectSinkEvent,
-    node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
+    db::check_dir_writable, external_db::DBManager,
+    model::sink::SubjectSinkEvent, node::register::RegisterEvent,
+    request::tracking::RequestTrackingEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
@@ -329,48 +330,4 @@ impl ReadStore for ExternalDB {
     }
 }
 
-/// Check that a directory exists and is writable.
-/// If it does not exist, check the nearest existing ancestor.
-fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
-    let target = if path.exists() {
-        if !path.is_dir() {
-            return Err(format!(
-                "'{}' exists but is not a directory",
-                path.display()
-            ));
-        }
-        path
-    } else {
-        let mut ancestor = path;
-        while !ancestor.exists() {
-            match ancestor.parent() {
-                Some(p) => ancestor = p,
-                None => {
-                    return Err(format!(
-                        "'{}' does not exist and has no existing parent",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        if !ancestor.is_dir() {
-            return Err(format!(
-                "ancestor '{}' exists but is not a directory",
-                ancestor.display()
-            ));
-        }
-        ancestor
-    };
 
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&test_file);
-        }
-        Err(e) => {
-            return Err(format!("'{}' is not writable: {e}", target.display()));
-        }
-    }
-
-    Ok(())
-}

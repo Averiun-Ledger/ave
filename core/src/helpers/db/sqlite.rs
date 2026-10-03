@@ -2464,11 +2464,17 @@ fn get_events_from_conn(
     let mut page = query.page.unwrap_or(1).max(1);
     let total = count_events_from_conn(conn, runtime, subject_id, &query)?;
 
-    // An empty ledger stays an error (not an empty page): callers use
-    // `NoEvents` as the not-found signal for deleted or never-written
-    // subjects, and the API maps it to 404.
+    // An empty ledger is an empty page, like aborts: list endpoints
+    // answer `[]`, only single-item lookups report `NoEvents`.
     if total == 0 {
-        return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+        return Ok(PaginatorEvents {
+            paginator: Paginator {
+                pages: 0,
+                next: None,
+                prev: None,
+            },
+            events: Vec::new(),
+        });
     }
 
     let mut pages = total.div_ceil(quantity);
@@ -3139,7 +3145,7 @@ fn resolve_event_page_from_anchors(
         let events =
             fetch_events_with_offset(conn, subject_id, &query, offset)?;
         if events.is_empty() {
-            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+            return Ok(Vec::new());
         }
         if page < pages
             && let Some(last) = events.last()
@@ -3164,7 +3170,7 @@ fn resolve_event_page_from_anchors(
         let events =
             fetch_events_with_cursor(conn, subject_id, &current_query)?;
         if events.is_empty() {
-            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+            return Ok(Vec::new());
         }
 
         if current_page < pages
@@ -3183,7 +3189,7 @@ fn resolve_event_page_from_anchors(
         }
 
         let Some(last) = events.last() else {
-            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+            return Ok(Vec::new());
         };
         current_query.cursor = Some(encode_event_cursor(last.sn));
         current_page += 1;

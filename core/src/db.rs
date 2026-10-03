@@ -59,7 +59,11 @@ impl Database {
 
 /// Check that a directory exists and is writable.
 /// If it does not exist, check the nearest existing ancestor.
-fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
+/// Single canonical copy: the former duplicates in `helpers::db` and
+/// `node` were removed. Symlinks are accepted (operators mount disks
+/// through them); the probe is best-effort, the database open itself
+/// is the enforcement point.
+pub(crate) fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
     let target = if path.exists() {
         if !path.is_dir() {
             return Err(format!(
