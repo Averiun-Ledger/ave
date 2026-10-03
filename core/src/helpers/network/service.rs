@@ -13,8 +13,12 @@ use super::test_faults::{OutboundVerdict, SharedFaultRegistry};
 /// The Helper service.
 #[derive(Debug, Clone)]
 pub struct NetworkSender {
-    /// The command sender to communicate with the worker.
+    /// Outbound command sender: actor traffic toward the network.
     command_sender: Sender<Command<NetworkMessage>>,
+    /// Inbound command sender: traffic from the network toward the
+    /// actors. Priority goes to the outbound channel, so inbound
+    /// bursts never stall deadline-driven votes.
+    inbound_sender: Option<Sender<Command<NetworkMessage>>>,
     /// Test-only fault registry, consulted before anything reaches the
     /// command channel so an injected failure can fail the send itself.
     #[cfg(feature = "test")]
@@ -25,7 +29,10 @@ impl NetworkSender {
     /// Create a new `NetworkSender`.
     #[cfg(not(feature = "test"))]
     pub const fn new(command_sender: Sender<Command<NetworkMessage>>) -> Self {
-        Self { command_sender }
+        Self {
+            command_sender,
+            inbound_sender: None,
+        }
     }
 
     /// Create a new `NetworkSender`.
@@ -36,8 +43,27 @@ impl NetworkSender {
     ) -> Self {
         Self {
             command_sender,
+            inbound_sender: None,
             faults,
         }
+    }
+
+    /// Attach the inbound channel. The intermediary wires it at build;
+    /// unit harnesses without one keep the single-channel behavior.
+    pub fn with_inbound_sender(
+        mut self,
+        sender: Sender<Command<NetworkMessage>>,
+    ) -> Self {
+        self.inbound_sender = Some(sender);
+        self
+    }
+
+    /// Sender for traffic coming from the network (received messages).
+    /// Falls back to the outbound channel when no inbound one exists.
+    pub fn inbound_sender(&self) -> Sender<Command<NetworkMessage>> {
+        self.inbound_sender.clone().unwrap_or_else(|| {
+            self.command_sender.clone()
+        })
     }
 
     /// Send command to the network worker.
@@ -101,7 +127,11 @@ impl NetworkSender {
             });
         }
 
-        self.command_sender.send(command).await.map_err(|e| {
+        let sender = match &command {
+            Command::ReceivedMessage { .. } => self.inbound_sender(),
+            Command::SendMessage { .. } => self.command_sender.clone(),
+        };
+        sender.send(command).await.map_err(|e| {
             error!(
                 error = %e,
                 "Failed to send command to network worker"

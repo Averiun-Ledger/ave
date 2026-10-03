@@ -443,7 +443,7 @@ impl Api {
 
         let peer_id = worker.local_peer_id().to_string();
 
-        worker.add_helper_sender(service.sender());
+        worker.add_helper_sender(service.inbound_sender());
 
         system.add_helper("network", service.clone());
 
@@ -2509,15 +2509,21 @@ impl Api {
     /// delivered.
     pub async fn test_release_held(&self) -> Result<usize, Error> {
         let faults = self.test_faults()?;
-        let (commands, control) = {
+        let commands = {
             let mut faults = faults
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let commands = faults.take_held_commands();
-            (commands, faults.control_sender())
+            commands
+                .into_iter()
+                .map(|command| {
+                    let control = faults.control_sender_for(&command);
+                    (control, command)
+                })
+                .collect::<Vec<_>>()
         };
         let count = commands.len();
-        for command in commands {
+        for (control, command) in commands {
             // A closed channel means the node is shutting down:
             // nothing to deliver to, and a test fault is never fatal.
             let _ = control.send(command).await;
@@ -2568,7 +2574,7 @@ impl Api {
             let faults = faults
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            faults.control_sender()
+            faults.inbound_sender()
         };
         let command =
             helpers::network::test_faults::TestFaultRegistry::inject_command(

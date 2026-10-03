@@ -178,13 +178,15 @@ enum HeldMessage {
 }
 
 /// The per-node fault registry: rules plus the held messages, with the
-/// node's own command channel to re-inject releases and test-crafted
-/// inbound messages.
+/// node's own command channels to re-inject releases and test-crafted
+/// inbound messages. Both senders start as the same channel; the
+/// intermediary attaches the real inbound one.
 #[derive(Debug)]
 pub struct TestFaultRegistry {
     rules: Vec<FaultRule>,
     held: Vec<HeldMessage>,
-    control: mpsc::Sender<Command<NetworkMessage>>,
+    outbound: mpsc::Sender<Command<NetworkMessage>>,
+    inbound: mpsc::Sender<Command<NetworkMessage>>,
 }
 
 impl TestFaultRegistry {
@@ -192,8 +194,16 @@ impl TestFaultRegistry {
         Self {
             rules: Vec::new(),
             held: Vec::new(),
-            control,
+            outbound: control.clone(),
+            inbound: control,
         }
+    }
+
+    pub fn set_inbound_sender(
+        &mut self,
+        sender: mpsc::Sender<Command<NetworkMessage>>,
+    ) {
+        self.inbound = sender;
     }
 
     pub fn install(&mut self, rule: FaultRule) {
@@ -331,10 +341,26 @@ impl TestFaultRegistry {
             .collect()
     }
 
-    /// The node's own command channel, to re-inject releases and
-    /// test-crafted inbound messages.
+    /// The node's own outbound command channel.
     pub fn control_sender(&self) -> mpsc::Sender<Command<NetworkMessage>> {
-        self.control.clone()
+        self.outbound.clone()
+    }
+
+    /// The node's own inbound command channel.
+    pub fn inbound_sender(&self) -> mpsc::Sender<Command<NetworkMessage>> {
+        self.inbound.clone()
+    }
+
+    /// The channel matching the command direction: releases and
+    /// crafted messages re-enter through their own lane.
+    pub fn control_sender_for(
+        &self,
+        command: &Command<NetworkMessage>,
+    ) -> mpsc::Sender<Command<NetworkMessage>> {
+        match command {
+            Command::SendMessage { .. } => self.outbound.clone(),
+            Command::ReceivedMessage { .. } => self.inbound.clone(),
+        }
     }
 
     /// Builds the inbound command that delivers a test-crafted message

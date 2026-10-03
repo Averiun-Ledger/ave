@@ -61,7 +61,11 @@ impl Intermediary {
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> Arc<NetworkSender> {
-        let (command_sender, mut command_receiver) = mpsc::channel(2048);
+        // Separate channels per direction so inbound bursts (bulk
+        // ledger batches) never stall outbound deadline-driven votes.
+        // The loop below polls outbound first.
+        let (outbound_sender, mut outbound_receiver) = mpsc::channel(1024);
+        let (inbound_sender, mut inbound_receiver) = mpsc::channel(1024);
 
         // Test-only fault injection: one registry per node, shared by
         // the network sender (outbound) and this task (inbound), and
@@ -70,52 +74,54 @@ impl Intermediary {
         let faults = {
             let faults: test_faults::SharedFaultRegistry =
                 Arc::new(std::sync::Mutex::new(
-                    test_faults::TestFaultRegistry::new(command_sender.clone()),
+                    test_faults::TestFaultRegistry::new(
+                        outbound_sender.clone(),
+                    ),
                 ));
+            faults
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .set_inbound_sender(inbound_sender.clone());
             system.add_helper("test_faults", faults.clone());
             faults
         };
 
         #[cfg(feature = "test")]
-        let service_sender = NetworkSender::new(command_sender, faults.clone());
+        let service_sender =
+            NetworkSender::new(outbound_sender, faults.clone())
+                .with_inbound_sender(inbound_sender.clone());
         #[cfg(not(feature = "test"))]
-        let service_sender = NetworkSender::new(command_sender);
+        let service_sender = NetworkSender::new(outbound_sender)
+            .with_inbound_sender(inbound_sender.clone());
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    command = command_receiver.recv() => {
+                    biased;
+                    command = outbound_receiver.recv() => {
                         if let Some(command) = command {
-                            let result = Self::handle_command(
+                            Self::drive_command(
                                 command,
                                 &system,
                                 &network_sender,
                                 #[cfg(feature = "test")]
                                 &faults,
-                            ).await;
-                            if let Err(e) = result {
-                                match e {
-                                    IntermediaryError::NetworkSendFailed { .. } => {
-                                        error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
-                                        crash_token.cancel();
-                                        break;
-                                    }
-                                    _ => {
-                                        if let Some(metrics) =
-                                            try_core_metrics()
-                                        {
-                                            metrics
-                                                .observe_network_ingress_drop(
-                                                    e.cause(),
-                                                );
-                                        }
-                                        warn!(
-                                            error = %e,
-                                            "Intermediary command failed with non-fatal error"
-                                        );
-                                    }
-                                }
-                            }
+                                &crash_token,
+                            )
+                            .await;
+                        }
+                    },
+                    command = inbound_receiver.recv() => {
+                        if let Some(command) = command {
+                            Self::drive_command(
+                                command,
+                                &system,
+                                &network_sender,
+                                #[cfg(feature = "test")]
+                                &faults,
+                                &crash_token,
+                            )
+                            .await;
                         }
                     },
                     _ = graceful_token.cancelled() => {
@@ -127,10 +133,47 @@ impl Intermediary {
                         break;
                     }
                 }
+                if crash_token.is_cancelled() {
+                    break;
+                }
             }
         });
 
         Arc::new(service_sender)
+    }
+
+    async fn drive_command(
+        command: Command<NetworkMessage>,
+        system: &SystemRef,
+        network_sender: &mpsc::Sender<NetworkCommand>,
+        #[cfg(feature = "test")] faults: &test_faults::SharedFaultRegistry,
+        crash_token: &CancellationToken,
+    ) {
+        if let Err(e) = Self::handle_command(
+            command,
+            system,
+            network_sender,
+            #[cfg(feature = "test")]
+            faults,
+        )
+        .await
+        {
+            match e {
+                IntermediaryError::NetworkSendFailed { .. } => {
+                    error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
+                    crash_token.cancel();
+                }
+                _ => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_network_ingress_drop(e.cause());
+                    }
+                    warn!(
+                        error = %e,
+                        "Intermediary command failed with non-fatal error"
+                    );
+                }
+            }
+        }
     }
 
     async fn handle_command(
