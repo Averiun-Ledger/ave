@@ -36,8 +36,10 @@ pub const USER_AGENT: &str = "ave/0.8.0";
 pub const MAX_APP_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
 pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
-pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_TOTAL: usize = 0; // disabled
-pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL: usize = 0; // disabled
+pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_TOTAL: usize = 128 * 1024 * 1024; // 128 MiB
+pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL: usize = 128 * 1024 * 1024; // 128 MiB
+/// Default cap on queued messages per peer (count, not bytes).
+pub const DEFAULT_MAX_PENDING_MESSAGES_PER_PEER: usize = 100;
 /// Maximum accepted body size of a control-list service response.
 /// 1 MiB holds ~18k peer ids — ample for any realistic deployment, and it
 /// implicitly bounds the parsed entry count.

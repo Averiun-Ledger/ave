@@ -574,6 +574,8 @@ pub struct NetworkConfigHttp {
     /// Maximum total buffered outbound bytes across all peers while disconnected.
     /// `0` means no global limit.
     pub max_pending_outbound_bytes_total: usize,
+    /// Maximum queued messages per peer (count, not bytes).
+    pub max_pending_messages_per_peer: usize,
 }
 
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
@@ -599,6 +601,7 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .max_pending_outbound_bytes_total,
             max_pending_inbound_bytes_total: value
                 .max_pending_inbound_bytes_total,
+            max_pending_messages_per_peer: value.max_pending_messages_per_peer,
         }
     }
 }

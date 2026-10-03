@@ -413,6 +413,26 @@ impl NetworkMetrics {
         }
     }
 
+    pub(crate) fn inc_inbound_queue_ttl_drop_by(&self, count: u64) {
+        if count > 0 {
+            self.messages_dropped_total
+                .get_or_create(&MessageDropLabels {
+                    direction: "inbound",
+                    reason: "ttl_expired",
+                })
+                .inc_by(count);
+        }
+    }
+
+    pub(crate) fn inc_response_channel_drop(&self) {
+        self.messages_dropped_total
+            .get_or_create(&MessageDropLabels {
+                direction: "inbound",
+                reason: "response_channel_limit",
+            })
+            .inc();
+    }
+
     pub(crate) fn inc_reqres_request_received(&self) {
         self.reqres_messages_received_total
             .get_or_create(&ReqResMessageLabels { kind: "request" })

@@ -323,6 +323,11 @@ pub struct Config {
     #[serde(default = "default_max_pending_inbound_bytes_total")]
     pub max_pending_inbound_bytes_total: usize,
 
+    /// Maximum queued messages per peer (count, not bytes).
+    /// Must be at least 1.
+    #[serde(default = "default_max_pending_messages_per_peer")]
+    pub max_pending_messages_per_peer: usize,
+
     /// Maximum age in seconds of a queued outbound message before it is
     /// purged. `0` disables the TTL. The TTL is enforced lazily (on
     /// insert and on flush, no periodic sweep): with the default
@@ -330,6 +335,12 @@ pub struct Config {
     /// cap, not the TTL, normally decides how long a message waits.
     #[serde(default = "default_pending_outbound_ttl_secs")]
     pub pending_outbound_ttl_secs: u64,
+
+    /// Maximum age in seconds of a buffered inbound message before it is
+    /// purged. `0` disables the TTL. Enforced on insert and on the
+    /// identify flush, mirroring the outbound side.
+    #[serde(default = "default_pending_inbound_ttl_secs")]
+    pub pending_inbound_ttl_secs: u64,
 }
 
 impl Config {
@@ -357,7 +368,10 @@ impl Config {
                 default_max_pending_outbound_bytes_total(),
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
+            max_pending_messages_per_peer:
+                default_max_pending_messages_per_peer(),
             pending_outbound_ttl_secs: default_pending_outbound_ttl_secs(),
+            pending_inbound_ttl_secs: default_pending_inbound_ttl_secs(),
         }
     }
 }
@@ -382,7 +396,15 @@ const fn default_max_pending_inbound_bytes_total() -> usize {
     crate::utils::DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL
 }
 
+const fn default_max_pending_messages_per_peer() -> usize {
+    crate::utils::DEFAULT_MAX_PENDING_MESSAGES_PER_PEER
+}
+
 const fn default_pending_outbound_ttl_secs() -> u64 {
+    180
+}
+
+const fn default_pending_inbound_ttl_secs() -> u64 {
     180
 }
 
@@ -405,7 +427,10 @@ impl Default for Config {
                 default_max_pending_outbound_bytes_total(),
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
+            max_pending_messages_per_peer:
+                default_max_pending_messages_per_peer(),
             pending_outbound_ttl_secs: default_pending_outbound_ttl_secs(),
+            pending_inbound_ttl_secs: default_pending_inbound_ttl_secs(),
         }
     }
 }
@@ -537,6 +562,13 @@ impl Config {
             self.max_pending_inbound_bytes_total,
             "max_pending_inbound_bytes_total",
         )?;
+
+        if self.max_pending_messages_per_peer == 0 {
+            return Err(CommonError::InvalidConfiguration {
+                component: "network.max_pending_messages_per_peer".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
 
         if self.control_list.get_enable()
             && self.control_list.get_allow_list().is_empty()

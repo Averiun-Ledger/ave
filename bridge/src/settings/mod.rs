@@ -1004,8 +1004,14 @@ http:
             config.node.network.max_pending_inbound_bytes_per_peer,
             8 * 1024 * 1024
         );
-        assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
-        assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
+        assert_eq!(
+            config.node.network.max_pending_outbound_bytes_total,
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            config.node.network.max_pending_inbound_bytes_total,
+            128 * 1024 * 1024
+        );
         assert!(config.node.spec.is_none());
 
         // node defaults

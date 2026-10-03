@@ -51,13 +51,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 const TARGET: &str = "ave::network::worker";
 
-/// Maximum number of outbound messages queued per peer while disconnected.
-/// When this limit is reached the oldest message is evicted to make room.
-const MAX_PENDING_MESSAGES_PER_PEER: usize = 100;
-
 /// Bounded queue of outbound messages for a single peer.
 ///
-/// Keeps the 100 most recent messages; when full the oldest is evicted.
+/// Keeps the most recent messages up to the configured per-peer count
+/// limit; when full the oldest is evicted.
 #[derive(Default)]
 struct PendingQueue {
     messages: VecDeque<PendingMessage>,
@@ -135,7 +132,8 @@ struct PendingEnqueueReport {
     /// Messages evicted by the per-peer bytes limit, plus one when the
     /// incoming message itself did not fit and was rejected.
     dropped_bytes_limit_peer: u64,
-    /// Messages rejected by the global bytes limit.
+    /// Messages evicted or rejected under global bytes pressure
+    /// (oldest-first across peers).
     dropped_bytes_limit_global: u64,
     /// Evicted messages (for age observation), in eviction order.
     evicted: Vec<PendingMessage>,
@@ -143,11 +141,14 @@ struct PendingEnqueueReport {
 
 /// Insert `message` into the peer's queue applying the shared bounded
 /// policy: dedup, per-peer count limit, per-peer bytes limit and global
-/// bytes limit (oldest evicted first). A `0` bytes limit disables it.
+/// bytes limit with oldest-first eviction across peers. A `0` bytes
+/// limit disables it. Queues left empty are removed so the peer count
+/// stays bounded by buffered content.
 fn enqueue_pending(
     queues: &mut HashMap<PeerId, PendingQueue>,
     per_peer_limit: usize,
     global_limit: usize,
+    max_messages_per_peer: usize,
     peer: PeerId,
     message: Bytes,
 ) -> PendingEnqueueReport {
@@ -162,44 +163,112 @@ fn enqueue_pending(
     let mut total_pending_bytes =
         queues.values().map(PendingQueue::bytes_len).sum::<usize>();
 
-    let queue = queues.entry(peer).or_default();
-    if queue.contains(&message) {
-        report.duplicate = true;
-        return report;
+    enum PeerVerdict {
+        Duplicate,
+        RejectPeer,
+        Tentative,
     }
 
-    while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
-        if let Some(evicted) = queue.pop_front() {
-            report.dropped_count += 1;
-            total_pending_bytes =
-                total_pending_bytes.saturating_sub(evicted.payload.len());
-            report.evicted.push(evicted);
+    let verdict = {
+        let queue = queues.entry(peer).or_default();
+        if queue.contains(&message) {
+            PeerVerdict::Duplicate
         } else {
-            break;
-        }
-    }
+            while queue.len() >= max_messages_per_peer {
+                if let Some(evicted) = queue.pop_front() {
+                    report.dropped_count += 1;
+                    total_pending_bytes = total_pending_bytes
+                        .saturating_sub(evicted.payload.len());
+                    report.evicted.push(evicted);
+                } else {
+                    break;
+                }
+            }
 
-    if per_peer_limit > 0 {
-        while queue.bytes_len() + message_len > per_peer_limit {
-            if let Some(evicted) = queue.pop_front() {
+            if per_peer_limit > 0 {
+                while queue.bytes_len() + message_len > per_peer_limit {
+                    if let Some(evicted) = queue.pop_front() {
+                        report.dropped_bytes_limit_peer += 1;
+                        total_pending_bytes = total_pending_bytes
+                            .saturating_sub(evicted.payload.len());
+                        report.evicted.push(evicted);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            if per_peer_limit > 0
+                && queue.bytes_len() + message_len > per_peer_limit
+            {
                 report.dropped_bytes_limit_peer += 1;
-                total_pending_bytes =
-                    total_pending_bytes.saturating_sub(evicted.payload.len());
-                report.evicted.push(evicted);
+                PeerVerdict::RejectPeer
             } else {
-                break;
+                PeerVerdict::Tentative
+            }
+        }
+    };
+
+    match verdict {
+        PeerVerdict::Duplicate => {
+            report.duplicate = true;
+        }
+        PeerVerdict::RejectPeer => {}
+        PeerVerdict::Tentative => {
+            if global_limit > 0
+                && total_pending_bytes.saturating_add(message_len)
+                    > global_limit
+            {
+                while total_pending_bytes.saturating_add(message_len)
+                    > global_limit
+                {
+                    let oldest = queues
+                        .iter()
+                        .filter_map(|(id, queue)| {
+                            queue
+                                .messages
+                                .front()
+                                .map(|front| (*id, front.enqueued_at))
+                        })
+                        .min_by_key(|&(_, at)| at)
+                        .map(|(id, _)| id);
+                    let Some(victim) = oldest else {
+                        break;
+                    };
+                    let evicted = queues
+                        .get_mut(&victim)
+                        .and_then(PendingQueue::pop_front);
+                    match evicted {
+                        Some(message) => {
+                            total_pending_bytes = total_pending_bytes
+                                .saturating_sub(message.payload.len());
+                            report.dropped_bytes_limit_global += 1;
+                            report.evicted.push(message);
+                        }
+                        None => break,
+                    }
+                    if queues
+                        .get(&victim)
+                        .is_some_and(PendingQueue::is_empty)
+                    {
+                        queues.remove(&victim);
+                    }
+                }
+                if total_pending_bytes.saturating_add(message_len)
+                    > global_limit
+                {
+                    report.dropped_bytes_limit_global += 1;
+                } else {
+                    queues.entry(peer).or_default().push_back(message);
+                }
+            } else {
+                queues.entry(peer).or_default().push_back(message);
             }
         }
     }
 
-    if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit {
-        report.dropped_bytes_limit_peer += 1;
-    } else if global_limit > 0
-        && total_pending_bytes.saturating_add(message_len) > global_limit
-    {
-        report.dropped_bytes_limit_global += 1;
-    } else {
-        queue.push_back(message);
+    if queues.get(&peer).is_some_and(PendingQueue::is_empty) {
+        queues.remove(&peer);
     }
 
     report
@@ -277,10 +346,15 @@ where
     max_pending_inbound_bytes_per_peer: usize,
     max_pending_outbound_bytes_total: usize,
     max_pending_inbound_bytes_total: usize,
+    max_pending_messages_per_peer: usize,
 
     /// Maximum age of a queued outbound message before it is purged.
     /// Zero disables the TTL.
     pending_outbound_ttl: Duration,
+
+    /// Maximum age of a buffered inbound message before it is purged.
+    /// Zero disables the TTL.
+    pending_inbound_ttl: Duration,
 
     metrics: Option<Arc<NetworkMetrics>>,
 }
@@ -361,8 +435,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             config.max_pending_outbound_bytes_total;
         let max_pending_inbound_bytes_total =
             config.max_pending_inbound_bytes_total;
+        let max_pending_messages_per_peer =
+            config.max_pending_messages_per_peer;
         let pending_outbound_ttl =
             Duration::from_secs(config.pending_outbound_ttl_secs);
+        let pending_inbound_ttl =
+            Duration::from_secs(config.pending_inbound_ttl_secs);
 
         // Build transport.
         let transport = build_transport(&key, limits.clone())?;
@@ -452,7 +530,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             max_pending_inbound_bytes_per_peer,
             max_pending_outbound_bytes_total,
             max_pending_inbound_bytes_total,
+            max_pending_messages_per_peer,
             pending_outbound_ttl,
+            pending_inbound_ttl,
             metrics: runtime.metrics,
         };
 
@@ -850,10 +930,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let message_len = message.len();
         let per_peer_limit = self.max_pending_outbound_bytes_per_peer;
         let global_limit = self.max_pending_outbound_bytes_total;
+        let max_messages = self.max_pending_messages_per_peer;
         let report = enqueue_pending(
             &mut self.pending_outbound_messages,
             per_peer_limit,
             global_limit,
+            max_messages,
             peer,
             message,
         );
@@ -872,7 +954,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 target: TARGET,
                 peer_id = %peer,
                 dropped = report.dropped_count,
-                max_messages = MAX_PENDING_MESSAGES_PER_PEER,
+                max_messages = max_messages,
                 "outbound queue count limit reached; oldest messages evicted",
             );
         }
@@ -895,7 +977,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 dropped = report.dropped_bytes_limit_global,
                 message_bytes = message_len,
                 max_queue_bytes_total = global_limit,
-                "outbound global queue bytes limit reached; messages dropped",
+                "outbound global queue bytes limit reached; oldest evicted across peers",
             );
         }
 
@@ -914,13 +996,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     fn add_pending_inbound_message(&mut self, peer: PeerId, message: Bytes) {
+        let expired = self.sweep_expired_inbound(&peer);
         let message_len = message.len();
         let per_peer_limit = self.max_pending_inbound_bytes_per_peer;
         let global_limit = self.max_pending_inbound_bytes_total;
+        let max_messages = self.max_pending_messages_per_peer;
         let report = enqueue_pending(
             &mut self.pending_inbound_messages,
             per_peer_limit,
             global_limit,
+            max_messages,
             peer,
             message,
         );
@@ -939,7 +1024,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 target: TARGET,
                 peer_id = %peer,
                 dropped = report.dropped_count,
-                max_messages = MAX_PENDING_MESSAGES_PER_PEER,
+                max_messages = max_messages,
                 "inbound queue count limit reached; oldest messages evicted",
             );
         }
@@ -962,11 +1047,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 dropped = report.dropped_bytes_limit_global,
                 message_bytes = message_len,
                 max_queue_bytes_total = global_limit,
-                "inbound global queue bytes limit reached; messages dropped",
+                "inbound global queue bytes limit reached; oldest evicted across peers",
             );
         }
 
         if let Some(metrics) = self.metric_handle() {
+            metrics.inc_inbound_queue_ttl_drop_by(expired);
             metrics.inc_inbound_queue_drop_by(report.dropped_count);
             metrics.inc_inbound_queue_bytes_drop_per_peer_by(
                 report.dropped_bytes_limit_peer,
@@ -979,16 +1065,80 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         self.refresh_runtime_metrics();
     }
 
-    /// Add ephemeral response.
+    /// Purges expired messages from the front of the peer's inbound
+    /// queue (FIFO, so sweeping front-expired entries is enough).
+    /// Returns how many were purged. A zero TTL disables the purge.
+    /// Queues left empty are removed so the peer count stays bounded.
+    fn sweep_expired_inbound(&mut self, peer: &PeerId) -> u64 {
+        if self.pending_inbound_ttl.is_zero() {
+            return 0;
+        }
+        let ttl = self.pending_inbound_ttl;
+        let mut expired = Vec::new();
+        if let Some(queue) = self.pending_inbound_messages.get_mut(peer) {
+            while queue
+                .messages
+                .front()
+                .is_some_and(|front| front.enqueued_at.elapsed() >= ttl)
+            {
+                let Some(message) = queue.pop_front() else {
+                    break;
+                };
+                expired.push(message);
+            }
+        }
+        if self
+            .pending_inbound_messages
+            .get(peer)
+            .is_some_and(PendingQueue::is_empty)
+        {
+            self.pending_inbound_messages.remove(peer);
+        }
+        let count = expired.len() as u64;
+        for message in expired {
+            self.observe_pending_message_age(message.enqueued_at);
+        }
+        count
+    }
+
+    /// Maximum response channels buffered per peer. A channel answers
+    /// one inbound request; beyond the cap the oldest is dropped (its
+    /// requester times out on its own reqres deadline).
+    const MAX_RESPONSE_CHANNELS_PER_PEER: usize = 16;
+
+    /// Buffer a response channel for an inbound request. Stashing is
+    /// keyed by the authenticated PeerId, so it is safe before
+    /// identify completes; the payload itself is only delivered to the
+    /// helper after identify.
     fn add_ephemeral_response(
         &mut self,
         peer: PeerId,
         response_channel: ResponseChannel<ReqResMessage>,
     ) {
-        self.response_channels
-            .entry(peer)
-            .or_default()
-            .push_back(response_channel);
+        let mut evicted = 0u64;
+        {
+            let queue =
+                self.response_channels.entry(peer).or_default();
+            while queue.len() >= Self::MAX_RESPONSE_CHANNELS_PER_PEER {
+                queue.pop_front();
+                evicted += 1;
+            }
+            queue.push_back(response_channel);
+        }
+        for _ in 0..evicted {
+            if let Some(metrics) = self.metric_handle() {
+                metrics.inc_response_channel_drop();
+            }
+        }
+        if evicted > 0 {
+            warn!(
+                target: TARGET,
+                peer_id = %peer,
+                dropped = evicted,
+                max_channels = Self::MAX_RESPONSE_CHANNELS_PER_PEER,
+                "response channel limit reached; oldest dropped",
+            );
+        }
         self.refresh_runtime_metrics();
     }
 
@@ -1775,12 +1925,28 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             if let Some(mut queue) =
                                 self.pending_inbound_messages.remove(&peer_id)
                             {
+                                let ttl = self.pending_inbound_ttl;
                                 let mut buffered = VecDeque::new();
+                                let mut expired = 0u64;
                                 for message in queue.drain() {
                                     self.observe_pending_message_age(
                                         message.enqueued_at,
                                     );
+                                    // Stale buffered copies are worse than
+                                    // lost ones: receivers re-request what
+                                    // they still miss.
+                                    if !ttl.is_zero()
+                                        && message.enqueued_at.elapsed() >= ttl
+                                    {
+                                        expired += 1;
+                                        continue;
+                                    }
                                     buffered.push_back(message.payload);
+                                }
+                                if let Some(metrics) = self.metric_handle() {
+                                    metrics.inc_inbound_queue_ttl_drop_by(
+                                        expired,
+                                    );
                                 }
                                 self.message_to_helper(
                                     MessagesHelper::Vec(buffered),
@@ -1993,17 +2159,21 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 num_established: 0,
                 ..
             } => {
+                // Per-peer ephemeral state always goes with the last
+                // connection: buffered inbound, stashed response
+                // channels, identify mark and retry state. Buffered
+                // outbound survives (the peer may still be reachable
+                // through another address) and drives the redial below.
+                self.drop_pending_inbound_messages(&peer_id);
+                self.response_channels.remove(&peer_id);
+                self.peer_identify.remove(&peer_id);
+                self.retry_by_peer.remove(&peer_id);
+
                 if let Some(Action::Identified(id)) =
                     self.peer_action.get(&peer_id)
                     && connection_id == *id
                 {
                     self.peer_action.remove(&peer_id);
-
-                    self.peer_identify.remove(&peer_id);
-                    self.drop_pending_inbound_messages(&peer_id);
-                    self.response_channels.remove(&peer_id);
-
-                    self.retry_by_peer.remove(&peer_id);
 
                     if self
                         .pending_outbound_messages
@@ -2019,10 +2189,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     self.peer_action.get(&peer_id)
                 {
                     self.peer_action.remove(&peer_id);
-                    self.retry_by_peer.remove(&peer_id);
-                    self.drop_pending_inbound_messages(&peer_id);
-                    self.response_channels.remove(&peer_id);
-                    self.peer_identify.remove(&peer_id);
 
                     if self
                         .pending_outbound_messages
@@ -2383,7 +2549,7 @@ mod tests {
         );
         worker.add_pending_outbound_message(
             peer_b,
-            Bytes::from_static(b"bbbbbbbbbbbb"), // rejected by global limit
+            Bytes::from_static(b"bbbbbbbbbbbb"), // evicts peer_a by global LRU
         );
 
         assert_eq!(worker.pending_outbound_bytes_len(), 12);
@@ -2391,16 +2557,16 @@ mod tests {
             worker
                 .pending_outbound_messages
                 .get(&peer_a)
-                .expect("peer_a queue")
-                .len(),
-            1
+                .map_or(0, PendingQueue::len),
+            0
         );
         assert_eq!(
             worker
                 .pending_outbound_messages
                 .get(&peer_b)
-                .map_or(0, PendingQueue::len),
-            0
+                .expect("peer_b queue")
+                .len(),
+            1
         );
 
         let mut text = String::new();
@@ -2416,6 +2582,148 @@ mod tests {
             metric_value(
                 &text,
                 "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn rejected_messages_leave_no_empty_peer_entry() {
+        let mut config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3103".to_owned()],
+        );
+        config.max_pending_outbound_bytes_per_peer = 0;
+        config.max_pending_outbound_bytes_total = 1;
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+
+        // Nothing is evictable and the message exceeds the global total:
+        // rejected without leaving an empty queue behind.
+        worker.add_pending_outbound_message(
+            PeerId::random(),
+            Bytes::from_static(b"aaaaaaaaaaaa"),
+        );
+        assert!(worker.pending_outbound_messages.is_empty());
+    }
+
+    #[test]
+    fn pending_message_count_limit_is_configurable() {
+        let mut config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3104".to_owned()],
+        );
+        config.max_pending_outbound_bytes_per_peer = 0;
+        config.max_pending_outbound_bytes_total = 0;
+        config.max_pending_messages_per_peer = 2;
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+
+        let peer = PeerId::random();
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"aa"));
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"bb"));
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"cc"));
+
+        let queue = worker
+            .pending_outbound_messages
+            .get(&peer)
+            .expect("queue exists");
+        assert_eq!(queue.len(), 2);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_limit\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn inbound_ttl_sweep_purges_expired_on_insert() {
+        let config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3105".to_owned()],
+        );
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+        worker.pending_inbound_ttl = Duration::from_millis(100);
+
+        let peer = PeerId::random();
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"old"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        // The next enqueue sweeps the expired message from the front.
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"new"));
+        let queue = worker
+            .pending_inbound_messages
+            .get(&peer)
+            .expect("queue exists");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.messages.front().expect("front").payload,
+            Bytes::from_static(b"new")
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"inbound\",reason=\"ttl_expired\"}"
             ),
             1.0
         );
