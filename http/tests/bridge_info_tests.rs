@@ -1722,7 +1722,7 @@ async fn test_subject_deserialization() {
     let future_date = "2099-01-01T00:00:00Z";
 
     // event_request_ts_from with future date -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?event_request_ts_from={}",
@@ -1733,10 +1733,11 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // event_ledger_ts_from with future date -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?event_ledger_ts_from={}",
@@ -1748,10 +1749,11 @@ async fn test_subject_deserialization() {
     )
     .await;
 
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // sink_ts_from with future date -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?sink_ts_from={}",
@@ -1762,10 +1764,11 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // event_request_ts_to in the past -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?event_request_ts_to=2000-01-01T00:00:00Z",
@@ -1776,7 +1779,8 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // Range covering the events -> all 7 events are returned
     let (status, body) = make_request(
@@ -2365,8 +2369,15 @@ async fn test_system_info_deserialization() {
         config.node.network.max_pending_outbound_bytes_per_peer,
         8_388_608
     );
-    assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
-    assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
+    assert_eq!(
+        config.node.network.max_pending_inbound_bytes_total,
+        128 * 1024 * 1024
+    );
+    assert_eq!(
+        config.node.network.max_pending_outbound_bytes_total,
+        128 * 1024 * 1024
+    );
+    assert_eq!(config.node.network.max_pending_messages_per_peer, 100);
 
     // Control list timeout/concurrency defaults
     assert_eq!(config.node.network.control_list.request_timeout_secs, 5);
