@@ -1135,6 +1135,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         {
             let queue =
                 self.response_channels.entry(peer).or_default();
+            // Drop channels the requester already abandoned: they can
+            // never be answered and only pin memory.
+            let before = queue.len();
+            queue.retain(|channel| channel.is_open());
+            evicted += (before - queue.len()) as u64;
             while queue.len() >= Self::MAX_RESPONSE_CHANNELS_PER_PEER {
                 queue.pop_front();
                 evicted += 1;

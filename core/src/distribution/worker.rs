@@ -29,9 +29,8 @@ use crate::{
             check_witness_status, crash_system, get_verified_transfer_sn,
             node::get_subject_data,
             subject::{
-                acquire_subject, check_simulated_transfer_hi_sn_limit,
-                check_witness_status_and_window, get_gov_sn,
-                get_local_subject_sn,
+                acquire_subject, check_witness_status_and_window,
+                get_gov_sn, get_local_subject_sn,
                 get_tracker_window as resolve_tracker_window, get_version,
                 has_role,
             },
@@ -255,6 +254,9 @@ impl DistriWorker {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<u64, ActorError> {
+        // Deliberately unauthenticated: ex-witnesses and members need
+        // the version to sync governance at all; only a u64 is
+        // disclosed and the ledger itself stays gated.
         let data = get_subject_data(ctx, subject_id).await?;
         let Some(SubjectData::Governance { .. }) = data else {
             return Err(DistributorError::SubjectNotFound.into());
@@ -398,6 +400,8 @@ impl DistriWorker {
             }
             .into());
         };
+
+
 
         let gov_version =
             get_version(ctx, &governance_id).await.map_err(|e| {
@@ -642,19 +646,20 @@ impl DistriWorker {
             first_ledger.get_event_request_type(),
             EventRequestType::Transfer
         ) {
-            let simulated_limit = check_simulated_transfer_hi_sn_limit(
+            // Same bar as the batch path: cryptographic verification
+            // plus simulation, not simulation alone.
+            match self.transfer_verifier.verify_and_simulate(
                 ctx,
-                &governance_id,
                 &subject_id,
-                first_ledger.clone(),
-                (*self.our_key).clone(),
-                namespace.clone(),
-                schema_id.clone(),
+                ledger,
+                first_ledger,
             )
-            .await?;
-
-            if matches!(simulated_limit, HiSnLimit::None) {
-                return Err(DistributorError::ReceiverNoAccess.into());
+            .await?
+            {
+                TransferSimulationResult::Witness => {}
+                TransferSimulationResult::NotWitness => {
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
             }
 
             return Ok(DistributionAuth {
@@ -790,7 +795,7 @@ impl DistriWorker {
         ledger.split_off(split_index)
     }
 
-    async fn get_tracker_window(
+    pub(crate) async fn get_tracker_window(
         &self,
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,

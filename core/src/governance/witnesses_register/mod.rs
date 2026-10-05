@@ -280,15 +280,6 @@ pub enum WitnessesRegisterMessage {
         schema_id: SchemaType,
         actual_sn: Option<u64>,
     },
-    GetTrackerWindowFromLedger {
-        subject_id: DigestIdentifier,
-        ledger: Vec<Ledger>,
-        node: PublicKey,
-        sender: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        actual_sn: Option<u64>,
-    },
     SimulateTransferHiSnLimit {
         subject_id: DigestIdentifier,
         transfer_event: Box<Ledger>,
@@ -1414,40 +1405,6 @@ impl Handler<Self> for WitnessesRegister {
                             schema_id,
                             actual_sn,
                         },
-                    )
-                    .await?;
-
-                return Ok(WitnessesRegisterResponse::TrackerWindow {
-                    sn,
-                    transfer_sn,
-                    clear_sn,
-                    is_all,
-                    ranges,
-                });
-            }
-            WitnessesRegisterMessage::GetTrackerWindowFromLedger {
-                subject_id,
-                ledger,
-                node,
-                namespace,
-                schema_id,
-                actual_sn,
-                ..
-            } => {
-                let data =
-                    Self::transfer_data_from_ledger(&subject_id, &ledger)?;
-                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
-                    .build_tracker_window_from_data(
-                        ctx,
-                        &subject_id,
-                        &data,
-                        &node,
-                        TrackerParams {
-                            namespace,
-                            schema_id,
-                            actual_sn,
-                        },
-                        None,
                     )
                     .await?;
 

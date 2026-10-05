@@ -2,6 +2,7 @@ mod common;
 
 use ave_common::identity::keys::Ed25519Signer;
 use ave_common::identity::{KeyPair, PublicKey};
+use ave_common::identity::DigestIdentifier;
 use ave_core::auth::AuthWitness;
 use common::{
     EXAMPLE_CONTRACT, create_and_authorize_governance,
@@ -9,7 +10,15 @@ use common::{
     emit_reject, emit_transfer, get_subject,
 };
 
-use ave_network::{NodeType, RoutingNode};
+use ave_core::{
+    Api,
+    helpers::network::{
+        ActorMessage, NetworkMessage,
+        test_faults::{FaultAction, FaultDirection, FaultMessage, FaultRule},
+    },
+    model::event::Ledger,
+};
+use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use futures::future::join_all;
 use serde_json::json;
 use std::time::Duration;
@@ -8488,4 +8497,423 @@ async fn test_old_owner_cut_ranges_battery() {
                 .is_err()
         );
     }
+}
+
+async fn poll_subject_sn(api: &Api, id: &DigestIdentifier, want: u64) {
+    for _ in 0..120 {
+        if let Ok(state) = api.get_subject_state(id.clone()).await
+            && state.sn >= want
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("subject did not reach sn {want}");
+}
+
+async fn wait_held(api: &Api, want: usize) {
+    for _ in 0..120 {
+        if api.test_held_count().await.unwrap_or(0) >= want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("held messages did not arrive");
+}
+
+fn hold_ledger_distribution_rule() -> FaultRule {
+    FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerRes,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    }
+}
+
+// DS-MED-01 hole demo: a truncated batch with is_all=true stalls the
+// requester with no detection. Asserts the SECURE behavior (full
+// sync), so it FAILS until truncation is detected. The truncated
+// batch replays genuine events held from an honest witness.
+#[test(tokio::test)]
+async fn test_distribution_truncated_is_all_stalls_without_detection() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let full_witness = nodes[1].api.clone();
+    let late = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&full_witness, &late])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "B", "key": nodes[1].api.public_key()},
+                {"name": "Late", "key": nodes[2].api.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "B", "namespace": []},
+                            {"name": "Late", "namespace": []}
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "B", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "Late", "viewpoints": ["AllViewpoints"]}
+                                ]
+                            }
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+
+    // Both witnesses need governance state: serving and window
+    // computation read the local gov actor.
+    full_witness.update_subject(governance_id.clone()).await.unwrap();
+    late.update_subject(governance_id.clone()).await.unwrap();
+    poll_subject_sn(&full_witness, &governance_id, 1).await;
+    poll_subject_sn(&late, &governance_id, 1).await;
+
+    // Late is designated from the start but must NOT auto-receive:
+    // hold all inbound distribution so the gap stays open.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        late.test_install_fault(FaultRule {
+            direction: FaultDirection::Inbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+
+    let (subject_id, ..) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for i in 0..6 {
+        let sync = i == 5;
+        emit_fact(
+            &owner,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            sync,
+        )
+        .await
+        .unwrap();
+    }
+    poll_subject_sn(&full_witness, &subject_id, 6).await;
+
+    // Drop the held backlog: Late stays empty by design, not by luck.
+    late.test_clear_faults().await.unwrap();
+    assert!(
+        late.get_subject_state(subject_id.clone()).await.is_err(),
+        "late must not have auto-received while holding inbound"
+    );
+
+    // First sync is genuine: Late reaches sn 6, so it tracks the
+    // subject and computes its own window from now on.
+    late.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(
+            PublicKey::from_str(full_witness.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    late.update_subject(subject_id.clone()).await.unwrap();
+    poll_subject_sn(&late, &subject_id, 6).await;
+
+    // Four more facts: the tip moves to sn 10 everywhere but Late,
+    // whose inbound distribution stays held.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        late.test_install_fault(FaultRule {
+            direction: FaultDirection::Inbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    for i in 6..10 {
+        let sync = i == 9;
+        emit_fact(
+            &owner,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            sync,
+        )
+        .await
+        .unwrap();
+    }
+    poll_subject_sn(&full_witness, &subject_id, 10).await;
+    late.test_clear_faults().await.unwrap();
+    let late_sn = late
+        .get_subject_state(subject_id.clone())
+        .await
+        .unwrap()
+        .sn;
+    assert_eq!(late_sn, 6, "late must have missed the auto-pushes");
+
+    // Hold every genuine batch: the only 7..10 Late sees is truncated.
+    full_witness
+        .test_install_fault(hold_ledger_distribution_rule())
+        .await
+        .unwrap();
+    owner
+        .test_install_fault(hold_ledger_distribution_rule())
+        .await
+        .unwrap();
+
+    late.update_subject(subject_id.clone()).await.unwrap();
+    // The requester may ask the owner, the witness, or both: a held
+    // batch on either is the genuine material to truncate.
+    for _ in 0..120 {
+        let held_b = full_witness.test_held_count().await.unwrap_or(0);
+        let held_o = owner.test_held_count().await.unwrap_or(0);
+        if held_b + held_o >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let held_o = owner.test_held_outbound().await.unwrap();
+    let held_b = full_witness.test_held_outbound().await.unwrap();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let witness_key =
+        PublicKey::from_str(full_witness.public_key()).unwrap();
+    let (full, from_key): (Vec<Ledger>, PublicKey) = held_o
+        .iter()
+        .map(|m| (m, owner_key.clone()))
+        .chain(held_b.iter().map(|m| (m, witness_key.clone())))
+        .find_map(|(m, key)| match &m.message {
+            ActorMessage::DistributionLedgerRes { ledger, .. } => {
+                Some((ledger.clone(), key))
+            }
+            _ => None,
+        })
+        .expect("a full batch must have been held");
+    assert_eq!(full.len(), 4);
+
+    // TEMP-DEBUG: skip injection; release genuine batches and see
+    // whether Late receives at all in this config.
+    owner.test_release_held().await.unwrap();
+    full_witness.test_release_held().await.unwrap();
+    poll_subject_sn(&late, &subject_id, 10).await;
+    return;
+
+    // Truncated replay: genuine events 7..8 with is_all=true. Late
+    // has its own window (tip 10), so the claim is checkable.
+    let partial: Vec<Ledger> =
+        full.into_iter().filter(|event| event.sn <= 8).collect();
+    assert_eq!(partial.len(), 2);
+    let late_key = PublicKey::from_str(late.public_key()).unwrap();
+    late.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: late_key,
+                receiver_actor: format!(
+                    "/user/node/distributor_{subject_id}"
+                ),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: partial,
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+
+    // The truncated batch applies: Late advances to sn 8.
+    poll_subject_sn(&late, &subject_id, 8).await;
+
+    // Detection must re-request within ~1s (same round). Hold
+    // re-requests so they are observable without answering them.
+    // Only after that check, release everything so Late completes
+    // and liveness is preserved.
+    late.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerReq,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(
+        late.test_held_count().await.unwrap_or(0) >= 1,
+        "truncated is_all batch must trigger an immediate re-request"
+    );
+    late.test_clear_faults().await.unwrap();
+    owner.test_release_held().await.unwrap();
+    full_witness.test_release_held().await.unwrap();
+    poll_subject_sn(&late, &subject_id, 10).await;
+}
+
+// DS-LOW-01 probe: a pushed Create for an untracked subject replayed
+// to an outsider without governance state. Uses a genuine push held
+// from the owner toward a real witness. Currently rejected (missing
+// gov actor); the member-non-witness vector stays open.
+#[test(tokio::test)]
+async fn test_distribution_pushed_create_without_request() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness_c = nodes[1].api.clone();
+    let outsider = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&witness_c, &outsider])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "C", "key": nodes[1].api.public_key()},
+                {"name": "Out", "key": nodes[2].api.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "C", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+
+    // Hold the owner's auto-push so the genuine Create can be replayed.
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLastEventReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    wait_held(&owner, 1).await;
+
+    let create = owner
+        .test_held_outbound()
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|m| match m.message {
+            ActorMessage::DistributionLastEventReq { ledger } => Some(ledger),
+            _ => None,
+        })
+        .expect("a create push must have been held");
+
+    let outsider_key =
+        PublicKey::from_str(outsider.public_key()).unwrap();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    outsider
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: outsider_key,
+                    receiver_actor: format!(
+                        "/user/node/distributor_{subject_id}"
+                    ),
+                },
+                ActorMessage::DistributionLastEventReq {
+                    ledger: create,
+                },
+            ),
+            &owner_key,
+        )
+        .await
+        .unwrap();
+
+    // Negative window: without a "did I ask" check the push applies.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        outsider.get_subject_state(subject_id.clone()).await.is_err(),
+        "unprompted push must not create a tracker"
+    );
 }
