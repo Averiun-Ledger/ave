@@ -862,8 +862,22 @@ impl Tracker {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
                     // Check if it's a sequence number error
-                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
-                        // El evento que estamos aplicando no es el siguiente.
+                    if let SubjectError::InvalidSequenceNumber {
+                        expected,
+                        actual,
+                    } = &e
+                    {
+                        // El evento que estamos aplicando no es el
+                        // siguiente: se salta en este batch (el sync lo
+                        // re-entrega mientras siga pendiente) pero se
+                        // registra — un salto silencioso es un evento
+                        // perdido sin rastro.
+                        warn!(
+                            subject_id = %self.subject_metadata.subject_id,
+                            expected_sn = expected,
+                            event_sn = actual,
+                            "Skipping out-of-order ledger event in batch"
+                        );
                         continue;
                     } else {
                         return Err(ActorError::Functional {

@@ -84,7 +84,7 @@ impl Handler<Self> for DistriCoordinator {
                 match ctx.get_parent::<Distribution>().await {
                     Ok(distribution_actor) => {
                         if let Err(e) = distribution_actor
-                            .tell(DistributionMessage::Response {
+                            .tell(DistributionMessage::Timeout {
                                 sender: self.node_key.clone(),
                             })
                             .await
@@ -92,7 +92,6 @@ impl Handler<Self> for DistriCoordinator {
                             error!(
                                 msg_type = "Coordinator",
                                 node_key = %self.node_key,
-                                error = %e,
                                 "Failed to notify parent distribution actor after retry exhausted"
                             );
                             crash_system(ctx, e).await;

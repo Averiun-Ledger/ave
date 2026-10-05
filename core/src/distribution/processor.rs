@@ -688,6 +688,23 @@ impl DistriWorker {
                         lease.finish(ctx).await?;
                     }
 
+                    // The received event is ours even with a gap behind:
+                    // ack it so the sender stops retrying, the missing
+                    // range was already re-requested above.
+                    if let Err(e) = self
+                        .send_last_event_ack(sender.clone(), &info)
+                        .await
+                    {
+                        error!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            error = %e,
+                            "Failed to send distribution acknowledgment"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    };
+
                     return Ok(());
                 }
                 Ok((..)) => lease,

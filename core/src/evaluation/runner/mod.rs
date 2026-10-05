@@ -2,6 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
+#[cfg(not(any(test, feature = "test")))]
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -13,7 +15,8 @@ use ave_common::{
     schematype::ReservedWords,
 };
 use ave_contract_sdk::runtime::{
-    CompiledModule, ContractRuntime, RuntimeError,
+    CompiledModule, ContractRuntime, ExecutionResult, ExecutionStats,
+    RuntimeError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -378,6 +381,66 @@ impl Runner {
         })
     }
 
+    /// Wall-clock ceiling for one contract execution: fuel bounds
+    /// instructions, not wall time (bulk-memory ops cost ~1 fuel per
+    /// call), so a pathological contract could pin its thread
+    /// indefinitely. On expiry the node casts no verdict
+    /// (`ResourceLimit` → `Unavailable`, replaced from the pool) —
+    /// a slower machine must not call the request invalid.
+    #[cfg(not(any(test, feature = "test")))]
+    const EXECUTION_WALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Runs the blocking wasmtime call off the async worker thread:
+    /// one evaluation per one-shot worker already isolates requests
+    /// from each other, but without this every in-flight execution
+    /// still occupies a Tokio pool thread. Under `test` (or the
+    /// `test` feature) it runs inline: those runtimes are
+    /// single-threaded and `spawn_blocking` would panic there.
+    async fn execute_bounded(
+        runtime: Arc<ContractRuntime>,
+        module: Arc<CompiledModule>,
+        state: ValueWrapper,
+        init_state: ValueWrapper,
+        event: ValueWrapper,
+        is_owner: bool,
+    ) -> Result<(ExecutionResult, ExecutionStats), RunnerError> {
+        #[cfg(any(test, feature = "test"))]
+        {
+            return runtime
+                .execute(&module, &state, &init_state, &event, is_owner)
+                .map_err(map_runtime_error_to_runner_error);
+        }
+        #[cfg(not(any(test, feature = "test")))]
+        {
+            let handle = tokio::task::spawn_blocking(move || {
+                runtime.execute(&module, &state, &init_state, &event, is_owner)
+            });
+            match tokio::time::timeout(
+                Self::EXECUTION_WALL_TIMEOUT,
+                handle,
+            )
+            .await
+            {
+                Ok(Ok(result)) => {
+                    result.map_err(map_runtime_error_to_runner_error)
+                }
+                Ok(Err(join_error)) => Err(RunnerError::ResourceLimit {
+                    operation: "contract execution",
+                    details: format!(
+                        "blocking execution task failed: {join_error}"
+                    ),
+                }),
+                Err(_) => Err(RunnerError::ResourceLimit {
+                    operation: "contract execution wall-clock",
+                    details: format!(
+                        "contract did not finish within {}s",
+                        Self::EXECUTION_WALL_TIMEOUT.as_secs()
+                    ),
+                }),
+            }
+        }
+    }
+
     async fn execute_fact_not_gov(
         ctx: &ActorContext<Self>,
         state: &ValueWrapper,
@@ -412,9 +475,15 @@ impl Runner {
             module
         };
 
-        let (result, _stats) = contract_runtime
-            .execute(&module, state, init_state, payload, is_owner)
-            .map_err(map_runtime_error_to_runner_error)?;
+        let (result, _stats) = Self::execute_bounded(
+            contract_runtime,
+            module,
+            state.clone(),
+            init_state.clone(),
+            payload.clone(),
+            is_owner,
+        )
+        .await?;
 
         if !result.success {
             return Err(RunnerError::ContractFailed {

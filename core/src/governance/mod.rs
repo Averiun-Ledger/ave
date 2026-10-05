@@ -15,7 +15,7 @@ use crate::{
         payload_contract_sources,
         support::{
             CompilerResponse, CompilerSupport, ContractSourceInput,
-            is_compiler_infra_error, is_local_fatal_compiler_error,
+            is_local_fatal_compiler_error,
             is_retryable_compiler_recovery_error,
         },
         worker::{CompileWorker, CompileWorkerMessage},
@@ -76,7 +76,7 @@ use crate::{
         register::RegisterMessage,
     },
     sink::{
-        SinkManager, SinkManagerInitParams, SinkManagerMessage, retry_delay_ms,
+        SinkManager, SinkManagerInitParams, SinkManagerMessage,
     },
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
@@ -1856,6 +1856,16 @@ impl Governance {
                         "No local toolchain for pin, apply-time recovery stays dormant"
                     );
                 }
+                Err(error @ CompilerError::ToolchainDrift { .. }) => {
+                    // The local toolchain can not reproduce the anchor
+                    // (drifted): same dormancy, fetch and quorum peers
+                    // carry this schema until the toolchain returns.
+                    warn!(
+                        schema_id = %schema_id,
+                        error = %error,
+                        "Toolchain drift, apply-time recovery stays dormant"
+                    );
+                }
                 Err(error) => {
                     return Err(crash_system(
                         ctx,
@@ -3281,53 +3291,22 @@ impl Governance {
         Ok(())
     }
 
-    /// Maximum retries of a final contract compilation on compiler
-    /// infrastructure errors (the contract itself failing never retries).
-    const COMPILE_INFRA_MAX_RETRIES: usize = 5;
-    /// Base delay of the compilation retry backoff.
-    const COMPILE_INFRA_RETRY_BASE_MS: u64 = 1_000;
-    /// Cap of the compilation retry backoff.
-    const COMPILE_INFRA_RETRY_MAX_MS: u64 = 30_000;
-
-    /// Asks a ContractCompiler actor, retrying with exponential backoff
-    /// (same policy as sink deliveries: [`retry_delay_ms`]) when the
-    /// failure is a compiler infrastructure error — a liveness problem,
-    /// not a contract problem. Returns the terminal error, if any, so the
-    /// caller formats its own message.
-    async fn ask_compile_with_retries<F, Fut>(
-        schema_id: &SchemaType,
+    /// Asks a ContractCompiler actor once, without in-actor retry:
+    /// sleeping with backoff here would block the whole Governance
+    /// actor (sync, queries) on every error storm. Recovery lives
+    /// where it belongs — the compiler's own heal/fetch cycles keep
+    /// retrying out of band. Returns the terminal error, if any, so
+    /// the caller formats its own message.
+    async fn ask_compile_once<F, Fut>(
         mut attempt: F,
     ) -> Result<Option<CompilerError>, ActorError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<CompilerResponse, ActorError>>,
     {
-        let mut retry = 0;
-        loop {
-            match attempt().await? {
-                CompilerResponse::Ok => return Ok(None),
-                CompilerResponse::Error(error)
-                    if is_compiler_infra_error(&error)
-                        && retry < Self::COMPILE_INFRA_MAX_RETRIES =>
-                {
-                    retry += 1;
-                    let delay = retry_delay_ms(
-                        Self::COMPILE_INFRA_RETRY_BASE_MS,
-                        Self::COMPILE_INFRA_RETRY_MAX_MS,
-                        retry,
-                        None,
-                    );
-                    warn!(
-                        schema_id = %schema_id,
-                        retry,
-                        delay_ms = delay,
-                        error = %error,
-                        "Compiler infrastructure error during final compilation, retrying"
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                }
-                CompilerResponse::Error(error) => return Ok(Some(error)),
-            }
+        match attempt().await? {
+            CompilerResponse::Ok => Ok(None),
+            CompilerResponse::Error(error) => Ok(Some(error)),
         }
     }
 
@@ -3395,7 +3374,7 @@ impl Governance {
                         toolchain_pin: self.properties.toolchain.clone(),
                     },
                 };
-                let terminal_error = Self::ask_compile_with_retries(id, || {
+                let terminal_error = Self::ask_compile_once(|| {
                     let reconcile = reconcile.clone();
                     async { compiler.ask(reconcile).await }
                 })
@@ -3552,12 +3531,11 @@ impl Governance {
                         toolchain_pin: self.properties.toolchain.clone(),
                     },
                 };
-                let terminal_error =
-                    Self::ask_compile_with_retries(&id, || {
-                        let reconcile = reconcile.clone();
-                        async { actor.ask(reconcile).await }
-                    })
-                    .await?;
+                let terminal_error = Self::ask_compile_once(|| {
+                    let reconcile = reconcile.clone();
+                    async { actor.ask(reconcile).await }
+                })
+                .await?;
 
                 if let Some(error) = terminal_error {
                     // Fatal local problems (disk, register, helpers,
@@ -4140,8 +4118,22 @@ impl Governance {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
                     // Check if it's a sequence number error
-                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
-                        // El evento que estamos aplicando no es el siguiente.
+                    if let SubjectError::InvalidSequenceNumber {
+                        expected,
+                        actual,
+                    } = &e
+                    {
+                        // El evento que estamos aplicando no es el
+                        // siguiente: se salta en este batch (el sync lo
+                        // re-entrega mientras siga pendiente) pero se
+                        // registra — un salto silencioso es un evento
+                        // perdido sin rastro.
+                        warn!(
+                            subject_id = %self.subject_metadata.subject_id,
+                            expected_sn = expected,
+                            event_sn = actual,
+                            "Skipping out-of-order ledger event in batch"
+                        );
                         continue;
                     } else {
                         return Err(ActorError::Functional {
@@ -4473,7 +4465,7 @@ impl Governance {
         let witnesses_register = match ctx
             .create_child(
                 "witnesses_register",
-                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+                WitnessesRegister::initial(()),
             )
             .await
         {
@@ -4837,7 +4829,7 @@ impl Governance {
         let witnesses_register = match ctx
             .create_child(
                 "witnesses_register",
-                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+                WitnessesRegister::initial(()),
             )
             .await
         {
@@ -5220,7 +5212,7 @@ impl Actor for Governance {
         if let Err(e) = ctx
             .create_child(
                 "witnesses_register",
-                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+                WitnessesRegister::initial(()),
             )
             .await
         {

@@ -1234,6 +1234,27 @@ impl DistriWorker {
             let expected_sn = local_sn.saturating_add(1);
 
             if received_first_sn <= local_sn {
+                // Stale head but possibly fresh tail (race with a
+                // concurrent push): ask from our tip instead of
+                // dropping the newer events with the batch.
+                debug!(
+                    msg_type = "EnsureNextSn",
+                    subject_id = %subject_id,
+                    local_last_sn = local_sn,
+                    received_first_sn = received_first_sn,
+                    "Stale batch head, requesting from local tip"
+                );
+
+                self.request_ledger_from_sender(
+                    ctx,
+                    subject_id,
+                    sender.clone(),
+                    info,
+                    Some(local_sn),
+                    subject_data.clone(),
+                )
+                .await?;
+
                 return Ok(false);
             }
 
@@ -1397,8 +1418,36 @@ impl DistriWorker {
         info: ComunicateInfo,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
+        if ledger.is_empty() {
+            warn!(
+                msg_type = "LedgerDistribution",
+                sender = %sender,
+                "Empty ledger batch rejected"
+            );
+            if let Some(metrics) = crate::metrics::try_core_metrics() {
+                metrics.observe_distribution_failure("empty_batch");
+            }
+            return Err(DistributorError::EmptyEvents.into());
+        }
         if !ledger.windows(2).all(|w| w[0].sn <= w[1].sn) {
             ledger.sort_by_key(|event| event.sn);
+        }
+        // Extra temprano: el ledger solo acepta el siguiente sn, pero
+        // un hueco/duplicado aquí se rechaza antes de gastar auth.
+        if !ledger
+            .windows(2)
+            .all(|w| w[0].sn.checked_add(1) == Some(w[1].sn))
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                sender = %sender,
+                ledger_count = ledger.len(),
+                "Non-contiguous ledger batch rejected"
+            );
+            if let Some(metrics) = crate::metrics::try_core_metrics() {
+                metrics.observe_distribution_failure("gapped_batch");
+            }
+            return Err(DistributorError::ReceiverNoAccess.into());
         }
 
         let subject_id = ledger[0].get_subject_id();

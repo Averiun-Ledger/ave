@@ -2001,6 +2001,22 @@ impl Handler<Self> for ContractCompiler {
                                     "Official artifact healed: recompiled against the ledger anchor"
                                 );
                             }
+                            Err(
+                                error @ CompilerError::ToolchainDrift { .. },
+                            ) => {
+                                // Drifted toolchain can not reproduce the
+                                // anchor, and rebuilding would fail the
+                                // same way forever: stay dormant (serve
+                                // retained/fetched bytes, vote
+                                // Unavailable) instead of looping builds
+                                // or crashing.
+                                warn!(
+                                    msg_type = "HealArtifact",
+                                    contract_name = %contract_name,
+                                    error = %error,
+                                    "Toolchain drift, healing stays dormant"
+                                );
+                            }
                             Err(error)
                                 if is_compiler_infra_error(&error)
                                     || is_retryable_compiler_recovery_error(

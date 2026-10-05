@@ -279,6 +279,13 @@ impl TransferVerifier {
             .verify_light(ctx, transfer_event, subject_id, first_ledger)
             .await?;
 
+        // No sn-vs-batch gate here: the sender fetches the pending
+        // transfer separately from the offered window by design
+        // (`build_distribution_batch`), so a transfer ahead of the
+        // batch is the normal case, not an attack. The binding is the
+        // cryptographic verification above (seal + quorum + subject):
+        // a transfer that passes it is authentic, and the receiver
+        // still applies events strictly in order downstream.
         let (schema_id, namespace) = match subject_data {
             Some(SubjectData::Tracker {
                 schema_id,

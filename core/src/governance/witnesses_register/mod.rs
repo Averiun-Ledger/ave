@@ -53,8 +53,6 @@ pub struct WitnessesRegister {
     #[serde(skip)]
     pub(crate) node_creator_index:
         HashMap<PublicKey, HashSet<(PublicKey, String, SchemaType)>>,
-    #[serde(skip)]
-    pub(crate) ledger_batch_size: usize,
 }
 
 pub type IntervalData = (IntervalSet, Option<u64>);
@@ -1608,14 +1606,11 @@ impl Handler<Self> for WitnessesRegister {
 #[async_trait]
 impl PersistentActor for WitnessesRegister {
     type Persistence = LightPersistence;
-    type InitParams = usize;
+    type InitParams = ();
     type State = Self;
 
-    fn create_initial(params: Self::InitParams) -> Self {
-        Self {
-            ledger_batch_size: params,
-            ..Self::default()
-        }
+    fn create_initial(_: Self::InitParams) -> Self {
+        Self::default()
     }
 
     fn apply(

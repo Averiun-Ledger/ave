@@ -571,11 +571,18 @@ impl Handler<Self> for Update {
                         if let Some((better_node, offer, target_sn)) =
                             selected_request.clone()
                         {
+                            // Only offers covering our next sn count:
+                            // a stale witness must not inflate the
+                            // target beyond the selected peer's reach.
                             let expected_target_sn = self
                                 .offers
                                 .values()
                                 .filter(|offer| {
                                     offer.kind == UpdateSubjectKind::Tracker
+                                })
+                                .filter(|offer| {
+                                    self.next_tracker_range(&offer.ranges)
+                                        .is_some()
                                 })
                                 .map(|offer| offer.sn)
                                 .max()

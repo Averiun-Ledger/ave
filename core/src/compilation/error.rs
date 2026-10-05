@@ -134,6 +134,14 @@ pub enum CompilerError {
         "artifact hash does not match ledger anchor: expected {expected}, got {actual}"
     )]
     ArtifactAnchorMismatch { expected: String, actual: String },
+
+    #[error(
+        "toolchain drift: anchor built with {expected_fingerprint}, local build with {actual_fingerprint}"
+    )]
+    ToolchainDrift {
+        expected_fingerprint: String,
+        actual_fingerprint: String,
+    },
 }
 
 impl CompilerError {

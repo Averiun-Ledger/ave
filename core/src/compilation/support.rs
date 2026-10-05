@@ -201,6 +201,7 @@ pub(crate) const fn is_compiler_infra_error(error: &CompilerError) -> bool {
         error,
         CompilerError::CompilersUnavailable { .. }
             | CompilerError::ToolchainMismatch { .. }
+            | CompilerError::ToolchainDrift { .. }
             | CompilerError::InvalidAttestationSignature
             | CompilerError::AttestationMismatch { .. }
     )
@@ -338,6 +339,28 @@ impl CompilerSupport {
                 result,
                 started_at.elapsed(),
             );
+        }
+    }
+
+    /// Toolchain fingerprint recorded at anchor time, if any: the
+    /// reference to tell drift (different toolchain, stand down)
+    /// from corruption (same toolchain, fail loud).
+    async fn anchor_toolchain_fingerprint<A: Actor>(
+        ctx: &ActorContext<A>,
+        register_path: &ActorPath,
+        contract_name: &str,
+    ) -> Option<DigestIdentifier> {
+        let register = ctx.system().get_actor::<ContractRegister>(register_path).await.ok()?;
+        match register
+            .ask(ContractRegisterMessage::GetMetadata {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Metadata(Some(record))) => {
+                Some(record.toolchain_fingerprint)
+            }
+            Ok(_) | Err(_) => None,
         }
     }
 
@@ -713,6 +736,25 @@ impl CompilerSupport {
                 if let Some(expected) = expected_wasm_hash
                     && metadata.wasm_hash != *expected
                 {
+                    // Drift (cache built under another toolchain) stands
+                    // down; only same-toolchain divergence is corruption.
+                    if let Some(record_fingerprint) =
+                        Self::anchor_toolchain_fingerprint(
+                            ctx,
+                            register_path,
+                            contract_name,
+                        )
+                        .await
+                        && record_fingerprint != metadata.toolchain_fingerprint
+                    {
+                        return Err(CompilerError::ToolchainDrift {
+                            expected_fingerprint: record_fingerprint
+                                .to_string(),
+                            actual_fingerprint: metadata
+                                .toolchain_fingerprint
+                                .to_string(),
+                        });
+                    }
                     return Err(CompilerError::ArtifactAnchorMismatch {
                         expected: expected.to_string(),
                         actual: metadata.wasm_hash.to_string(),
@@ -793,6 +835,24 @@ impl CompilerSupport {
             if let Some(expected) = expected_wasm_hash
                 && wasm_hash != *expected
             {
+                // Same toolchain must reproduce the anchor byte for
+                // byte: divergence is corruption (fail loud). A
+                // different toolchain can not reproduce it by design:
+                // stand down instead of crash-looping.
+                if let Some(record_fingerprint) =
+                    Self::anchor_toolchain_fingerprint(
+                        ctx,
+                        register_path,
+                        contract_name,
+                    )
+                    .await
+                    && record_fingerprint != toolchain_fingerprint
+                {
+                    return Err(CompilerError::ToolchainDrift {
+                        expected_fingerprint: record_fingerprint.to_string(),
+                        actual_fingerprint: toolchain_fingerprint.to_string(),
+                    });
+                }
                 return Err(CompilerError::ArtifactAnchorMismatch {
                     expected: expected.to_string(),
                     actual: wasm_hash.to_string(),
@@ -1687,6 +1747,10 @@ mod tests {
                 expected: "e".to_owned(),
                 actual: "a".to_owned(),
             },
+            CompilerError::ToolchainDrift {
+                expected_fingerprint: "e".to_owned(),
+                actual_fingerprint: "a".to_owned(),
+            },
         ]
     }
 
@@ -1699,6 +1763,7 @@ mod tests {
         match error {
             CompilerError::CompilersUnavailable { .. } => (true, false, true),
             CompilerError::ToolchainMismatch { .. }
+            | CompilerError::ToolchainDrift { .. }
             | CompilerError::InvalidAttestationSignature
             | CompilerError::AttestationMismatch { .. } => (true, false, false),
             CompilerError::FileReadFailed { kind, .. } => (
