@@ -830,7 +830,6 @@ pub async fn get_tracker_window<A>(
         Option<u64>,
         Option<u64>,
         Option<u64>,
-        bool,
         Vec<TrackerDeliveryRange>,
     ),
     ActorError,
@@ -862,9 +861,9 @@ where
             sn,
             transfer_sn,
             clear_sn,
-            is_all,
             ranges,
-        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
+            ..
+        } => Ok((sn, transfer_sn, clear_sn, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
@@ -886,7 +885,6 @@ pub async fn check_witness_status_and_window<A>(
         Option<u64>,
         Option<u64>,
         Option<u64>,
-        bool,
         Vec<TrackerDeliveryRange>,
     ),
     ActorError,
@@ -922,9 +920,9 @@ where
             sn,
             transfer_sn,
             clear_sn,
-            is_all,
             ranges,
-        } => Ok((status, sn, transfer_sn, clear_sn, is_all, ranges)),
+            ..
+        } => Ok((status, sn, transfer_sn, clear_sn, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::WitnessStatusAndWindow"

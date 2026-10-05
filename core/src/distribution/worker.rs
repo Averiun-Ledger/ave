@@ -807,7 +807,6 @@ impl DistriWorker {
             u64,
             Option<u64>,
             Option<u64>,
-            bool,
             Vec<TrackerDeliveryRange>,
         ),
         ActorError,
@@ -822,8 +821,7 @@ impl DistriWorker {
             return Err(DistributorError::SubjectNotFound.into());
         };
 
-        let (sn, transfer_sn, clear_sn, is_all, ranges) =
-            resolve_tracker_window(
+        let (sn, transfer_sn, clear_sn, ranges) = resolve_tracker_window(
                 ctx,
                 governance_id,
                 subject_id,
@@ -868,7 +866,7 @@ impl DistriWorker {
             };
         };
 
-        Ok((sn, transfer_sn, clear_sn, is_all, ranges))
+        Ok((sn, transfer_sn, clear_sn, ranges))
     }
 
     fn project_tracker_ledger(
@@ -985,7 +983,7 @@ impl DistriWorker {
 
         match data {
             SubjectData::Tracker { .. } => {
-                let (sn, _, clear_sn, _, ranges) = self
+                let (sn, _, clear_sn, ranges) = self
                     .get_tracker_window(
                         ctx,
                         subject_id,
@@ -1031,7 +1029,7 @@ impl DistriWorker {
 
         match data {
             SubjectData::Tracker { .. } => {
-                let (window_sn, transfer_sn, clear_sn, _, ranges) = self
+                let (window_sn, transfer_sn, clear_sn, ranges) = self
                     .get_tracker_window(
                         ctx,
                         subject_id,

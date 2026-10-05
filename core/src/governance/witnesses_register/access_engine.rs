@@ -237,7 +237,6 @@ impl WitnessesRegister {
             Option<u64>,
             Option<u64>,
             Option<u64>,
-            bool,
             Vec<TrackerDeliveryRange>,
         ),
         ActorError,
@@ -300,7 +299,7 @@ impl WitnessesRegister {
         );
 
         let Some(access_limit) = access_limit else {
-            return Ok((None, None, None, true, Vec::new()));
+            return Ok((None, None, None, Vec::new()));
         };
 
         let mut sorted_old_owners: Vec<(PublicKey, u64)> = data
@@ -354,7 +353,7 @@ impl WitnessesRegister {
 
         let from_sn = params.actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
-            return Ok((None, transfer_sn, None, true, Vec::new()));
+            return Ok((None, transfer_sn, None, Vec::new()));
         }
 
         let namespace = Namespace::from(params.namespace);
@@ -451,7 +450,7 @@ impl WitnessesRegister {
             "Tracker window built"
         );
 
-        Ok((Some(access_limit), transfer_sn, clear_sn, true, ranges))
+        Ok((Some(access_limit), transfer_sn, clear_sn, ranges))
     }
 
     pub(crate) async fn build_tracker_window(
@@ -465,13 +464,12 @@ impl WitnessesRegister {
             Option<u64>,
             Option<u64>,
             Option<u64>,
-            bool,
             Vec<TrackerDeliveryRange>,
         ),
         ActorError,
     > {
         let Some(data) = self.subjects.get(subject_id) else {
-            return Ok((None, None, None, true, Vec::new()));
+            return Ok((None, None, None, Vec::new()));
         };
 
         self.build_tracker_window_from_data(

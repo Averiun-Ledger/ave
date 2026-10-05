@@ -411,7 +411,6 @@ pub enum WitnessesRegisterResponse {
         sn: Option<u64>,
         transfer_sn: Option<u64>,
         clear_sn: Option<u64>,
-        is_all: bool,
         ranges: Vec<TrackerDeliveryRange>,
     },
     WitnessStatusAndWindow {
@@ -419,7 +418,6 @@ pub enum WitnessesRegisterResponse {
         sn: Option<u64>,
         transfer_sn: Option<u64>,
         clear_sn: Option<u64>,
-        is_all: bool,
         ranges: Vec<TrackerDeliveryRange>,
     },
     WitnessStatus(WitnessStatus),
@@ -1395,7 +1393,7 @@ impl Handler<Self> for WitnessesRegister {
                 actual_sn,
                 ..
             } => {
-                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
+                let (sn, transfer_sn, clear_sn, ranges) = self
                     .build_tracker_window(
                         ctx,
                         &subject_id,
@@ -1412,7 +1410,6 @@ impl Handler<Self> for WitnessesRegister {
                     sn,
                     transfer_sn,
                     clear_sn,
-                    is_all,
                     ranges,
                 });
             }
@@ -1537,7 +1534,7 @@ impl Handler<Self> for WitnessesRegister {
                         None,
                     )
                     .await?;
-                let (sn, transfer_sn, clear_sn, is_all, ranges) = self
+                let (sn, transfer_sn, clear_sn, ranges) = self
                     .build_tracker_window_from_data(
                         ctx,
                         &subject_id,
@@ -1557,7 +1554,6 @@ impl Handler<Self> for WitnessesRegister {
                     sn,
                     transfer_sn,
                     clear_sn,
-                    is_all,
                     ranges,
                 });
             }

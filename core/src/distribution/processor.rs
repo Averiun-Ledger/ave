@@ -61,7 +61,7 @@ impl DistriWorker {
             )
             .await
             .ok()
-            .map(|(sn, _, _, _, ranges)| (Some(sn), ranges))
+            .map(|(sn, _, _, ranges)| (Some(sn), ranges))
             .unwrap_or((None, Vec::new()))
         } else {
             (None, Vec::new())
