@@ -1712,17 +1712,7 @@ fn persist_write_batch(
                 upsert_subject_with_stmt(&mut upsert_subject_stmt, metadata)?
             }
             WriteCommand::Incident(event) => {
-                insert_incident_with_stmt(
-                    &mut insert_incident_stmt,
-                    event.watchdog_timestamp_nanos.unwrap_or(0),
-                    event.watchdog_phase.clone().unwrap_or_default(),
-                    event.watchdog_expected_secs.unwrap_or(0),
-                    event.watchdog_elapsed_secs.unwrap_or(0),
-                    event.request_id.clone(),
-                    event.sn.unwrap_or(0),
-                    event.watchdog_node_version.clone().unwrap_or_default(),
-                    event.error.clone(),
-                )?
+                insert_incident_with_stmt(&mut insert_incident_stmt, event)?
             }
             WriteCommand::Abort(event) => upsert_abort_with_stmt(
                 &mut upsert_abort_stmt,
@@ -3776,17 +3766,11 @@ fn upsert_subject_with_stmt(
 
 /// Stores a watchdog incident: plain insert, no upsert — every
 /// firing is its own row (unlike aborts, incidents never update).
-#[allow(clippy::too_many_arguments)]
+/// Takes the whole tracking event instead of one parameter per
+/// column, so adding a column never trips the argument-count lint.
 fn insert_incident_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
-    timestamp_nanos: u64,
-    phase: String,
-    expected_secs: u64,
-    elapsed_secs: u64,
-    request_id: String,
-    gov_version: u64,
-    node_version: String,
-    detail: String,
+    event: &RequestTrackingEvent,
 ) -> Result<(), DatabaseError> {
     let as_i64 = |value: u64, field: &str| {
         i64::try_from(value).map_err(|_| {
@@ -3796,14 +3780,14 @@ fn insert_incident_with_stmt(
         })
     };
     stmt.execute(params![
-        as_i64(timestamp_nanos, "timestamp_nanos")?,
-        phase,
-        as_i64(expected_secs, "expected_secs")?,
-        as_i64(elapsed_secs, "elapsed_secs")?,
-        request_id,
-        as_i64(gov_version, "gov_version")?,
-        node_version,
-        detail
+        as_i64(event.watchdog_timestamp_nanos.unwrap_or(0), "timestamp_nanos")?,
+        event.watchdog_phase.clone().unwrap_or_default(),
+        as_i64(event.watchdog_expected_secs.unwrap_or(0), "expected_secs")?,
+        as_i64(event.watchdog_elapsed_secs.unwrap_or(0), "elapsed_secs")?,
+        event.request_id.clone(),
+        as_i64(event.sn.unwrap_or(0), "gov_version")?,
+        event.watchdog_node_version.clone().unwrap_or_default(),
+        event.error.clone()
     ])
     .map_err(|e| DatabaseError::Query(e.to_string()))?;
 

@@ -22,6 +22,7 @@ use crate::governance::witnesses_register::{
 use crate::governance::{
     Governance, GovernanceMessage, GovernanceResponse, model::WitnessesData,
 };
+use super::version_sync::SyncPeerBackoff;
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
 };
@@ -39,6 +40,14 @@ pub enum TrackerSyncMessage {
     UpdateTimeout { batch_nonce: u64 },
     NetworkRequest(TrackerSyncNetworkRequest),
     NetworkResponse(TrackerSyncNetworkResponse),
+    /// Pushed by the parent governance every time it updates (same
+    /// pattern as `RefreshGovernance` on the version sync): who may
+    /// ask for our witness subject lists. No lazy fetching, no TTL —
+    /// the data is always current because the parent keeps it so.
+    RefreshPeers {
+        members: HashSet<PublicKey>,
+        witnesses: HashSet<PublicKey>,
+    },
 }
 
 impl Message for TrackerSyncMessage {}
@@ -123,12 +132,36 @@ pub struct TrackerSync {
     update_batch_size: usize,
     update_timeout: Duration,
     next_nonce: u64,
+    round: u64,
+    peer_backoff: SyncPeerBackoff,
     state: SyncState,
     pending_fetch_timeout: Option<TimerKey>,
     pending_update_timeout: Option<TimerKey>,
+    /// Members + gov witnesses allowed to ask for our lists, pushed
+    /// by the parent on every governance update. Zero asks on serve.
+    peers: PeerSet,
+    /// Pages served this cycle. Pagination without a bound lets one
+    /// lying or broken peer hold the cycle (and the tick loop) forever
+    /// by repeating `next_cursor` (SYNC-06).
+    pages_this_cycle: u32,
+    /// Cursor to resume from on the next cycle when the page cap cut
+    /// this one short. Cleared on every full pass so new heads are
+    /// still discovered.
+    resume_cursor: Option<DigestIdentifier>,
 }
 
 const MAX_STALLED_UPDATE_CHECKS: u8 = 3;
+
+/// Pages fetched per cycle before yielding to the next tick. With the
+/// default page size this still covers thousands of subjects per
+/// minute; a peer demanding more is either broken or stalling us.
+const MAX_PAGES_PER_CYCLE: u32 = 100;
+
+#[derive(Debug, Clone, Default)]
+struct PeerSet {
+    members: HashSet<PublicKey>,
+    witnesses: HashSet<PublicKey>,
+}
 
 impl TrackerSync {
     fn observe_round(result: &'static str) {
@@ -160,9 +193,14 @@ impl TrackerSync {
             update_batch_size: config.update_batch_size.max(1),
             update_timeout: config.update_timeout,
             next_nonce: 0,
+            round: 0,
+            peer_backoff: SyncPeerBackoff::default(),
+            peers: PeerSet::default(),
             state: SyncState::Idle,
             pending_fetch_timeout: None,
             pending_update_timeout: None,
+            pages_this_cycle: 0,
+            resume_cursor: None,
         }
     }
 
@@ -297,7 +335,7 @@ impl TrackerSync {
     }
 
     async fn select_peer(
-        &self,
+        &mut self,
         ctx: &ActorContext<Self>,
     ) -> Result<Option<PublicKey>, ActorError> {
         let (gov_peers, sync_peers) = tokio::try_join!(
@@ -307,6 +345,10 @@ impl TrackerSync {
         let mut peers = gov_peers;
         peers.extend(sync_peers);
         peers.remove(&*self.our_key);
+        // Forget gone peers; skip the ones sitting out a silence
+        // backoff — one quiet cycle must not eat every round.
+        self.peer_backoff.prune(&peers);
+        peers.retain(|peer| !self.peer_backoff.is_backed_off(peer, self.round));
 
         let mut rng = rand::rng();
         Ok(peers.into_iter().choose(&mut rng))
@@ -320,6 +362,14 @@ impl TrackerSync {
         after_subject_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         self.cancel_update_timeout(ctx);
+        if after_subject_id.is_none() {
+            // Fresh cycle (tick, gov change, completion): the page
+            // budget restarts and any saved resume point is spent.
+            // Paginated continuations keep counting.
+            self.pages_this_cycle = 0;
+            self.resume_cursor = None;
+        }
+        self.pages_this_cycle += 1;
         let request_nonce = self.allocate_nonce();
 
         let message = ActorMessage::TrackerSyncReq {
@@ -490,9 +540,20 @@ impl TrackerSync {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let current_local_version = self.get_governance_version(ctx).await?;
+        if !matches!(self.state, SyncState::Updating(_)) {
+            // Unreachable through the nonce-guarded timeout path, but
+            // `take` below would silently wipe the state if it ever
+            // fired off-state: scream instead of vanishing (SYNC-07).
+            warn!(
+                governance_id = %self.governance_id,
+                state = ?std::mem::discriminant(&self.state),
+                "advance_update_phase called outside Updating state"
+            );
+            return Ok(());
+        }
         let SyncState::Updating(mut state) = std::mem::take(&mut self.state)
         else {
-            return Ok(());
+            unreachable!("checked Updating above");
         };
 
         if current_local_version != state.governance_version {
@@ -561,6 +622,7 @@ impl TrackerSync {
             }
 
             Self::observe_round("completed");
+            self.resume_cursor = None;
             return self.finish_cycle(ctx).await;
         }
 
@@ -609,17 +671,40 @@ impl TrackerSync {
             self.schedule_tick(ctx)?;
             return Ok(());
         };
+        self.round += 1;
 
         let governance_version = self.get_governance_version(ctx).await?;
         Self::observe_round("started");
-        self.start_fetch(ctx, peer, governance_version, None).await
+        // Resume where the page cap cut the previous cycle, if
+        // anywhere: a huge fleet is covered over successive cycles
+        // instead of rescanning the head forever.
+        let resume = self.resume_cursor.clone();
+        self.start_fetch(ctx, peer, governance_version, resume).await
+    }
+
+    /// Whether `sender` may ask for our witness subject list: a
+    /// fellow governance member or governance witness, from the set
+    /// the parent pushes on every update. Strangers get silence, not
+    /// data — the list enumerates what we follow and each answer
+    /// costs a register scan (SYNC-08).
+    fn is_sync_peer(&self, sender: &PublicKey) -> bool {
+        self.peers.members.contains(sender)
+            || self.peers.witnesses.contains(sender)
     }
 
     async fn handle_network_request(
-        &self,
+        &mut self,
         ctx: &ActorContext<Self>,
         request: TrackerSyncNetworkRequest,
     ) -> Result<(), ActorError> {
+        if !self.is_sync_peer(&request.sender) {
+            warn!(
+                governance_id = %self.governance_id,
+                sender = %request.sender,
+                "Ignoring tracker sync request from non-member"
+            );
+            return Ok(());
+        }
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/witnesses_register",
             self.governance_id
@@ -744,6 +829,9 @@ impl Handler<Self> for TrackerSync {
         ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerSyncResponse, ActorError> {
         match msg {
+            TrackerSyncMessage::RefreshPeers { members, witnesses } => {
+                self.peers = PeerSet { members, witnesses };
+            }
             TrackerSyncMessage::Tick => {
                 if let Err(error) = self.handle_tick(ctx).await {
                     Self::observe_round("error");
@@ -770,6 +858,13 @@ impl Handler<Self> for TrackerSync {
                         request_nonce = request_nonce,
                         "Tracker sync fetch timed out"
                     );
+                    // The peer stayed silent the whole round: back it
+                    // off so the next cycles ask someone else. Any
+                    // future answer forgives it at once.
+                    if let SyncState::Fetching(state) = &self.state {
+                        let peer = state.peer.clone();
+                        self.peer_backoff.note_failure(&peer, self.round);
+                    }
                     if let Err(e) = self.finish_cycle(ctx).await {
                         return self.fail_cycle(ctx, "fetch timeout", e).await;
                     }
@@ -812,7 +907,30 @@ impl Handler<Self> for TrackerSync {
                     _ => return Ok(TrackerSyncResponse::None),
                 };
 
+                // Page budget spent but the peer keeps paging: save where
+                // to resume next tick and yield instead of letting one
+                // peer hold the cycle (and the tick loop) forever
+                // (SYNC-06). A finished list (`next_cursor: None`)
+                // completes normally below.
+                if next_cursor.is_some()
+                    && self.pages_this_cycle >= MAX_PAGES_PER_CYCLE
+                {
+                    warn!(
+                        governance_id = %self.governance_id,
+                        peer = %peer,
+                        pages = self.pages_this_cycle,
+                        "Sync page budget spent, resuming next cycle"
+                    );
+                    Self::observe_round("page_capped");
+                    self.resume_cursor = next_cursor;
+                    self.finish_cycle(ctx).await?;
+                    return Ok(TrackerSyncResponse::None);
+                }
+
                 self.cancel_fetch_timeout(ctx);
+                // It answered: alive, whatever the page says — forgive
+                // any silence backoff on the spot.
+                self.peer_backoff.note_success(&peer);
 
                 debug!(
                     governance_id = %self.governance_id,
@@ -863,6 +981,10 @@ impl Handler<Self> for TrackerSync {
                                 .await?;
                             } else {
                                 Self::observe_round("completed");
+                                // Full pass done: drop any saved resume
+                                // point so the next cycle scans from the
+                                // head and discovers new subjects.
+                                self.resume_cursor = None;
                                 self.finish_cycle(ctx).await?;
                             }
                             return Ok(TrackerSyncResponse::None);

@@ -205,9 +205,18 @@ impl Handler<Self> for ValidationSchema {
                     return Ok(());
                 }
 
+                // One worker per signer AND subject: distinct subjects
+                // are independent ledgers, so sharing one name slot
+                // would serialize them (all but one bounced with
+                // Unavailable). Same signer + same subject still
+                // collides on purpose (duplicate delivery dedup).
                 let child = ctx
                     .create_child(
-                        &format!("{}", validation_req.signature().signer),
+                        &format!(
+                            "{}_{}",
+                            validation_req.signature().signer,
+                            validation_req.content().get_subject_id()
+                        ),
                         ValiWorker {
                             init_state: Some(self.init_state.clone()),
                             node_key: sender.clone(),
@@ -261,8 +270,9 @@ impl Handler<Self> for ValidationSchema {
                             // exactly like the created path below.
                             match ctx
                                 .get_child::<ValiWorker>(&format!(
-                                    "{}",
-                                    validation_req.signature().signer
+                                    "{}_{}",
+                                    validation_req.signature().signer,
+                                    validation_req.content().get_subject_id()
                                 ))
                                 .await
                             {

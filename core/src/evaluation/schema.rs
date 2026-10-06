@@ -254,9 +254,22 @@ impl Handler<Self> for EvaluationSchema {
                     return Ok(());
                 }
 
+                // One worker per signer AND subject: distinct subjects
+                // are independent ledgers, so sharing one name slot
+                // would serialize them (all but one bounced with
+                // Unavailable). Same signer + same subject still
+                // collides on purpose (duplicate delivery dedup).
                 let child = ctx
                     .create_child(
-                        &format!("{}", evaluation_req.signature().signer),
+                        &format!(
+                            "{}_{}",
+                            evaluation_req.signature().signer,
+                            evaluation_req
+                                .content()
+                                .event_request
+                                .content()
+                                .get_subject_id()
+                        ),
                         EvalWorker {
                             node_key: sender.clone(),
                             our_key: self.our_key.clone(),

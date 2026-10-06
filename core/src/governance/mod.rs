@@ -49,7 +49,9 @@ use crate::{
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
-        tracker_sync::{TrackerSync, TrackerSyncConfig},
+        tracker_sync::{
+            TrackerSync, TrackerSyncConfig, TrackerSyncMessage,
+        },
         transfer_verification_register::{
             TransferVerificationRegister, TransferVerificationRegisterMessage,
             TransferVerificationRegisterResponse,
@@ -767,7 +769,7 @@ impl Governance {
 
     async fn refresh_version_sync(
         &self,
-        ctx: &ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if !self.service {
             return Ok(());
@@ -790,6 +792,34 @@ impl Governance {
             })
             .await?;
 
+        // Same refresh point for the tracker sync peer set: every
+        // governance update re-pushes members + witnesses, so the
+        // serving gate never goes stale (SYNC-08).
+        self.push_tracker_sync_peers(ctx).await?;
+
+        Ok(())
+    }
+
+    /// Pushes the current members + gov witnesses to the tracker sync
+    /// child for its serving gate. Same fire-and-forget pattern as the
+    /// version sync refresh above.
+    async fn push_tracker_sync_peers(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let tracker_sync =
+            ctx.get_child::<TrackerSync>("tracker_sync").await?;
+        let members: HashSet<PublicKey> =
+            self.properties.members.values().cloned().collect();
+        let witnesses =
+            self.properties.get_witnesses(WitnessesData::Gov).map_err(
+                |e| ActorError::Functional {
+                    description: e.to_string(),
+                },
+            )?;
+        tracker_sync
+            .tell(TrackerSyncMessage::RefreshPeers { members, witnesses })
+            .await?;
         Ok(())
     }
 
@@ -5298,7 +5328,7 @@ impl Actor for Governance {
                 config.sync_tracker.update_timeout_secs.max(1),
             );
 
-            if let Err(e) = ctx
+            match ctx
                 .create_child(
                     "tracker_sync",
                     TrackerSync::new(
@@ -5319,12 +5349,43 @@ impl Actor for Governance {
                 )
                 .await
             {
-                error!(
-                    error = %e,
-                    subject_id = %self.subject_metadata.subject_id,
-                    "Failed to create tracker_sync child"
-                );
-                return Err(e);
+                Ok(_) => {
+                    // Newborn children start with empty peer sets: push
+                    // the current ones at once, same as RefreshGovernance
+                    // below does for the version sync.
+                    if let Err(e) =
+                        self.push_tracker_sync_peers(ctx).await
+                    {
+                        error!(
+                            error = %e,
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Failed to push initial peers to tracker_sync"
+                        );
+                        return Err(e);
+                    }
+                }
+                Err(ActorError::Exists { .. }) => {
+                    // Restart with a live child: it already syncs, just
+                    // bring its peer set current.
+                    if let Err(e) =
+                        self.push_tracker_sync_peers(ctx).await
+                    {
+                        error!(
+                            error = %e,
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Failed to refresh tracker_sync peers"
+                        );
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        subject_id = %self.subject_metadata.subject_id,
+                        "Failed to create tracker_sync child"
+                    );
+                    return Err(e);
+                }
             }
 
             let version_sync = ctx

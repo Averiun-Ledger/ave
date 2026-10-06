@@ -22601,7 +22601,7 @@ async fn test_compilation_stale_gov_owner_aborts() {
         "abort",
     )
     .await;
-    let RequestState::Abort { error, .. } = state else {
+    let RequestState::Abort { error: _, .. } = state else {
         panic!("expected abort state");
     };
 

@@ -176,12 +176,18 @@ enum ArtifactGate {
 /// Outcome of one schema of a multi-schema compile: success carries
 /// its artifact hash, a verdict short-circuits the whole request and
 /// a fatal error crashes the node. Aggregation in schema order keeps
-/// votes deterministic no matter in which order builds finish.
-#[allow(clippy::large_enum_variant)]
+/// votes deterministic no matter in which order builds finish. The
+/// fatal variant is boxed: `ActorError` would bloat every outcome.
 enum SchemaOutcome {
     Compiled(SchemaType, DigestIdentifier),
     Verdict(ContractCompilation),
-    Fatal(ActorError),
+    Fatal(Box<ActorError>),
+}
+
+impl SchemaOutcome {
+    fn fatal(error: ActorError) -> Self {
+        Self::Fatal(Box::new(error))
+    }
 }
 
 impl CompileWorker {
@@ -721,7 +727,7 @@ impl CompileWorker {
                 }
                 SchemaOutcome::Verdict(verdict) => return Ok(verdict),
                 SchemaOutcome::Fatal(error) => {
-                    return Err(crash_system(ctx, error).await);
+                    return Err(crash_system(ctx, *error).await);
                 }
             }
         }
@@ -761,7 +767,7 @@ impl CompileWorker {
                     Err(e) => {
                         return (
                             index,
-                            SchemaOutcome::Fatal(ActorError::Functional {
+                            SchemaOutcome::fatal(ActorError::Functional {
                                 description: format!(
                                     "Can not hash contract source: {}",
                                     e
@@ -805,7 +811,7 @@ impl CompileWorker {
                     Err(error) => {
                         return (
                             index,
-                            SchemaOutcome::Fatal(
+                            SchemaOutcome::fatal(
                                 ActorError::FunctionalCritical {
                                     description: format!(
                                         "Can not access contract register for anchor: {}",
@@ -828,7 +834,7 @@ impl CompileWorker {
                     Ok(ContractRegisterResponse::Anchor(None)) => {
                         return (
                             index,
-                            SchemaOutcome::Fatal(
+                            SchemaOutcome::fatal(
                                 ActorError::FunctionalCritical {
                                     description: format!(
                                         "No ledger anchor for committed contract {}",
@@ -841,7 +847,7 @@ impl CompileWorker {
                     Ok(_) => {
                         return (
                             index,
-                            SchemaOutcome::Fatal(
+                            SchemaOutcome::fatal(
                                 ActorError::UnexpectedResponse {
                                     path: register_path.clone(),
                                     expected:
@@ -854,7 +860,7 @@ impl CompileWorker {
                     Err(error) => {
                         return (
                             index,
-                            SchemaOutcome::Fatal(
+                            SchemaOutcome::fatal(
                                 ActorError::FunctionalCritical {
                                     description: format!(
                                         "Can not read contract anchor: {}",
@@ -896,7 +902,7 @@ impl CompileWorker {
                         Err(error) => {
                             return (
                                 index,
-                                SchemaOutcome::Fatal(
+                                SchemaOutcome::fatal(
                                     ActorError::FunctionalCritical {
                                         description: format!(
                                             "Can not read compiled contract {}: {}",
@@ -973,7 +979,7 @@ impl CompileWorker {
                         // loud.
                         return (
                             index,
-                            SchemaOutcome::Fatal(
+                            SchemaOutcome::fatal(
                                 ActorError::FunctionalCritical {
                                     description: format!(
                                         "Committed contract {} does not decode: {}",
@@ -1005,7 +1011,7 @@ impl CompileWorker {
                     if is_local_fatal_compiler_error(&error) {
                         return (
                             index,
-                            SchemaOutcome::Fatal(
+                            SchemaOutcome::fatal(
                                 ActorError::FunctionalCritical {
                                     description: format!(
                                         "Can not compile contract {}: {}",
