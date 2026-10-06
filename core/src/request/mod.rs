@@ -1177,7 +1177,7 @@ impl Actor for RequestHandler {
                 }
             };
 
-            let mut sink = tracking.register_sink("internal", None)?;
+            let sink = tracking.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_request_tracking());
         }
 

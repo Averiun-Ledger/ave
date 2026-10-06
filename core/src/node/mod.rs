@@ -1053,7 +1053,7 @@ impl Actor for Node {
                 });
             };
 
-            let mut sink = register_actor.register_sink("internal", None)?;
+            let sink = register_actor.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_register());
 
             match ctx
