@@ -1684,10 +1684,7 @@ async fn test_failed_fact_writes_no_registers() {
         state.properties,
         GovernanceData {
             version: 0,
-            members: BTreeMap::from([(
-                "Owner".to_owned(),
-                owner_key.clone(),
-            )]),
+            members: BTreeMap::from([("Owner".to_owned(), owner_key.clone())]),
             roles_gov: RolesGov {
                 approver: BTreeSet::from(["Owner".to_owned()]),
                 evaluator: BTreeSet::from(["Owner".to_owned()]),
@@ -1765,10 +1762,7 @@ async fn test_failed_fact_writes_no_registers() {
         .await
         .unwrap();
     assert!(evaluators.contains(&owner_key));
-    assert!(
-        evaluators
-            .contains(&PublicKey::from_str(&fake_key).unwrap())
-    );
+    assert!(evaluators.contains(&PublicKey::from_str(&fake_key).unwrap()));
 
     node_running(node1).await.unwrap();
 }
@@ -5250,8 +5244,9 @@ async fn test_reconcile_heals_role_wipe() {
             }
         }
     });
-    let request_id_v1 =
-        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    let request_id_v1 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     emit_approve(
         &node1,
         governance_id.clone(),
@@ -5268,8 +5263,9 @@ async fn test_reconcile_heals_role_wipe() {
             "remove": ["N2"]
         }
     });
-    let request_id_v2 =
-        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    let request_id_v2 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     emit_approve(
         &node1,
         governance_id.clone(),
@@ -5298,8 +5294,9 @@ async fn test_reconcile_heals_role_wipe() {
             }
         }
     });
-    let request_id_v3 =
-        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    let request_id_v3 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     emit_approve(
         &node1,
         governance_id.clone(),
@@ -5359,8 +5356,10 @@ async fn test_reconcile_heals_role_wipe() {
     assert_eq!(properties.version, 3);
     assert!(properties.members.contains_key("N2"));
 
-    let evaluators =
-        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
     assert!(evaluators.contains(&owner_key));
     assert!(evaluators.contains(&node2_key));
 
@@ -5386,8 +5385,7 @@ async fn test_reconcile_heals_rotation() {
         create_and_authorize_governance(&owner_governance, vec![&future_owner])
             .await;
 
-    let old_key =
-        PublicKey::from_str(owner_governance.public_key()).unwrap();
+    let old_key = PublicKey::from_str(owner_governance.public_key()).unwrap();
     let new_key = PublicKey::from_str(future_owner.public_key()).unwrap();
 
     let json = json!({
@@ -5425,10 +5423,9 @@ async fn test_reconcile_heals_rotation() {
         .await
         .unwrap();
 
-    let state =
-        get_subject(&future_owner, governance_id.clone(), None, true)
-            .await
-            .unwrap();
+    let state = get_subject(&future_owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
     assert_eq!(state.owner, future_owner.public_key());
 
     let evaluators = future_owner
@@ -5477,8 +5474,10 @@ async fn test_reconcile_heals_rotation() {
         .unwrap();
     assert_eq!(state.owner, future_owner.public_key());
 
-    let evaluators =
-        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
     assert!(evaluators.contains(&new_key));
     assert!(!evaluators.contains(&old_key));
 
@@ -5497,8 +5496,7 @@ async fn test_clean_boot_skips_replay() {
         .await;
     let node1 = nodes[0].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&node1, vec![]).await;
+    let governance_id = create_and_authorize_governance(&node1, vec![]).await;
 
     let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
 
@@ -5514,8 +5512,9 @@ async fn test_clean_boot_skips_replay() {
             ]
         }
     });
-    let request_id_f1 =
-        emit_fact(&node1, governance_id.clone(), json, true).await.unwrap();
+    let request_id_f1 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     emit_approve(
         &node1,
         governance_id.clone(),
@@ -5564,8 +5563,10 @@ async fn test_clean_boot_skips_replay() {
     assert_eq!(state.sn, 1);
     assert_eq!(governance_properties(state.properties).version, 1);
 
-    let evaluators =
-        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
     assert!(evaluators.contains(&owner_key));
 
     // The rebooted node accepts traffic: readiness flipped, so the
@@ -5582,8 +5583,9 @@ async fn test_clean_boot_skips_replay() {
             ]
         }
     });
-    let request_id_f2 =
-        emit_fact(&api, governance_id.clone(), json, true).await.unwrap();
+    let request_id_f2 = emit_fact(&api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
     emit_approve(
         &api,
         governance_id.clone(),
@@ -5616,8 +5618,7 @@ async fn test_inflight_resume_after_reboot() {
         .await;
     let node1 = nodes[0].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&node1, vec![]).await;
+    let governance_id = create_and_authorize_governance(&node1, vec![]).await;
 
     let fake_key =
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
@@ -5631,8 +5632,9 @@ async fn test_inflight_resume_after_reboot() {
             ]
         }
     });
-    let request_id =
-        emit_fact(&node1, governance_id.clone(), json, false).await.unwrap();
+    let request_id = emit_fact(&node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
 
     // Wait until the handler registered the request: killing before
     // registration would leave nothing to resume or replay anywhere.
@@ -5647,9 +5649,15 @@ async fn test_inflight_resume_after_reboot() {
     // request leaves Approval): either the event applies before
     // death or resume plus replay complete it after reboot. Both
     // branches converge on the same assertions.
-    emit_approve(&node1, governance_id.clone(), ApprovalStateRes::Accepted, request_id.clone(), false)
-        .await
-        .unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
     for _ in 0..100 {
         let voted = node1
             .get_request_state(request_id.clone())
@@ -5692,8 +5700,10 @@ async fn test_inflight_resume_after_reboot() {
     // pre_start, so the assertions below observe post-boot state
     // instead of pre-reboot ext_db rows.
     let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
-    let evaluators =
-        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
     assert!(evaluators.contains(&owner_key));
 
     let state = get_subject(&api, governance_id.clone(), Some(1), true)

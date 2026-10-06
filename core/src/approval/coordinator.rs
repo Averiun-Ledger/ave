@@ -177,9 +177,7 @@ impl Handler<Self> for ApprCoordinator {
                         receiver: node_key.clone(),
                         receiver_actor: self.validator_actor_path(),
                     },
-                    ActorMessage::ApprovalCollectReq {
-                        req: *approval_req,
-                    },
+                    ActorMessage::ApprovalCollectReq { req: *approval_req },
                 );
 
                 let target = RetryNetwork::new(self.network.clone());

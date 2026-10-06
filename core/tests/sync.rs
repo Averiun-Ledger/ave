@@ -11,8 +11,8 @@ use ave_core::{
 };
 use ave_network::{NodeType, RoutingNode};
 use common::{
-    create_and_authorize_governance, create_node, emit_fact, get_subject,
-    node_running, CreateNodeConfig,
+    CreateNodeConfig, create_and_authorize_governance, create_node, emit_fact,
+    get_subject, node_running,
 };
 use serde_json::json;
 use std::collections::HashSet;
@@ -25,8 +25,8 @@ use crate::common::PORT_COUNTER;
 
 /// Nodes with short governance-sync ticks (TTL = 10 ticks): the stale
 /// target test would take ~2 minutes with default intervals.
-async fn create_sync_nodes(
-) -> (Vec<common::NodeData>, Vec<tempfile::TempDir>) {
+async fn create_sync_nodes() -> (Vec<common::NodeData>, Vec<tempfile::TempDir>)
+{
     let gov_sync = || {
         Some(GovernanceSyncConfig {
             interval_secs: 1,
@@ -107,7 +107,9 @@ async fn held_count(api: &Api, message: FaultMessage) -> usize {
 
 async fn wait_held_ledger_reqs(api: &Api, at_least: usize, timeout_secs: u64) {
     for _ in 0..timeout_secs * 2 {
-        if held_count(api, FaultMessage::DistributionLedgerReq).await >= at_least {
+        if held_count(api, FaultMessage::DistributionLedgerReq).await
+            >= at_least
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -130,8 +132,7 @@ async fn test_sync_stale_target_resweeps() {
     let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
     let _ = nodes;
 
-    let governance_id =
-        create_and_authorize_governance(&b, vec![&a]).await;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
 
     // v1: both members, B a gov witness (the only sync candidate).
     emit_fact(
@@ -151,9 +152,13 @@ async fn test_sync_stale_target_resweeps() {
     .unwrap();
     // B applies its own facts locally on emit: no update needed,
     // and it must know the v1 membership before serving A.
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // From here A must never receive ledger, neither pulled nor
     // pushed (batch or last-event): hold its outbound ledger requests
@@ -178,7 +183,9 @@ async fn test_sync_stale_target_resweeps() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
 
     // Wave 1: A learns v2 and fires its update. Then silence: the
     // ledger never arrives, the version never moves.
@@ -191,14 +198,18 @@ async fn test_sync_stale_target_resweeps() {
     wait_held_ledger_reqs(&a, 2, 60).await;
 
     // And it never "succeeded": A is still at v1.
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // Wave 2 (after the 10-tick target TTL): A drops the stale target
     // and opens a fresh round. Pre-fix this never happens.
     wait_held_ledger_reqs(&a, 2, 60).await;
 
     // And it never "succeeded": A is still at v1.
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 }
 
 // SYNC-06: a peer repeating next_cursor must not hold the fetch cycle
@@ -208,13 +219,11 @@ async fn test_sync_stale_target_resweeps() {
 async fn test_sync_page_cap_and_resume() {
     let (nodes, _dirs) = create_sync_nodes().await;
     let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
-    let b_key =
-        PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
+    let b_key = PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
     let a_key = PublicKey::from_str(&nodes[1].api.public_key()).unwrap();
     let _ = nodes;
 
-    let governance_id =
-        create_and_authorize_governance(&b, vec![&a]).await;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
     emit_fact(
         &b,
         governance_id.clone(),
@@ -230,9 +239,13 @@ async fn test_sync_page_cap_and_resume() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // A's own fetch requests are held (observable + countable); forged
     // responses are injected straight into its tracker_sync actor.
@@ -251,7 +264,15 @@ async fn test_sync_page_cap_and_resume() {
     let mut seen = HashSet::from([first_nonce]);
     let mut nonce = first_nonce;
     for i in 0..100 {
-        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, cursor.clone()).await;
+        inject_sync_page(
+            &a,
+            &a_key,
+            &b_key,
+            &sync_actor,
+            nonce,
+            cursor.clone(),
+        )
+        .await;
         nonce = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
         seen.insert(nonce);
         assert_eq!(
@@ -305,8 +326,7 @@ async fn test_sync_serving_gate() {
     };
     let _ = nodes;
 
-    let governance_id =
-        create_and_authorize_governance(&b, vec![&a]).await;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
     emit_fact(
         &b,
         governance_id.clone(),
@@ -322,7 +342,9 @@ async fn test_sync_serving_gate() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // A's answers are held so silence vs response is observable.
     hold_outbound(&a, FaultMessage::TrackerSyncRes).await;
@@ -337,9 +359,7 @@ async fn test_sync_serving_gate() {
         .await
         .unwrap_or_default()
         .iter()
-        .filter(|m| {
-            matches!(&m.message, ActorMessage::TrackerSyncRes { .. })
-        })
+        .filter(|m| matches!(&m.message, ActorMessage::TrackerSyncRes { .. }))
         .count();
     assert_eq!(silent, 0, "stranger got a sync answer");
 
@@ -404,9 +424,7 @@ async fn tracker_fetch_full(
         .filter_map(|m| match &m.message {
             ActorMessage::TrackerSyncReq {
                 after_subject_id, ..
-            } if &m.info.receiver == peer => {
-                Some(after_subject_id.clone())
-            }
+            } if &m.info.receiver == peer => Some(after_subject_id.clone()),
             _ => None,
         })
         .collect()
@@ -494,5 +512,3 @@ async fn inject_sync_page(
     );
     api.test_inject_inbound(message, from).await.unwrap();
 }
-
-

@@ -136,9 +136,7 @@ impl DistriWorker {
             )?;
 
             let truncated = match window_sn {
-                Some(window) => {
-                    sender_is_all && chunk_offered_hi_sn < window
-                }
+                Some(window) => sender_is_all && chunk_offered_hi_sn < window,
                 None => false,
             };
             if truncated {
@@ -154,9 +152,8 @@ impl DistriWorker {
                     metrics.observe_distribution_failure("truncated_batch");
                 }
             }
-            let chunk_is_all = remaining_ledger.is_empty()
-                && sender_is_all
-                && !truncated;
+            let chunk_is_all =
+                remaining_ledger.is_empty() && sender_is_all && !truncated;
 
             let lease = if pending_ledger[0].is_create_event() && !is_register {
                 let create_ledger = pending_ledger[0].clone();
@@ -428,10 +425,7 @@ impl DistriWorker {
             return Ok(());
         }
         for event in ledger.iter_mut() {
-            if !matches!(
-                event.protocols,
-                Protocols::TrackerFactFull { .. }
-            ) {
+            if !matches!(event.protocols, Protocols::TrackerFactFull { .. }) {
                 continue;
             }
             let mode = ranges
@@ -457,9 +451,7 @@ impl DistriWorker {
                         sn = event.sn,
                         "Masked over-clear fact on receipt"
                     );
-                    if let Some(metrics) =
-                        crate::metrics::try_core_metrics()
-                    {
+                    if let Some(metrics) = crate::metrics::try_core_metrics() {
                         metrics.observe_distribution_failure(
                             "visibility_remasked",
                         );
@@ -691,9 +683,8 @@ impl DistriWorker {
                     // The received event is ours even with a gap behind:
                     // ack it so the sender stops retrying, the missing
                     // range was already re-requested above.
-                    if let Err(e) = self
-                        .send_last_event_ack(sender.clone(), &info)
-                        .await
+                    if let Err(e) =
+                        self.send_last_event_ack(sender.clone(), &info).await
                     {
                         error!(
                             msg_type = "LastEventDistribution",

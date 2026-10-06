@@ -115,11 +115,7 @@ impl SyncPeerBackoff {
         (1u64 << failures.saturating_sub(1).min(4)).min(MAX_BACKOFF_ROUNDS)
     }
 
-    pub(crate) fn is_backed_off(
-        &self,
-        peer: &PublicKey,
-        round: u64,
-    ) -> bool {
+    pub(crate) fn is_backed_off(&self, peer: &PublicKey, round: u64) -> bool {
         self.skip_until_round
             .get(peer)
             .is_some_and(|until| round < *until)
@@ -136,16 +132,13 @@ impl SyncPeerBackoff {
         // Sits out exactly the next `backoff_rounds` rounds: with
         // `now < skip_until`, that needs the +1 (the failing round
         // itself is already over).
-        self.skip_until_round.insert(
-            peer.clone(),
-            round + Self::backoff_rounds(failures) + 1,
-        );
+        self.skip_until_round
+            .insert(peer.clone(), round + Self::backoff_rounds(failures) + 1);
     }
 
     pub(crate) fn prune(&mut self, known: &HashSet<PublicKey>) {
         self.failures.retain(|peer, _| known.contains(peer));
-        self.skip_until_round
-            .retain(|peer, _| known.contains(peer));
+        self.skip_until_round.retain(|peer, _| known.contains(peer));
     }
 }
 
@@ -248,8 +241,7 @@ impl GovernanceVersionSync {
             return false;
         };
         if self.update_target.is_none()
-            || set_at.elapsed()
-                < self.tick_interval * MAX_STALE_TARGET_ROUNDS
+            || set_at.elapsed() < self.tick_interval * MAX_STALE_TARGET_ROUNDS
         {
             return false;
         }
@@ -268,10 +260,7 @@ impl GovernanceVersionSync {
     /// Reports an idle round at most once per local version: idle
     /// is a state, and every tick re-proving it would spam the
     /// governance actor with full acquisition passes (SYNC-05).
-    async fn maybe_notify_idle_round(
-        &mut self,
-        ctx: &ActorContext<Self>,
-    ) {
+    async fn maybe_notify_idle_round(&mut self, ctx: &ActorContext<Self>) {
         if self.idle_notified_at_version != Some(self.local_version) {
             self.idle_notified_at_version = Some(self.local_version);
             self.notify_idle_round(ctx).await;
@@ -644,8 +633,7 @@ impl Handler<Self> for GovernanceVersionSync {
                     // dropping the intel until the next tick (SYNC-03).
                     // Not an idle proof, so no idle notify.
                     self.peer_backoff.note_success(&peer);
-                    self.update_target =
-                        Some(UpdateTarget { peer, version });
+                    self.update_target = Some(UpdateTarget { peer, version });
                     self.target_set_at = Some(Instant::now());
                     if let Err(error) =
                         self.trigger_update_if_needed(ctx, false).await

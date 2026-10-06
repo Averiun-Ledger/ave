@@ -274,9 +274,7 @@ impl SyncConfig {
         if self.ledger_batch_size > MAX_LEDGER_BATCH_SIZE {
             return Err(Error::InvalidConfiguration {
                 component: "sync.ledger_batch_size".to_string(),
-                reason: format!(
-                    "must not exceed {MAX_LEDGER_BATCH_SIZE}"
-                ),
+                reason: format!("must not exceed {MAX_LEDGER_BATCH_SIZE}"),
             });
         }
 

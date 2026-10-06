@@ -842,8 +842,12 @@ mod tests {
 
         metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "built");
         metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "built");
-        metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "cached");
-        metrics.observe_compiler_build("rust-1.98.1_sdk-0.8.0_wasm32", "stood_down");
+        metrics
+            .observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "cached");
+        metrics.observe_compiler_build(
+            "rust-1.98.1_sdk-0.8.0_wasm32",
+            "stood_down",
+        );
         // Unknown pins collapse into one series: request pins are
         // network input and must never expand cardinality.
         metrics.observe_compiler_build("rust-9.99-ficticio", "stood_down");

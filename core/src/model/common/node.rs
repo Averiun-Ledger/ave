@@ -173,9 +173,7 @@ where
     }
     ctx.system().crash_system();
     Err(ActorError::FunctionalCritical {
-        description: format!(
-            "governance {governance_id} never became ready"
-        ),
+        description: format!("governance {governance_id} never became ready"),
     })
 }
 

@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     governance::model::Quorum,
-    model::common::{
-        CeilingMap, IntervalSet, crash_system, purge_storage,
-    },
+    model::common::{CeilingMap, IntervalSet, crash_system, purge_storage},
 };
 use async_trait::async_trait;
 use ave_actors::{

@@ -1929,14 +1929,16 @@ impl SqliteRuntime {
         target_page: u64,
         cursor: String,
     ) {
-        self.lock_page_cache()
-            .store_anchor(key, subject_id, target_page, cursor);
+        self.lock_page_cache().store_anchor(
+            key,
+            subject_id,
+            target_page,
+            cursor,
+        );
     }
 
     fn lookup_count_cache(&self, key: &str, subject_id: &str) -> Option<u64> {
-        let cached = self
-            .lock_page_cache()
-            .lookup_count(key, subject_id);
+        let cached = self.lock_page_cache().lookup_count(key, subject_id);
         self.metrics.record_count_cache_lookup(cached.is_some());
         cached
     }
@@ -2235,36 +2237,31 @@ fn get_incidents_from_conn(
             ))
         })
     };
-    let from_nanos: Option<i64> = query.from_nanos.map(|v| {
-        i64::try_from(v).unwrap_or(i64::MAX)
-    });
-    let to_nanos: Option<i64> = query.to_nanos.map(|v| {
-        i64::try_from(v).unwrap_or(i64::MAX)
-    });
+    let from_nanos: Option<i64> = query
+        .from_nanos
+        .map(|v| i64::try_from(v).unwrap_or(i64::MAX));
+    let to_nanos: Option<i64> =
+        query.to_nanos.map(|v| i64::try_from(v).unwrap_or(i64::MAX));
     let rows = stmt
         .query_map(
-            rusqlite::params![
-                query.phase.clone(),
-                from_nanos,
-                to_nanos,
-                limit
-            ],
+            rusqlite::params![query.phase.clone(), from_nanos, to_nanos, limit],
             |row| {
-            let timestamp_nanos: i64 = row.get(0)?;
-            let expected_secs: i64 = row.get(2)?;
-            let elapsed_secs: i64 = row.get(3)?;
-            let gov_version: i64 = row.get(5)?;
-            Ok((
-                timestamp_nanos,
-                expected_secs,
-                elapsed_secs,
-                gov_version,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        })
+                let timestamp_nanos: i64 = row.get(0)?;
+                let expected_secs: i64 = row.get(2)?;
+                let elapsed_secs: i64 = row.get(3)?;
+                let gov_version: i64 = row.get(5)?;
+                Ok((
+                    timestamp_nanos,
+                    expected_secs,
+                    elapsed_secs,
+                    gov_version,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
     let mut out = Vec::new();
     for row in rows {
@@ -3780,7 +3777,10 @@ fn insert_incident_with_stmt(
         })
     };
     stmt.execute(params![
-        as_i64(event.watchdog_timestamp_nanos.unwrap_or(0), "timestamp_nanos")?,
+        as_i64(
+            event.watchdog_timestamp_nanos.unwrap_or(0),
+            "timestamp_nanos"
+        )?,
         event.watchdog_phase.clone().unwrap_or_default(),
         as_i64(event.watchdog_expected_secs.unwrap_or(0), "expected_secs")?,
         as_i64(event.watchdog_elapsed_secs.unwrap_or(0), "elapsed_secs")?,
@@ -3901,8 +3901,7 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                 let subject_id = event.get_subject_id().to_string();
                 let sn = event.sn;
 
-                let persist_result =
-                    self.persist_signed_ledger(event).await;
+                let persist_result = self.persist_signed_ledger(event).await;
                 if let Err(e) = &persist_result {
                     error!(
                         subject_id = %subject_id,
@@ -3913,9 +3912,7 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                     if let Err(e) = self
                         .inner
                         .manager
-                        .tell(DBManagerMessage::Error(
-                            e.clone(),
-                        ))
+                        .tell(DBManagerMessage::Error(e.clone()))
                         .await
                     {
                         error!(
@@ -4025,8 +4022,11 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save abort record to SQLite"
             );
-            if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e.clone())).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e.clone()))
+                .await
             {
                 error!(
                     subject_id = %subject_id,
@@ -4065,8 +4065,11 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         let persist_result = self.persist_register((*event).clone()).await;
         if let Err(e) = &persist_result {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
-            if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e.clone())).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e.clone()))
+                .await
             {
                 error!(
                     error = %e,

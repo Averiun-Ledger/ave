@@ -211,8 +211,7 @@ impl BorshDeserialize for Node {
             HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
         // The flag did not exist before boot reconciliation: old
         // snapshots decode to dirty (safe direction: sync).
-        let dirty_shutdown =
-            bool::deserialize_reader(reader).unwrap_or(true);
+        let dirty_shutdown = bool::deserialize_reader(reader).unwrap_or(true);
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
@@ -1168,13 +1167,10 @@ impl Actor for Node {
         // node) stays ready: there is nothing to reconcile. The
         // shared helper mirrors the set so gates check per subject
         // without messaging.
-        self.pending_reconcile =
-            self.governance_ids().into_iter().collect();
+        self.pending_reconcile = self.governance_ids().into_iter().collect();
         if let Some(pending) = ctx
             .system()
-            .get_helper::<crate::system::PendingReconcile>(
-                "pending_reconcile",
-            )
+            .get_helper::<crate::system::PendingReconcile>("pending_reconcile")
         {
             for governance_id in &self.pending_reconcile {
                 pending.insert(governance_id.clone());
@@ -1479,9 +1475,8 @@ impl Handler<Self> for Node {
                 // double reports) are harmless: only the boot set
                 // gates per-subject traffic.
                 self.pending_reconcile.remove(&governance_id);
-                if let Some(pending) = ctx
-                    .system()
-                    .get_helper::<crate::system::PendingReconcile>(
+                if let Some(pending) =
+                    ctx.system().get_helper::<crate::system::PendingReconcile>(
                         "pending_reconcile",
                     )
                 {

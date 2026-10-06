@@ -424,11 +424,7 @@ impl SinkReplayState {
             public_key.to_owned(),
         );
 
-        build_data_to_sink(
-            data,
-            replay_parts.event_request,
-            sink_timestamp,
-        )
+        build_data_to_sink(data, replay_parts.event_request, sink_timestamp)
     }
 
     fn apply_success(
@@ -783,13 +779,12 @@ fn data_to_sink_event(
             return Err(ActorError::Functional {
                 description: format!(
                     "Mismatched sink event data: request {request}, ledger {ledger}",
-                    request = event
-                        .as_ref()
-                        .map_or("none", |_| "present"),
+                    request = event.as_ref().map_or("none", |_| "present"),
                     ledger = match ledger_data {
                         EventLedgerDataForSink::Create { .. } => "create",
                         EventLedgerDataForSink::FactFull { .. } => "fact-full",
-                        EventLedgerDataForSink::FactOpaque { .. } => "fact-opaque",
+                        EventLedgerDataForSink::FactOpaque { .. } =>
+                            "fact-opaque",
                         EventLedgerDataForSink::Transfer { .. } => "transfer",
                         EventLedgerDataForSink::Confirm { .. } => "confirm",
                         EventLedgerDataForSink::Reject => "reject",

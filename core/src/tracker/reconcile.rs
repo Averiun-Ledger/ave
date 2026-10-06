@@ -118,8 +118,7 @@ impl Tracker {
         // subjects): recreate it first. The read above doubles as the
         // tail marker query, so this costs nothing extra. Idempotent:
         // a present entry is never default-empty.
-        let (tail_start, entry_missing) =
-            self.replay_tail_start(ctx).await?;
+        let (tail_start, entry_missing) = self.replay_tail_start(ctx).await?;
         if entry_missing {
             use crate::model::common::get_last_event;
             let tip_gov_version = get_last_event(ctx)
@@ -151,8 +150,7 @@ impl Tracker {
             if let Some(prev_event) = before.first()
                 && prev_event.sn + 1 == tail_start
             {
-                fold.prev =
-                    Some((prev_event.gov_version, prev_event.sn));
+                fold.prev = Some((prev_event.gov_version, prev_event.sn));
             }
         }
 
@@ -270,9 +268,8 @@ impl Tracker {
                     "/user/node/subject_manager/{}/witnesses_register",
                     self.governance_id
                 )),
-                expected:
-                    "WitnessesRegisterResponse::TrackerVisibilityState"
-                        .to_owned(),
+                expected: "WitnessesRegisterResponse::TrackerVisibilityState"
+                    .to_owned(),
             });
         };
         Ok(visibility_covers_tip(&state, tip.sn))
@@ -328,9 +325,8 @@ impl Tracker {
                     "/user/node/subject_manager/{}/witnesses_register",
                     self.governance_id
                 )),
-                expected:
-                    "WitnessesRegisterResponse::TrackerVisibilityState"
-                        .to_owned(),
+                expected: "WitnessesRegisterResponse::TrackerVisibilityState"
+                    .to_owned(),
             });
         };
         Ok((
@@ -354,7 +350,8 @@ impl Tracker {
         // Visibility is recorded for every event live: replay all of
         // them with tip mode (only the current mode is read; per-sn
         // range data is event-intrinsic, so duplicates converge).
-        self.record_visibility_event(ctx, event, self.visibility_mode).await?;
+        self.record_visibility_event(ctx, event, self.visibility_mode)
+            .await?;
         report.writes_resent += 1;
         // Sn registration mirrors the live path exactly. The live
         // path sends pre-apply sn (ledger sn, dense) at transition

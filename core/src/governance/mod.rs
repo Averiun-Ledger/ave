@@ -49,9 +49,7 @@ use crate::{
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
-        tracker_sync::{
-            TrackerSync, TrackerSyncConfig, TrackerSyncMessage,
-        },
+        tracker_sync::{TrackerSync, TrackerSyncConfig, TrackerSyncMessage},
         transfer_verification_register::{
             TransferVerificationRegister, TransferVerificationRegisterMessage,
             TransferVerificationRegisterResponse,
@@ -77,9 +75,7 @@ use crate::{
         Node, NodeMessage, NodeResponse, TransferSubject,
         register::RegisterMessage,
     },
-    sink::{
-        SinkManager, SinkManagerInitParams, SinkManagerMessage,
-    },
+    sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata, error::SubjectError,
@@ -312,8 +308,8 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        let NodeResponse::Ok =
-            node.ask(NodeMessage::RejectTransfer(
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::RejectTransfer(
                 self.subject_metadata.subject_id.clone(),
             ))
             .await?
@@ -334,8 +330,8 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        let NodeResponse::Ok =
-            node.ask(NodeMessage::ConfirmTransfer(
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::ConfirmTransfer(
                 self.subject_metadata.subject_id.clone(),
             ))
             .await?
@@ -807,16 +803,15 @@ impl Governance {
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let tracker_sync =
-            ctx.get_child::<TrackerSync>("tracker_sync").await?;
+        let tracker_sync = ctx.get_child::<TrackerSync>("tracker_sync").await?;
         let members: HashSet<PublicKey> =
             self.properties.members.values().cloned().collect();
-        let witnesses =
-            self.properties.get_witnesses(WitnessesData::Gov).map_err(
-                |e| ActorError::Functional {
-                    description: e.to_string(),
-                },
-            )?;
+        let witnesses = self
+            .properties
+            .get_witnesses(WitnessesData::Gov)
+            .map_err(|e| ActorError::Functional {
+                description: e.to_string(),
+            })?;
         tracker_sync
             .tell(TrackerSyncMessage::RefreshPeers { members, witnesses })
             .await?;
@@ -2321,8 +2316,9 @@ impl Governance {
         // The governance is inactive from here: no deferred
         // acquisition will ever run for it, so drop pending markers
         // instead of leaking them.
-        let pending =
-            Self::list_acquisition_pending(ctx).await.unwrap_or_default();
+        let pending = Self::list_acquisition_pending(ctx)
+            .await
+            .unwrap_or_default();
         if !pending.is_empty() {
             Self::set_acquisition_pending(ctx, pending, false).await?;
         }
@@ -2434,11 +2430,10 @@ impl Governance {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let node_key =
-            self.subject_metadata.new_owner.as_ref().map_or_else(
-                || self.subject_metadata.owner.clone(),
-                |new_owner| new_owner.clone(),
-            );
+        let node_key = self.subject_metadata.new_owner.as_ref().map_or_else(
+            || self.subject_metadata.owner.clone(),
+            |new_owner| new_owner.clone(),
+        );
         if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
             let (issuers, issuer_any) = self.properties.governance_issuers();
             evaluator
@@ -3879,17 +3874,11 @@ impl Governance {
                 new_approvers: vec![owner.clone()],
                 new_compilers: vec![owner.clone()],
                 new_evaluators: HashMap::from([(
-                    (
-                        SchemaType::Governance,
-                        owner.clone(),
-                    ),
+                    (SchemaType::Governance, owner.clone()),
                     vec![Namespace::new()],
                 )]),
                 new_validators: HashMap::from([(
-                    (
-                        SchemaType::Governance,
-                        owner.clone(),
-                    ),
+                    (SchemaType::Governance, owner.clone()),
                     vec![Namespace::new()],
                 )]),
                 remove_approvers: vec![],
@@ -4218,9 +4207,7 @@ impl Governance {
                         })
                 );
                 match &event_request {
-                    EventRequest::Transfer(transfer_request)
-                        if transfer_ok =>
-                    {
+                    EventRequest::Transfer(transfer_request) if transfer_ok => {
                         self.transfer(
                             ctx,
                             transfer_request.new_owner.clone(),
@@ -4256,30 +4243,30 @@ impl Governance {
                     }
                     _ => {}
                 };
-                let update_confirm =
-                    if let EventRequest::Confirm(..) = &event_request
-                        && confirm_ok
-                    {
-                        self.confirm(
-                            ctx,
-                            event.ledger_seal_signature.signer.clone(),
-                            0,
-                        )
-                        .await?;
+                let update_confirm = if let EventRequest::Confirm(..) =
+                    &event_request
+                    && confirm_ok
+                {
+                    self.confirm(
+                        ctx,
+                        event.ledger_seal_signature.signer.clone(),
+                        0,
+                    )
+                    .await?;
 
-                        if let Some(new_owner_key) =
-                            &self.subject_metadata.new_owner
-                        {
-                            Some(self.properties.roles_update_remove_confirm(
-                                &self.subject_metadata.owner,
-                                new_owner_key,
-                            ))
-                        } else {
-                            None
-                        }
+                    if let Some(new_owner_key) =
+                        &self.subject_metadata.new_owner
+                    {
+                        Some(self.properties.roles_update_remove_confirm(
+                            &self.subject_metadata.owner,
+                            new_owner_key,
+                        ))
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
                 let update_fact = if let EventRequest::Fact(fact_request) =
                     &event_request
@@ -4288,10 +4275,14 @@ impl Governance {
                     // A committed payload that does not deserialize is
                     // local corruption: fail loud instead of returning a
                     // critical error for a tell handler to discard.
-                    let governance_event = match serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()) {
-                            Ok(event) => event,
-                            Err(e) => {
-                                return Err(crash_system(
+                    let governance_event = match serde_json::from_value::<
+                        GovernanceEvent,
+                    >(
+                        fact_request.payload.0.clone(),
+                    ) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            return Err(crash_system(
                                     ctx,
                                     ActorError::FunctionalCritical {
                                         description: format!(
@@ -4300,8 +4291,8 @@ impl Governance {
                                     },
                                 )
                                 .await);
-                            }
-                        };
+                        }
+                    };
 
                     let rm_members = governance_event
                         .members
@@ -4493,10 +4484,7 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child(
-                "witnesses_register",
-                WitnessesRegister::initial(()),
-            )
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
             .await
         {
             Ok(actor) => Some(actor),
@@ -4857,10 +4845,7 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child(
-                "witnesses_register",
-                WitnessesRegister::initial(()),
-            )
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
             .await
         {
             Ok(actor) => Some(actor),
@@ -5240,10 +5225,7 @@ impl Actor for Governance {
         }
 
         if let Err(e) = ctx
-            .create_child(
-                "witnesses_register",
-                WitnessesRegister::initial(()),
-            )
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
             .await
         {
             error!(
@@ -5353,9 +5335,7 @@ impl Actor for Governance {
                     // Newborn children start with empty peer sets: push
                     // the current ones at once, same as RefreshGovernance
                     // below does for the version sync.
-                    if let Err(e) =
-                        self.push_tracker_sync_peers(ctx).await
-                    {
+                    if let Err(e) = self.push_tracker_sync_peers(ctx).await {
                         error!(
                             error = %e,
                             subject_id = %self.subject_metadata.subject_id,
@@ -5367,9 +5347,7 @@ impl Actor for Governance {
                 Err(ActorError::Exists { .. }) => {
                     // Restart with a live child: it already syncs, just
                     // bring its peer set current.
-                    if let Err(e) =
-                        self.push_tracker_sync_peers(ctx).await
-                    {
+                    if let Err(e) = self.push_tracker_sync_peers(ctx).await {
                         error!(
                             error = %e,
                             subject_id = %self.subject_metadata.subject_id,
@@ -5392,10 +5370,7 @@ impl Actor for Governance {
                 .create_child(
                     "version_sync",
                     GovernanceVersionSync::new(GovernanceVersionSyncConfig {
-                        governance_id: self
-                            .subject_metadata
-                            .subject_id
-                            .clone(),
+                        governance_id: self.subject_metadata.subject_id.clone(),
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         local_version: self.properties.version,
@@ -5522,9 +5497,7 @@ impl Handler<Self> for Governance {
                 // logged, not propagated: these triggers are tells, so
                 // an error would vanish silently — and the next trigger
                 // retries the pass anyway.
-                if let Err(e) =
-                    self.run_deferred_acquisition(ctx).await
-                {
+                if let Err(e) = self.run_deferred_acquisition(ctx).await {
                     error!(
                         error = %e,
                         "Deferred artifact acquisition failed, retrying on next trigger"

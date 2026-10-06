@@ -61,9 +61,9 @@ impl NetworkSender {
     /// Sender for traffic coming from the network (received messages).
     /// Falls back to the outbound channel when no inbound one exists.
     pub fn inbound_sender(&self) -> Sender<Command<NetworkMessage>> {
-        self.inbound_sender.clone().unwrap_or_else(|| {
-            self.command_sender.clone()
-        })
+        self.inbound_sender
+            .clone()
+            .unwrap_or_else(|| self.command_sender.clone())
     }
 
     /// Send command to the network worker.

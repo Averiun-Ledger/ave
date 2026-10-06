@@ -1301,12 +1301,14 @@ impl Handler<Self> for Approval {
                 // N-th round sweeps everything. The ask itself is the
                 // liveness heartbeat either way.
                 self.keepalive_rounds = self.keepalive_rounds.saturating_add(1);
-                let wanted =
-                    if self.keepalive_rounds.is_multiple_of(FULL_STATUS_SWEEP_ROUNDS) {
-                        None
-                    } else {
-                        Some(self.pending_approvers())
-                    };
+                let wanted = if self
+                    .keepalive_rounds
+                    .is_multiple_of(FULL_STATUS_SWEEP_ROUNDS)
+                {
+                    None
+                } else {
+                    Some(self.pending_approvers())
+                };
                 let working: Vec<PublicKey> =
                     self.working.iter().cloned().collect();
                 self.status_pending.clone_from(&self.working);

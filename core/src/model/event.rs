@@ -456,49 +456,49 @@ impl Protocols {
                 event_request,
                 ..
             } => {
-                let (evaluation_response, approval_success) = match evaluation.as_ref() {
-                        // No evaluation means the compilation phase
-                        // rejected the contracts.
-                        None => {
-                            let Some(compilation) = compilation.as_ref() else {
-                                return Err(ProtocolsError::CorruptLedgerShape(
-                                    "gov fact without evaluation or compilation"
-                                        .to_owned(),
-                                ));
-                            };
-                            let CompilationResponse::Error { result, .. } =
-                                &compilation.response
-                            else {
-                                return Err(ProtocolsError::CorruptLedgerShape(
+                let (evaluation_response, approval_success) = match evaluation
+                    .as_ref()
+                {
+                    // No evaluation means the compilation phase
+                    // rejected the contracts.
+                    None => {
+                        let Some(compilation) = compilation.as_ref() else {
+                            return Err(ProtocolsError::CorruptLedgerShape(
+                                "gov fact without evaluation or compilation"
+                                    .to_owned(),
+                            ));
+                        };
+                        let CompilationResponse::Error { result, .. } =
+                            &compilation.response
+                        else {
+                            return Err(ProtocolsError::CorruptLedgerShape(
                                     "gov fact without evaluation but successful compilation"
                                         .to_owned(),
                                 ));
+                        };
+                        (
+                            EvalResDB::Error(format!(
+                                "compilation: {}",
+                                result
+                            )),
+                            None,
+                        )
+                    }
+                    Some(evaluation) => match evaluation.response.clone() {
+                        EvaluationResponse::Ok { result, .. } => {
+                            let Some(appr) = approval else {
+                                return Err(ProtocolsError::ApprovalRequired);
                             };
                             (
-                                EvalResDB::Error(format!(
-                                    "compilation: {}",
-                                    result
-                                )),
-                                None,
+                                EvalResDB::Patch(result.patch.0),
+                                Some(appr.approved),
                             )
                         }
-                        Some(evaluation) => match evaluation.response.clone() {
-                            EvaluationResponse::Ok { result, .. } => {
-                                let Some(appr) = approval else {
-                                    return Err(
-                                        ProtocolsError::ApprovalRequired,
-                                    );
-                                };
-                                (
-                                    EvalResDB::Patch(result.patch.0),
-                                    Some(appr.approved),
-                                )
-                            }
-                            EvaluationResponse::Error { result, .. } => {
-                                (EvalResDB::Error(result.to_string()), None)
-                            }
-                        },
-                    };
+                        EvaluationResponse::Error { result, .. } => {
+                            (EvalResDB::Error(result.to_string()), None)
+                        }
+                    },
+                };
 
                 let EventRequest::Fact(fact_request) = event_request.content()
                 else {

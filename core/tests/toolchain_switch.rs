@@ -19,12 +19,11 @@ use ave_core::governance::data::GovernanceData;
 use ave_core::test_compiler::{ScriptedCompiler, ScriptedTransform};
 use ave_network::{NodeType, RoutingNode};
 use common::{
-    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig,
-    CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
-    EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT, PORT_COUNTER,
-    create_and_authorize_governance, create_node, create_nodes_and_connections,
-    emit_approve,     emit_fact, get_events, get_subject, node_running,
-    wait_artifact_bytes,
+    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig, CreateNodesAndConnectionsConfig,
+    EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT,
+    PORT_COUNTER, create_and_authorize_governance, create_node,
+    create_nodes_and_connections, emit_approve, emit_fact, get_events,
+    get_subject, node_running, wait_artifact_bytes,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -91,7 +90,11 @@ async fn single_node_with(
     (nodes.remove(0), dirs)
 }
 
-fn schema_add(id: &str, contract: &str, initial: serde_json::Value) -> serde_json::Value {
+fn schema_add(
+    id: &str,
+    contract: &str,
+    initial: serde_json::Value,
+) -> serde_json::Value {
     json!({
         "schemas": {
             "add": [
@@ -110,7 +113,9 @@ async fn properties(
     gov: &ave_common::identity::DigestIdentifier,
     sn: u64,
 ) -> GovernanceData {
-    let state = get_subject(node, gov.clone(), Some(sn), true).await.unwrap();
+    let state = get_subject(node, gov.clone(), Some(sn), true)
+        .await
+        .unwrap();
     serde_json::from_value(state.properties).unwrap()
 }
 
@@ -141,9 +146,11 @@ async fn test_pin_switch_no_schemas_commits() {
 // Capacity vote, negative side: a bare switch nobody can build never
 // commits — reboot with the pin untouched, no crash-loop.
 async fn test_pin_bare_switch_without_capacity_reboots() {
-    let (node, _dirs) =
-        single_node_with(Some(BTreeMap::from([(default_pin(), String::new())])))
-            .await;
+    let (node, _dirs) = single_node_with(Some(BTreeMap::from([(
+        default_pin(),
+        String::new(),
+    )])))
+    .await;
     let node = &node.api;
 
     let governance_id = create_and_authorize_governance(node, vec![]).await;
@@ -179,15 +186,18 @@ async fn test_pin_switch_recompiles_all() {
     )
     .await
     .unwrap();
-    let before: GovernanceData =
-        serde_json::from_value(
-            get_subject(node, governance_id.clone(), Some(1), true)
-                .await
-                .unwrap()
-                .properties,
-        )
-        .unwrap();
-    assert!(before.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    let before: GovernanceData = serde_json::from_value(
+        get_subject(node, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap()
+            .properties,
+    )
+    .unwrap();
+    assert!(
+        before
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     let request_id = emit_fact(
         node,
@@ -202,7 +212,9 @@ async fn test_pin_switch_recompiles_all() {
     let after = properties(node, &governance_id, 2).await;
     assert_eq!(after.toolchain, PIN_198);
     assert!(
-        after.schemas.contains_key(&SchemaType::Type("Example".to_owned())),
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned())),
         "schemas must survive the switch"
     );
 }
@@ -335,7 +347,9 @@ async fn test_pin_switch_with_add_and_modify() {
     let after = properties(node, &governance_id, 2).await;
     assert_eq!(after.toolchain, PIN_198);
     assert!(
-        after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())),
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Beta".to_owned())),
         "added schema must commit"
     );
     assert_eq!(
@@ -391,7 +405,9 @@ async fn test_pin_rollback_is_symmetric() {
     let after = properties(node, &governance_id, 3).await;
     assert_eq!(after.toolchain, default_pin());
     assert!(
-        after.schemas.contains_key(&SchemaType::Type("Example".to_owned())),
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned())),
         "schemas must survive the round trip"
     );
 }
@@ -472,7 +488,8 @@ async fn test_pin_switch_denied_keeps_previous_version() {
         let staged = std::fs::read_dir(contracts_dir.path())
             .unwrap()
             .filter_map(|entry| {
-                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                let name =
+                    entry.unwrap().file_name().to_string_lossy().into_owned();
                 name.contains("_temp_staging_").then_some(name)
             })
             .collect::<Vec<_>>();
@@ -486,9 +503,15 @@ async fn test_pin_switch_denied_keeps_previous_version() {
         .await
         .unwrap();
 
-    emit_approve(node, governance_id.clone(), ApprovalStateRes::Rejected, request_id, true)
-        .await
-        .unwrap();
+    emit_approve(
+        node,
+        governance_id.clone(),
+        ApprovalStateRes::Rejected,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
 
     // Previous version intact: same bytes, no staging leftovers.
     assert_eq!(
@@ -498,15 +521,22 @@ async fn test_pin_switch_denied_keeps_previous_version() {
     let staged = std::fs::read_dir(contracts_dir.path())
         .unwrap()
         .filter_map(|entry| {
-            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let name =
+                entry.unwrap().file_name().to_string_lossy().into_owned();
             name.contains("_temp_staging_").then_some(name)
         })
         .collect::<Vec<_>>();
-    assert!(staged.is_empty(), "staging must be swept on abort: {staged:?}");
+    assert!(
+        staged.is_empty(),
+        "staging must be swept on abort: {staged:?}"
+    );
 
     // Nothing committed: pin, schemas and contract pin the old ones.
-    let state = get_subject(node, governance_id.clone(), None, true).await.unwrap();
-    let props: GovernanceData = serde_json::from_value(state.properties).unwrap();
+    let state = get_subject(node, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let props: GovernanceData =
+        serde_json::from_value(state.properties).unwrap();
     assert_eq!(props.toolchain, default_pin());
     assert_eq!(
         props
@@ -578,7 +608,11 @@ async fn test_pin_switch_diverges_bytes_with_real_toolchains() {
 
     let props = properties(node, &governance_id, 2).await;
     assert_eq!(props.toolchain, PIN_198);
-    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -608,7 +642,11 @@ async fn test_pin_switch_with_add_only() {
 
     let after = properties(node, &governance_id, 1).await;
     assert_eq!(after.toolchain, PIN_198);
-    assert!(after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
+    assert!(
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Beta".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -702,7 +740,11 @@ async fn test_pin_switch_with_init_only_change() {
 
     let after = properties(node, &governance_id, 2).await;
     assert_eq!(after.toolchain, PIN_198);
-    assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -747,8 +789,11 @@ async fn test_pin_bare_switch_denied_changes_nothing() {
     .await
     .unwrap();
 
-    let state = get_subject(node, governance_id.clone(), None, true).await.unwrap();
-    let props: GovernanceData = serde_json::from_value(state.properties).unwrap();
+    let state = get_subject(node, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let props: GovernanceData =
+        serde_json::from_value(state.properties).unwrap();
     assert_eq!(props.toolchain, default_pin());
     assert_eq!(props.version, 0);
     assert!(props.schemas.is_empty());
@@ -794,8 +839,16 @@ async fn test_pin_switch_with_remove() {
 
     let after = properties(node, &governance_id, 2).await;
     assert_eq!(after.toolchain, PIN_198);
-    assert!(after.schemas.contains_key(&SchemaType::Type("Alpha".to_owned())));
-    assert!(!after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
+    assert!(
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Alpha".to_owned()))
+    );
+    assert!(
+        !after
+            .schemas
+            .contains_key(&SchemaType::Type("Beta".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -865,13 +918,20 @@ async fn test_pin_inflight_add_then_switch() {
     wait_state(node, add, "finish").await;
     let mid = properties(node, &governance_id, 1).await;
     assert_eq!(mid.toolchain, default_pin());
-    assert!(mid.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        mid.schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     // ...y el switch, tras reintentar con la versión nueva, bajo el nuevo.
     wait_state(node, switch, "finish").await;
     let after = properties(node, &governance_id, 2).await;
     assert_eq!(after.toolchain, PIN_198);
-    assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -983,11 +1043,18 @@ async fn test_pin_kill_mid_recompile_then_restart() {
     scripted.release();
     wait_state(&node2.api, switch, "finish").await;
 
-    let after =
-        properties(&node2.api, &governance_id, 2).await;
+    let after = properties(&node2.api, &governance_id, 2).await;
     assert_eq!(after.toolchain, PIN_198);
-    assert!(after.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
-    assert!(after.schemas.contains_key(&SchemaType::Type("Beta".to_owned())));
+    assert!(
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+    assert!(
+        after
+            .schemas
+            .contains_key(&SchemaType::Type("Beta".to_owned()))
+    );
     // Ambos oficiales sirven bytes: los artefactos existen y son legibles.
     for name in ["Example", "Beta"] {
         let official_name = format!("{governance_id}_{name}");
@@ -1003,9 +1070,11 @@ async fn test_pin_kill_mid_recompile_then_restart() {
 async fn test_pin_nobody_holds_reboots() {
     // Holds the default pin only: the switch target is unresolvable,
     // so the stand-down is meaningful (not an empty-map artifact).
-    let (node, _dirs) =
-        single_node_with(Some(BTreeMap::from([(default_pin(), String::new())])))
-            .await;
+    let (node, _dirs) = single_node_with(Some(BTreeMap::from([(
+        default_pin(),
+        String::new(),
+    )])))
+    .await;
     let node = &node.api;
 
     let governance_id = create_and_authorize_governance(node, vec![]).await;
@@ -1032,7 +1101,11 @@ async fn test_pin_nobody_holds_reboots() {
     // No commit and no crash: version frozen, node answers.
     let props = properties(node, &governance_id, 1).await;
     assert_eq!(props.toolchain, default_pin());
-    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -1080,10 +1153,7 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
         peers: vec![peer],
         always_accept: true,
         is_service: true,
-        toolchains: Some(BTreeMap::from([(
-            default_pin(),
-            String::new(),
-        )])),
+        toolchains: Some(BTreeMap::from([(default_pin(), String::new())])),
         ..Default::default()
     })
     .await;
@@ -1113,10 +1183,14 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
             }
         }
     });
-    emit_fact(node1, governance_id.clone(), members, true).await.unwrap();
+    emit_fact(node1, governance_id.clone(), members, true)
+        .await
+        .unwrap();
     for api in [&node2.api, &node3.api] {
         api.update_subject(governance_id.clone()).await.unwrap();
-        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     }
 
     // Schema add compiles with all three (default pin held everywhere).
@@ -1144,7 +1218,11 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
 
     let props = properties(node1, &governance_id, 3).await;
     assert_eq!(props.toolchain, PIN_198);
-    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 }
 
 #[test(tokio::test)]
@@ -1178,7 +1256,11 @@ async fn test_pin_unknown_with_contracts_votes_error() {
 
     let props = properties(node, &governance_id, 2).await;
     assert_eq!(props.toolchain, default_pin());
-    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     let events = get_events(node, governance_id, 3, true).await.unwrap();
     let event = serde_json::to_string(events.last().unwrap()).unwrap();
@@ -1243,10 +1325,7 @@ async fn test_pin_boot_without_pin_stays_dormant() {
         contracts_path: Some(contracts_dir.path().to_path_buf()),
         always_accept: true,
         is_service: true,
-        toolchains: Some(BTreeMap::from([(
-            PIN_198.to_owned(),
-            String::new(),
-        )])),
+        toolchains: Some(BTreeMap::from([(PIN_198.to_owned(), String::new())])),
         ..Default::default()
     })
     .await;
@@ -1257,7 +1336,11 @@ async fn test_pin_boot_without_pin_stays_dormant() {
     // correctness after reboot depends on it.
     let props = properties(&node2.api, &governance_id, 1).await;
     assert_eq!(props.toolchain, default_pin());
-    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     // A new build under the unheld pin reboots instead of crashing.
     let request_id = emit_fact(
@@ -1287,10 +1370,7 @@ async fn test_pin_switch_blind_proponent_commits() {
             always_accept: true,
             is_service: true,
             // Owner holds only the current pin.
-            toolchains: Some(BTreeMap::from([(
-                default_pin(),
-                String::new(),
-            )])),
+            toolchains: Some(BTreeMap::from([(default_pin(), String::new())])),
             ..Default::default()
         })
         .await;
@@ -1355,10 +1435,14 @@ async fn test_pin_switch_blind_proponent_commits() {
             }
         }
     });
-    emit_fact(node1, governance_id.clone(), members, true).await.unwrap();
+    emit_fact(node1, governance_id.clone(), members, true)
+        .await
+        .unwrap();
     for api in [&node2.api, &node3.api] {
         api.update_subject(governance_id.clone()).await.unwrap();
-        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     }
 
     // Schema add compiles with all three (default pin held everywhere).
@@ -1394,7 +1478,11 @@ async fn test_pin_switch_blind_proponent_commits() {
     }
     let props = properties(node1, &governance_id, 3).await;
     assert_eq!(props.toolchain, PIN_198);
-    assert!(props.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
     for api in [&node2.api, &node3.api] {
         let props = properties(api, &governance_id, 3).await;
         assert_eq!(props.toolchain, PIN_198);
@@ -1463,24 +1551,28 @@ async fn test_pin_two_governances_two_pins_coexist() {
     .unwrap();
 
     // Only gov2 moves.
-    let request_id = emit_fact(
-        node,
-        gov2.clone(),
-        json!({ "toolchain": PIN_198 }),
-        false,
-    )
-    .await
-    .unwrap();
+    let request_id =
+        emit_fact(node, gov2.clone(), json!({ "toolchain": PIN_198 }), false)
+            .await
+            .unwrap();
     wait_request_state(node, request_id, Some(RequestState::Finish))
         .await
         .unwrap();
 
     let props1 = properties(node, &gov1, 1).await;
     assert_eq!(props1.toolchain, default_pin());
-    assert!(props1.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props1
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
     let props2 = properties(node, &gov2, 2).await;
     assert_eq!(props2.toolchain, PIN_198);
-    assert!(props2.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props2
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
 
     // gov1 keeps operating under its pin after gov2 moved.
     emit_fact(
@@ -1493,8 +1585,16 @@ async fn test_pin_two_governances_two_pins_coexist() {
     .unwrap();
     let props1 = properties(node, &gov1, 2).await;
     assert_eq!(props1.toolchain, default_pin());
-    assert!(props1.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
-    assert!(props1.schemas.contains_key(&SchemaType::Type("Second".to_owned())));
+    assert!(
+        props1
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+    assert!(
+        props1
+            .schemas
+            .contains_key(&SchemaType::Type("Second".to_owned()))
+    );
     node_running(node).await.unwrap();
 }
 
@@ -1560,10 +1660,7 @@ async fn test_pin_stood_down_node_survives_switch() {
         always_accept: true,
         is_service: true,
         contracts_path: Some(node3_contracts.path().to_path_buf()),
-        toolchains: Some(BTreeMap::from([(
-            default_pin(),
-            String::new(),
-        )])),
+        toolchains: Some(BTreeMap::from([(default_pin(), String::new())])),
         ..Default::default()
     })
     .await;
@@ -1594,10 +1691,14 @@ async fn test_pin_stood_down_node_survives_switch() {
             }
         }
     });
-    emit_fact(node1, governance_id.clone(), members, true).await.unwrap();
+    emit_fact(node1, governance_id.clone(), members, true)
+        .await
+        .unwrap();
     for api in [&node2.api, &node3.api] {
         api.update_subject(governance_id.clone()).await.unwrap();
-        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     }
 
     // Schema add compiles with all three (default pin held everywhere).
@@ -1616,10 +1717,12 @@ async fn test_pin_stood_down_node_survives_switch() {
     .await
     .unwrap();
     let official_name = format!("{governance_id}_Example");
-    let official_dir =
-        node3_contracts.path().join("contracts").join(&official_name);
-    let stale = wait_artifact_bytes(node3_contracts.path(), &official_name)
-        .await;
+    let official_dir = node3_contracts
+        .path()
+        .join("contracts")
+        .join(&official_name);
+    let stale =
+        wait_artifact_bytes(node3_contracts.path(), &official_name).await;
     assert!(!stale.is_empty());
     std::fs::remove_dir_all(&official_dir).unwrap();
 
@@ -1645,7 +1748,11 @@ async fn test_pin_stood_down_node_survives_switch() {
     // (`node_running` would hang, not fail, on a dead node.)
     let props3 = properties(&node3.api, &governance_id, 3).await;
     assert_eq!(props3.toolchain, PIN_198);
-    assert!(props3.schemas.contains_key(&SchemaType::Type("Example".to_owned())));
+    assert!(
+        props3
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
     assert!(
         std::fs::read(official_dir.join("contract.wasm")).is_err(),
         "a stood-down node rebuilds nothing by itself"

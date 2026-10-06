@@ -23,8 +23,7 @@ use tracing::{Span, debug, error, info, info_span, warn};
 use crate::approval::request::ApprovalReq;
 use crate::approval::{Approval, ApprovalMessage};
 use crate::compilation::{
-    needs_compilation_evidence, payload_contract_sources,
-    schemas_to_compile,
+    needs_compilation_evidence, payload_contract_sources, schemas_to_compile,
 };
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
@@ -224,8 +223,7 @@ impl RequestManager {
         phase: &'static str,
         budget: std::time::Duration,
     ) -> Result<(), RequestManagerError> {
-        self.watchdog_generation =
-            self.watchdog_generation.wrapping_add(1);
+        self.watchdog_generation = self.watchdog_generation.wrapping_add(1);
         self.watchdog_budget_secs = budget.as_secs();
         ctx.schedule_once(
             budget,
@@ -1294,12 +1292,12 @@ impl RequestManager {
             // A version mismatch returned above, so the versions are
             // equal here: the roles below always resolve.
             let current_request_roles = {
-                let (evaluation_workers, evaluation_quorum) =
-                    governance_data.get_quorum_and_signers(
-                        ProtocolTypes::Evaluation,
-                        &metadata.schema_id,
-                        metadata.namespace.clone(),
-                    )?;
+                let (evaluation_workers, evaluation_quorum) = governance_data
+                    .get_quorum_and_signers(
+                    ProtocolTypes::Evaluation,
+                    &metadata.schema_id,
+                    metadata.namespace.clone(),
+                )?;
 
                 let (compilation_workers, compilation_quorum) =
                     if has_compilation {
@@ -2158,20 +2156,18 @@ impl RequestManager {
 
         // The committed state decides recompile-all; on lookup failure
         // fall back to the payload-only set (no new failure mode).
-        let pre = get_metadata(ctx, &self.subject_id)
-            .await
-            .ok()
-            .and_then(|metadata| {
+        let pre = get_metadata(ctx, &self.subject_id).await.ok().and_then(
+            |metadata| {
                 crate::governance::data::GovernanceData::try_from(
                     metadata.properties,
                 )
                 .ok()
-            });
+            },
+        );
         match pre {
-            Some(pre) => needs_compilation_evidence(
-                &fact_request.payload,
-                &pre,
-            ),
+            Some(pre) => {
+                needs_compilation_evidence(&fact_request.payload, &pre)
+            }
             None => schemas_to_compile(&fact_request.payload)
                 .is_some_and(|schemas| !schemas.is_empty()),
         }
@@ -2206,8 +2202,7 @@ impl RequestManager {
         .and_then(|event| event.toolchain)
         .is_some()
             && let Ok(metadata) = get_metadata(ctx, &self.subject_id).await
-            && let Ok(committed) =
-                GovernanceData::try_from(metadata.properties)
+            && let Ok(committed) = GovernanceData::try_from(metadata.properties)
         {
             sources.extend(
                 committed
@@ -2898,8 +2893,7 @@ impl Handler<Self> for RequestManager {
                     // A duplicate or late reboot completion must not
                     // re-run the command mid-phase (child name
                     // collisions crash the manager).
-                    if !matches!(self.state, RequestManagerState::Reboot)
-                    {
+                    if !matches!(self.state, RequestManagerState::Reboot) {
                         warn!(
                             msg_type = "FinishReboot",
                             request_id = %self.id,
@@ -3074,10 +3068,7 @@ impl Handler<Self> for RequestManager {
 
                 return Ok(());
             }
-            RequestManagerMessage::WatchdogFire {
-                generation,
-                phase,
-            } => {
+            RequestManagerMessage::WatchdogFire { generation, phase } => {
                 self.handle_watchdog_fire(ctx, generation, phase).await?;
 
                 return Ok(());

@@ -17,9 +17,7 @@ use crate::{
     subject::RequestSubjectData,
 };
 
-use crate::{
-    helpers::network::ActorMessage,
-};
+use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
 use ave_common::{
@@ -482,21 +480,19 @@ impl EvalWorker {
         let Some(committed_pin) = self.context.toolchain() else {
             return Ok(());
         };
-        let EventRequest::Fact(fact_request) = evaluation_req
-            .content()
-            .event_request
-            .content()
+        let EventRequest::Fact(fact_request) =
+            evaluation_req.content().event_request.content()
         else {
             return Ok(());
         };
-        let event: GovernanceEvent =
-            serde_json::from_value(fact_request.payload.0.clone()).map_err(
-                |e| {
-                    EvaluatorError::InvalidEventRequest(format!(
-                        "Governance fact payload is not a governance event: {e}"
-                    ))
-                },
-            )?;
+        let event: GovernanceEvent = serde_json::from_value(
+            fact_request.payload.0.clone(),
+        )
+        .map_err(|e| {
+            EvaluatorError::InvalidEventRequest(format!(
+                "Governance fact payload is not a governance event: {e}"
+            ))
+        })?;
         let Some(new_pin) = &event.toolchain else {
             return Ok(());
         };

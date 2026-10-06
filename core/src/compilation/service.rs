@@ -94,10 +94,8 @@ async fn write_file_atomic(
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    let tmp = dir.join(format!(
-        "{file_name}.tmp.{}.{nanos}",
-        std::process::id()
-    ));
+    let tmp =
+        dir.join(format!("{file_name}.tmp.{}.{nanos}", std::process::id()));
     let target = dir.join(file_name);
     let result = async {
         let mut file = fs::File::create(&tmp).await?;
@@ -252,8 +250,12 @@ impl ArtifactStore {
 
         write_file_atomic(&entry_dir, ARTIFACT_WASM, wasm).await?;
         let hash_bytes = wasm_hash.to_string();
-        write_file_atomic(&entry_dir, ARTIFACT_WASM_HASH, hash_bytes.as_bytes())
-            .await?;
+        write_file_atomic(
+            &entry_dir,
+            ARTIFACT_WASM_HASH,
+            hash_bytes.as_bytes(),
+        )
+        .await?;
 
         self.touch(key).await;
         self.collect_garbage().await?;
@@ -601,13 +603,9 @@ impl CompilerServer {
         let source = pipeline::decode_contract_source(source_b64)
             .map_err(|e| status_for_build_error(&e))?;
         let (rust_src, rustc_commit) =
-            ave_build::query_sysroot("")
-                .await
-                .map_err(|e| {
-                    Status::internal(
-                        pipeline::map_build_error(e).to_string(),
-                    )
-                })?;
+            ave_build::query_sysroot("").await.map_err(|e| {
+                Status::internal(pipeline::map_build_error(e).to_string())
+            })?;
         let vendor_dir =
             pipeline::vendor_dir_for_build(&build_dir, &contracts_root);
         let offline = vendor_dir.is_some();
@@ -615,15 +613,11 @@ impl CompilerServer {
         let request = ave_build::BuildRequest {
             source: &source,
             manifest_toml: &manifest_toml,
-            config_template:
-                ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+            config_template: ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
             lockfile: None,
-            target_dir: std::path::PathBuf::from(
-                pipeline::BUILD_TARGET_DIR,
-            ),
+            target_dir: std::path::PathBuf::from(pipeline::BUILD_TARGET_DIR),
             vendor_dir,
-            cargo_home: contracts_root
-                .join(pipeline::SHARED_CARGO_HOME_DIR),
+            cargo_home: contracts_root.join(pipeline::SHARED_CARGO_HOME_DIR),
             toolchain: "",
             cargo: ave_build::CargoProgram::System,
             rust_src,
@@ -891,10 +885,8 @@ async fn load_or_generate_identity(
             // Atomic write: a crash mid-write must not leave a corrupt
             // identity behind. Unique temp name so two first boots
             // never share it; fsyncs so a crash can lose nothing.
-            let tmp_path = key_path.with_extension(format!(
-                "der.tmp.{}",
-                std::process::id()
-            ));
+            let tmp_path = key_path
+                .with_extension(format!("der.tmp.{}", std::process::id()));
             let mut tmp = fs::File::create(&tmp_path).await.map_err(|e| {
                 ServiceError::Io {
                     path: tmp_path.to_string_lossy().to_string(),

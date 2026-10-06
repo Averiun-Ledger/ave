@@ -6112,11 +6112,8 @@ async fn ns_setup_with_creator(
     node_running(&owner.api).await.unwrap();
     node_running(&creator.api).await.unwrap();
 
-    let governance_id = create_and_authorize_governance(
-        &owner.api,
-        vec![&creator.api],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&creator.api]).await;
 
     let json = json!({
         "members": {
@@ -6198,7 +6195,9 @@ async fn test_namespace_exact_grant_creates() {
     .unwrap();
     // Committed and readable by both nodes: the creation holds.
     for api in [&owner.api, &creator.api] {
-        get_subject(api, subject_id.clone(), None, true).await.unwrap();
+        get_subject(api, subject_id.clone(), None, true)
+            .await
+            .unwrap();
     }
 }
 
@@ -6427,10 +6426,15 @@ async fn test_reconcile_heals_sn_visibility() {
         .await
         .unwrap();
 
-    let (subject_id_1, ..) =
-        create_subject(&emit_events, governance_id.clone(), "Example", "", true)
-            .await
-            .unwrap();
+    let (subject_id_1, ..) = create_subject(
+        &emit_events,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
 
     for data in [100, 200] {
         let json = json!({
@@ -6438,8 +6442,7 @@ async fn test_reconcile_heals_sn_visibility() {
                 "data": data,
             }
         });
-        let issuer_keys =
-            KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let issuer_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         emit_fact_signed(
             &emit_events,
             &issuer_keys,
@@ -6460,26 +6463,27 @@ async fn test_reconcile_heals_sn_visibility() {
                 to_sn: None,
                 visibility: TrackerStoredVisibilityDB::Full,
             }],
-            vec![TrackerEventVisibilityRangeDB {
-                from_sn: 0,
-                to_sn: Some(0),
-                visibility: TrackerEventVisibilityDB::NonFact,
-            },
-            TrackerEventVisibilityRangeDB {
-                from_sn: 1,
-                to_sn: None,
-                visibility: TrackerEventVisibilityDB::Fact {
-                    viewpoints: vec![],
+            vec![
+                TrackerEventVisibilityRangeDB {
+                    from_sn: 0,
+                    to_sn: Some(0),
+                    visibility: TrackerEventVisibilityDB::NonFact,
                 },
-            }],
+                TrackerEventVisibilityRangeDB {
+                    from_sn: 1,
+                    to_sn: None,
+                    visibility: TrackerEventVisibilityDB::Fact {
+                        viewpoints: vec![],
+                    },
+                },
+            ],
         )
         .unwrap()
     };
 
-    let state =
-        get_subject(&emit_events, subject_id_1.clone(), Some(2), true)
-            .await
-            .unwrap();
+    let state = get_subject(&emit_events, subject_id_1.clone(), Some(2), true)
+        .await
+        .unwrap();
     assert_eq!(state.sn, 2);
     assert_visibility(&state);
 
@@ -6522,9 +6526,11 @@ async fn test_reconcile_heals_sn_visibility() {
         .test_gov_evaluators(governance_id.clone())
         .await
         .unwrap();
-    assert!(evaluators.iter().any(|key| {
-        key.to_string() == owner_governance.public_key()
-    }));
+    assert!(
+        evaluators
+            .iter()
+            .any(|key| { key.to_string() == owner_governance.public_key() })
+    );
 
     // One more fact after the reboot: its snapshot is built live from
     // the healed registers (never from the pre-reboot ext_db rows),
@@ -6534,17 +6540,10 @@ async fn test_reconcile_heals_sn_visibility() {
             "data": 300,
         }
     });
-    let issuer_keys =
-        KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
-    emit_fact_signed(
-        &api,
-        &issuer_keys,
-        subject_id_1.clone(),
-        json,
-        true,
-    )
-    .await
-    .unwrap();
+    let issuer_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    emit_fact_signed(&api, &issuer_keys, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
 
     let state = get_subject(&api, subject_id_1.clone(), Some(3), true)
         .await
@@ -6708,16 +6707,18 @@ async fn test_reconcile_heals_tracker_rotation() {
     .await
     .unwrap();
 
-    future_owner.update_subject(subject_id.clone()).await.unwrap();
+    future_owner
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
 
     emit_confirm(&future_owner, subject_id.clone(), None, true)
         .await
         .unwrap();
 
-    let state =
-        get_subject(&future_owner, subject_id.clone(), None, true)
-            .await
-            .unwrap();
+    let state = get_subject(&future_owner, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     assert_eq!(state.owner, future_owner.public_key());
 
     // Wipe witnesses (visibility + transfer state) and reboot the new
@@ -6753,10 +6754,11 @@ async fn test_reconcile_heals_tracker_rotation() {
 
     // Barrier: a live register read queues behind governance
     // pre_start, so the emit below observes post-boot state.
-    let owner_key =
-        PublicKey::from_str(owner_governance.public_key()).unwrap();
-    let evaluators =
-        api.test_gov_evaluators(governance_id.clone()).await.unwrap();
+    let owner_key = PublicKey::from_str(owner_governance.public_key()).unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
     assert!(evaluators.contains(&owner_key));
 
     // The new owner operates: fresh snapshot built live from healed
@@ -6766,7 +6768,9 @@ async fn test_reconcile_heals_tracker_rotation() {
             "data": 150,
         }
     });
-    emit_fact(&api, subject_id.clone(), json, true).await.unwrap();
+    emit_fact(&api, subject_id.clone(), json, true)
+        .await
+        .unwrap();
 
     let state = get_subject(&api, subject_id.clone(), None, true)
         .await

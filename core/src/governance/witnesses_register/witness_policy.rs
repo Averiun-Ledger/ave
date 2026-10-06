@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::governance::sn_register::SnLimit;
-use crate::model::common::{
-    IntervalSet, OwnerContext, TrackerIdentity,
-};
+use crate::model::common::{IntervalSet, OwnerContext, TrackerIdentity};
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};

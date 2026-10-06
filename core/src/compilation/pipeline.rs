@@ -21,8 +21,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "test")]
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use super::error::CompilerError;
@@ -87,9 +87,15 @@ pub(crate) fn map_build_error(error: ave_build::BuildError) -> CompilerError {
         E::FileWriteFailed { path, details } => {
             CompilerError::FileWriteFailed { path, details }
         }
-        E::FileReadFailed { path, details, kind } => {
-            CompilerError::FileReadFailed { path, kind, details }
-        }
+        E::FileReadFailed {
+            path,
+            details,
+            kind,
+        } => CompilerError::FileReadFailed {
+            path,
+            kind,
+            details,
+        },
         E::CargoSpawnFailed { details } => {
             CompilerError::CargoBuildFailed { details }
         }
@@ -205,11 +211,7 @@ fn global_cache_root() -> PathBuf {
     // run's transformed bytes (or starve its pool assertions, as
     // REC-01 learned). Within a process the sharing stays: first
     // build still serves all tests of the run.
-    env::temp_dir().join(format!(
-        "{}-{}",
-        GLOBAL_CACHE_DIR,
-        std::process::id()
-    ))
+    env::temp_dir().join(format!("{}-{}", GLOBAL_CACHE_DIR, std::process::id()))
 }
 
 #[cfg(feature = "test")]
@@ -337,7 +339,8 @@ pub async fn persist_artifact(
 
     // wasm first, precompiled second: the precompiled file marks a
     // complete artifact (readers require it before trusting the wasm).
-    write_file_atomic(contract_path, ave_build::ARTIFACT_WASM, wasm_bytes).await?;
+    write_file_atomic(contract_path, ave_build::ARTIFACT_WASM, wasm_bytes)
+        .await?;
     write_file_atomic(contract_path, ARTIFACT_PRECOMPILED, precompiled_bytes)
         .await?;
 
@@ -655,13 +658,11 @@ pub fn map_runtime_error_to_compiler_error(
         }
         // Deterministic (same fuel budget on every node): a contract
         // failure, never a broken-node signal.
-        RuntimeError::OutOfFuel { consumed } => {
-            CompilerError::FuelLimitError {
-                details: format!(
-                    "contract ran out of fuel after consuming {consumed} units"
-                ),
-            }
-        }
+        RuntimeError::OutOfFuel { consumed } => CompilerError::FuelLimitError {
+            details: format!(
+                "contract ran out of fuel after consuming {consumed} units"
+            ),
+        },
         RuntimeError::FuelLimitError(details) => {
             CompilerError::FuelLimitError { details }
         }

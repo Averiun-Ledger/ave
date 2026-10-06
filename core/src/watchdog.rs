@@ -76,7 +76,8 @@ const fn send_cycle_secs(attempts: usize, interval_secs: u64) -> u64 {
 
 fn apply_margin(secs: u64) -> Duration {
     Duration::from_secs(
-        secs.saturating_mul(MARGIN_NUMERATOR).div_ceil(MARGIN_DENOMINATOR),
+        secs.saturating_mul(MARGIN_NUMERATOR)
+            .div_ceil(MARGIN_DENOMINATOR),
     )
 }
 
@@ -86,9 +87,9 @@ fn apply_margin(secs: u64) -> Duration {
 /// practice; the envelope assumes sequential so it can never
 /// undercount). All terms reference the defining constants.
 pub fn budget_for_compilation(schemas: u32) -> Duration {
-    let per_schema = BUILD_TIMEOUT.as_secs().saturating_add(
-        compilation_coord::RESULT_DEADLINE.as_secs(),
-    );
+    let per_schema = BUILD_TIMEOUT
+        .as_secs()
+        .saturating_add(compilation_coord::RESULT_DEADLINE.as_secs());
     let per_schema = per_schema.saturating_add(send_cycle_secs(
         compilation_coord::SEND_RETRY_ATTEMPTS,
         compilation_coord::SEND_RETRY_INTERVAL_SECS,

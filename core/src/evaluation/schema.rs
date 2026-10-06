@@ -19,8 +19,7 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::{
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
     helpers::network::{
-        ActorMessage, NetworkMessage, delivery_of,
-        service::NetworkSender,
+        ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
     },
     metrics::try_core_metrics,
     model::common::crash_system,
@@ -188,7 +187,8 @@ impl Handler<Self> for EvaluationSchema {
                         signer = %evaluation_req.signature().signer,
                         "Signer and sender are not the same"
                     );
-                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
+                    self.answer_unavailable(&evaluation_req, &info, &sender)
+                        .await;
                     return Ok(());
                 }
 
@@ -201,7 +201,8 @@ impl Handler<Self> for EvaluationSchema {
                         received_governance_id = %evaluation_req.content().governance_id,
                         "Invalid governance_id"
                     );
-                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
+                    self.answer_unavailable(&evaluation_req, &info, &sender)
+                        .await;
                     return Ok(());
                 }
 
@@ -213,7 +214,8 @@ impl Handler<Self> for EvaluationSchema {
                         received_schema_id = ?evaluation_req.content().schema_id,
                         "Invalid schema_id"
                     );
-                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
+                    self.answer_unavailable(&evaluation_req, &info, &sender)
+                        .await;
                     return Ok(());
                 }
 
@@ -226,7 +228,12 @@ impl Handler<Self> for EvaluationSchema {
                             namespace = ?evaluation_req.content().namespace,
                             "Invalid sender namespace"
                         );
-                        self.answer_unavailable(&evaluation_req, &info, &sender).await;
+                        self.answer_unavailable(
+                            &evaluation_req,
+                            &info,
+                            &sender,
+                        )
+                        .await;
                         return Ok(());
                     }
                 } else {
@@ -236,7 +243,8 @@ impl Handler<Self> for EvaluationSchema {
                         sender = %sender,
                         "Sender is not a creator"
                     );
-                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
+                    self.answer_unavailable(&evaluation_req, &info, &sender)
+                        .await;
                     return Ok(());
                 }
 
@@ -250,7 +258,8 @@ impl Handler<Self> for EvaluationSchema {
                         sender = %sender,
                         "Ignoring request with newer governance version; service nodes must update governance through resilience protocols"
                     );
-                    self.answer_unavailable(&evaluation_req, &info, &sender).await;
+                    self.answer_unavailable(&evaluation_req, &info, &sender)
+                        .await;
                     return Ok(());
                 }
 
@@ -333,8 +342,7 @@ impl Handler<Self> for EvaluationSchema {
                         error = %e,
                         "Failed to send request to evaluator, stopping orphan"
                     );
-                    if let Err(stop_err) = evaluator_actor.ask_stop().await
-                    {
+                    if let Err(stop_err) = evaluator_actor.ask_stop().await {
                         warn!(
                             msg_type = "NetworkRequest",
                             error = %stop_err,

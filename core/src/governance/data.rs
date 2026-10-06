@@ -544,8 +544,7 @@ impl GovernanceData {
         // are strings); the fallback only keeps the panic-free
         // invariant and never runs.
         ValueWrapper(
-            serde_json::to_value(self)
-                .unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(self).unwrap_or(serde_json::Value::Null),
         )
     }
 

@@ -102,10 +102,7 @@ pub enum CompilerError {
     ContractExecutionFailed { details: String },
 
     #[error("serialization error [{context}]: {details}")]
-    SerializationError {
-        context: String,
-        details: String,
-    },
+    SerializationError { context: String, details: String },
 
     #[error("invalid contract output: {details}")]
     InvalidContractOutput { details: String },

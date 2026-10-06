@@ -1,9 +1,9 @@
 use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
+use rand::SeedableRng;
 use rand::rng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
@@ -978,10 +978,13 @@ pub fn take_random_signers(
 }
 
 fn seed_u64(seed: &DigestIdentifier) -> u64 {
-    borsh::to_vec(seed).unwrap_or_default().iter().rev().take(8).enumerate().fold(
-        0u64,
-        |acc, (i, &byte)| acc | (u64::from(byte) << (8 * i)),
-    )
+    borsh::to_vec(seed)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take(8)
+        .enumerate()
+        .fold(0u64, |acc, (i, &byte)| acc | (u64::from(byte) << (8 * i)))
 }
 
 /// Deterministic variant of `take_random_signers` for owner-side
@@ -1069,10 +1072,8 @@ mod tests {
     fn seeded_draw_is_deterministic_and_partitions() {
         let seed = DigestIdentifier::default();
         let all = sample_keys(5);
-        let (chosen_a, rest_a) =
-            take_seeded_signers(all.clone(), 2, &seed);
-        let (chosen_b, rest_b) =
-            take_seeded_signers(all.clone(), 2, &seed);
+        let (chosen_a, rest_a) = take_seeded_signers(all.clone(), 2, &seed);
+        let (chosen_b, rest_b) = take_seeded_signers(all.clone(), 2, &seed);
         assert_eq!(chosen_a, chosen_b);
         assert_eq!(rest_a, rest_b);
         assert_eq!(chosen_a.len(), 2);

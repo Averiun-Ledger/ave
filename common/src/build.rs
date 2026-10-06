@@ -192,8 +192,8 @@ pub fn render_contract_cargo_config(
         &pattern("rust_src"),
         &escape_toml(&rust_src.to_string_lossy()),
     );
-    config = config
-        .replace(&pattern("rustc_commit"), &escape_toml(rustc_commit));
+    config =
+        config.replace(&pattern("rustc_commit"), &escape_toml(rustc_commit));
     if let Some(vendor_dir) = vendor_dir {
         config.push_str(&format!(
             "\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
@@ -210,10 +210,7 @@ pub fn render_contract_cargo_config(
 /// silently points cargo at a foreign directory in the other layout.
 /// `None` when the build dir is not under `root` — then no vendor
 /// section is emitted, same as when the dir is absent.
-pub fn relative_vendor_dir(
-    build_dir: &Path,
-    root: &Path,
-) -> Option<PathBuf> {
+pub fn relative_vendor_dir(build_dir: &Path, root: &Path) -> Option<PathBuf> {
     let depth = build_dir.strip_prefix(root).ok()?.components().count();
     if depth == 0 {
         return None;

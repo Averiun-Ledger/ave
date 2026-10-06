@@ -48,10 +48,7 @@ impl Toolchains {
     /// Pins the reproducible cargo binary every local build runs
     /// through (see `Config::cargo_bin`). Unset keeps the `rustup`
     /// cargo (single-architecture networks only).
-    pub(crate) fn with_cargo_bin(
-        mut self,
-        cargo_bin: Option<PathBuf>,
-    ) -> Self {
+    pub(crate) fn with_cargo_bin(mut self, cargo_bin: Option<PathBuf>) -> Self {
         self.cargo_bin = cargo_bin;
         self
     }
@@ -64,8 +61,7 @@ impl Toolchains {
         if let Some(name) = self.entries.get(pin) {
             return Some(name.clone());
         }
-        if self.entries.is_empty()
-            && pin == ave_common::governance::DEFAULT_PIN
+        if self.entries.is_empty() && pin == ave_common::governance::DEFAULT_PIN
         {
             return Some(String::new());
         }
@@ -98,12 +94,13 @@ impl Toolchains {
             // loud way. Empty (`""` = system cargo) only has to
             // execute: it declares no version, and production votes
             // carry whatever it measures for validators to judge.
-            let measured = ave_build::rustc_version(name)
-                .await
-                .map_err(|e| CompilerError::ToolchainFingerprintFailed {
-                    details: format!(
-                        "can not measure toolchain for pin {pin}: {e}"
-                    ),
+            let measured =
+                ave_build::rustc_version(name).await.map_err(|e| {
+                    CompilerError::ToolchainFingerprintFailed {
+                        details: format!(
+                            "can not measure toolchain for pin {pin}: {e}"
+                        ),
+                    }
                 })?;
             if !name.is_empty() && measured != entry.rustc_version {
                 return Err(CompilerError::ToolchainFingerprintFailed {
@@ -158,8 +155,7 @@ impl Toolchains {
         };
         let mut blessed = false;
         for pin in pins {
-            let Some(expected) =
-                ave_common::registry::cargo_bin_blake3(pin)
+            let Some(expected) = ave_common::registry::cargo_bin_blake3(pin)
             else {
                 continue;
             };
@@ -212,7 +208,9 @@ pub(crate) const fn is_compiler_infra_error(error: &CompilerError) -> bool {
 /// broken and these must stay fatal — they never degrade. This is the
 /// same family that maps to `EvaluatorError::InternalError` in
 /// `evaluation/response.rs`; keep both in sync.
-pub(crate) const fn is_local_fatal_compiler_error(error: &CompilerError) -> bool {
+pub(crate) const fn is_local_fatal_compiler_error(
+    error: &CompilerError,
+) -> bool {
     matches!(
         error,
         CompilerError::InvalidContractPath { .. }
@@ -350,7 +348,11 @@ impl CompilerSupport {
         register_path: &ActorPath,
         contract_name: &str,
     ) -> Option<DigestIdentifier> {
-        let register = ctx.system().get_actor::<ContractRegister>(register_path).await.ok()?;
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(register_path)
+            .await
+            .ok()?;
         match register
             .ask(ContractRegisterMessage::GetMetadata {
                 contract_name: contract_name.to_owned(),
@@ -465,10 +467,9 @@ impl CompilerSupport {
         // The payload travels base64 (plain or zstd): decode here, so
         // the shared procedure always receives raw source bytes.
         let source = pipeline::decode_contract_source(contract)?;
-        let (rust_src, rustc_commit) =
-            ave_build::query_sysroot(toolchain)
-                .await
-                .map_err(pipeline::map_build_error)?;
+        let (rust_src, rustc_commit) = ave_build::query_sysroot(toolchain)
+            .await
+            .map_err(pipeline::map_build_error)?;
         let vendor_dir =
             pipeline::vendor_dir_for_build(build_dir, contracts_root);
         let request = ave_build::BuildRequest {
@@ -478,8 +479,7 @@ impl CompilerSupport {
             lockfile: lockfile.map(|frozen| frozen.content),
             target_dir: PathBuf::from(pipeline::BUILD_TARGET_DIR),
             vendor_dir,
-            cargo_home: contracts_root
-                .join(pipeline::SHARED_CARGO_HOME_DIR),
+            cargo_home: contracts_root.join(pipeline::SHARED_CARGO_HOME_DIR),
             toolchain,
             cargo: match &cargo_bin {
                 // Same binary on every compiler: the registry-blessed
@@ -498,10 +498,13 @@ impl CompilerSupport {
         let wasm = ave_build::build_contract_wasm(build_dir, &request)
             .await
             .map_err(pipeline::map_build_error)?;
-        let toolchain_fingerprint =
-            ave_build::toolchain_fingerprint(hash, toolchain, CONTRACT_CARGO_CONFIG)
-                .await
-                .map_err(pipeline::map_build_error)?;
+        let toolchain_fingerprint = ave_build::toolchain_fingerprint(
+            hash,
+            toolchain,
+            CONTRACT_CARGO_CONFIG,
+        )
+        .await
+        .map_err(pipeline::map_build_error)?;
         Ok((wasm, toolchain_fingerprint))
     }
 
@@ -582,12 +585,12 @@ impl CompilerSupport {
     pub(crate) fn toolchains_helper<A: Actor>(
         ctx: &ActorContext<A>,
     ) -> Result<Arc<Toolchains>, ActorError> {
-        ctx.system().get_helper::<Arc<Toolchains>>("toolchains").ok_or_else(
-            || ActorError::Helper {
+        ctx.system()
+            .get_helper::<Arc<Toolchains>>("toolchains")
+            .ok_or_else(|| ActorError::Helper {
                 name: "toolchains".to_owned(),
                 reason: "Not found".to_owned(),
-            },
-        )
+            })
     }
 
     /// Resolves a governance pin to the local toolchain selector passed
@@ -606,8 +609,7 @@ impl CompilerSupport {
         let unknown = || CompilerError::UnknownToolchainPin {
             pin: pin.to_owned(),
         };
-        let toolchains =
-            Self::toolchains_helper(ctx).map_err(|_| unknown())?;
+        let toolchains = Self::toolchains_helper(ctx).map_err(|_| unknown())?;
         toolchains.resolve(pin).ok_or_else(unknown)
     }
 
@@ -1466,30 +1468,31 @@ impl CompilerSupport {
             return Ok(ServedArtifact::Missing);
         };
 
-        let wasm_bytes =
-            match pipeline::load_artifact_wasm(&contract_path).await {
-                Ok(wasm_bytes) => wasm_bytes,
-                Err(error) => {
-                    // Unreadable bytes with metadata still registered:
-                    // same handling as a hash mismatch — discard and
-                    // heal — or probes keep advertising `CanServe`
-                    // while every request answers `NotServed`.
-                    warn!(
-                        error = %error,
-                        contract_name = %contract_name,
-                        "Can not read official artifact to serve it, discarding it"
-                    );
-                    Self::discard_persisted_artifact(
-                        ctx,
-                        contract_name,
-                        &contract_path,
-                        &register,
-                        false,
-                    )
-                    .await?;
-                    return Ok(ServedArtifact::Corrupt);
-                }
-            };
+        let wasm_bytes = match pipeline::load_artifact_wasm(&contract_path)
+            .await
+        {
+            Ok(wasm_bytes) => wasm_bytes,
+            Err(error) => {
+                // Unreadable bytes with metadata still registered:
+                // same handling as a hash mismatch — discard and
+                // heal — or probes keep advertising `CanServe`
+                // while every request answers `NotServed`.
+                warn!(
+                    error = %error,
+                    contract_name = %contract_name,
+                    "Can not read official artifact to serve it, discarding it"
+                );
+                Self::discard_persisted_artifact(
+                    ctx,
+                    contract_name,
+                    &contract_path,
+                    &register,
+                    false,
+                )
+                .await?;
+                return Ok(ServedArtifact::Corrupt);
+            }
+        };
 
         let wasm_hash =
             pipeline::hash_bytes(hash, &wasm_bytes, "served wasm artifact")?;
@@ -1910,19 +1913,16 @@ mod tests {
     async fn toolchain_verify_rejects_foreign_cargo_bin() {
         use std::collections::BTreeMap;
 
-        let dir = std::env::temp_dir().join(format!(
-            "ave-test-cargo-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir()
+            .join(format!("ave-test-cargo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let foreign = dir.join("cargo-foreign");
         std::fs::write(&foreign, "not the blessed cargo").unwrap();
-        let toolchains =
-            Toolchains::from_config(&BTreeMap::from([(
-                "rust-1.98.1_sdk-0.8.0_wasm32".to_owned(),
-                String::new(),
-            )]))
-            .with_cargo_bin(Some(foreign.clone()));
+        let toolchains = Toolchains::from_config(&BTreeMap::from([(
+            "rust-1.98.1_sdk-0.8.0_wasm32".to_owned(),
+            String::new(),
+        )]))
+        .with_cargo_bin(Some(foreign.clone()));
         let err = toolchains
             .verify()
             .await

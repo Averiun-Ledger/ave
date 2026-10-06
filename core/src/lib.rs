@@ -88,10 +88,9 @@ use validation::{Validation, ValidationMessage};
 pub use crate::api_input_validation::{
     parse_request_id, require_non_empty_str, require_positive_u64,
     require_query_limit, validate_aborts_query, validate_event_request,
-    validate_incidents_query,
-    validate_events_query, validate_governance_id, validate_request_id,
-    validate_sink_events_query, validate_sink_replay_request,
-    validate_sinks_query, validate_subject_id,
+    validate_events_query, validate_governance_id, validate_incidents_query,
+    validate_request_id, validate_sink_events_query,
+    validate_sink_replay_request, validate_sinks_query, validate_subject_id,
 };
 use crate::approval::request::ApprovalReq;
 use crate::helpers::db::{
@@ -961,7 +960,8 @@ impl Api {
 
     pub async fn get_pending_transfers(
         &self,
-    ) -> Result<Vec<TransferSubject>, Error> {        let response =
+    ) -> Result<Vec<TransferSubject>, Error> {
+        let response =
             self.node.ask(NodeMessage::PendingTransfers).await.map_err(
                 |e| {
                     warn!(error = %e, "Failed to get pending transfers");
@@ -2228,13 +2228,10 @@ impl Api {
         query: IncidentsQuery,
     ) -> Result<Vec<WatchdogIncidentRow>, Error> {
         validate_incidents_query(&query)?;
-        self.db
-            .get_recent_incidents(query)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get watchdog incidents");
-                Error::QueryFailed(e.to_string())
-            })
+        self.db.get_recent_incidents(query).await.map_err(|e| {
+            warn!(error = %e, "Failed to get watchdog incidents");
+            Error::QueryFailed(e.to_string())
+        })
     }
 
     pub async fn get_event_sn(
@@ -2467,7 +2464,10 @@ impl Api {
         // Test infrastructure: the lock is never held across an await;
         // on poisoning (a test already panicked) keep going with the
         // guarded state.
-        faults.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).install(rule);
+        faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .install(rule);
         Ok(())
     }
 
@@ -2675,12 +2675,9 @@ impl Api {
                         "{base}/role_register"
                     )))
                     .await?;
-                actor
-                    .ask(RoleRegisterMessage::PurgeStorage)
-                    .await
-                    .map_err(|e| {
-                        actor_communication_error("role_register", e)
-                    })?;
+                actor.ask(RoleRegisterMessage::PurgeStorage).await.map_err(
+                    |e| actor_communication_error("role_register", e),
+                )?;
             }
             "subject" => {
                 use crate::governance::subject_register::{
@@ -2722,16 +2719,12 @@ impl Api {
                 };
                 let actor: ActorRef<SnRegister> = self
                     .system
-                    .get_actor(&ActorPath::from(format!(
-                        "{base}/sn_register"
-                    )))
+                    .get_actor(&ActorPath::from(format!("{base}/sn_register")))
                     .await?;
                 actor
                     .ask(SnRegisterMessage::PurgeStorage)
                     .await
-                    .map_err(|e| {
-                        actor_communication_error("sn_register", e)
-                    })?;
+                    .map_err(|e| actor_communication_error("sn_register", e))?;
             }
             "contract" => {
                 use crate::governance::contract_register::{
@@ -2789,8 +2782,7 @@ impl Api {
         governance_id: DigestIdentifier,
     ) -> Result<Vec<PublicKey>, Error> {
         use crate::governance::role_register::{
-            RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
-            SearchRole,
+            RoleRegister, RoleRegisterMessage, RoleRegisterResponse, SearchRole,
         };
         use ave_common::{Namespace, SchemaType};
         let actor: ActorRef<RoleRegister> = self

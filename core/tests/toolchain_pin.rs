@@ -6,8 +6,8 @@ use ave_common::response::RequestState;
 use ave_core::governance::data::GovernanceData;
 use common::{
     CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT, NodeData,
-    create_and_authorize_governance, create_nodes_and_connections,
-    emit_fact, get_events, get_subject,
+    create_and_authorize_governance, create_nodes_and_connections, emit_fact,
+    get_events, get_subject,
 };
 use test_log::test;
 
@@ -44,13 +44,9 @@ async fn test_pin_unknown_votes_error() {
     .await
     .unwrap();
 
-    wait_request_state(
-        &node1,
-        request_id,
-        Some(RequestState::Finish),
-    )
-    .await
-    .unwrap();
+    wait_request_state(&node1, request_id, Some(RequestState::Finish))
+        .await
+        .unwrap();
 
     // The committed pin did not move.
     let state = get_subject(&node1, governance_id.clone(), Some(1), true)

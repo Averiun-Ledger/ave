@@ -16,8 +16,7 @@ use crate::{
         },
     },
     compilation::{
-        compilation_set, request::CompilationReq,
-        response::CompilationResult,
+        compilation_set, request::CompilationReq, response::CompilationResult,
     },
     config::ApprovalConfig,
     evaluation::{
@@ -1851,12 +1850,11 @@ impl ValiWorker {
                 value: "compilation toolchain version",
             });
         } else {
-            let entry =
-                ave_common::governance::toolchain_info(&pin).ok_or(
-                    ValidatorError::InvalidData {
-                        value: "compilation toolchain pin",
-                    },
-                )?;
+            let entry = ave_common::governance::toolchain_info(&pin).ok_or(
+                ValidatorError::InvalidData {
+                    value: "compilation toolchain pin",
+                },
+            )?;
             if toolchain_version != entry.rustc_version {
                 return Err(ValidatorError::InvalidData {
                     value: "compilation toolchain version",
@@ -1877,17 +1875,15 @@ impl ValiWorker {
             };
             // Coverage against the committed state: a pin switch
             // recompiles every existing schema under the new pin.
-            let pre =
-                GovernanceData::try_from(metadata.properties.clone())
-                    .map_err(|_| ValidatorError::InvalidData {
-                        value: "governance state",
-                    })?;
-            let expected =
-                compilation_set(&fact_request.payload, &pre).ok_or(
-                    ValidatorError::InvalidData {
-                        value: "compilation schemas",
-                    },
-                )?;
+            let pre = GovernanceData::try_from(metadata.properties.clone())
+                .map_err(|_| ValidatorError::InvalidData {
+                    value: "governance state",
+                })?;
+            let expected = compilation_set(&fact_request.payload, &pre).ok_or(
+                ValidatorError::InvalidData {
+                    value: "compilation schemas",
+                },
+            )?;
             let got = result.contracts.keys().collect::<BTreeSet<_>>();
             if got != expected.iter().collect::<BTreeSet<_>>() {
                 return Err(ValidatorError::InvalidData {
@@ -1959,11 +1955,10 @@ impl ValiWorker {
                 });
             };
 
-            let pre =
-                GovernanceData::try_from(metadata.properties.clone())
-                    .map_err(|_| ValidatorError::InvalidData {
-                        value: "governance state",
-                    })?;
+            let pre = GovernanceData::try_from(metadata.properties.clone())
+                .map_err(|_| ValidatorError::InvalidData {
+                    value: "governance state",
+                })?;
             let needs_compilation =
                 crate::compilation::needs_compilation_evidence(
                     &fact_request.payload,
@@ -2928,10 +2923,7 @@ impl Handler<Self> for ValiWorker {
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage::new(
-                            new_info.clone(),
-                            message,
-                        ),
+                        message: NetworkMessage::new(new_info.clone(), message),
                     })
                     .await
                 {
@@ -3598,9 +3590,7 @@ mod tests {
             pin: &str,
         ) -> CompilationData {
             self.compilation_with_contracts_pin_and_version(
-                contracts,
-                pin,
-                "1.95.0",
+                contracts, pin, "1.95.0",
             )
         }
 
@@ -3664,7 +3654,7 @@ mod tests {
             )]))
         }
 
-    fn check_compilation(
+        fn check_compilation(
             &self,
             compilation: CompilationData,
         ) -> Result<(), ValidatorError> {
@@ -3750,7 +3740,7 @@ mod tests {
             )
         }
 
-    fn check_evaluation(
+        fn check_evaluation(
             &self,
             evaluation: EvaluationData,
         ) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>

@@ -473,22 +473,21 @@ impl Handler<Self> for ManualDistribution {
                 // A fresh id per manual run: the empty default
                 // collides across runs and blinds traceability.
                 let request_id = {
-                    use ave_common::identity::{
-                        HashAlgorithm, hash_borsh,
-                    };
+                    use ave_common::identity::{HashAlgorithm, hash_borsh};
                     hash_borsh(
                         &*HashAlgorithm::Blake3.hasher(),
                         &(
                             subject_id.to_string(),
                             ledger.sn,
-                            ave_common::identity::TimeStamp::now()
-                                .as_nanos(),
+                            ave_common::identity::TimeStamp::now().as_nanos(),
                         ),
                     )
-                    .map_err(|e| ActorError::Functional {
-                        description: format!(
-                            "Can not hash manual distribution id: {e}"
-                        ),
+                    .map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Can not hash manual distribution id: {e}"
+                            ),
+                        }
                     })?
                 };
                 let distribution = Distribution::new(

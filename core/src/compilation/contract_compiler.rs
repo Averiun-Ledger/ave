@@ -22,10 +22,9 @@ use ave_network::ComunicateInfo;
 use super::error::CompilerError;
 use super::pipeline;
 use super::support::{
-    CompilerResponse, CompilerSupport, ContractSourceInput,
-    HEAL_RETRY_BASE_MS, HEAL_RETRY_MAX_MS, RegisteredLoadInput,
-    SERVING_CACHE_TTL, ServedArtifact, ServingCacheEntry,
-    is_compiler_infra_error, is_local_fatal_compiler_error,
+    CompilerResponse, CompilerSupport, ContractSourceInput, HEAL_RETRY_BASE_MS,
+    HEAL_RETRY_MAX_MS, RegisteredLoadInput, SERVING_CACHE_TTL, ServedArtifact,
+    ServingCacheEntry, is_compiler_infra_error, is_local_fatal_compiler_error,
     is_retryable_compiler_recovery_error,
 };
 use crate::compilation::artifact::{
@@ -308,7 +307,8 @@ impl ContractCompiler {
         // Test infrastructure: the lock is never held across an await;
         // on poisoning (a test already panicked) keep going with the
         // guarded state.
-        let mut obs = obs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut obs =
+            obs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         update(obs.entry(contract_name.to_owned()).or_default());
     }
 
@@ -1209,20 +1209,23 @@ impl ContractCompiler {
         // yet owns nothing): only persisted bytes that mismatch the
         // anchor are corrupt. Treating a missing artifact as unhealthy
         // would reset provisioning and disturb an already-running fetch.
-        let wasm_bytes =
-            match pipeline::load_artifact_wasm(contract_path).await {
-                Ok(wasm_bytes) => Some(wasm_bytes),
-                Err(CompilerError::FileReadFailed { kind, .. })
-                    if kind == std::io::ErrorKind::NotFound =>
-                {
-                    return Ok(true);
-                }
-                Err(_) => None,
-            };
+        let wasm_bytes = match pipeline::load_artifact_wasm(contract_path).await
+        {
+            Ok(wasm_bytes) => Some(wasm_bytes),
+            Err(CompilerError::FileReadFailed { kind, .. })
+                if kind == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(true);
+            }
+            Err(_) => None,
+        };
         let healthy = match wasm_bytes {
             Some(wasm_bytes) => {
-                match pipeline::hash_bytes(hash, &wasm_bytes, "reconcile reverify")
-                {
+                match pipeline::hash_bytes(
+                    hash,
+                    &wasm_bytes,
+                    "reconcile reverify",
+                ) {
                     Ok(wasm_hash) => wasm_hash == anchor,
                     Err(_) => false,
                 }
@@ -2242,22 +2245,19 @@ impl Handler<Self> for ContractCompiler {
                         }
                         ArtifactProbeResult::NotServed
                         | ArtifactProbeResult::Busy => {
-                            let round_closed =
-                                if let Some(fetch) = &mut self.fetch
-                                    && let FetchPhase::Probe(round) =
-                                        &mut fetch.phase
-                                {
-                                    round.pending.remove(&sender);
-                                    if matches!(
-                                        result,
-                                        ArtifactProbeResult::Busy
-                                    ) {
-                                        round.busy.insert(sender.clone());
-                                    }
-                                    round.pending.is_empty()
-                                } else {
-                                    false
-                                };
+                            let round_closed = if let Some(fetch) =
+                                &mut self.fetch
+                                && let FetchPhase::Probe(round) =
+                                    &mut fetch.phase
+                            {
+                                round.pending.remove(&sender);
+                                if matches!(result, ArtifactProbeResult::Busy) {
+                                    round.busy.insert(sender.clone());
+                                }
+                                round.pending.is_empty()
+                            } else {
+                                false
+                            };
                             if round_closed {
                                 self.resolve_probe_round(ctx).await?;
                             }
@@ -2333,12 +2333,10 @@ impl Handler<Self> for ContractCompiler {
                     ArtifactGate::Allowed => {
                         let contract_name =
                             format!("{}_{}", subject_id, schema_id);
-                        self.serve_artifact(ctx, &contract_name)
-                            .await?
-                            .map_or(
-                                ArtifactFetchResult::NotServed,
-                                ArtifactFetchResult::Artifact,
-                            )
+                        self.serve_artifact(ctx, &contract_name).await?.map_or(
+                            ArtifactFetchResult::NotServed,
+                            ArtifactFetchResult::Artifact,
+                        )
                     }
                 };
 

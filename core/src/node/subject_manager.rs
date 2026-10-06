@@ -273,14 +273,12 @@ impl SubjectManager {
                 }
             }
             Err(error) => {
-    
                 cleanup_errors.push(format!("tracker: {error}"));
                 None
             }
         };
 
         if let Some(tracker) = tracker {
-
             match tracker.ask(TrackerMessage::PurgeStorage).await {
                 Ok(TrackerResponse::Ok) => {}
                 Ok(other) => cleanup_errors

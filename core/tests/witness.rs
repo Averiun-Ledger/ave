@@ -1,8 +1,8 @@
 mod common;
 
+use ave_common::identity::DigestIdentifier;
 use ave_common::identity::keys::Ed25519Signer;
 use ave_common::identity::{KeyPair, PublicKey};
-use ave_common::identity::DigestIdentifier;
 use ave_core::auth::AuthWitness;
 use common::{
     EXAMPLE_CONTRACT, create_and_authorize_governance,
@@ -8531,7 +8531,6 @@ fn hold_ledger_distribution_rule() -> FaultRule {
     }
 }
 
-
 // DS-LOW-01 probe: a pushed Create for an untracked subject replayed
 // to an outsider without governance state. Uses a genuine push held
 // from the owner toward a real witness. Currently rejected (missing
@@ -8591,7 +8590,9 @@ async fn test_distribution_pushed_create_without_request() {
             ]
         }
     });
-    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
 
     // Hold the owner's auto-push so the genuine Create can be replayed.
     owner
@@ -8622,8 +8623,7 @@ async fn test_distribution_pushed_create_without_request() {
         })
         .expect("a create push must have been held");
 
-    let outsider_key =
-        PublicKey::from_str(outsider.public_key()).unwrap();
+    let outsider_key = PublicKey::from_str(outsider.public_key()).unwrap();
     let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
     outsider
         .test_inject_inbound(
@@ -8636,9 +8636,7 @@ async fn test_distribution_pushed_create_without_request() {
                         "/user/node/distributor_{subject_id}"
                     ),
                 },
-                ActorMessage::DistributionLastEventReq {
-                    ledger: create,
-                },
+                ActorMessage::DistributionLastEventReq { ledger: create },
             ),
             &owner_key,
         )
@@ -8648,7 +8646,10 @@ async fn test_distribution_pushed_create_without_request() {
     // Negative window: without a "did I ask" check the push applies.
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(
-        outsider.get_subject_state(subject_id.clone()).await.is_err(),
+        outsider
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err(),
         "unprompted push must not create a tracker"
     );
 }

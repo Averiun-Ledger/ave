@@ -81,7 +81,10 @@ impl PendingReconcile {
 
     /// Whether every boot governance reported.
     pub fn is_empty(&self) -> bool {
-        self.pending.read().map(|pending| pending.is_empty()).unwrap_or(true)
+        self.pending
+            .read()
+            .map(|pending| pending.is_empty())
+            .unwrap_or(true)
     }
 
     pub fn insert(&self, governance_id: DigestIdentifier) {
@@ -572,11 +575,8 @@ pub mod tests {
         let pending = PendingReconcile::default();
         assert!(pending.is_empty());
         let gov_a = DigestIdentifier::default();
-        let gov_b = DigestIdentifier::new(
-            HashAlgorithm::Blake3,
-            vec![7; 32],
-        )
-        .unwrap();
+        let gov_b =
+            DigestIdentifier::new(HashAlgorithm::Blake3, vec![7; 32]).unwrap();
         pending.insert(gov_a.clone());
         pending.insert(gov_b.clone());
         assert!(!pending.is_empty());

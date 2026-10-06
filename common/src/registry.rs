@@ -43,8 +43,10 @@ use super::governance::ToolchainInfo;
 /// iterates exactly what the network enforces. Table entries below
 /// reference these positions (`PIN_IDS[0]`, ...): adding a pin extends
 /// this list AND appends one `PinRecord` — never in only one side.
-const PIN_IDS: &[&str] =
-    &["rust-1.95.0_sdk-0.8.0_wasm32", "rust-1.98.1_sdk-0.8.0_wasm32"];
+const PIN_IDS: &[&str] = &[
+    "rust-1.95.0_sdk-0.8.0_wasm32",
+    "rust-1.98.1_sdk-0.8.0_wasm32",
+];
 
 pub fn registry_ids() -> &'static [&'static str] {
     PIN_IDS
@@ -71,8 +73,14 @@ static PIN_REGISTRY: &[PinRecord] = &[
             lock_hash: "995560fd74456da3cf8d795aedb01dcf70c5cbfea8dd6c3ac9ed076d27380a6b",
             builder_image: "averiun/ave-tools@sha256:00401caa6f1e220153229eda04a6a537c8f3db5f2b2af9349f96ac1e3333dcbc",
             cargo_bins: &[
-                ("amd64", "5ba984eb055ef0e606096ed692090f75154784c580d3cd91a98bc1782dc48e32"),
-                ("arm64", "59bef027385cf2f4b74d5e2473f52a169648d58a4943f5a97646351ebfaef6a3"),
+                (
+                    "amd64",
+                    "5ba984eb055ef0e606096ed692090f75154784c580d3cd91a98bc1782dc48e32",
+                ),
+                (
+                    "arm64",
+                    "59bef027385cf2f4b74d5e2473f52a169648d58a4943f5a97646351ebfaef6a3",
+                ),
             ],
         },
         lockfile_version: Some(1),
@@ -87,8 +95,14 @@ static PIN_REGISTRY: &[PinRecord] = &[
             lock_hash: "995560fd74456da3cf8d795aedb01dcf70c5cbfea8dd6c3ac9ed076d27380a6b",
             builder_image: "averiun/ave-tools@sha256:00401caa6f1e220153229eda04a6a537c8f3db5f2b2af9349f96ac1e3333dcbc",
             cargo_bins: &[
-                ("amd64", "5ba984eb055ef0e606096ed692090f75154784c580d3cd91a98bc1782dc48e32"),
-                ("arm64", "59bef027385cf2f4b74d5e2473f52a169648d58a4943f5a97646351ebfaef6a3"),
+                (
+                    "amd64",
+                    "5ba984eb055ef0e606096ed692090f75154784c580d3cd91a98bc1782dc48e32",
+                ),
+                (
+                    "arm64",
+                    "59bef027385cf2f4b74d5e2473f52a169648d58a4943f5a97646351ebfaef6a3",
+                ),
             ],
         },
         lockfile_version: Some(1),
@@ -100,7 +114,10 @@ static PIN_REGISTRY: &[PinRecord] = &[
 /// invented. Content verified 2026-09-28 (both pins re-measured by
 /// `ave-pin`, both architectures, hashes match).
 pub fn toolchain_info(id: &str) -> Option<ToolchainInfo> {
-    PIN_REGISTRY.iter().find(|entry| entry.id == id).map(|entry| entry.info)
+    PIN_REGISTRY
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.info)
 }
 
 /// Blessed reproducible cargo binary hash for a pin on THIS

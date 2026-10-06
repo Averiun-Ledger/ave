@@ -67,7 +67,10 @@ pub enum BuildError {
     #[error("toolchain probe failed: {details}")]
     ToolchainProbeFailed { details: String },
     #[error("serialization failed in {context}: {details}")]
-    SerializationError { context: &'static str, details: String },
+    SerializationError {
+        context: &'static str,
+        details: String,
+    },
 }
 
 /// Which cargo binary runs the build. `System` is the ambient cargo
@@ -145,9 +148,8 @@ struct Probe {
     verbose: String,
 }
 
-fn probe_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, Probe>,
-> {
+fn probe_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Probe>> {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, Probe>>,
     > = std::sync::OnceLock::new();
@@ -207,9 +209,7 @@ async fn probe_toolchain(toolchain: &str) -> Result<Probe, BuildError> {
     Ok(measured)
 }
 
-async fn probe_toolchain_once(
-    toolchain: &str,
-) -> Result<Probe, BuildError> {
+async fn probe_toolchain_once(toolchain: &str) -> Result<Probe, BuildError> {
     let sysroot_output = rustc_command(toolchain)
         .arg("--print")
         .arg("sysroot")
@@ -224,8 +224,9 @@ async fn probe_toolchain_once(
                 .to_string(),
         });
     }
-    let sysroot =
-        String::from_utf8_lossy(&sysroot_output.stdout).trim().to_owned();
+    let sysroot = String::from_utf8_lossy(&sysroot_output.stdout)
+        .trim()
+        .to_owned();
     let verbose_output = rustc_command(toolchain)
         .arg("--version")
         .arg("--verbose")
@@ -249,9 +250,7 @@ async fn probe_toolchain_once(
 /// `rustc 1.95.0 (hash date)` → `1.95.0`: normalized, no host triple.
 /// What compilers attest in their votes and validators compare
 /// against the registry entry. Empty selects the system rustc.
-pub async fn rustc_version(
-    toolchain: &str,
-) -> Result<String, BuildError> {
+pub async fn rustc_version(toolchain: &str) -> Result<String, BuildError> {
     // The verbose first line is `rustc 1.98.1 (hash date)`: same
     // version token as the short output, from the cached probe.
     let probe = probe_toolchain(toolchain).await?;
@@ -283,8 +282,7 @@ pub async fn toolchain_fingerprint(
     // The build configuration (rustflags and friends) shapes the artifact
     // bytes as much as the rustc version itself, so the raw template is
     // part of the fingerprint: a flag change is a toolchain change.
-    let fingerprint_input =
-        format!("{}{}", probe.verbose, config_template);
+    let fingerprint_input = format!("{}{}", probe.verbose, config_template);
     hash_borsh(&*hash.hasher(), &fingerprint_input).map_err(|e| {
         BuildError::SerializationError {
             context: "toolchain fingerprint",
@@ -321,12 +319,12 @@ pub async fn prepare_project(
     }
 
     let cargo = contract_path.join("Cargo.toml");
-    fs::write(&cargo, request.manifest_toml).await.map_err(|e| {
-        BuildError::FileWriteFailed {
+    fs::write(&cargo, request.manifest_toml)
+        .await
+        .map_err(|e| BuildError::FileWriteFailed {
             path: cargo.to_string_lossy().to_string(),
             details: e.to_string(),
-        }
-    })?;
+        })?;
 
     let lib_rs = contract_path.join("src").join("lib.rs");
     fs::write(&lib_rs, request.source).await.map_err(|e| {
@@ -382,9 +380,7 @@ pub async fn run_cargo_build(
     // toolchains can not interfere. Empty selects the system cargo.
     let mut command = match &request.cargo {
         CargoProgram::System => Command::new("cargo"),
-        CargoProgram::Rustup(name) if name.is_empty() => {
-            Command::new("cargo")
-        }
+        CargoProgram::Rustup(name) if name.is_empty() => Command::new("cargo"),
         CargoProgram::Rustup(name) => {
             let mut command = Command::new("rustup");
             command.arg("run").arg(name).arg("cargo");
@@ -431,11 +427,9 @@ pub async fn run_cargo_build(
         command.process_group(0);
     }
     let mut child =
-        command
-            .spawn()
-            .map_err(|e| BuildError::CargoSpawnFailed {
-                details: e.to_string(),
-            })?;
+        command.spawn().map_err(|e| BuildError::CargoSpawnFailed {
+            details: e.to_string(),
+        })?;
 
     let stderr = child.stderr.take();
     let reader = tokio::spawn(async move {
@@ -448,11 +442,8 @@ pub async fn run_cargo_build(
                 match stderr.read(&mut chunk).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let room = MAX_STDERR_BYTES
-                            .saturating_sub(buf.len());
-                        buf.extend_from_slice(
-                            &chunk[..n.min(room)],
-                        );
+                        let room = MAX_STDERR_BYTES.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..n.min(room)]);
                     }
                     Err(_) => break,
                 }
@@ -463,10 +454,8 @@ pub async fn run_cargo_build(
 
     let status = match request.timeout {
         Some(limit) => match timeout(limit, child.wait()).await {
-            Ok(result) => result.map_err(|e| {
-                BuildError::CargoSpawnFailed {
-                    details: e.to_string(),
-                }
+            Ok(result) => result.map_err(|e| BuildError::CargoSpawnFailed {
+                details: e.to_string(),
             })?,
             Err(_) => {
                 kill_build_tree(&mut child).await;
@@ -476,11 +465,14 @@ pub async fn run_cargo_build(
                 });
             }
         },
-        None => child.wait().await.map_err(|e| {
-            BuildError::CargoSpawnFailed {
-                details: e.to_string(),
-            }
-        })?,
+        None => {
+            child
+                .wait()
+                .await
+                .map_err(|e| BuildError::CargoSpawnFailed {
+                    details: e.to_string(),
+                })?
+        }
     };
 
     if !status.success() {
@@ -523,11 +515,13 @@ async fn load_compiled_wasm(
     target_dir: &Path,
 ) -> Result<Vec<u8>, BuildError> {
     let wasm_path = build_output_wasm_path(contract_path, target_dir);
-    fs::read(&wasm_path).await.map_err(|e| BuildError::FileReadFailed {
-        path: wasm_path.to_string_lossy().to_string(),
-        details: e.to_string(),
-        kind: e.kind(),
-    })
+    fs::read(&wasm_path)
+        .await
+        .map_err(|e| BuildError::FileReadFailed {
+            path: wasm_path.to_string_lossy().to_string(),
+            details: e.to_string(),
+            kind: e.kind(),
+        })
 }
 
 fn cargo_config_path(contract_path: &Path) -> PathBuf {
@@ -573,4 +567,3 @@ async fn kill_build_tree(child: &mut tokio::process::Child) {
         let _ = error;
     }
 }
-

@@ -1,9 +1,9 @@
+#[cfg(not(any(test, feature = "test")))]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
-#[cfg(not(any(test, feature = "test")))]
-use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -189,9 +189,9 @@ impl Runner {
             // namespace (hierarchy is for serving roles). This mirrors
             // SubjectRegister enforcement, so a transfer that passes
             // evaluation can not die later in the register check.
-            namespaces.iter().any(|creator_namespace| {
-                creator_namespace == &namespace
-            })
+            namespaces
+                .iter()
+                .any(|creator_namespace| creator_namespace == &namespace)
         }) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
@@ -415,11 +415,8 @@ impl Runner {
             let handle = tokio::task::spawn_blocking(move || {
                 runtime.execute(&module, &state, &init_state, &event, is_owner)
             });
-            match tokio::time::timeout(
-                Self::EXECUTION_WALL_TIMEOUT,
-                handle,
-            )
-            .await
+            match tokio::time::timeout(Self::EXECUTION_WALL_TIMEOUT, handle)
+                .await
             {
                 Ok(Ok(result)) => {
                     result.map_err(map_runtime_error_to_runner_error)
@@ -1709,9 +1706,7 @@ mod tests {
     use ave_common::{Namespace, SchemaType};
 
     use super::Runner;
-    use crate::evaluation::runner::error::{
-        InvalidEventKind, RunnerError,
-    };
+    use crate::evaluation::runner::error::{InvalidEventKind, RunnerError};
 
     fn key() -> ave_common::identity::PublicKey {
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key()
@@ -1727,8 +1722,7 @@ mod tests {
         namespace: Namespace,
     ) -> Result<super::types::RunnerResult, RunnerError> {
         let old_owner = key();
-        let members =
-            BTreeSet::from([holder.clone(), old_owner.clone()]);
+        let members = BTreeSet::from([holder.clone(), old_owner.clone()]);
         let creators =
             BTreeMap::from([(holder.clone(), BTreeSet::from([grant]))]);
         Runner::execute_transfer_not_gov(
@@ -1744,12 +1738,14 @@ mod tests {
     #[test]
     fn transfer_creator_grant_is_exact() {
         // Exact grant: passes the creator gate.
-        assert!(transfer_to(
-            key(),
-            Namespace::from("org.A.records.R1"),
-            Namespace::from("org.A.records.R1"),
-        )
-        .is_ok());
+        assert!(
+            transfer_to(
+                key(),
+                Namespace::from("org.A.records.R1"),
+                Namespace::from("org.A.records.R1"),
+            )
+            .is_ok()
+        );
         // Parent grant for a child subject: rejected (Creator covers
         // exactly its namespace; hierarchy is for serving roles).
         let holder = key();

@@ -522,9 +522,7 @@ impl Handler<Self> for Evaluation {
                                 // vote (stale governance intent must die,
                                 // not reboot-loop); tracker requests
                                 // tally below.
-                                if Self::request_is_governance(
-                                    &self.request,
-                                ) {
+                                if Self::request_is_governance(&self.request) {
                                     if let Err(e) = abort_req(
                                         ctx,
                                         self.request_id.clone(),
@@ -557,10 +555,8 @@ impl Handler<Self> for Evaluation {
 
                                     return Ok(());
                                 }
-                                self.aborts.push((
-                                    sender.clone(),
-                                    error.clone(),
-                                ));
+                                self.aborts
+                                    .push((sender.clone(), error.clone()));
                                 if self.quorum.check_quorum(
                                     self.evaluators_quantity,
                                     self.aborts.len() as u32,
@@ -575,27 +571,27 @@ impl Handler<Self> for Evaluation {
                                     .await
                                     {
                                         error!(
-                                            msg_type = "Response",
-                                            request_id = %self.request_id,
+                                                msg_type = "Response",
+                                                request_id = %self.request_id,
+                                            sender = %sender,
+                                            abort_reason = %error,
+                                            error = %e,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    };
+
+                                    debug!(
+                                        msg_type = "Response",
+                                        request_id = %self.request_id,
                                         sender = %sender,
                                         abort_reason = %error,
-                                        error = %e,
-                                        "Failed to abort request"
+                                        "Evaluation aborted by quorum"
                                     );
-                                    return Err(crash_system(ctx, e).await);
-                                };
 
-                                debug!(
-                                    msg_type = "Response",
-                                    request_id = %self.request_id,
-                                    sender = %sender,
-                                    abort_reason = %error,
-                                    "Evaluation aborted by quorum"
-                                );
+                                    self.closed = true;
 
-                                self.closed = true;
-
-                                return Ok(());
+                                    return Ok(());
                                 }
                                 // Below quorum: the aborter is already out
                                 // of the round — fall through so the

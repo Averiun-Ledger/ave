@@ -476,11 +476,7 @@ impl Compilation {
                         // (they live outside the well-known serving
                         // path): empty whitelist rejects every probe.
                         evaluators: BTreeMap::new(),
-                        toolchain_pin: self
-                            .request
-                            .content()
-                            .pin
-                            .clone(),
+                        toolchain_pin: self.request.content().pin.clone(),
                         committed_pin: self.state.toolchain.clone(),
                         serving_blocked: false,
                         serving_cache: HashMap::new(),
@@ -798,9 +794,7 @@ impl Handler<Self> for Compilation {
                                 // compilation requests are always
                                 // governance scoped by construction.
                                 // Tracker-subject requests tally below.
-                                if Self::request_is_governance(
-                                    &self.request,
-                                ) {
+                                if Self::request_is_governance(&self.request) {
                                     if let Err(e) = abort_req(
                                         ctx,
                                         self.request_id.clone(),
@@ -833,10 +827,8 @@ impl Handler<Self> for Compilation {
 
                                     return Ok(());
                                 }
-                                self.aborts.push((
-                                    sender.clone(),
-                                    error.clone(),
-                                ));
+                                self.aborts
+                                    .push((sender.clone(), error.clone()));
                                 if self.quorum.check_quorum(
                                     self.compilers_quantity,
                                     self.aborts.len() as u32,
@@ -1160,9 +1152,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(targets.len(), 2);
-        let beta = targets
-            .get(&SchemaType::Type("Beta".to_owned()))
-            .unwrap();
+        let beta = targets.get(&SchemaType::Type("Beta".to_owned())).unwrap();
         assert!(beta.contract_changed);
         assert!(beta.force_rebuild);
         let example = targets
@@ -1173,7 +1163,8 @@ mod tests {
     }
 
     #[test]
-    fn same_pin_never_force_rebuilds() {        // Same pin plus an add: the add builds normally, nothing else
+    fn same_pin_never_force_rebuilds() {
+        // Same pin plus an add: the add builds normally, nothing else
         // is touched — force_rebuild is switch-only.
         let targets = resolve_compile_targets(
             &ValueWrapper(serde_json::json!({
@@ -1193,9 +1184,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(targets.len(), 1);
-        let beta = targets
-            .get(&SchemaType::Type("Beta".to_owned()))
-            .unwrap();
+        let beta = targets.get(&SchemaType::Type("Beta".to_owned())).unwrap();
         assert!(beta.contract_changed);
         assert!(!beta.force_rebuild);
     }

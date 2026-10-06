@@ -247,10 +247,7 @@ fn enqueue_pending(
                         }
                         None => break,
                     }
-                    if queues
-                        .get(&victim)
-                        .is_some_and(PendingQueue::is_empty)
-                    {
+                    if queues.get(&victim).is_some_and(PendingQueue::is_empty) {
                         queues.remove(&victim);
                     }
                 }
@@ -854,10 +851,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         // A freshly identified peer is sendable even before the DHT
         // lists it: dropping its first messages would burn a retry
         // cycle for a connection that is already open.
-        let sendable = matches!(
-            self.peer_action.get(&peer),
-            Some(Action::Identified(..))
-        ) || self.swarm.behaviour_mut().is_known_peer(&peer);
+        let sendable =
+            matches!(self.peer_action.get(&peer), Some(Action::Identified(..)))
+                || self.swarm.behaviour_mut().is_known_peer(&peer);
 
         if delivery == Delivery::Direct {
             if sendable {
@@ -1133,8 +1129,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     ) {
         let mut evicted = 0u64;
         {
-            let queue =
-                self.response_channels.entry(peer).or_default();
+            let queue = self.response_channels.entry(peer).or_default();
             // Drop channels the requester already abandoned: they can
             // never be answered and only pin memory.
             let before = queue.len();
@@ -1976,9 +1971,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                     buffered.push_back(message.payload);
                                 }
                                 if let Some(metrics) = self.metric_handle() {
-                                    metrics.inc_inbound_queue_ttl_drop_by(
-                                        expired,
-                                    );
+                                    metrics
+                                        .inc_inbound_queue_ttl_drop_by(expired);
                                 }
                                 self.message_to_helper(
                                     MessagesHelper::Vec(buffered),
@@ -3402,10 +3396,9 @@ mod tests {
         let peer = PeerId::random();
         // Identified but not yet in the DHT k-buckets: the open
         // connection must be used instead of dropping to discovery.
-        worker.peer_action.insert(
-            peer,
-            Action::Identified(ConnectionId::new_unchecked(41)),
-        );
+        worker
+            .peer_action
+            .insert(peer, Action::Identified(ConnectionId::new_unchecked(41)));
         let result = worker.send_message(
             peer,
             Bytes::from_static(b"hello"),

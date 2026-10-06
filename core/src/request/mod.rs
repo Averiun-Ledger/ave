@@ -715,13 +715,9 @@ impl RequestHandler {
             if in_handling || in_queue {
                 // Bounded queue: an authorized signer must not enqueue
                 // without limit (the payload is persisted per entry).
-                if self
-                    .in_queue
-                    .get(subject_id)
-                    .is_some_and(|queue| {
-                        queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
-                    })
-                {
+                if self.in_queue.get(subject_id).is_some_and(|queue| {
+                    queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
+                }) {
                     return Err(ActorError::Functional {
                         description: format!(
                             "Request queue for subject {subject_id} is full"
@@ -799,8 +795,7 @@ impl RequestHandler {
                 }
                 Err(ActorError::Exists { .. }) => {
                     if let Some(metrics) = try_core_metrics() {
-                        metrics
-                            .observe_request_handler_child_collision();
+                        metrics.observe_request_handler_child_collision();
                     }
                     Self::await_child_gone(ctx, subject_id).await?;
                 }
@@ -833,11 +828,9 @@ impl RequestHandler {
                 // again, loud.
                 Err(_) => return Ok(()),
                 Ok(_) => {
-                    tokio::time::sleep(
-                        std::time::Duration::from_millis(
-                            CHILD_TEARDOWN_POLL_MS,
-                        ),
-                    )
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        CHILD_TEARDOWN_POLL_MS,
+                    ))
                     .await;
                 }
             }
@@ -1014,9 +1007,9 @@ impl RequestHandler {
         {
             Ok(actor) => actor,
             Err(ActorError::Exists { .. }) => {
-                let actor =
-                    ctx.get_child::<RequestManager>(&subject_id.to_string())
-                        .await?;
+                let actor = ctx
+                    .get_child::<RequestManager>(&subject_id.to_string())
+                    .await?;
                 // A live manager may hold an in-flight request: abort
                 // it first so tracking records the outcome instead of
                 // freezing on the last state.
@@ -1211,10 +1204,11 @@ impl Actor for RequestHandler {
                 .await?
                 .and_then(|data| data.get_governance_id());
             if let Some(governance_id) = &governance_id
-                && let Err(e) =
-                    wait_governance_ready(ctx, governance_id).await
+                && let Err(e) = wait_governance_ready(ctx, governance_id).await
             {
-                error!("Request handler pre_start timed out waiting for governance readiness");
+                error!(
+                    "Request handler pre_start timed out waiting for governance readiness"
+                );
                 return Err(e);
             }
             let request_manager_init = InitRequestManager {

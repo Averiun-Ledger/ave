@@ -29,8 +29,8 @@ use crate::{
             check_witness_status, crash_system, get_verified_transfer_sn,
             node::get_subject_data,
             subject::{
-                acquire_subject, check_witness_status_and_window,
-                get_gov_sn, get_local_subject_sn,
+                acquire_subject, check_witness_status_and_window, get_gov_sn,
+                get_local_subject_sn,
                 get_tracker_window as resolve_tracker_window, get_version,
                 has_role,
             },
@@ -401,8 +401,6 @@ impl DistriWorker {
             .into());
         };
 
-
-
         let gov_version =
             get_version(ctx, &governance_id).await.map_err(|e| {
                 DistributorError::GetGovernanceFailed {
@@ -648,13 +646,10 @@ impl DistriWorker {
         ) {
             // Same bar as the batch path: cryptographic verification
             // plus simulation, not simulation alone.
-            match self.transfer_verifier.verify_and_simulate(
-                ctx,
-                &subject_id,
-                ledger,
-                first_ledger,
-            )
-            .await?
+            match self
+                .transfer_verifier
+                .verify_and_simulate(ctx, &subject_id, ledger, first_ledger)
+                .await?
             {
                 TransferSimulationResult::Witness => {}
                 TransferSimulationResult::NotWitness => {
@@ -803,12 +798,7 @@ impl DistriWorker {
         actual_sn: Option<u64>,
         data: &SubjectData,
     ) -> Result<
-        (
-            u64,
-            Option<u64>,
-            Option<u64>,
-            Vec<TrackerDeliveryRange>,
-        ),
+        (u64, Option<u64>, Option<u64>, Vec<TrackerDeliveryRange>),
         ActorError,
     > {
         let SubjectData::Tracker {
@@ -822,18 +812,18 @@ impl DistriWorker {
         };
 
         let (sn, transfer_sn, clear_sn, ranges) = resolve_tracker_window(
-                ctx,
-                governance_id,
-                subject_id,
-                sender.clone(),
-                (*self.our_key).clone(),
-                TrackerParams {
-                    namespace: namespace.clone(),
-                    schema_id: schema_id.clone(),
-                    actual_sn,
-                },
-            )
-            .await?;
+            ctx,
+            governance_id,
+            subject_id,
+            sender.clone(),
+            (*self.our_key).clone(),
+            TrackerParams {
+                namespace: namespace.clone(),
+                schema_id: schema_id.clone(),
+                actual_sn,
+            },
+        )
+        .await?;
 
         let Some(sn) = sn else {
             let witness_status = check_witness_status(
@@ -1490,9 +1480,7 @@ impl DistriWorker {
                         Some(TransferSimulationResult::Witness)
                     }
                     TransferSimulationResult::NotWitness => {
-                        return Err(
-                            DistributorError::ReceiverNoAccess.into()
-                        );
+                        return Err(DistributorError::ReceiverNoAccess.into());
                     }
                 }
             } else {
@@ -1511,9 +1499,7 @@ impl DistriWorker {
             .await
             {
                 Ok(v) => v
-                    .filter(|(_, verified_sender)| {
-                        *verified_sender == sender
-                    })
+                    .filter(|(_, verified_sender)| *verified_sender == sender)
                     .map(|(sn, _)| sn),
                 Err(e) => {
                     warn!(

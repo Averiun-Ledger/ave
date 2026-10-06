@@ -245,4 +245,3 @@ pub enum RequestManagerError {
     #[error("In create tracker events, the signer has to be a creator")]
     NotCreator,
 }
-

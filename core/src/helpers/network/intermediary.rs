@@ -72,12 +72,11 @@ impl Intermediary {
         // exposed to the test suites through the `test_faults` helper.
         #[cfg(feature = "test")]
         let faults = {
-            let faults: test_faults::SharedFaultRegistry =
-                Arc::new(std::sync::Mutex::new(
-                    test_faults::TestFaultRegistry::new(
-                        outbound_sender.clone(),
-                    ),
-                ));
+            let faults: test_faults::SharedFaultRegistry = Arc::new(
+                std::sync::Mutex::new(test_faults::TestFaultRegistry::new(
+                    outbound_sender.clone(),
+                )),
+            );
             faults
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())

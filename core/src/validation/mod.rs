@@ -226,8 +226,11 @@ impl Validation {
                         init_state: self.init_state.clone(),
                         governance_id: self
                             .request
-                            .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?
-                            ,
+                            .content()
+                            .get_governance_id()
+                            .map_err(|e| ActorError::Functional {
+                                description: e,
+                            })?,
                         gov_version: self.request.content().get_gov_version(),
                         sn: self.request.content().get_sn(),
                         hash: self.hash,
@@ -241,10 +244,13 @@ impl Validation {
                                 .current_request_roles
                                 .compilation
                                 .clone(),
-                            approval: self.current_request_roles.approval.clone(),
+                            approval: self
+                                .current_request_roles
+                                .approval
+                                .clone(),
                             validation: self.validation_roles.clone(),
                         },
-                        stop:true,
+                        stop: true,
                         pending: None,
                         approvals: HashMap::new(),
                     },
@@ -638,9 +644,7 @@ impl Handler<Self> for Validation {
                                 // vote (stale governance intent must die,
                                 // not reboot-loop); tracker requests
                                 // tally below.
-                                if Self::request_is_governance(
-                                    &self.request,
-                                ) {
+                                if Self::request_is_governance(&self.request) {
                                     if let Err(e) = abort_req(
                                         ctx,
                                         self.request_id.clone(),
@@ -663,10 +667,8 @@ impl Handler<Self> for Validation {
 
                                     return Ok(());
                                 }
-                                self.aborts.push((
-                                    sender.clone(),
-                                    error.clone(),
-                                ));
+                                self.aborts
+                                    .push((sender.clone(), error.clone()));
                                 if self.quorum.check_quorum(
                                     self.validators_quantity,
                                     self.aborts.len() as u32,
@@ -705,8 +707,14 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?,
-                                    RebootType::Normal
+                                        .content()
+                                        .get_governance_id()
+                                        .map_err(|e| {
+                                            ActorError::Functional {
+                                                description: e,
+                                            }
+                                        })?,
+                                    RebootType::Normal,
                                 )
                                 .await
                                 {
@@ -734,18 +742,24 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?,
-                                    RebootType::Diff
+                                        .content()
+                                        .get_governance_id()
+                                        .map_err(|e| {
+                                            ActorError::Functional {
+                                                description: e,
+                                            }
+                                        })?,
+                                    RebootType::Diff,
                                 )
                                 .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        "Failed to send reboot to request actor"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
-                                }
+                            {
+                                error!(
+                                    msg_type = "Response",
+                                    error = %e,
+                                    "Failed to send reboot to request actor"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
                                 self.closed = true;
@@ -864,24 +878,28 @@ impl Handler<Self> for Validation {
                             );
                         } else if self.awaiting_count() == 0
                             && let Err(e) = send_reboot_to_req(
-                                    ctx,
-                                    self.request_id.clone(),
-                                    self.request
-                                        .content().get_governance_id().map_err(|e| ActorError::Functional { description: e })?,
-                                    RebootType::TimeOut
-                                )
-                                .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        "Failed to send reboot to request actor"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
-                                } else if self.awaiting_count() == 0 {
-                                    Self::observe_event("reboot");
-                                    self.closed = true;
-                                }
+                                ctx,
+                                self.request_id.clone(),
+                                self.request
+                                    .content()
+                                    .get_governance_id()
+                                    .map_err(|e| ActorError::Functional {
+                                        description: e,
+                                    })?,
+                                RebootType::TimeOut,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "Response",
+                                error = %e,
+                                "Failed to send reboot to request actor"
+                            );
+                            return Err(crash_system(ctx, e).await);
+                        } else if self.awaiting_count() == 0 {
+                            Self::observe_event("reboot");
+                            self.closed = true;
+                        }
                     } else {
                         warn!(
                             msg_type = "Response",

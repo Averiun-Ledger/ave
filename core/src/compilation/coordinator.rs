@@ -782,7 +782,9 @@ mod tests {
     #[test(tokio::test)]
     async fn result_deadline_reports_timeout_and_stops() {
         let PhaseHarness {
-            runner, coordinator, ..
+            runner,
+            coordinator,
+            ..
         } = setup().await;
 
         coordinator

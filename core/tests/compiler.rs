@@ -22483,7 +22483,9 @@ async fn test_compilation_stale_gov_owner_aborts() {
         .unwrap();
     for api in [&node3.api, &anchor.api] {
         api.update_subject(governance_id.clone()).await.unwrap();
-        get_subject(api, governance_id.clone(), Some(1), true).await.unwrap();
+        get_subject(api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     }
 
     // The anchor stops receiving distribution pushes: it stays at v1
@@ -22519,7 +22521,11 @@ async fn test_compilation_stale_gov_owner_aborts() {
     )
     .await
     .unwrap();
-    node3.api.update_subject(governance_id.clone()).await.unwrap();
+    node3
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
     get_subject(&node3.api, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
@@ -22558,7 +22564,9 @@ async fn test_compilation_stale_gov_owner_aborts() {
         .await
         .unwrap();
     owner.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(owner, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(owner, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // Stale owner emits a contract-carrying gov fact: node3 (ahead)
     // aborts in compilation and the request dies here — no commit,
@@ -22619,5 +22627,7 @@ async fn test_compilation_stale_gov_owner_aborts() {
     get_subject(&node3.api, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    get_subject(owner, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(owner, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 }

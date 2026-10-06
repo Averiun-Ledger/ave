@@ -340,8 +340,7 @@ impl Handler<Self> for EvalCoordinator {
                             Ok(evaluation_actor) => {
                                 if let Err(e) = evaluation_actor
                                     .tell(EvaluationMessage::Response {
-                                        evaluation_res:
-                                            EvaluationRes::TimeOut,
+                                        evaluation_res: EvaluationRes::TimeOut,
                                         sender: self.node_key.clone(),
                                     })
                                     .await

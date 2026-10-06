@@ -763,12 +763,8 @@ impl Tracker {
             self.create(ctx, first.gov_version).await?;
 
             self.on_event(first.clone(), ctx).await;
-            self.record_visibility_event(
-                ctx,
-                &first,
-                self.visibility_mode,
-            )
-            .await?;
+            self.record_visibility_event(ctx, &first, self.visibility_mode)
+                .await?;
 
             Self::register(
                 ctx,
@@ -956,12 +952,8 @@ impl Tracker {
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
-            self.record_visibility_event(
-                ctx,
-                &event,
-                self.visibility_mode,
-            )
-            .await?;
+            self.record_visibility_event(ctx, &event, self.visibility_mode)
+                .await?;
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();

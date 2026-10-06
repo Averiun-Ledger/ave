@@ -228,12 +228,9 @@ impl Handler<Self> for SnRegister {
                 // with event order; a missing tail means an empty map
                 // here, which reads as unknown and scans fully —
                 // safe direction).
-                let max = self
-                    .register
-                    .get(&subject_id)
-                    .and_then(|versions| {
-                        versions.iter().map(|(_, sn)| *sn).max()
-                    });
+                let max = self.register.get(&subject_id).and_then(|versions| {
+                    versions.iter().map(|(_, sn)| *sn).max()
+                });
 
                 return Ok(SnRegisterResponse::MaxSn(max));
             }

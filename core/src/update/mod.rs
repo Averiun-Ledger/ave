@@ -346,7 +346,10 @@ impl Update {
         if let UpdateType::Request { id, subject_id } = &self.update_type {
             let request_path =
                 ActorPath::from(format!("/user/request/{}", subject_id));
-            match ctx.system().get_actor::<RequestManager>(&request_path).await
+            match ctx
+                .system()
+                .get_actor::<RequestManager>(&request_path)
+                .await
             {
                 Ok(request_actor) => {
                     if let Err(e) = request_actor

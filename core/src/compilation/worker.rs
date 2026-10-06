@@ -19,7 +19,8 @@ use crate::{
             CompilerSupport, ContractSourceInput, HEAL_RETRY_BASE_MS,
             HEAL_RETRY_MAX_MS, SERVING_CACHE_TTL, ServedArtifact,
             ServingCacheEntry, is_compiler_infra_error,
-            is_local_fatal_compiler_error, is_retryable_compiler_recovery_error,
+            is_local_fatal_compiler_error,
+            is_retryable_compiler_recovery_error,
         },
     },
     governance::{
@@ -521,100 +522,98 @@ impl CompileWorker {
         let toolchain_version = if toolchain_name.is_empty() {
             empty_version
         } else {
-            match Self::measure_toolchain_version(&toolchain_name, &pin)
-                .await
-            {
+            match Self::measure_toolchain_version(&toolchain_name, &pin).await {
                 Ok(version) => version,
                 Err(response) => return Ok(response),
             }
         };
 
-        let result =
-            match resolve_compile_targets(
-                &fact_request.payload,
-                &self.schemas,
-                &self.committed_pin,
-            )
-            {
-                Ok(targets) => {
-                    if targets.is_empty() {
-                        // No schemas in the payload yet compilation was
-                        // requested: bare pin switch (the manager only
-                        // asks then). Capacity attestation, no builds —
-                        // the gate above already proved this pin
-                        // resolves locally, so voting empty is exact.
-                        let carries_pin = serde_json::from_value::<
-                            ave_common::governance::GovernanceEvent,
-                        >(fact_request.payload.0.clone())
-                        .ok()
-                        .and_then(|event| event.toolchain)
-                        .is_some();
-                        if carries_pin {
-                            CompilationResult::Ok {
-                                response: CompilerResponse {
-                                    contracts: BTreeMap::new(),
-                                },
-                                compile_req_hash,
-                                req_subject_data_hash,
-                                pin: pin.clone(),
-                                toolchain_version: toolchain_version.clone(),
-                            }
-                        } else {
-                            CompilationResult::Error {
-                                error: CompilationError::InvalidEvent(
-                                    "The event does not add or change any contract"
-                                        .to_owned(),
-                                ),
-                                compile_req_hash,
-                                req_subject_data_hash,
-                                pin: pin.clone(),
-                                toolchain_version: toolchain_version.clone(),
-                            }
+        let result = match resolve_compile_targets(
+            &fact_request.payload,
+            &self.schemas,
+            &self.committed_pin,
+        ) {
+            Ok(targets) => {
+                if targets.is_empty() {
+                    // No schemas in the payload yet compilation was
+                    // requested: bare pin switch (the manager only
+                    // asks then). Capacity attestation, no builds —
+                    // the gate above already proved this pin
+                    // resolves locally, so voting empty is exact.
+                    let carries_pin = serde_json::from_value::<
+                        ave_common::governance::GovernanceEvent,
+                    >(
+                        fact_request.payload.0.clone()
+                    )
+                    .ok()
+                    .and_then(|event| event.toolchain)
+                    .is_some();
+                    if carries_pin {
+                        CompilationResult::Ok {
+                            response: CompilerResponse {
+                                contracts: BTreeMap::new(),
+                            },
+                            compile_req_hash,
+                            req_subject_data_hash,
+                            pin: pin.clone(),
+                            toolchain_version: toolchain_version.clone(),
                         }
                     } else {
-                        match self
-                            .compile_targets(ctx, compilation_req, targets)
-                            .await
-                        {
-                            Ok(ContractCompilation::Compiled(contracts)) => {
-                                CompilationResult::Ok {
-                                    response: CompilerResponse { contracts },
-                                    compile_req_hash,
-                                    req_subject_data_hash,
-                                    pin: pin.clone(),
-                                    toolchain_version: toolchain_version.clone(),
-                                }
-                            }
-                            Ok(ContractCompilation::Failed(error)) => {
-                                CompilationResult::Error {
-                                    error,
-                                    compile_req_hash,
-                                    req_subject_data_hash,
-                                    pin: pin.clone(),
-                                    toolchain_version: toolchain_version.clone(),
-                                }
-                            }
-                            Ok(ContractCompilation::Abort(reason)) => {
-                                return Ok(CompilationRes::Abort(reason));
-                            }
-                            Ok(ContractCompilation::Unavailable) => {
-                                // This node can not compile right now for
-                                // infrastructure reasons: not a verdict,
-                                // the requester replaces this compiler.
-                                return Ok(CompilationRes::Unavailable);
-                            }
-                            Err(error) => return Err(error),
+                        CompilationResult::Error {
+                            error: CompilationError::InvalidEvent(
+                                "The event does not add or change any contract"
+                                    .to_owned(),
+                            ),
+                            compile_req_hash,
+                            req_subject_data_hash,
+                            pin: pin.clone(),
+                            toolchain_version: toolchain_version.clone(),
                         }
                     }
+                } else {
+                    match self
+                        .compile_targets(ctx, compilation_req, targets)
+                        .await
+                    {
+                        Ok(ContractCompilation::Compiled(contracts)) => {
+                            CompilationResult::Ok {
+                                response: CompilerResponse { contracts },
+                                compile_req_hash,
+                                req_subject_data_hash,
+                                pin: pin.clone(),
+                                toolchain_version: toolchain_version.clone(),
+                            }
+                        }
+                        Ok(ContractCompilation::Failed(error)) => {
+                            CompilationResult::Error {
+                                error,
+                                compile_req_hash,
+                                req_subject_data_hash,
+                                pin: pin.clone(),
+                                toolchain_version: toolchain_version.clone(),
+                            }
+                        }
+                        Ok(ContractCompilation::Abort(reason)) => {
+                            return Ok(CompilationRes::Abort(reason));
+                        }
+                        Ok(ContractCompilation::Unavailable) => {
+                            // This node can not compile right now for
+                            // infrastructure reasons: not a verdict,
+                            // the requester replaces this compiler.
+                            return Ok(CompilationRes::Unavailable);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
-                Err(error) => CompilationResult::Error {
-                    error,
-                    compile_req_hash,
-                    req_subject_data_hash,
-                    pin: pin.clone(),
-                    toolchain_version: toolchain_version.clone(),
-                },
-            };
+            }
+            Err(error) => CompilationResult::Error {
+                error,
+                compile_req_hash,
+                req_subject_data_hash,
+                pin: pin.clone(),
+                toolchain_version: toolchain_version.clone(),
+            },
+        };
 
         let result_hash =
             hash_borsh(&*self.hash.hasher(), &result).map_err(|e| {
@@ -700,23 +699,22 @@ impl CompileWorker {
             .map(|n| n.get())
             .unwrap_or(2)
             .max(1);
-        let mut outcomes: Vec<(usize, SchemaOutcome)> =
-            futures::stream::iter(jobs.into_iter().map(
-                |(index, schema_id, target)| {
-                    self.compile_one(
-                        ctx,
-                        compilation_req,
-                        &subject_id,
-                        &register_path,
-                        index,
-                        schema_id,
-                        target,
-                    )
-                },
-            ))
-            .buffer_unordered(limit)
-            .collect()
-            .await;
+        let mut outcomes: Vec<(usize, SchemaOutcome)> = futures::stream::iter(
+            jobs.into_iter().map(|(index, schema_id, target)| {
+                self.compile_one(
+                    ctx,
+                    compilation_req,
+                    &subject_id,
+                    &register_path,
+                    index,
+                    schema_id,
+                    target,
+                )
+            }),
+        )
+        .buffer_unordered(limit)
+        .collect()
+        .await;
         outcomes.sort_by_key(|(index, _)| *index);
 
         let mut contracts = BTreeMap::new();
@@ -756,13 +754,11 @@ impl CompileWorker {
                 SchemaOutcome::Verdict(ContractCompilation::Unavailable),
             );
         };
-            let (contract_name, contract_path) = if target.contract_changed
-                || target.force_rebuild
-            {
-                let contract_hash = match hash_borsh(
-                    &*self.hash.hasher(),
-                    &target.source,
-                ) {
+        let (contract_name, contract_path) = if target.contract_changed
+            || target.force_rebuild
+        {
+            let contract_hash =
+                match hash_borsh(&*self.hash.hasher(), &target.source) {
                     Ok(contract_hash) => contract_hash,
                     Err(e) => {
                         return (
@@ -776,228 +772,159 @@ impl CompileWorker {
                         );
                     }
                 };
-                let staging_name = format!(
-                    "{}_temp_staging_{}_{}",
-                    subject_id, schema_id, contract_hash
-                );
-                let staging_path = config.contracts_path.join(&staging_name);
-                (staging_name, staging_path)
-            } else {
-                let official_name = format!("{}_{}", subject_id, schema_id);
-                let official_path = config
-                    .contracts_path
-                    .join("contracts")
-                    .join(&official_name);
-                (official_name, official_path)
-            };
+            let staging_name = format!(
+                "{}_temp_staging_{}_{}",
+                subject_id, schema_id, contract_hash
+            );
+            let staging_path = config.contracts_path.join(&staging_name);
+            (staging_name, staging_path)
+        } else {
+            let official_name = format!("{}_{}", subject_id, schema_id);
+            let official_path =
+                config.contracts_path.join("contracts").join(&official_name);
+            (official_name, official_path)
+        };
 
-            // Unchanged contract: the init check re-runs against the
-            // official artifact, and the recompile fallback (missing or
-            // corrupt local artifact) must reproduce the ledger-anchored
-            // bytes exactly — compilation is deterministic with the same
-            // toolchain, so a mismatch is a local integrity failure,
-            // never a divergent vote or an anchor drift.
-            let expected_wasm_hash = if target.contract_changed
-                || target.force_rebuild
+        // Unchanged contract: the init check re-runs against the
+        // official artifact, and the recompile fallback (missing or
+        // corrupt local artifact) must reproduce the ledger-anchored
+        // bytes exactly — compilation is deterministic with the same
+        // toolchain, so a mismatch is a local integrity failure,
+        // never a divergent vote or an anchor drift.
+        let expected_wasm_hash = if target.contract_changed
+            || target.force_rebuild
+        {
+            None
+        } else {
+            let register = match ctx
+                .system()
+                .get_actor::<ContractRegister>(&register_path)
+                .await
             {
-                None
-            } else {
-                let register = match ctx
-                    .system()
-                    .get_actor::<ContractRegister>(&register_path)
+                Ok(register) => register,
+                Err(error) => {
+                    return (
+                        index,
+                        SchemaOutcome::fatal(ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not access contract register for anchor: {}",
+                                error
+                            ),
+                        }),
+                    );
+                }
+            };
+            match register
+                .ask(ContractRegisterMessage::GetAnchor {
+                    contract_name: contract_name.clone(),
+                })
+                .await
+            {
+                Ok(ContractRegisterResponse::Anchor(Some(anchor))) => {
+                    Some(anchor)
+                }
+                Ok(ContractRegisterResponse::Anchor(None)) => {
+                    return (
+                        index,
+                        SchemaOutcome::fatal(ActorError::FunctionalCritical {
+                            description: format!(
+                                "No ledger anchor for committed contract {}",
+                                contract_name
+                            ),
+                        }),
+                    );
+                }
+                Ok(_) => {
+                    return (
+                        index,
+                        SchemaOutcome::fatal(ActorError::UnexpectedResponse {
+                            path: register_path.clone(),
+                            expected: "ContractRegisterResponse::Anchor"
+                                .to_owned(),
+                        }),
+                    );
+                }
+                Err(error) => {
+                    return (
+                        index,
+                        SchemaOutcome::fatal(ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not read contract anchor: {}",
+                                error
+                            ),
+                        }),
+                    );
+                }
+            }
+        };
+
+        match CompilerSupport::compile_or_load_registered(
+            self.hash,
+            ctx,
+            ContractSourceInput {
+                contract_name: &contract_name,
+                contract: &target.source,
+                contract_path: &contract_path,
+                initial_value: target.initial_value,
+            },
+            &register_path,
+            expected_wasm_hash.as_ref(),
+            // The request already carries the effective pin
+            // (event pin or committed pin, computed by the
+            // requester): building under it is exact.
+            &compilation_req.content().pin,
+            target.force_rebuild,
+        )
+        .await
+        {
+            Ok((_module, record)) => {
+                let wasm = match pipeline::load_artifact_wasm(&contract_path)
                     .await
                 {
-                    Ok(register) => register,
+                    Ok(wasm) => wasm,
                     Err(error) => {
                         return (
                             index,
                             SchemaOutcome::fatal(
                                 ActorError::FunctionalCritical {
                                     description: format!(
-                                        "Can not access contract register for anchor: {}",
-                                        error
+                                        "Can not read compiled contract {}: {}",
+                                        schema_id, error
                                     ),
                                 },
                             ),
                         );
                     }
                 };
-                match register
-                    .ask(ContractRegisterMessage::GetAnchor {
-                        contract_name: contract_name.clone(),
-                    })
-                    .await
-                {
-                    Ok(ContractRegisterResponse::Anchor(Some(anchor))) => {
-                        Some(anchor)
-                    }
-                    Ok(ContractRegisterResponse::Anchor(None)) => {
+                match ArtifactData::from_wasm(&wasm, None) {
+                    Ok(_) => {}
+                    Err(
+                        ArtifactTransferError::TooLarge { size, max }
+                        | ArtifactTransferError::UncompressedTooLarge {
+                            size,
+                            max,
+                        },
+                    ) => {
                         return (
                             index,
-                            SchemaOutcome::fatal(
-                                ActorError::FunctionalCritical {
-                                    description: format!(
-                                        "No ledger anchor for committed contract {}",
-                                        contract_name
+                            SchemaOutcome::Verdict(
+                                ContractCompilation::Failed(
+                                    CompilationError::CompilationFailed(
+                                        format!(
+                                            "{}: artifact is too large for network transport: {} bytes (max {})",
+                                            schema_id, size, max
+                                        ),
                                     ),
-                                },
-                            ),
-                        );
-                    }
-                    Ok(_) => {
-                        return (
-                            index,
-                            SchemaOutcome::fatal(
-                                ActorError::UnexpectedResponse {
-                                    path: register_path.clone(),
-                                    expected:
-                                        "ContractRegisterResponse::Anchor"
-                                            .to_owned(),
-                                },
+                                ),
                             ),
                         );
                     }
                     Err(error) => {
-                        return (
-                            index,
-                            SchemaOutcome::fatal(
-                                ActorError::FunctionalCritical {
-                                    description: format!(
-                                        "Can not read contract anchor: {}",
-                                        error
-                                    ),
-                                },
-                            ),
-                        );
-                    }
-                }
-            };
-
-            match CompilerSupport::compile_or_load_registered(
-                self.hash,
-                ctx,
-                ContractSourceInput {
-                    contract_name: &contract_name,
-                    contract: &target.source,
-                    contract_path: &contract_path,
-                    initial_value: target.initial_value,
-                },
-                &register_path,
-                expected_wasm_hash.as_ref(),
-                // The request already carries the effective pin
-                // (event pin or committed pin, computed by the
-                // requester): building under it is exact.
-                &compilation_req.content().pin,
-                target.force_rebuild,
-            )
-            .await
-            {
-                Ok((_module, record)) => {
-                    let wasm = match pipeline::load_artifact_wasm(
-                        &contract_path,
-                    )
-                    .await
-                    {
-                        Ok(wasm) => wasm,
-                        Err(error) => {
-                            return (
-                                index,
-                                SchemaOutcome::fatal(
-                                    ActorError::FunctionalCritical {
-                                        description: format!(
-                                            "Can not read compiled contract {}: {}",
-                                            schema_id, error
-                                        ),
-                                    },
-                                ),
-                            );
-                        }
-                    };
-                    match ArtifactData::from_wasm(&wasm, None) {
-                        Ok(_) => {}
-                        Err(
-                            ArtifactTransferError::TooLarge { size, max }
-                            | ArtifactTransferError::UncompressedTooLarge {
-                                size,
-                                max,
-                            },
-                        ) => {
-                            return (
-                                index,
-                                SchemaOutcome::Verdict(
-                                    ContractCompilation::Failed(
-                                        CompilationError::CompilationFailed(
-                                            format!(
-                                                "{}: artifact is too large for network transport: {} bytes (max {})",
-                                                schema_id, size, max
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            );
-                        }
-                        Err(error) => {
-                            warn!(
-                                governance_id = %self.governance_id,
-                                schema_id = %schema_id,
-                                error = %error,
-                                "Could not prepare artifact for network transport"
-                            );
-                            return (
-                                index,
-                                SchemaOutcome::Verdict(
-                                    ContractCompilation::Unavailable,
-                                ),
-                            );
-                        }
-                    }
-                    return (
-                        index,
-                        SchemaOutcome::Compiled(schema_id, record.wasm_hash),
-                    );
-                }
-                Err(error) => {
-                    if matches!(error, CompilerError::Base64DecodeFailed { .. })
-                    {
-                        // A contract payload that does not even decode
-                        // is a malformed request: nothing to vote, it
-                        // is aborted (same as the evaluation's
-                        // `InvalidEventRequest`).
-                        if target.contract_changed {
-                            return (
-                                index,
-                                SchemaOutcome::Verdict(
-                                    ContractCompilation::Abort(format!(
-                                        "{}: {}",
-                                        schema_id, error
-                                    )),
-                                ),
-                            );
-                        }
-                        // The undecodable contract comes from the
-                        // committed local state: it is corrupt, fail
-                        // loud.
-                        return (
-                            index,
-                            SchemaOutcome::fatal(
-                                ActorError::FunctionalCritical {
-                                    description: format!(
-                                        "Committed contract {} does not decode: {}",
-                                        schema_id, error
-                                    ),
-                                },
-                            ),
-                        );
-                    }
-                    // Infrastructure problems of this node are not a
-                    // verdict: answer Unavailable so the requester
-                    // replaces this compiler.
-                    if is_compiler_infra_error(&error) {
                         warn!(
                             governance_id = %self.governance_id,
                             schema_id = %schema_id,
                             error = %error,
-                            "Compiler infrastructure unavailable"
+                            "Could not prepare artifact for network transport"
                         );
                         return (
                             index,
@@ -1006,34 +933,82 @@ impl CompileWorker {
                             ),
                         );
                     }
-                    // Fatal local problems (disk, register, helpers,
-                    // engine): the node is broken, fail loud.
-                    if is_local_fatal_compiler_error(&error) {
+                }
+                return (
+                    index,
+                    SchemaOutcome::Compiled(schema_id, record.wasm_hash),
+                );
+            }
+            Err(error) => {
+                if matches!(error, CompilerError::Base64DecodeFailed { .. }) {
+                    // A contract payload that does not even decode
+                    // is a malformed request: nothing to vote, it
+                    // is aborted (same as the evaluation's
+                    // `InvalidEventRequest`).
+                    if target.contract_changed {
                         return (
                             index,
-                            SchemaOutcome::fatal(
-                                ActorError::FunctionalCritical {
-                                    description: format!(
-                                        "Can not compile contract {}: {}",
-                                        schema_id, error
-                                    ),
-                                },
-                            ),
+                            SchemaOutcome::Verdict(ContractCompilation::Abort(
+                                format!("{}: {}", schema_id, error),
+                            )),
                         );
                     }
-                    // Anything else is a contract problem: every honest
-                    // compiler reaches the same verdict, so it is voted.
+                    // The undecodable contract comes from the
+                    // committed local state: it is corrupt, fail
+                    // loud.
                     return (
                         index,
-                        SchemaOutcome::Verdict(ContractCompilation::Failed(
-                            CompilationError::CompilationFailed(format!(
-                                "{}: {}",
+                        SchemaOutcome::fatal(ActorError::FunctionalCritical {
+                            description: format!(
+                                "Committed contract {} does not decode: {}",
                                 schema_id, error
-                            )),
-                        )),
+                            ),
+                        }),
                     );
                 }
+                // Infrastructure problems of this node are not a
+                // verdict: answer Unavailable so the requester
+                // replaces this compiler.
+                if is_compiler_infra_error(&error) {
+                    warn!(
+                        governance_id = %self.governance_id,
+                        schema_id = %schema_id,
+                        error = %error,
+                        "Compiler infrastructure unavailable"
+                    );
+                    return (
+                        index,
+                        SchemaOutcome::Verdict(
+                            ContractCompilation::Unavailable,
+                        ),
+                    );
+                }
+                // Fatal local problems (disk, register, helpers,
+                // engine): the node is broken, fail loud.
+                if is_local_fatal_compiler_error(&error) {
+                    return (
+                        index,
+                        SchemaOutcome::fatal(ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not compile contract {}: {}",
+                                schema_id, error
+                            ),
+                        }),
+                    );
+                }
+                // Anything else is a contract problem: every honest
+                // compiler reaches the same verdict, so it is voted.
+                return (
+                    index,
+                    SchemaOutcome::Verdict(ContractCompilation::Failed(
+                        CompilationError::CompilationFailed(format!(
+                            "{}: {}",
+                            schema_id, error
+                        )),
+                    )),
+                );
             }
+        }
     }
 
     /// Request-level checks. Every failure is an abort: the requester is
@@ -1413,10 +1388,7 @@ impl Handler<Self> for CompileWorker {
                         .network
                         .send_command(ave_network::CommandHelper::SendMessage {
                             delivery: delivery_of(&message),
-                            message: NetworkMessage::new(
-                                new_info,
-                                message,
-                            ),
+                            message: NetworkMessage::new(new_info, message),
                         })
                         .await
                     {
@@ -1450,10 +1422,7 @@ impl Handler<Self> for CompileWorker {
                         .network
                         .send_command(ave_network::CommandHelper::SendMessage {
                             delivery: delivery_of(&message),
-                            message: NetworkMessage::new(
-                                new_info,
-                                message,
-                            ),
+                            message: NetworkMessage::new(new_info, message),
                         })
                         .await
                     {
@@ -1589,10 +1558,7 @@ impl Handler<Self> for CompileWorker {
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
                         delivery: delivery_of(&message),
-                        message: NetworkMessage::new(
-                            new_info.clone(),
-                            message,
-                        ),
+                        message: NetworkMessage::new(new_info.clone(), message),
                     })
                     .await
                 {

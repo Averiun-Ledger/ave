@@ -14,6 +14,7 @@ use ave_network::ComunicateInfo;
 use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
+use super::version_sync::SyncPeerBackoff;
 use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::governance::witnesses_register::{
     CurrentWitnessSubject, WitnessesRegister, WitnessesRegisterMessage,
@@ -22,7 +23,6 @@ use crate::governance::witnesses_register::{
 use crate::governance::{
     Governance, GovernanceMessage, GovernanceResponse, model::WitnessesData,
 };
-use super::version_sync::SyncPeerBackoff;
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
 };
@@ -36,8 +36,12 @@ use crate::node::SubjectData;
 #[derive(Debug, Clone)]
 pub enum TrackerSyncMessage {
     Tick,
-    FetchTimeout { request_nonce: u64 },
-    UpdateTimeout { batch_nonce: u64 },
+    FetchTimeout {
+        request_nonce: u64,
+    },
+    UpdateTimeout {
+        batch_nonce: u64,
+    },
     NetworkRequest(TrackerSyncNetworkRequest),
     NetworkResponse(TrackerSyncNetworkResponse),
     /// Pushed by the parent governance every time it updates (same
@@ -679,7 +683,8 @@ impl TrackerSync {
         // anywhere: a huge fleet is covered over successive cycles
         // instead of rescanning the head forever.
         let resume = self.resume_cursor.clone();
-        self.start_fetch(ctx, peer, governance_version, resume).await
+        self.start_fetch(ctx, peer, governance_version, resume)
+            .await
     }
 
     /// Whether `sender` may ask for our witness subject list: a
@@ -776,9 +781,7 @@ impl TrackerSync {
     ) -> Result<TrackerSyncResponse, ActorError> {
         match error {
             ActorError::FunctionalCritical { .. }
-            | ActorError::Helper { .. } => {
-                Err(crash_system(ctx, error).await)
-            }
+            | ActorError::Helper { .. } => Err(crash_system(ctx, error).await),
             error => {
                 warn!(
                     governance_id = %self.governance_id,
@@ -947,9 +950,8 @@ impl Handler<Self> for TrackerSync {
                 // of stalling without a timeout.
                 let page_result: Result<TrackerSyncResponse, ActorError> =
                     async {
-                        let local_governance_version = self
-                            .get_governance_version(ctx)
-                            .await?;
+                        let local_governance_version =
+                            self.get_governance_version(ctx).await?;
                         let effective_governance_version =
                             local_governance_version.max(governance_version);
 
@@ -967,9 +969,8 @@ impl Handler<Self> for TrackerSync {
                             return Ok(TrackerSyncResponse::None);
                         }
 
-                        let pending_items = self
-                            .build_pending_updates(ctx, items)
-                            .await?;
+                        let pending_items =
+                            self.build_pending_updates(ctx, items).await?;
                         if pending_items.is_empty() {
                             if let Some(after_subject_id) = next_cursor {
                                 self.start_fetch(
@@ -1002,9 +1003,7 @@ impl Handler<Self> for TrackerSync {
                     }
                     .await;
                 if let Err(e) = page_result {
-                    return self
-                        .fail_cycle(ctx, "network response", e)
-                        .await;
+                    return self.fail_cycle(ctx, "network response", e).await;
                 }
             }
         }

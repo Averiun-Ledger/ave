@@ -45,8 +45,7 @@ use ave_common::request::EventRequest;
 use tracing::debug;
 
 use super::events::{
-    governance_event_roles_update_fact,
-    governance_event_update_creator_change,
+    governance_event_roles_update_fact, governance_event_update_creator_change,
 };
 use super::role_register::{
     RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
@@ -102,25 +101,19 @@ impl Governance {
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(u64, u64, u64), ActorError> {
-        let register =
-            ctx.get_child::<RoleRegister>("role_register").await?;
-        let RoleRegisterResponse::Version(role_version) = register
-            .ask(RoleRegisterMessage::GetVersion)
-            .await?
+        let register = ctx.get_child::<RoleRegister>("role_register").await?;
+        let RoleRegisterResponse::Version(role_version) =
+            register.ask(RoleRegisterMessage::GetVersion).await?
         else {
             return Err(ActorError::UnexpectedResponse {
-                path: ActorPath::from(format!(
-                    "{}/role_register",
-                    ctx.path()
-                )),
+                path: ActorPath::from(format!("{}/role_register", ctx.path())),
                 expected: "RoleRegisterResponse::Version".to_owned(),
             });
         };
         let register =
             ctx.get_child::<SubjectRegister>("subject_register").await?;
-        let SubjectRegisterResponse::MaxVersion(subject_max) = register
-            .ask(SubjectRegisterMessage::GetMaxVersion)
-            .await?
+        let SubjectRegisterResponse::MaxVersion(subject_max) =
+            register.ask(SubjectRegisterMessage::GetMaxVersion).await?
         else {
             return Err(ActorError::UnexpectedResponse {
                 path: ActorPath::from(format!(
@@ -156,10 +149,7 @@ impl Governance {
         {
             let _ = node
                 .tell(NodeMessage::GovernanceReconciled {
-                    governance_id: self
-                        .subject_metadata
-                        .subject_id
-                        .clone(),
+                    governance_id: self.subject_metadata.subject_id.clone(),
                 })
                 .await;
         }
@@ -214,8 +204,7 @@ impl Governance {
         // (duplicates to caught-up streams converge harmlessly;
         // anything below every marker landed).
         let (role_marker, subject_marker, witnesses_marker) = markers;
-        let min_marker =
-            role_marker.min(subject_marker).min(witnesses_marker);
+        let min_marker = role_marker.min(subject_marker).min(witnesses_marker);
 
         let mut last_sn = 0u64;
         loop {
@@ -319,34 +308,32 @@ impl Governance {
                     // A committed payload that does not deserialize
                     // is local corruption: fail loud, like the live
                     // path crashes on it.
-                    let gov_event: GovernanceEvent =
-                        serde_json::from_value(
-                            fact_request.payload.0.clone(),
-                        )
-                        .map_err(|e| ActorError::Functional {
-                            description: format!(
-                                "reconcile: can not parse governance event: {e}"
-                            ),
-                        })?;
-                    let rm_members = gov_event.members.as_ref().map_or_else(
-                        || None,
-                        |members| members.remove.clone(),
-                    );
-                    let rm_schemas = gov_event.schemas.as_ref().map_or_else(
-                        || None,
-                        |schemas| schemas.remove.clone(),
-                    );
+                    let gov_event: GovernanceEvent = serde_json::from_value(
+                        fact_request.payload.0.clone(),
+                    )
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "reconcile: can not parse governance event: {e}"
+                        ),
+                    })?;
+                    let rm_members = gov_event
+                        .members
+                        .as_ref()
+                        .map_or_else(|| None, |members| members.remove.clone());
+                    let rm_schemas = gov_event
+                        .schemas
+                        .as_ref()
+                        .map_or_else(|| None, |schemas| schemas.remove.clone());
                     // Same builders, same pre-event state as live:
                     // removals resolve exactly.
                     let rm_roles = pre
                         .properties
                         .roles_update_remove_fact(rm_members, rm_schemas);
-                    let creator_update =
-                        governance_event_update_creator_change(
-                            &gov_event,
-                            &pre.properties.members,
-                            &pre.properties.roles_schema,
-                        );
+                    let creator_update = governance_event_update_creator_change(
+                        &gov_event,
+                        &pre.properties.members,
+                        &pre.properties.roles_schema,
+                    );
                     // Advance era state with the REAL apply fold first:
                     // the live path rebuilds the final update AFTER
                     // persist, with post-event members (same-event
