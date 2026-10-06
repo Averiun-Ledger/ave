@@ -101,7 +101,9 @@ pub fn schemas_to_compile(
 }
 
 /// Full compilation set for a governance fact against the committed
-/// governance state: the payload set above, plus — when the event
+/// governance state.
+///
+/// The payload set above, plus — when the event
 /// changes the toolchain pin — every existing schema, recompiled under
 /// the new pin with fresh evidence (a pin switch never reuses old-pin's
 /// builds). `None` exactly when `schemas_to_compile` is `None`.
@@ -294,22 +296,26 @@ pub fn resolve_compile_targets(
             if removed.is_some_and(|remove| remove.contains(schema_id)) {
                 continue;
             }
-            targets.entry(schema_id.clone()).or_insert(CompileTarget {
-                source: schema.contract.clone(),
-                initial_value: schema.initial_value.0.clone(),
-                contract_changed: false,
-                force_rebuild: true,
-            });
+            targets
+                .entry(schema_id.clone())
+                .or_insert_with(|| CompileTarget {
+                    source: schema.contract.clone(),
+                    initial_value: schema.initial_value.0.clone(),
+                    contract_changed: false,
+                    force_rebuild: true,
+                });
         }
     }
 
     Ok(targets)
 }
 
-/// Whether a governance fact enters the compilation phase: the schema
-/// set above is non-empty, or it is a bare switch to a KNOWN pin with
-/// nothing to build. The bare switch is a capacity vote — compilers
-/// attest by voting, not by building — so a pin can never commit
+/// Whether a governance fact enters the compilation phase.
+///
+/// The schema set above is non-empty, or it is a bare switch to a
+/// KNOWN pin with nothing to build. The bare switch is a capacity
+/// vote — compilers attest by voting, not by building — so a pin
+/// can never commit
 /// without a builder quorum behind it. Unknown pins return false here
 /// (evaluation rejects them); same-pin no-ops too (rejected as
 /// no-ops). Manager and validators share this decision, so they can
@@ -763,7 +769,7 @@ impl Handler<Self> for Compilation {
                                 result_hash_signature,
                             } => {
                                 self.store_response_result(
-                                    result,
+                                    *result,
                                     result_hash,
                                     result_hash_signature,
                                 );

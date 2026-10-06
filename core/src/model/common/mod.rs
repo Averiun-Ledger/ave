@@ -988,9 +988,11 @@ fn seed_u64(seed: &DigestIdentifier) -> u64 {
 }
 
 /// Deterministic variant of `take_random_signers` for owner-side
-/// initial picks: every participant can recompute the subset from
-/// `seed` (a phase request hash), so the draw is auditable instead of
-/// trusting the picker's RNG. Failover replacements and probe batches
+/// initial picks.
+///
+/// Every participant can recompute the subset from `seed` (a phase
+/// request hash), so the draw is auditable instead of trusting the
+/// picker's RNG. Failover replacements and probe batches
 /// keep the local CSPRNG (`take_random_signers`).
 pub fn take_seeded_signers(
     signers: HashSet<PublicKey>,

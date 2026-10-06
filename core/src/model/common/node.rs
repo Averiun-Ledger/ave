@@ -155,8 +155,10 @@ where
 }
 
 /// Bounded wait for one governance to report boot reconciliation
-/// (3000 rounds of 100 ms): reports always resolve (report, or a
-/// controlled crash elsewhere fails the boot); the bound only guards
+/// (3000 rounds of 100 ms).
+///
+/// Reports always resolve (report, or a controlled crash elsewhere
+/// fails the boot); the bound only guards
 /// a wedged boot from hanging forever.
 pub async fn wait_governance_ready<A>(
     ctx: &mut ActorContext<A>,

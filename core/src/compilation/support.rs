@@ -481,13 +481,13 @@ impl CompilerSupport {
             vendor_dir,
             cargo_home: contracts_root.join(pipeline::SHARED_CARGO_HOME_DIR),
             toolchain,
-            cargo: match &cargo_bin {
-                // Same binary on every compiler: the registry-blessed
-                // cargo the pins were measured with. `RUSTC` still
-                // resolves to the selected toolchain inside ave-build.
-                Some(binary) => ave_build::CargoProgram::Pinned(binary),
-                None => ave_build::CargoProgram::Rustup(toolchain),
-            },
+            // Same binary on every compiler: the registry-blessed
+            // cargo the pins were measured with. `RUSTC` still
+            // resolves to the selected toolchain inside ave-build.
+            cargo: cargo_bin.as_ref().map_or(
+                ave_build::CargoProgram::Rustup(toolchain),
+                |binary| ave_build::CargoProgram::Pinned(binary),
+            ),
             rust_src,
             rustc_commit,
             offline: contracts_root.join(pipeline::VENDOR_DIR).exists(),
@@ -798,7 +798,7 @@ impl CompilerSupport {
             let contracts_root = || {
                 ctx.system()
                     .get_helper::<ConfigHelper>("config")
-                    .map(|config| config.contracts_path.clone())
+                    .map(|config| config.contracts_path)
                     .ok_or(CompilerError::MissingHelper { name: "config" })
             };
             #[cfg(feature = "test")]

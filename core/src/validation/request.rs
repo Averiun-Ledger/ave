@@ -145,7 +145,7 @@ pub enum ActualProtocols {
     },
     EvalApprove {
         eval_data: EvaluationData,
-        approval_data: ApprovalData,
+        approval_data: Box<ApprovalData>,
     },
     /// The governance fact touched contracts and the compilation phase
     /// rejected them: the event commits as failed without evaluation.
@@ -161,7 +161,7 @@ pub enum ActualProtocols {
     CompileEvalApprove {
         compile_data: CompilationData,
         eval_data: EvaluationData,
-        approval_data: ApprovalData,
+        approval_data: Box<ApprovalData>,
     },
 }
 

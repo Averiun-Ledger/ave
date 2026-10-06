@@ -765,7 +765,7 @@ impl Governance {
 
     async fn refresh_version_sync(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if !self.service {
             return Ok(());
@@ -801,7 +801,7 @@ impl Governance {
     /// version sync refresh above.
     async fn push_tracker_sync_peers(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let tracker_sync = ctx.get_child::<TrackerSync>("tracker_sync").await?;
         let members: HashSet<PublicKey> =

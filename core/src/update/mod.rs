@@ -342,7 +342,7 @@ impl Update {
 
     /// Stops on an empty updater set: a request-driven update still
     /// wakes its manager, or the request hangs in reboot forever.
-    async fn stop_empty(&self, ctx: &mut ActorContext<Self>) {
+    async fn stop_empty(&self, ctx: &ActorContext<Self>) {
         if let UpdateType::Request { id, subject_id } = &self.update_type {
             let request_path =
                 ActorPath::from(format!("/user/request/{}", subject_id));

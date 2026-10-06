@@ -16,7 +16,6 @@ use ave_core::{
         ActorMessage, NetworkMessage,
         test_faults::{FaultAction, FaultDirection, FaultMessage, FaultRule},
     },
-    model::event::Ledger,
 };
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use futures::future::join_all;
@@ -8499,18 +8498,6 @@ async fn test_old_owner_cut_ranges_battery() {
     }
 }
 
-async fn poll_subject_sn(api: &Api, id: &DigestIdentifier, want: u64) {
-    for _ in 0..120 {
-        if let Ok(state) = api.get_subject_state(id.clone()).await
-            && state.sn >= want
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    panic!("subject did not reach sn {want}");
-}
-
 async fn wait_held(api: &Api, want: usize) {
     for _ in 0..120 {
         if api.test_held_count().await.unwrap_or(0) >= want {
@@ -8519,16 +8506,6 @@ async fn wait_held(api: &Api, want: usize) {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     panic!("held messages did not arrive");
-}
-
-fn hold_ledger_distribution_rule() -> FaultRule {
-    FaultRule {
-        direction: FaultDirection::Outbound,
-        message: FaultMessage::DistributionLedgerRes,
-        peer: None,
-        remaining: None,
-        action: FaultAction::Hold,
-    }
 }
 
 // DS-LOW-01 probe: a pushed Create for an untracked subject replayed

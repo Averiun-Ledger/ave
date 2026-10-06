@@ -400,21 +400,19 @@ impl Node {
     /// missing distributor is not an error.
     async fn remove_distributor(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) {
         let distributor_name = format!("distributor_{}", subject_id);
-        match ctx.get_child::<DistriWorker>(&distributor_name).await {
-            Ok(distributor) => {
-                if let Err(e) = distributor.ask_stop().await {
-                    debug!(
-                        subject_id = %subject_id,
-                        error = %e,
-                        "Failed to stop subject distributor"
-                    );
-                }
-            }
-            Err(_) => {}
+        if let Ok(distributor) =
+            ctx.get_child::<DistriWorker>(&distributor_name).await
+            && let Err(e) = distributor.ask_stop().await
+        {
+            debug!(
+                subject_id = %subject_id,
+                error = %e,
+                "Failed to stop subject distributor"
+            );
         }
     }
 

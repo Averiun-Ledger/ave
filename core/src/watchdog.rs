@@ -50,17 +50,20 @@ pub const PHASE_APPROVAL: &str = "approval";
 /// See [`PHASE_COMPILATION`].
 pub const PHASE_VALIDATION: &str = "validation";
 
-/// Coordination slack reused by every phase envelope: pool
-/// replacements, ACK waits and every micro-timer without its own
-/// named bound. Deliberately generous (extreme backstop, not tight
-/// detection). If a phase grows a new bounded wait, either reference
-/// it here like the ones below or confirm this slack still covers it.
+/// Coordination slack reused by every phase envelope.
+///
+/// Pool replacements, ACK waits and every micro-timer without its
+/// own named bound. Deliberately generous (extreme backstop, not
+/// tight detection). If a phase grows a new bounded wait, either
+/// reference it here like the ones below or confirm this slack
+/// still covers it.
 pub const COORD_SLACK_SECS: u64 = 600;
 
-/// Local compute bound per worker: wasmtime execution (fuel-capped,
-/// milliseconds in practice), init checks and result delivery.
-/// Orders of magnitude above observed; the envelope assumes it per
-/// worker sequentially.
+/// Local compute bound per worker.
+///
+/// Wasmtime execution (fuel-capped, milliseconds in practice), init
+/// checks and result delivery. Orders of magnitude above observed;
+/// the envelope assumes it per worker sequentially.
 pub const LOCAL_COMPUTE_BOUND_SECS: u64 = 300;
 
 /// Post-deadline grace for approval: attestation rounds and
@@ -74,18 +77,19 @@ const fn send_cycle_secs(attempts: usize, interval_secs: u64) -> u64 {
     attempts as u64 * interval_secs
 }
 
-fn apply_margin(secs: u64) -> Duration {
+const fn apply_margin(secs: u64) -> Duration {
     Duration::from_secs(
         secs.saturating_mul(MARGIN_NUMERATOR)
             .div_ceil(MARGIN_DENOMINATOR),
     )
 }
 
-/// Worst-case budget for a compilation phase with `schemas`
-/// contracts to build: per schema one full local build plus one
-/// remote result wait plus its send cycle (builds are parallel in
-/// practice; the envelope assumes sequential so it can never
-/// undercount). All terms reference the defining constants.
+/// Worst-case budget for a compilation phase.
+///
+/// Per schema one full local build plus one remote result wait plus
+/// its send cycle (builds are parallel in practice; the envelope
+/// assumes sequential so it can never undercount). All terms
+/// reference the defining constants.
 pub fn budget_for_compilation(schemas: u32) -> Duration {
     let per_schema = BUILD_TIMEOUT
         .as_secs()

@@ -1050,7 +1050,7 @@ fn approval_data_serialization_roundtrip() {
                 .unwrap(),
             },
         },
-        approval_data: data,
+        approval_data: Box::new(data),
     };
     let bytes = borsh::to_vec(&protocols).unwrap();
     let back: ActualProtocols = borsh::from_slice(&bytes).unwrap();

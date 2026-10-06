@@ -28,6 +28,7 @@ pub type MemberName = String;
 pub const DEFAULT_PIN: &str = "rust-1.95.0_sdk-0.8.0_wasm32";
 
 /// A known build toolchain: normalized (no host triple, no paths).
+///
 /// The registry only grows between releases: entries are never removed
 /// so old events keep verifying. Unknown IDs simply match nothing —
 /// callers stand down, never reject.

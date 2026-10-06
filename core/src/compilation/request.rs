@@ -34,9 +34,10 @@ pub struct CompilationReq {
 }
 
 /// Effective build pin for a compilation request, computed identically
-/// by requester and validators: the event's pin when it changes it,
-/// else the committed pin. Single source so both sides can never
-/// disagree on what was requested.
+/// by requester and validators.
+///
+/// The event's pin when it changes it, else the committed pin. Single
+/// source so both sides can never disagree on what was requested.
 pub fn effective_pin(
     event_request: &EventRequest,
     committed_pin: &str,

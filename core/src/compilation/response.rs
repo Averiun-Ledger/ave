@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 )]
 pub enum CompilationRes {
     Response {
-        result: CompilationResult,
+        result: Box<CompilationResult>,
         result_hash: DigestIdentifier,
         result_hash_signature: Signature,
     },
@@ -247,7 +247,7 @@ mod tests {
         expected.extend_from_slice(&sample_signature_bytes());
         assert_wire_shape(
             &CompilationRes::Response {
-                result: sample_ok_result(),
+                result: Box::new(sample_ok_result()),
                 result_hash: DigestIdentifier::default(),
                 result_hash_signature: sample_signature(),
             },

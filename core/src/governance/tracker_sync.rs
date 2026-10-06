@@ -698,7 +698,7 @@ impl TrackerSync {
     }
 
     async fn handle_network_request(
-        &mut self,
+        &self,
         ctx: &ActorContext<Self>,
         request: TrackerSyncNetworkRequest,
     ) -> Result<(), ActorError> {
@@ -761,7 +761,7 @@ impl TrackerSync {
 
     async fn finish_cycle(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         self.state = SyncState::Idle;
         self.cancel_fetch_timeout(ctx);

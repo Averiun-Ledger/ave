@@ -535,7 +535,7 @@ impl SubjectManager {
     }
 
     async fn create_tracker(
-        &mut self,
+        &self,
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         metadata: crate::subject::Metadata,
@@ -594,7 +594,7 @@ impl SubjectManager {
     }
 
     async fn create_governance(
-        &mut self,
+        &self,
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         metadata: crate::subject::Metadata,

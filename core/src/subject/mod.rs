@@ -1270,7 +1270,7 @@ where
                                 ActualProtocols::CompileEvalApprove {
                                     compile_data: compilation.as_ref().clone(),
                                     eval_data: evaluation.clone(),
-                                    approval_data: appr.clone(),
+                                    approval_data: Box::new(appr.clone()),
                                 }
                             } else {
                                 return Err(
@@ -1311,7 +1311,7 @@ where
 
                                 ActualProtocols::EvalApprove {
                                     eval_data: evaluation.clone(),
-                                    approval_data: appr.clone(),
+                                    approval_data: Box::new(appr.clone()),
                                 }
                             } else {
                                 return Err(

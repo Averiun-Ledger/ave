@@ -163,9 +163,11 @@ pub enum ActorMessage {
     },
 }
 
-/// Wire version spoken by this node. Bumped only when a new
-/// `ActorMessage` variant without a legacy fallback ships; every
-/// variant today requires v1. Messages carry the sender version so a
+/// Wire version spoken by this node.
+///
+/// Bumped only when a new `ActorMessage` variant without a legacy
+/// fallback ships; every variant today requires v1. Messages carry
+/// the sender version so a
 /// newer node can degrade to the peer version instead of silencing an
 /// older one. The peer-version map ships with the first v2 variant.
 pub const WIRE_VERSION: u32 = 1;

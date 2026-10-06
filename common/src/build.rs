@@ -1,4 +1,5 @@
 //! Deterministic contract-build rules: the single source of truth
+//!
 //! shared by the node pipeline (`ave-core`) and the off-chain pin
 //! tooling (`ave-toolchain-pins`). Same rules in, same bytes out, on
 //! any architecture with the pinned toolchain.
@@ -22,6 +23,7 @@ pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 /// Pinned `SOURCE_DATE_EPOCH` for every contract build: no wall-clock
 /// input may shape artifacts. Cargo forwards it to build scripts;
+///
 /// `rustc` itself embeds no timestamps once paths are remapped and
 /// debug info stripped, so this is belt-and-braces, not the mechanism.
 pub const SOURCE_DATE_EPOCH: &str = "0";
@@ -45,6 +47,7 @@ pub mod profile {
 /// A frozen dependency set: versioned file plus its provenance, so
 /// anyone can tell WHICH set a pin builds with and where it came
 /// from. New sets add a file (`contract-vN.Cargo.lock`) and an arm
+///
 /// below — files are never overwritten, versions never reused.
 #[derive(Debug, Clone, Copy)]
 pub struct FrozenLockfile {
@@ -58,6 +61,7 @@ pub struct FrozenLockfile {
 }
 
 /// Frozen dependency set for a registry pin. `None` means "resolve
+///
 /// fresh", the pre-pins behavior kept for pins without a frozen set.
 /// A pin with a frozen set always builds with `--locked` against it,
 /// so dependency versions can never drift across machines or time.
@@ -81,6 +85,7 @@ pub fn pin_lockfile(id: &str) -> Option<FrozenLockfile> {
 
 /// Self-verification: every registry entry naming a lock hash must
 /// match the embedded file byte for byte. Call once at boot, fail
+///
 /// loud on mismatch — a swapped file must never silently resolve
 /// different dependencies.
 pub fn verify_registry_integrity() -> Result<(), String> {
@@ -116,19 +121,21 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
 /// The shared frozen set itself, for tools that provision a new pin
 /// reusing the current dependencies (the common case: new rustc, same
 /// deps). New dependency sets get their own versioned file + match
+///
 /// arm in `pin_lockfile` instead — never an overwrite.
-pub fn shared_contract_lockfile() -> &'static str {
+pub const fn shared_contract_lockfile() -> &'static str {
     include_str!("../pins/contract-v1.Cargo.lock")
 }
 
 /// The shared frozen source itself, for tools provisioning a new pin
 /// reusing the current contract (the common case). New sources get
 /// their own file + match arm in `pin_contract_source` instead.
-pub fn shared_contract_source() -> &'static str {
+pub const fn shared_contract_source() -> &'static str {
     include_str!("../pins/contract.rs")
 }
 
 /// Frozen contract source a pin builds. Shared until a pin freezes
+///
 /// its own: the tool and the node read it from here, never from a
 /// copy, so gate hashes and ledger bytes can not drift apart by
 /// source skew. Versions resolve through the registry table; unknown
@@ -144,6 +151,7 @@ pub fn pin_contract_source(id: &str) -> Option<&'static str> {
 /// `src/rust` under a rustc sysroot: the root the build config
 /// remaps to `/rustc/<commit>`, so absolute sysroot paths never
 /// shape artifacts. One function so the node pipeline and the
+///
 /// off-chain gate can never remap different roots.
 pub fn rust_src_dir(sysroot: &Path) -> PathBuf {
     sysroot.join("lib").join("rustlib").join("src").join("rust")
@@ -159,6 +167,7 @@ fn escape_toml(value: &str) -> String {
 
 /// Renders the contract cargo config from the SDK template with
 /// local paths substituted and the vendored-sources section appended
+///
 /// when a vendor dir is given. THE single renderer for the node
 /// pipeline (`ave-core`) and the off-chain gate (`ave-pin`): same
 /// inputs in, byte-identical config out. `vendor_dir` is written
@@ -206,6 +215,7 @@ pub fn render_contract_cargo_config(
 /// Relative path from a build directory to the `<root>/vendor`
 /// sibling, for the cargo config above. Depth-derived, never
 /// hardcoded: build layouts differ (node scratch is one level below
+///
 /// the contracts root, the test pool two), and a hardcoded depth
 /// silently points cargo at a foreign directory in the other layout.
 /// `None` when the build dir is not under `root` — then no vendor

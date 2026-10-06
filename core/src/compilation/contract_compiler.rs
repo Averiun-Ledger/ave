@@ -1212,26 +1212,20 @@ impl ContractCompiler {
         let wasm_bytes = match pipeline::load_artifact_wasm(contract_path).await
         {
             Ok(wasm_bytes) => Some(wasm_bytes),
-            Err(CompilerError::FileReadFailed { kind, .. })
-                if kind == std::io::ErrorKind::NotFound =>
-            {
+            Err(CompilerError::FileReadFailed {
+                kind: std::io::ErrorKind::NotFound,
+                ..
+            }) => {
                 return Ok(true);
             }
             Err(_) => None,
         };
-        let healthy = match wasm_bytes {
-            Some(wasm_bytes) => {
-                match pipeline::hash_bytes(
-                    hash,
-                    &wasm_bytes,
-                    "reconcile reverify",
-                ) {
-                    Ok(wasm_hash) => wasm_hash == anchor,
-                    Err(_) => false,
-                }
-            }
-            None => false,
-        };
+        let healthy = wasm_bytes.is_some_and(|wasm_bytes| {
+            matches!(
+                pipeline::hash_bytes(hash, &wasm_bytes, "reconcile reverify"),
+                Ok(wasm_hash) if wasm_hash == anchor
+            )
+        });
         if healthy {
             return Ok(true);
         }

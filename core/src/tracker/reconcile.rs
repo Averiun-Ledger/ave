@@ -69,14 +69,9 @@ pub struct TrackerReconcileReport {
 /// write derives from the event itself, and visibility mode resolves
 /// to tip state (only the current mode is ever read; per-sn range
 /// data is event-intrinsic).
+#[derive(Default)]
 struct TrackerReconcileFold {
     prev: Option<(u64, u64)>,
-}
-
-impl Default for TrackerReconcileFold {
-    fn default() -> Self {
-        Self { prev: None }
-    }
 }
 
 impl Tracker {
@@ -283,7 +278,7 @@ impl Tracker {
     /// (default-empty state), in which case the caller recreates it.
     async fn replay_tail_start(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(u64, bool), ActorError> {
         let sn_register = ctx
             .system()
@@ -340,7 +335,7 @@ impl Tracker {
     /// live and never replay.
     async fn reconcile_ledger_event(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         sn_register: &ActorRef<SnRegister>,
         event: &Ledger,
         fold: &mut TrackerReconcileFold,
@@ -359,17 +354,17 @@ impl Tracker {
         // end; both are map overwrites with identical data.
         // Ownership events need nothing here: their tells are
         // ask-confirmed live, hence durable.
-        if let Some((prev_gov, _)) = fold.prev {
-            if event.gov_version != prev_gov {
-                sn_register
-                    .tell(SnRegisterMessage::RegisterSn {
-                        subject_id: self.subject_metadata.subject_id.clone(),
-                        gov_version: prev_gov,
-                        sn: event.sn,
-                    })
-                    .await?;
-                report.writes_resent += 1;
-            }
+        if let Some((prev_gov, _)) = fold.prev
+            && event.gov_version != prev_gov
+        {
+            sn_register
+                .tell(SnRegisterMessage::RegisterSn {
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                    gov_version: prev_gov,
+                    sn: event.sn,
+                })
+                .await?;
+            report.writes_resent += 1;
         }
         sn_register
             .tell(SnRegisterMessage::RegisterSn {

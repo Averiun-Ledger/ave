@@ -366,9 +366,9 @@ impl EvalWorker {
         // reach the same verdict as the network evaluators, or the
         // requester outvotes them with a divergent patch.
         if let Err(error) = self.check_toolchain_pin(evaluation_req) {
-            return Ok(self
+            return self
                 .build_response_error(ctx, error, evaluation_req.clone())
-                .await?);
+                .await;
         }
         let evaluation =
             match self.evaluate(ctx, evaluation_req.content()).await {

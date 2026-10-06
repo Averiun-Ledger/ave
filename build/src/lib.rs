@@ -73,8 +73,9 @@ pub enum BuildError {
     },
 }
 
-/// Which cargo binary runs the build. `System` is the ambient cargo
-/// (pre-pins behavior); `Rustup` runs isolated via `rustup run`
+/// Which cargo binary runs the build.
+///
+/// `System` is the ambient cargo (pre-pins behavior); `Rustup` runs isolated via `rustup run`
 /// (concurrent builds with different toolchains can not interfere);
 /// `Pinned` runs an explicit binary (the reproducible toolchain)
 /// with `RUSTC` resolved to the selected toolchain.
@@ -158,6 +159,7 @@ fn probe_cache()
 }
 
 /// Sysroot rust-src path and commit hash of the SELECTED toolchain.
+///
 /// With the rust-src component installed, panic locations in
 /// std/core/alloc embed the absolute sysroot path instead of the
 /// canonical /rustc/<commit> one, breaking byte-reproducibility
@@ -266,7 +268,9 @@ pub async fn rustc_version(toolchain: &str) -> Result<String, BuildError> {
 
 /// Attests what built the bytes: `rustc -vV` plus the raw config
 /// template (rustflags shape artifacts as much as the version, so a
-/// flag change is a toolchain change). The caller passes its own
+/// flag change is a toolchain change).
+///
+/// The caller passes its own
 /// template (node and tool share the SDK one). Used for cache keys
 /// and artifact records — never voted, never compared across nodes.
 pub async fn toolchain_fingerprint(
@@ -367,7 +371,9 @@ pub async fn prepare_project(
 }
 
 /// Runs the cargo build for a prepared project and returns the raw
-/// wasm bytes. Stderr is collected in the background: on failure its
+/// wasm bytes.
+///
+/// Stderr is collected in the background: on failure its
 /// full text travels in the error (callers decide how much to log),
 /// on timeout the reader is dropped with the killed tree.
 pub async fn run_cargo_build(
@@ -380,7 +386,7 @@ pub async fn run_cargo_build(
     // toolchains can not interfere. Empty selects the system cargo.
     let mut command = match &request.cargo {
         CargoProgram::System => Command::new("cargo"),
-        CargoProgram::Rustup(name) if name.is_empty() => Command::new("cargo"),
+        CargoProgram::Rustup("") => Command::new("cargo"),
         CargoProgram::Rustup(name) => {
             let mut command = Command::new("rustup");
             command.arg("run").arg(name).arg("cargo");

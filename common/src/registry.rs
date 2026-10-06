@@ -48,12 +48,13 @@ const PIN_IDS: &[&str] = &[
     "rust-1.98.1_sdk-0.8.0_wasm32",
 ];
 
-pub fn registry_ids() -> &'static [&'static str] {
+pub const fn registry_ids() -> &'static [&'static str] {
     PIN_IDS
 }
 
-/// One registry row: the single source of truth for a pin. The ID
-/// must be the matching `PIN_IDS` position; frozen inputs are
+/// One registry row: the single source of truth for a pin.
+///
+/// The ID must be the matching `PIN_IDS` position; frozen inputs are
 /// versions into `common/pins/` resolved by `crate::build`
 /// (`None` = resolve fresh, the pre-pins behavior).
 pub struct PinRecord {
@@ -121,8 +122,9 @@ pub fn toolchain_info(id: &str) -> Option<ToolchainInfo> {
 }
 
 /// Blessed reproducible cargo binary hash for a pin on THIS
-/// architecture (`None` = unknown pin or unsupported arch). The two
-/// architectures ship different binaries (different version strings,
+/// architecture (`None` = unknown pin or unsupported arch).
+///
+/// The two architectures ship different binaries (different version strings,
 /// different bytes), so the entry carries one hash per arch and the
 /// lookup selects by `std::env::consts::ARCH`.
 pub fn cargo_bin_blake3(id: &str) -> Option<&'static str> {

@@ -74,7 +74,7 @@ impl EvaluationSchema {
     /// its pending pool at once instead of burning retries on silence.
     async fn answer_unavailable(
         &self,
-        evaluation_req: &Box<Signed<EvaluationReq>>,
+        evaluation_req: &Signed<EvaluationReq>,
         info: &ComunicateInfo,
         sender: &PublicKey,
     ) {

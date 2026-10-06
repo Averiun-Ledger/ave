@@ -135,10 +135,9 @@ impl DistriWorker {
                 &sender,
             )?;
 
-            let truncated = match window_sn {
-                Some(window) => sender_is_all && chunk_offered_hi_sn < window,
-                None => false,
-            };
+            let truncated = window_sn.is_some_and(|window| {
+                sender_is_all && chunk_offered_hi_sn < window
+            });
             if truncated {
                 warn!(
                     msg_type = "LedgerDistribution",
@@ -416,7 +415,7 @@ impl DistriWorker {
     /// honest sender would deliver); everything else passes through
     /// (missing ranges must not stall legit sync).
     fn reproject_receipt_visibility(
-        ledger: &mut Vec<Ledger>,
+        ledger: &mut [Ledger],
         ranges: &[TrackerDeliveryRange],
         subject_id: &DigestIdentifier,
         sender: &PublicKey,

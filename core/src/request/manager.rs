@@ -219,7 +219,7 @@ impl RequestManager {
     /// budget fires, and then it only diagnoses + reboots.
     fn arm_watchdog(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         phase: &'static str,
         budget: std::time::Duration,
     ) -> Result<(), RequestManagerError> {
@@ -1192,7 +1192,7 @@ impl RequestManager {
                     ActualProtocols::CompileEvalApprove {
                         compile_data,
                         eval_data,
-                        approval_data,
+                        approval_data: Box::new(approval_data),
                     },
                     eval_req.gov_version,
                     Some(eval_req.sn),
@@ -1217,7 +1217,7 @@ impl RequestManager {
                 (None, Some((eval_req, eval_data)), Some(approval_data)) => (
                     ActualProtocols::EvalApprove {
                         eval_data,
-                        approval_data,
+                        approval_data: Box::new(approval_data),
                     },
                     eval_req.gov_version,
                     Some(eval_req.sn),
@@ -2164,13 +2164,15 @@ impl RequestManager {
                 .ok()
             },
         );
-        match pre {
-            Some(pre) => {
-                needs_compilation_evidence(&fact_request.payload, &pre)
-            }
-            None => schemas_to_compile(&fact_request.payload)
-                .is_some_and(|schemas| !schemas.is_empty()),
-        }
+        pre.map_or_else(
+            || {
+                schemas_to_compile(&fact_request.payload)
+                    .is_some_and(|schemas| !schemas.is_empty())
+            },
+            |pre_data| {
+                needs_compilation_evidence(&fact_request.payload, &pre_data)
+            },
+        )
     }
 
     /// Sweeps the staged contract artifacts of an aborted governance

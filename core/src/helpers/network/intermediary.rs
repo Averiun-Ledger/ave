@@ -91,7 +91,7 @@ impl Intermediary {
                 .with_inbound_sender(inbound_sender.clone());
         #[cfg(not(feature = "test"))]
         let service_sender = NetworkSender::new(outbound_sender)
-            .with_inbound_sender(inbound_sender.clone());
+            .with_inbound_sender(inbound_sender);
 
         tokio::spawn(async move {
             loop {

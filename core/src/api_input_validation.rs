@@ -23,7 +23,7 @@ use crate::error::Error;
 /// paginated/limited endpoint (events, aborts, sink events, first/last
 /// events). Keeps a malicious or misconfigured client from forcing
 /// unbounded in-memory reads.
-pub(crate) const MAX_QUERY_LIMIT: u64 = 1000;
+pub const MAX_QUERY_LIMIT: u64 = 1000;
 
 /// Rejects `0` with a message that names the field.
 pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {

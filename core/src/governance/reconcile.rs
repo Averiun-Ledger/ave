@@ -99,7 +99,7 @@ impl Governance {
     /// boot loud (children are created before this runs).
     async fn replay_markers(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(u64, u64, u64), ActorError> {
         let register = ctx.get_child::<RoleRegister>("role_register").await?;
         let RoleRegisterResponse::Version(role_version) =
@@ -143,7 +143,7 @@ impl Governance {
 
     /// Best-effort reconciled report upward for resume ordering
     /// and tracker waits.
-    async fn report_reconciled(&self, ctx: &mut ActorContext<Self>) {
+    async fn report_reconciled(&self, ctx: &ActorContext<Self>) {
         if let Ok(node) =
             ctx.system().get_actor::<Node>(&"/user/node".into()).await
         {
@@ -232,16 +232,15 @@ impl Governance {
         // Role register version marker catches up to the tip: it
         // only moves forward and lookups resolve previous versions,
         // so jumping it is exact.
-        if self.properties.version > 0 {
-            if let Ok(register) =
+        if self.properties.version > 0
+            && let Ok(register) =
                 ctx.get_child::<RoleRegister>("role_register").await
-            {
-                let _ = register
-                    .tell(RoleRegisterMessage::UpdateVersion {
-                        version: self.properties.version,
-                    })
-                    .await;
-            }
+        {
+            let _ = register
+                .tell(RoleRegisterMessage::UpdateVersion {
+                    version: self.properties.version,
+                })
+                .await;
         }
 
         // Report boot reconciliation upward. Best-effort tell: the
@@ -266,7 +265,7 @@ impl Governance {
     /// NOT replayed (see module docs).
     async fn reconcile_ledger_event(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         event: &Ledger,
         min_marker: u64,
         fold: &mut ReconcileFold,
@@ -341,7 +340,7 @@ impl Governance {
                     // Identical inputs give identical properties; a
                     // failure means persisted events no longer fold:
                     // broken node, fail the boot loud.
-                    fold.era = Governance::apply(pre, event)?;
+                    fold.era = Self::apply(pre, event)?;
                     let post = fold.era.clone();
                     let update = governance_event_roles_update_fact(
                         &gov_event,
@@ -389,7 +388,7 @@ impl Governance {
                     );
                     // Era advances through the real fold first: the
                     // live path sends the post-apply version.
-                    fold.era = Governance::apply(pre, event)?;
+                    fold.era = Self::apply(pre, event)?;
                     if fold.era.properties.version >= min_marker {
                         self.update_registers_confirm(
                             ctx,
@@ -424,7 +423,7 @@ impl Governance {
         // next event derives from exact era state. A failure here
         // means persisted events no longer fold: broken node, fail
         // the boot loud.
-        fold.era = Governance::apply(pre, event)?;
+        fold.era = Self::apply(pre, event)?;
         // Genesis (sn 0 doubles as the full-scan detector: tail
         // scans never see it): replay the v0 seed with genesis-era
         // owner. The register upsert is ask-confirmed live, hence

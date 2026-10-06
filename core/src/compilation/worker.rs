@@ -191,6 +191,17 @@ impl SchemaOutcome {
     }
 }
 
+/// One schema build: groups the per-schema parameters so the build
+/// entry point stays readable.
+struct CompileOneInput<'a> {
+    compilation_req: &'a Signed<CompilationReq>,
+    subject_id: &'a DigestIdentifier,
+    register_path: &'a ActorPath,
+    index: usize,
+    schema_id: SchemaType,
+    target: CompileTarget,
+}
+
 impl CompileWorker {
     /// Best-effort `Unavailable` notification for the in-flight network
     /// compilation request: the node is going down before answering, so
@@ -632,7 +643,7 @@ impl CompileWorker {
         .await?;
 
         Ok(CompilationRes::Response {
-            result,
+            result: Box::new(result),
             result_hash,
             result_hash_signature,
         })
@@ -646,17 +657,17 @@ impl CompileWorker {
         toolchain_name: &str,
         pin: &str,
     ) -> Result<String, CompilationRes> {
-        match ave_build::rustc_version(toolchain_name).await {
-            Ok(version) => Ok(version),
-            Err(_) => {
+        ave_build::rustc_version(toolchain_name).await.map_or_else(
+            |_| {
                 if let Some(metrics) = try_core_metrics() {
                     metrics.observe_compiler_build(pin, "stood_down");
                 }
                 Err(CompilationRes::NoToolchain {
                     pin: pin.to_owned(),
                 })
-            }
-        }
+            },
+            Ok,
+        )
     }
 
     /// Compiles every target contract with its init check and returns
@@ -690,25 +701,28 @@ impl CompileWorker {
         // each other. The fold restores schema order and keeps the exact
         // first-failure semantics of the old sequential loop (a task can
         // not observe another task's outcome).
-        let jobs: Vec<(usize, SchemaType, CompileTarget)> = targets
-            .into_iter()
-            .enumerate()
-            .map(|(index, (schema_id, target))| (index, schema_id, target))
-            .collect();
+        let jobs = targets.into_iter().enumerate().map(
+            |(index, (schema_id, target))| (index, schema_id, target),
+        );
         let limit = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
             .max(1);
+        // Borrowed outside so the closure below captures references,
+        // not owned values it would have to move out per call.
+        let register_path = &register_path;
         let mut outcomes: Vec<(usize, SchemaOutcome)> = futures::stream::iter(
-            jobs.into_iter().map(|(index, schema_id, target)| {
+            jobs.map(|(index, schema_id, target)| {
                 self.compile_one(
                     ctx,
-                    compilation_req,
-                    &subject_id,
-                    &register_path,
-                    index,
-                    schema_id,
-                    target,
+                    CompileOneInput {
+                        compilation_req,
+                        subject_id: &subject_id,
+                        register_path,
+                        index,
+                        schema_id,
+                        target,
+                    },
                 )
             }),
         )
@@ -740,13 +754,16 @@ impl CompileWorker {
     async fn compile_one(
         &self,
         ctx: &ActorContext<Self>,
-        compilation_req: &Signed<CompilationReq>,
-        subject_id: &DigestIdentifier,
-        register_path: &ActorPath,
-        index: usize,
-        schema_id: SchemaType,
-        target: CompileTarget,
+        input: CompileOneInput<'_>,
     ) -> (usize, SchemaOutcome) {
+        let CompileOneInput {
+            compilation_req,
+            subject_id,
+            register_path,
+            index,
+            schema_id,
+            target,
+        } = input;
         let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             return (
@@ -798,7 +815,7 @@ impl CompileWorker {
         } else {
             let register = match ctx
                 .system()
-                .get_actor::<ContractRegister>(&register_path)
+                .get_actor::<ContractRegister>(register_path)
                 .await
             {
                 Ok(register) => register,
@@ -867,7 +884,7 @@ impl CompileWorker {
                 contract_path: &contract_path,
                 initial_value: target.initial_value,
             },
-            &register_path,
+            register_path,
             expected_wasm_hash.as_ref(),
             // The request already carries the effective pin
             // (event pin or committed pin, computed by the
@@ -934,10 +951,7 @@ impl CompileWorker {
                         );
                     }
                 }
-                return (
-                    index,
-                    SchemaOutcome::Compiled(schema_id, record.wasm_hash),
-                );
+                (index, SchemaOutcome::Compiled(schema_id, record.wasm_hash))
             }
             Err(error) => {
                 if matches!(error, CompilerError::Base64DecodeFailed { .. }) {
@@ -998,7 +1012,7 @@ impl CompileWorker {
                 }
                 // Anything else is a contract problem: every honest
                 // compiler reaches the same verdict, so it is voted.
-                return (
+                (
                     index,
                     SchemaOutcome::Verdict(ContractCompilation::Failed(
                         CompilationError::CompilationFailed(format!(
@@ -1006,7 +1020,7 @@ impl CompileWorker {
                             schema_id, error
                         )),
                     )),
-                );
+                )
             }
         }
     }
@@ -1202,15 +1216,14 @@ impl Handler<Self> for CompileWorker {
                 let pin_changed = self.toolchain_pin != toolchain_pin;
                 let mut live = BTreeSet::new();
                 for child_name in std::mem::take(&mut self.build_children) {
-                    match ctx.get_child::<Self>(&child_name).await {
-                        Ok(child) => {
-                            if pin_changed {
-                                child.tell_stop().await;
-                            } else {
-                                live.insert(child_name);
-                            }
+                    if let Ok(child) =
+                        ctx.get_child::<Self>(&child_name).await
+                    {
+                        if pin_changed {
+                            child.tell_stop().await;
+                        } else {
+                            live.insert(child_name);
                         }
-                        Err(_) => {}
                     }
                 }
                 if pin_changed {
@@ -2050,7 +2063,7 @@ mod tests {
         };
         assert!(
             matches!(
-                result,
+                &*result,
                 CompilationResult::Error {
                     error: CompilationError::InvalidEvent(_),
                     ..
@@ -2061,7 +2074,7 @@ mod tests {
         assert_eq!(result_hash_signature.signer, *our_key);
         result_hash_signature.verify(&result_hash).unwrap();
         let recomputed =
-            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &result).unwrap();
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &*result).unwrap();
         assert_eq!(recomputed, result_hash);
         assert_eq!(result_message.info.request_id, "test-request");
         assert_eq!(result_message.info.receiver_actor, expected_receiver_actor);

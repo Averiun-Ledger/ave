@@ -1999,15 +1999,18 @@ impl ConnectionPool {
 
     fn release(&self, conn: Connection) {
         // A poisoned pool must not silently shrink: recover the guard so
-        // the connection is returned instead of leaked.
-        let mut guard = match self.connections.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("Reader pool mutex poisoned, recovering guard");
-                poisoned.into_inner()
-            }
-        };
-        guard.push(conn);
+        // the connection is returned instead of leaked. The guard
+        // drops before the notify so a woken waiter never blocks on it.
+        {
+            let mut guard = match self.connections.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    error!("Reader pool mutex poisoned, recovering guard");
+                    poisoned.into_inner()
+                }
+            };
+            guard.push(conn);
+        }
         self.available.notify_one();
     }
 }

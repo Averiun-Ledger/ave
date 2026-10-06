@@ -58,9 +58,11 @@ pub struct ConfigHelper {
 }
 
 /// Boot governances still to report reconciliation, shared lock-free
-/// so every actor gates per subject without messaging: a subject is
-/// ready when its governance is absent from this set. `Node` seeds
-/// it at boot and removes on each `GovernanceReconciled`. Missing
+/// so every actor gates per subject without messaging.
+///
+/// A subject is ready when its governance is absent from this set.
+/// `Node` seeds it at boot and removes on each
+/// `GovernanceReconciled`. Missing
 /// helper (tests that never register it) reads as ready — `system()`
 /// always registers it in production.
 #[derive(Debug, Clone, Default)]

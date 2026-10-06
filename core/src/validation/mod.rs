@@ -300,7 +300,7 @@ impl Validation {
                 ActualProtocols::EvalApprove { approval_data, .. }
                 | ActualProtocols::CompileEvalApprove {
                     approval_data, ..
-                } => Some(Box::new(approval_data.clone())),
+                } => Some(approval_data.clone()),
                 _ => None,
             },
             ValidationReq::Create { .. } => None,
