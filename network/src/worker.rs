@@ -2627,8 +2627,12 @@ mod tests {
             NodeType::Addressable,
             vec!["/memory/3103".to_owned()],
         );
-        config.max_pending_outbound_bytes_per_peer = 0;
-        config.max_pending_outbound_bytes_total = 1;
+        // Per-peer rejection (a single message larger than the peer
+        // budget is dropped, never queued); the global total is
+        // disabled to isolate it. Must stay >= max_app_message_bytes
+        // (1 MiB) per config validation.
+        config.max_pending_outbound_bytes_per_peer = 1024 * 1024;
+        config.max_pending_outbound_bytes_total = 0;
 
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let mut registry = Registry::default();
@@ -2647,11 +2651,11 @@ mod tests {
         )
         .expect("worker");
 
-        // Nothing is evictable and the message exceeds the global total:
-        // rejected without leaving an empty queue behind.
+        // Nothing is evictable and the 2 MiB message exceeds the 1 MiB
+        // peer budget: rejected without leaving an empty queue behind.
         worker.add_pending_outbound_message(
             PeerId::random(),
-            Bytes::from_static(b"aaaaaaaaaaaa"),
+            Bytes::from(vec![0u8; 2 * 1024 * 1024]),
         );
         assert!(worker.pending_outbound_messages.is_empty());
     }
@@ -3267,7 +3271,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::WrongPeerId {
                 obtained: PeerId::random(),
-                address: addr,
+                address: addr.clone(),
             },
             &peer,
             false,
@@ -3275,7 +3279,18 @@ mod tests {
         assert_eq!(result, None);
         assert!(!worker.retry_by_peer.contains_key(&peer));
 
-        // Denied in runtime returns Some((false, vec![]))
+        // Denied in runtime is terminal: the peer is evicted at
+        // once (an allow-list denial never heals by redialing), so
+        // no retry comes back.
+        worker.retry_by_peer.insert(
+            peer,
+            RetryState {
+                attempts: 1,
+                when: Instant::now(),
+                kind: RetryKind::Dial,
+                addrs: vec![addr.clone()],
+            },
+        );
         let result = worker.handle_dial_error(
             DialError::Denied {
                 cause: libp2p::swarm::ConnectionDenied::new(
@@ -3285,7 +3300,8 @@ mod tests {
             &peer,
             false,
         );
-        assert_eq!(result, Some((false, vec![])));
+        assert_eq!(result, None);
+        assert!(!worker.retry_by_peer.contains_key(&peer));
 
         // Aborted in runtime returns Some((true, vec![]))
         let result = worker.handle_dial_error(DialError::Aborted, &peer, false);

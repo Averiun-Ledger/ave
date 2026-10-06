@@ -25,7 +25,7 @@ pub enum RunnerError {
 
     #[error("serialization error [{context}]: {details}")]
     SerializationError {
-        context: &'static str,
+        context: String,
         details: String,
     },
 

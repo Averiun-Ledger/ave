@@ -1579,7 +1579,7 @@ fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
         // contract failure, not a node serialization problem.
         RuntimeError::SerializationError { context, details }
             if matches!(
-                context,
+                context.as_str(),
                 "execution result" | "final state json" | "init check result"
             ) =>
         {
@@ -1622,6 +1622,13 @@ fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
                 details: format!("execute contract: {}", details),
             }
         }
+        // Deterministic (same fuel budget on every node): a verdict
+        // on the contract, never an Unavailable for this node.
+        RuntimeError::OutOfFuel { consumed } => RunnerError::ContractFailed {
+            details: format!(
+                "contract ran out of fuel after consuming {consumed} units"
+            ),
+        },
         RuntimeError::FuelLimitError(details) => RunnerError::ContractFailed {
             details: format!("set fuel: {}", details),
         },

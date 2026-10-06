@@ -956,7 +956,7 @@ impl ContractCompiler {
                     .fetch_failed(
                         ctx,
                         CompilerError::SerializationError {
-                            context: "contract manifest hash",
+                            context: "contract manifest hash".to_owned(),
                             details: e.to_string(),
                         },
                     )

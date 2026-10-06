@@ -631,13 +631,13 @@ impl CompilerSupport {
         let result = async {
             let contract_hash = hash_borsh(&*hash.hasher(), &contract)
                 .map_err(|e| CompilerError::SerializationError {
-                    context: "contract hash",
+                    context: "contract hash".to_owned(),
                     details: e.to_string(),
                 })?;
             let manifest = pipeline::compilation_toml();
             let manifest_hash = hash_borsh(&*hash.hasher(), &manifest)
                 .map_err(|e| CompilerError::SerializationError {
-                    context: "contract manifest hash",
+                    context: "contract manifest hash".to_owned(),
                     details: e.to_string(),
                 })?;
 
@@ -1048,7 +1048,7 @@ impl CompilerSupport {
         if metadata_matches && persisted_matches_anchor {
             let persisted = persisted.as_ref().ok_or_else(|| {
                 CompilerError::SerializationError {
-                    context: "persisted contract metadata",
+                    context: "persisted contract metadata".to_owned(),
                     details: "metadata unexpectedly missing".to_owned(),
                 }
             })?;
@@ -1293,7 +1293,7 @@ impl CompilerSupport {
         let contract_hash =
             hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
                 CompilerError::SerializationError {
-                    context: "contract hash",
+                    context: "contract hash".to_owned(),
                     details: e.to_string(),
                 }
             })?;
@@ -1301,7 +1301,7 @@ impl CompilerSupport {
         let manifest_hash =
             hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
                 CompilerError::SerializationError {
-                    context: "contract manifest hash",
+                    context: "contract manifest hash".to_owned(),
                     details: e.to_string(),
                 }
             })?;
@@ -1565,7 +1565,7 @@ impl CompilerSupport {
         let contract_hash =
             hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
                 CompilerError::SerializationError {
-                    context: "contract hash",
+                    context: "contract hash".to_owned(),
                     details: e.to_string(),
                 }
             })?;
@@ -1573,7 +1573,7 @@ impl CompilerSupport {
         let manifest_hash =
             hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
                 CompilerError::SerializationError {
-                    context: "contract manifest hash",
+                    context: "contract manifest hash".to_owned(),
                     details: e.to_string(),
                 }
             })?;
@@ -1718,7 +1718,7 @@ mod tests {
                 details: "d".to_owned(),
             },
             CompilerError::SerializationError {
-                context: "c",
+                context: "c".to_owned(),
                 details: "d".to_owned(),
             },
             CompilerError::InvalidContractOutput {

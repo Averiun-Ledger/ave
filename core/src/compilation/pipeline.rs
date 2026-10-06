@@ -114,7 +114,10 @@ pub(crate) fn map_build_error(error: ave_build::BuildError) -> CompilerError {
             CompilerError::ToolchainFingerprintFailed { details }
         }
         E::SerializationError { context, details } => {
-            CompilerError::SerializationError { context, details }
+            CompilerError::SerializationError {
+                context: context.to_owned(),
+                details,
+            }
         }
     }
 }
@@ -378,7 +381,7 @@ pub async fn persist_global_cache_artifact(
     fs::write(
         &metadata_path,
         to_vec(metadata).map_err(|e| CompilerError::SerializationError {
-            context: "global cache metadata",
+            context: "global cache metadata".to_owned(),
             details: e.to_string(),
         })?,
     )
@@ -402,7 +405,7 @@ async fn load_global_cache_metadata(
 
     ContractArtifactRecord::try_from_slice(&metadata_bytes).map_err(|e| {
         CompilerError::SerializationError {
-            context: "global cache metadata",
+            context: "global cache metadata".to_owned(),
             details: e.to_string(),
         }
     })
@@ -461,7 +464,7 @@ pub fn hash_bytes(
     // while sparing a multi-megabyte clone on hot paths.
     hash_borsh(&*hash.hasher(), &bytes).map_err(|e| {
         CompilerError::SerializationError {
-            context,
+            context: context.to_owned(),
             details: e.to_string(),
         }
     })
@@ -650,6 +653,15 @@ pub fn map_runtime_error_to_compiler_error(
         RuntimeError::ContractExecutionFailed(details) => {
             CompilerError::ContractExecutionFailed { details }
         }
+        // Deterministic (same fuel budget on every node): a contract
+        // failure, never a broken-node signal.
+        RuntimeError::OutOfFuel { consumed } => {
+            CompilerError::FuelLimitError {
+                details: format!(
+                    "contract ran out of fuel after consuming {consumed} units"
+                ),
+            }
+        }
         RuntimeError::FuelLimitError(details) => {
             CompilerError::FuelLimitError { details }
         }
@@ -664,7 +676,7 @@ pub fn map_runtime_error_to_compiler_error(
         // contract failure, not a host serialization problem.
         RuntimeError::SerializationError { context, details }
             if matches!(
-                context,
+                context.as_str(),
                 "execution result" | "final state json" | "init check result"
             ) =>
         {
