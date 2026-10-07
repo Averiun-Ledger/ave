@@ -8,7 +8,7 @@ use crate::{
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    LightPersistence, Message, PersistentActor, Response,
+    Message, PersistentActor, Response,
 };
 
 use ave_common::{Namespace, SchemaType, identity::PublicKey};
@@ -755,9 +755,15 @@ impl Handler<Self> for RoleRegister {
 
 #[async_trait]
 impl PersistentActor for RoleRegister {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()

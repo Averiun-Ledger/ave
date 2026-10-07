@@ -53,7 +53,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
     Message, Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use serde::{Deserialize, Serialize};
 
 pub mod register;
@@ -1684,9 +1684,15 @@ pub struct InitParamsNode {
 
 #[async_trait]
 impl PersistentActor for Node {
-    type Persistence = LightPersistence;
     type InitParams = InitParamsNode;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {

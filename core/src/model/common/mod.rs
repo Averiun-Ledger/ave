@@ -156,7 +156,7 @@ where
 }
 
 pub async fn check_subject_creation<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     creator: PublicKey,
     gov_version: u64,

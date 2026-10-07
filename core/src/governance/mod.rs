@@ -102,7 +102,7 @@ use ave_common::{
 };
 
 use async_trait::async_trait;
-use ave_actors::{FullPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
@@ -5624,7 +5624,6 @@ impl Handler<Self> for Governance {
 
 #[async_trait]
 impl PersistentActor for Governance {
-    type Persistence = FullPersistence;
     type InitParams = (
         Option<(SubjectMetadata, GovernanceData)>,
         Arc<PublicKey>,

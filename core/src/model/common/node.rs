@@ -45,7 +45,7 @@ pub enum SignTypesNode {
 }
 
 pub async fn i_owner_new_owner<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<(bool, Option<bool>), ActorError>
 where
@@ -118,7 +118,7 @@ where
 }
 
 pub async fn get_subject_data<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<Option<SubjectData>, ActorError>
 where

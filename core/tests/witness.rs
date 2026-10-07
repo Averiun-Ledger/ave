@@ -1,6 +1,5 @@
 mod common;
 
-use ave_common::identity::DigestIdentifier;
 use ave_common::identity::keys::Ed25519Signer;
 use ave_common::identity::{KeyPair, PublicKey};
 use ave_core::auth::AuthWitness;

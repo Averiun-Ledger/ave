@@ -6,7 +6,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -219,9 +219,15 @@ impl Handler<Self> for TransferVerificationRegister {
 
 #[async_trait]
 impl PersistentActor for TransferVerificationRegister {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()

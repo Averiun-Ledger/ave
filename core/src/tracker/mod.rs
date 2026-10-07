@@ -42,7 +42,7 @@ use ave_common::{
 };
 
 use async_trait::async_trait;
-use ave_actors::{FullPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
@@ -1197,7 +1197,6 @@ pub struct InitParamsTracker {
 
 #[async_trait]
 impl PersistentActor for Tracker {
-    type Persistence = FullPersistence;
     type InitParams = InitParamsTracker;
     type State = TrackerState;
 

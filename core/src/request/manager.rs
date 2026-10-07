@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
 };
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use ave_common::bridge::request::EventRequestType;
 use ave_common::governance::GovernanceEvent;
 use ave_common::identity::{
@@ -4005,9 +4005,15 @@ impl Handler<Self> for RequestManager {
 
 #[async_trait]
 impl PersistentActor for RequestManager {
-    type Persistence = LightPersistence;
     type InitParams = InitRequestManager;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {

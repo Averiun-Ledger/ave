@@ -3,7 +3,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use ave_common::Namespace;
 use ave_common::bridge::request::{
     ApprovalState, ApprovalStateRes, EventRequestType,
@@ -68,15 +68,16 @@ pub struct RequestData {
 /// are a normal workload).
 const MAX_QUEUED_REQUESTS_PER_SUBJECT: usize = 1024;
 
-/// Create attempts per request before failing loud. Each failed
+/// Create attempts per request before failing loud. Retries go by
+/// message (never sleeping in this funnel actor): each failed
 /// attempt re-checks the maps, so arrivals colliding on a stopping
 /// child serialize into owner + queued instead of erroring.
-const MAX_CHILD_CREATE_ATTEMPTS: usize = 3;
+const MAX_CHILD_CREATE_ATTEMPTS: usize = 10;
 
-/// Teardown wait budget: polls × step (5 s total). Teardown is
-/// milliseconds; a longer hold means the stop itself is stuck.
-const MAX_CHILD_TEARDOWN_POLLS: usize = 250;
-const CHILD_TEARDOWN_POLL_MS: u64 = 20;
+/// Delay between create retries. Teardown is milliseconds; anything
+/// longer means the stop itself is stuck — the attempts run out and
+/// the last one fails loud instead.
+const CHILD_CREATE_RETRY_DELAY_MS: u64 = 500;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
@@ -130,7 +131,7 @@ impl BorshDeserialize for RequestHandler {
 
 impl RequestHandler {
     async fn check_signer_authorization(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         our_key: PublicKey,
         signer: PublicKey,
         governance_id: &DigestIdentifier,
@@ -373,7 +374,7 @@ impl RequestHandler {
     }
 
     async fn check_owner_new_owner(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
     ) -> Result<(), RequestHandlerError> {
         match request {
@@ -502,7 +503,7 @@ impl RequestHandler {
     }
 
     async fn check_fact_viewpoints(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
         subject_data: &SubjectData,
     ) -> Result<(), RequestHandlerError> {
@@ -550,7 +551,7 @@ impl RequestHandler {
     }
 
     async fn check_tracker_ledger_full(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
         subject_data: &SubjectData,
     ) -> Result<(), RequestHandlerError> {
@@ -577,7 +578,7 @@ impl RequestHandler {
     }
 
     async fn build_subject_data(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
     ) -> Result<SubjectData, RequestHandlerError> {
         let subject_data = match request {
@@ -615,7 +616,7 @@ impl RequestHandler {
     }
 
     async fn check_creation(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_data: SubjectData,
         event_request: &EventRequestType,
         signer: PublicKey,
@@ -694,6 +695,7 @@ impl RequestHandler {
         subject_id: &DigestIdentifier,
         is_gov: bool,
         governance_id: Option<DigestIdentifier>,
+        attempts_left: usize,
     ) -> Result<(), ActorError> {
         let Some(helpers) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
@@ -701,33 +703,80 @@ impl RequestHandler {
             return Err(ActorError::FunctionalCritical { description: e });
         };
 
-        // Retried creation: the maps say free while a stopping child
-        // may still hold its actor name (teardown lags the
-        // FinishHandling bookkeeping by milliseconds). On `Exists`,
-        // wait bounded for the release and re-check from the top — a
-        // concurrent arrival that won the name in the meantime shows
-        // up as in_handling and queues normally. The request is never
-        // lost to the window.
-        for _ in 0..MAX_CHILD_CREATE_ATTEMPTS {
-            let in_handling = self.handling.contains_key(subject_id);
-            let in_queue = self.in_queue.contains_key(subject_id);
+        // The maps say free while a stopping child may still hold its
+        // actor name (teardown lags the FinishHandling bookkeeping by
+        // milliseconds). On `Exists`, re-checking from the top on the
+        // next attempt finds a concurrent winner in `handling` and
+        // queues normally — the request is never lost to the window.
+        // Retries go by message, never by sleeping here: this actor
+        // funnels every subject.
+    let in_handling = self.handling.contains_key(subject_id);
+        let in_queue = self.in_queue.contains_key(subject_id);
 
-            if in_handling || in_queue {
-                // Bounded queue: an authorized signer must not enqueue
-                // without limit (the payload is persisted per entry).
-                if self.in_queue.get(subject_id).is_some_and(|queue| {
-                    queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
-                }) {
-                    return Err(ActorError::Functional {
-                        description: format!(
-                            "Request queue for subject {subject_id} is full"
-                        ),
-                    });
-                }
+        if in_handling || in_queue {
+            // Bounded queue: an authorized signer must not enqueue
+            // without limit (the payload is persisted per entry).
+            if self.in_queue.get(subject_id).is_some_and(|queue| {
+                queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
+            }) {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Request queue for subject {subject_id} is full"
+                    ),
+                });
+            }
+            self.on_event(
+                RequestHandlerEvent::EventToQueue {
+                    subject_id: subject_id.clone(),
+                    event: request,
+                    request_id: request_id.clone(),
+                },
+                ctx,
+            )
+            .await;
+
+            send_to_tracking(
+                ctx,
+                RequestTrackingMessage::UpdateState {
+                    request_id: request_id.clone(),
+                    state: RequestState::InQueue,
+                },
+            )
+            .await?;
+
+            return Ok(());
+        }
+
+        let command = Self::build_req_manager_init_msg(
+            &EventRequestType::from(request.content()),
+            is_gov,
+        );
+        let init_data = InitRequestManager {
+            our_key: self.our_key.clone(),
+            subject_id: subject_id.clone(),
+            governance_id: governance_id.clone(),
+            helpers: helpers.clone(),
+        };
+
+        match ctx
+            .create_child(
+                &subject_id.to_string(),
+                RequestManager::initial(init_data),
+            )
+            .await
+        {
+            Ok(actor) => {
+                actor
+                    .tell(RequestManagerMessage::FirstRun {
+                        command,
+                        request,
+                        request_id: request_id.clone(),
+                    })
+                    .await?;
+
                 self.on_event(
-                    RequestHandlerEvent::EventToQueue {
+                    RequestHandlerEvent::EventToHandling {
                         subject_id: subject_id.clone(),
-                        event: request,
                         request_id: request_id.clone(),
                     },
                     ctx,
@@ -738,108 +787,42 @@ impl RequestHandler {
                     ctx,
                     RequestTrackingMessage::UpdateState {
                         request_id: request_id.clone(),
-                        state: RequestState::InQueue,
+                        state: RequestState::Handling,
                     },
                 )
                 .await?;
 
                 return Ok(());
             }
-
-            let command = Self::build_req_manager_init_msg(
-                &EventRequestType::from(request.content()),
-                is_gov,
-            );
-            let init_data = InitRequestManager {
-                our_key: self.our_key.clone(),
-                subject_id: subject_id.clone(),
-                governance_id: governance_id.clone(),
-                helpers: helpers.clone(),
-            };
-
-            match ctx
-                .create_child(
-                    &subject_id.to_string(),
-                    RequestManager::initial(init_data),
-                )
-                .await
-            {
-                Ok(actor) => {
-                    actor
-                        .tell(RequestManagerMessage::FirstRun {
-                            command,
-                            request,
-                            request_id: request_id.clone(),
-                        })
-                        .await?;
-
-                    self.on_event(
-                        RequestHandlerEvent::EventToHandling {
-                            subject_id: subject_id.clone(),
-                            request_id: request_id.clone(),
-                        },
-                        ctx,
-                    )
-                    .await;
-
-                    send_to_tracking(
-                        ctx,
-                        RequestTrackingMessage::UpdateState {
-                            request_id: request_id.clone(),
-                            state: RequestState::Handling,
-                        },
-                    )
-                    .await?;
-
-                    return Ok(());
+            Err(ActorError::Exists { .. }) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_request_handler_child_collision();
                 }
-                Err(ActorError::Exists { .. }) => {
-                    if let Some(metrics) = try_core_metrics() {
-                        metrics.observe_request_handler_child_collision();
-                    }
-                    Self::await_child_gone(ctx, subject_id).await?;
+                if attempts_left == 0 {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Request child for subject {subject_id} \
+                             still exists after retries"
+                        ),
+                    });
                 }
-                Err(error) => return Err(error),
+                ctx.schedule_once(
+                    std::time::Duration::from_millis(
+                        CHILD_CREATE_RETRY_DELAY_MS,
+                    ),
+                    RequestHandlerMessage::RetryQueueRequest {
+                        request,
+                        request_id: request_id.clone(),
+                        subject_id: subject_id.clone(),
+                        is_gov,
+                        governance_id: governance_id.clone(),
+                        attempts_left: attempts_left - 1,
+                    },
+                )?;
+                return Ok(());
             }
+            Err(error) => return Err(error),
         }
-
-        Err(ActorError::Functional {
-            description: format!(
-                "Request child for subject {subject_id} still exists \
-                 after retries"
-            ),
-        })
-    }
-
-    /// Waits (bounded) for a stopping subject child to release its
-    /// actor name. A newcomer arriving in the teardown window must
-    /// wait for the release instead of failing on `Exists`: teardown
-    /// is milliseconds, and anything longer means the stop itself is
-    /// stuck — failing loud then is correct.
-    async fn await_child_gone(
-        ctx: &ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-    ) -> Result<(), ActorError> {
-        let name = subject_id.to_string();
-        for _ in 0..MAX_CHILD_TEARDOWN_POLLS {
-            match ctx.get_child::<RequestManager>(&name).await {
-                // Name released (or registry hiccup): the retry
-                // decides — a still-present child just fails creation
-                // again, loud.
-                Err(_) => return Ok(()),
-                Ok(_) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        CHILD_TEARDOWN_POLL_MS,
-                    ))
-                    .await;
-                }
-            }
-        }
-        Err(ActorError::Functional {
-            description: format!(
-                "Request child for subject {subject_id} did not stop"
-            ),
-        })
     }
 
     const fn build_req_manager_init_msg(
@@ -863,7 +846,7 @@ impl RequestHandler {
     }
 
     async fn check_in_queue(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &Signed<EventRequest>,
         our_key: PublicKey,
     ) -> Result<bool, RequestHandlerError> {
@@ -871,10 +854,11 @@ impl RequestHandler {
             return Err(RequestHandlerError::CreationNotQueued);
         }
 
-        Self::check_owner_new_owner(ctx, request.content()).await?;
-
-        let subject_data =
-            Self::build_subject_data(ctx, request.content()).await?;
+        // Owner check and subject data are independent: ask together.
+        let ((), subject_data) = tokio::try_join!(
+            Self::check_owner_new_owner(ctx, request.content()),
+            Self::build_subject_data(ctx, request.content())
+        )?;
         let event_request_type = EventRequestType::from(request.content());
         let signer = request.signature().signer.clone();
         let governance_id = subject_data
@@ -888,21 +872,33 @@ impl RequestHandler {
             ));
         }
 
-        Self::check_tracker_ledger_full(ctx, request.content(), &subject_data)
-            .await?;
-
-        Self::check_signer_authorization(
-            ctx,
-            our_key,
-            signer.clone(),
-            &governance_id,
-            &event_request_type,
-            subject_data.clone(),
-        )
-        .await?;
-
-        Self::check_fact_viewpoints(ctx, request.content(), &subject_data)
-            .await?;
+        // The remaining checks only read shared state: ask together.
+        // `check_creation` is a no-op outside Create/Confirm, so it
+        // runs after — cheap and out of the hot Fact path.
+        tokio::try_join!(
+            Self::check_tracker_ledger_full(
+                ctx,
+                request.content(),
+                &subject_data
+            ),
+            async {
+                Self::check_signer_authorization(
+                    ctx,
+                    our_key,
+                    signer.clone(),
+                    &governance_id,
+                    &event_request_type,
+                    subject_data.clone(),
+                )
+                .await
+                .map_err(RequestHandlerError::from)
+            },
+            Self::check_fact_viewpoints(
+                ctx,
+                request.content(),
+                &subject_data
+            )
+        )?;
 
         Self::check_creation(ctx, subject_data, &event_request_type, signer)
             .await?;
@@ -1056,6 +1052,17 @@ pub enum RequestHandlerMessage {
     },
     PopQueue {
         subject_id: DigestIdentifier,
+    },
+    /// Retry a request whose child name was still held by a stopping
+    /// actor. Never sleeps in-handler: this actor funnels every
+    /// subject, so waiting here would stall them all.
+    RetryQueueRequest {
+        request: Signed<EventRequest>,
+        request_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        is_gov: bool,
+        governance_id: Option<DigestIdentifier>,
+        attempts_left: usize,
     },
     EndHandling {
         subject_id: DigestIdentifier,
@@ -1522,6 +1529,7 @@ impl Handler<Self> for RequestHandler {
                         &subject_id,
                         is_gov,
                         governance_id,
+                        MAX_CHILD_CREATE_ATTEMPTS,
                     )
                     .await
                 {
@@ -1539,6 +1547,38 @@ impl Handler<Self> for RequestHandler {
                     request_id,
                     subject_id,
                 }))
+            }
+            RequestHandlerMessage::RetryQueueRequest {
+                request,
+                request_id,
+                subject_id,
+                is_gov,
+                governance_id,
+                attempts_left,
+            } => {
+                if let Err(e) = self
+                    .handle_queue_request(
+                        ctx,
+                        request,
+                        &request_id,
+                        &subject_id,
+                        is_gov,
+                        governance_id,
+                        attempts_left,
+                    )
+                    .await
+                {
+                    error!(
+                        msg_type = "RetryQueueRequest",
+                        request_id = %request_id,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to handle queue request retry"
+                    );
+                    return Err(e);
+                }
+
+                Ok(RequestHandlerResponse::None)
             }
             RequestHandlerMessage::PopQueue { subject_id } => {
                 let (event, request_id) = if let Some(events) =
@@ -1668,9 +1708,15 @@ impl Storable for RequestHandler {}
 
 #[async_trait]
 impl PersistentActor for RequestHandler {
-    type Persistence = LightPersistence;
     type InitParams = (Arc<PublicKey>, (HashAlgorithm, Arc<NetworkSender>));
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {

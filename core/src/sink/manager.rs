@@ -16,7 +16,7 @@ use tracing::{debug, error, info, info_span, warn};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
-    LightPersistence, Message, PersistentActor, Response,
+    Message, PersistentActor, Response,
 };
 use ave_common::{
     DataToSink,
@@ -463,9 +463,15 @@ impl BorshDeserialize for SinkManager {
 // ---------------------------------------------------------------------------
 
 impl PersistentActor for SinkManager {
-    type Persistence = LightPersistence;
     type InitParams = SinkManagerInitParams;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         let mut active_sinks = BTreeSet::new();

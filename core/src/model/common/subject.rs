@@ -73,7 +73,7 @@ where
 }
 
 pub async fn has_role<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     role_query: HashThisRole,
 ) -> Result<bool, ActorError>
@@ -131,7 +131,7 @@ where
 }
 
 pub async fn get_schema_viewpoints<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     schema_id: SchemaType,
 ) -> Result<Option<BTreeSet<String>>, ActorError>
@@ -546,7 +546,7 @@ where
 }
 
 pub async fn get_version<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
 ) -> Result<u64, ActorError>
 where
@@ -762,7 +762,7 @@ where
 }
 
 pub async fn get_tracker_visibility_state<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
 ) -> Result<TrackerVisibilityState, ActorError>

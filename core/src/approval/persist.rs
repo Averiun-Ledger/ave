@@ -20,7 +20,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use ave_common::{
     Namespace, SchemaType,
     bridge::request::{ApprovalState, ApprovalStateRes},
@@ -1095,9 +1095,19 @@ impl ApprPersist {
 // The request state is persisted until it is approved
 #[async_trait]
 impl PersistentActor for ApprPersist {
-    type Persistence = LightPersistence;
     type InitParams = InitApprPersist;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
+
+    fn snapshot_every() -> Option<u64> {
+        Some(1) // snapshot cada 25 eventos; None = solo manual/cierre
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         let Self::InitParams {
